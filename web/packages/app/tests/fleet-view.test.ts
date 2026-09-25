@@ -1,15 +1,47 @@
 import { describe, expect, it } from "vitest";
 import type { Chat, Space } from "@zeron/proto";
 import type { ChatStatus } from "@zeron/engine-client";
+import { encodeScopedId, projectRegistrySnapshot, type EngineRegistrySnapshot } from "@zeron/engine-client";
 import {
   archivedRows,
   chatPageRow,
   healedSpaceFilter,
   singleLine,
+  fleetSpaceRows,
   spacesSorted,
 } from "../src/lib/view";
 
 const NOW = Date.parse("2026-09-16T12:00:00Z");
+
+describe("fleetSpaceRows", () => {
+  it("shows a shared project only on its host engine, leaving distinct projects intact", () => {
+    const ovh = { ...space("shared", "OVH project"), deviceId: "ovh" };
+    const threadripper = { ...space("local", "Threadripper project"), deviceId: "threadripper" };
+    const empty = { rows: [], loaded: true, error: null };
+    const registry = {
+      configurationError: null,
+      engines: ["ovh", "threadripper"].map((key) => ({
+        key,
+        info: { deviceId: key, capabilities: [] },
+        state: "connected",
+        lastError: null,
+        generation: 1,
+        chats: empty,
+        devices: empty,
+        sessions: empty,
+        // Each synced workspace reports both spaces. Only the host owns the path.
+        spaces: { rows: [ovh, threadripper], loaded: true, error: null },
+      })),
+    } as unknown as EngineRegistrySnapshot;
+    const projected = projectRegistrySnapshot(registry);
+    expect(projected.spaces).toHaveLength(4);
+    expect(fleetSpaceRows(projected.spaces).map((row) => row.id)).toEqual([
+      encodeScopedId("ovh", "shared"),
+      encodeScopedId("threadripper", "local"),
+    ]);
+  });
+});
+
 
 function chat(fields: Partial<Chat>): Chat {
   return {

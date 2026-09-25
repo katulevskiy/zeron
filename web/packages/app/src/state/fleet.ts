@@ -16,6 +16,8 @@ import {
 } from "@zeron/engine-client";
 import type { ChatStatus, ConnectivitySlot, WatchCacheSnapshot } from "@zeron/engine-client";
 import type { StoredEngine } from "../lib/engine-store";
+import { fleetDeviceRows } from "../lib/devices";
+import { fleetSpaceRows } from "../lib/view";
 
 /**
  * The engine fleet is the edge's owner-scoped device list (PR #319's
@@ -270,8 +272,8 @@ export function useFleetSnapshot(): WatchCacheSnapshot {
       capabilities:
         registry.engines.find((engine) => engine.key === active)?.info?.capabilities ?? [],
       chats: mergedRowSet(registry.engines.map((engine) => engine.chats), projected.chats),
-      spaces: mergedRowSet(registry.engines.map((engine) => engine.spaces), projected.spaces),
-      devices: mergedRowSet(registry.engines.map((engine) => engine.devices), projected.devices),
+      spaces: mergedRowSet(registry.engines.map((engine) => engine.spaces), fleetSpaceRows(projected.spaces)),
+      devices: mergedRowSet(registry.engines.map((engine) => engine.devices), fleetDeviceRows(registry, projected.devices)),
       statuses: mergedRowSet(registry.engines.map((engine) => engine.sessions), projected.sessions as ChatStatus[]),
       connectivity: NEVER_CONNECTED_SLOT,
     };

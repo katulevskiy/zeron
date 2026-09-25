@@ -1,4 +1,5 @@
 import { describe, expect, it } from "vitest";
+import { encodeScopedId, projectRegistrySnapshot, type EngineRegistrySnapshot } from "@zeron/engine-client";
 import {
   lastSeenOnline,
   formatLastSeen,
@@ -6,6 +7,7 @@ import {
   platformLabel,
   presenceDot,
   shortId,
+  fleetDeviceRows,
 } from "../src/lib/devices";
 
 const NOW = 1_800_000_000_000;
@@ -79,6 +81,45 @@ describe("shortId (devices.rs:299-305)", () => {
     expect(shortId("0123456789abcdef")).toBe("01234567…cdef");
   });
 });
+
+describe("fleetDeviceRows", () => {
+  it("shows each connected engine once when both engines advertise both devices", () => {
+    const devices = ["engine-a", "engine-b"].map((id) => ({
+      id,
+      name: id === "engine-a" ? "Build server A" : "Build server B",
+      platform: "linux",
+      lastSeenAt: null,
+      createdAt: null,
+      version: null,
+      capabilities: [],
+    }));
+    const empty = { rows: [], loaded: true, error: null };
+    const registry = {
+      configurationError: null,
+      engines: ["engine-a", "engine-b"].map((key) => ({
+        key,
+        info: { deviceId: key, capabilities: [] },
+        state: "connected",
+        generation: 1,
+        lastError: null,
+        chats: empty,
+        spaces: empty,
+        sessions: empty,
+        devices: { rows: devices, loaded: true, error: null },
+      })),
+    } as unknown as EngineRegistrySnapshot;
+    const projected = projectRegistrySnapshot(registry);
+    expect(projected.devices.map((device) => device.name)).toEqual([
+      "Build server A", "Build server B",
+      "Build server A", "Build server B",
+    ]);
+    expect(fleetDeviceRows(registry, projected.devices).map((device) => device.id)).toEqual([
+      encodeScopedId("engine-a", "engine-a"),
+      encodeScopedId("engine-b", "engine-b"),
+    ]);
+  });
+});
+
 
 function ago(seconds: number): string {
   return new Date(NOW - seconds * 1000).toISOString();

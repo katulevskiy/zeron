@@ -589,6 +589,18 @@ export function spaceDisplayName(space: Space): string {
 }
 
 /**
+ * A synced workspace can report the same project through every engine.
+ * Only the device named in the project's owner field can open its files;
+ * keep that engine's scoped copy instead of presenting false duplicates.
+ */
+export function fleetSpaceRows(spaces: readonly Space[]): Space[] {
+  return spaces.filter((space) => {
+    const source = parseScopedId(space.id).engine;
+    return source === null || parseScopedId(space.deviceId).rawId === source;
+  });
+}
+
+/**
  * Spaces in display order — case-insensitive display name, id tiebreak
  * (state.rs spaces_sorted). The order both space selectors list rows in.
  */

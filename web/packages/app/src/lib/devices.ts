@@ -1,3 +1,5 @@
+import type { Device } from "@zeron/proto";
+import { encodeScopedId, type EngineRegistrySnapshot } from "@zeron/engine-client";
 import type { IconName } from "@zeron/icons";
 import { DEVICE_ONLINE_WINDOW_SECS } from "./view";
 
@@ -113,6 +115,19 @@ export function shortId(id: string): string {
     return `${id.slice(0, 8)}…${id.slice(id.length - 4)}`;
   }
   return id;
+}
+
+/**
+ * Each relay engine may advertise the whole owner's device list. The fleet
+ * supervises one engine per device, so keep only the row reported under that
+ * device's own engine scope; a peer's copy would route requests incorrectly.
+ */
+export function fleetDeviceRows(registry: EngineRegistrySnapshot, projected: readonly Device[]): Device[] {
+  return registry.engines.flatMap((engine) => {
+    const ownId = encodeScopedId(engine.key, engine.info?.deviceId ?? engine.key);
+    const own = projected.find((device) => device.id === ownId);
+    return own === undefined ? [] : [own];
+  });
 }
 
 /**
