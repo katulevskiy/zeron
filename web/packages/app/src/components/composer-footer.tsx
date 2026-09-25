@@ -4,7 +4,7 @@ import { encodeScopedId, methods } from "@zeron/engine-client";
 import type { ChangeRequestSummary, ContextUsage, Device, RepoRef, Space } from "@zeron/proto";
 import { useEngineSession } from "../state/session-provider";
 import { useNow } from "../state/hooks";
-import { useFleetSnapshot } from "../state/fleet";
+import { engineStatesOf, useFleetRegistry, useFleetSnapshot } from "../state/fleet";
 import { deviceOnline, spaceDisplayName, spacesSorted } from "../lib/view";
 import { filterIndices } from "../lib/picker-search";
 import { addSpaceStore } from "../state/add-space";
@@ -204,6 +204,7 @@ export function DeviceChip({
   fallbackLabel = "Select device",
 }: DeviceChipProps) {
   const [open, setOpen] = useState(false);
+  const engineStates = engineStatesOf(useFleetRegistry());
 
   // Device order: this device first, then by lowercased name, then by id.
   const rows = useMemo(() => {
@@ -219,7 +220,7 @@ export function DeviceChip({
   }, [devices, ownDeviceId]);
 
   const label = effectiveDevice?.name ?? fallbackLabel;
-  const offline = effectiveDevice !== null && !deviceOnline(effectiveDevice, now);
+  const offline = effectiveDevice !== null && !deviceOnline(effectiveDevice, now, engineStates);
 
   return (
     <PickerCard
@@ -248,6 +249,7 @@ export function DeviceChip({
         ownDeviceId={ownDeviceId}
         effectiveDeviceId={effectiveDevice?.id ?? null}
         now={now}
+        engineStates={engineStates}
       />
     </PickerCard>
   );
@@ -260,6 +262,7 @@ function DeviceCard({
   ownDeviceId,
   effectiveDeviceId,
   now,
+  engineStates,
 }: {
   readonly open: boolean;
   readonly onClose: () => void;
@@ -267,6 +270,7 @@ function DeviceCard({
   readonly ownDeviceId: string | null;
   readonly effectiveDeviceId: string | null;
   readonly now: number;
+  readonly engineStates: ReadonlyMap<string, "connected" | "reconnecting" | "off">;
 }) {
   const [query, setQuery] = useState("");
   const inputRef = useRef<HTMLInputElement | null>(null);
@@ -328,7 +332,7 @@ function DeviceCard({
             >
               <span className="menu-row-label">{device.name}</span>
               {device.id === ownDeviceId && <span className="picker-row-tag">You</span>}
-              {!deviceOnline(device, now) && <Icon name="wifiOff" size={12} className="picker-row-offline" />}
+              {!deviceOnline(device, now, engineStates) && <Icon name="wifiOff" size={12} className="picker-row-offline" />}
             </MenuRowNav>
           ))}
         </div>
