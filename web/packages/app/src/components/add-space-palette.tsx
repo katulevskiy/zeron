@@ -3,8 +3,9 @@ import type { ReactNode, RefObject } from "react";
 import { useNavigate } from "@tanstack/react-router";
 import { Icon, type IconName } from "@zeron/icons";
 import type { Device, FolderEntry } from "@zeron/proto";
-import { useEngineSession } from "../state/session-provider";
-import { useNow, useWatchSnapshot } from "../state/hooks";
+import { useEngineSession, useEngineSessions } from "../state/session-provider";
+import { useNow } from "../state/hooks";
+import { engineStatesOf, useFleetSnapshot, useFleetRegistry } from "../state/fleet";
 import { deviceOnline } from "../lib/view";
 import {
   addSpaceCompletion,
@@ -84,8 +85,11 @@ function readyListing(flow: AddSpaceFlow): { path: string; entries: FolderEntry[
 
 export function AddSpacePalette() {
   const session = useEngineSession();
-  const snapshot = useWatchSnapshot(session);
+  const sessions = useEngineSessions();
+  const snapshot = useFleetSnapshot();
+  const registry = useFleetRegistry();
   const now = useNow(30_000);
+  const engineStates = engineStatesOf(registry);
   const state = useAddSpaceSnapshot();
   const navigate = useNavigate();
   const inputRef = useRef<HTMLInputElement | null>(null);
@@ -105,11 +109,13 @@ export function AddSpacePalette() {
   useEffect(() => {
     addSpaceStore.attach({
       session,
+      sessions,
+      devices: snapshot.devices.rows,
       goToCanvas: () => {
         goToCanvasRef.current();
       },
     });
-  }, [session]);
+  }, [session, sessions, snapshot.devices.rows]);
   // Only a true host unmount force-closes — nothing is left to paint, so
   // no exit window either. A session change re-runs the effect above; it
   // is not an unmount, and an open flow stays open.
@@ -144,7 +150,7 @@ export function AddSpacePalette() {
     return null;
   }
 
-  const devices = snapshot?.devices.rows ?? [];
+  const devices = snapshot.devices.rows;
   const device = flow.deviceId !== null ? devices.find((row) => row.id === flow.deviceId) ?? null : null;
 
   // The scrim press is Base UI's dismissal now (modal Dialog, pointer
@@ -176,7 +182,7 @@ export function AddSpacePalette() {
       <div className="add-space-card">
         <Header flow={flow} inputRef={inputRef} />
         <Crumbs flow={flow} device={device} />
-        <Results flow={flow} devices={devices} now={now} listRef={listRef} />
+        <Results flow={flow} devices={devices} now={now} engineStates={engineStates} listRef={listRef} />
         {flow.error !== null && <div className="add-space-error">{flow.error}</div>}
         <Footer flow={flow} />
       </div>
@@ -380,9 +386,10 @@ function Results(props: {
   readonly flow: AddSpaceFlow;
   readonly devices: readonly Device[];
   readonly now: number;
+  readonly engineStates: ReturnType<typeof engineStatesOf>;
   readonly listRef: RefObject<HTMLDivElement | null>;
 }) {
-  const { flow, devices, now, listRef } = props;
+  const { flow, devices, now, listRef, engineStates } = props;
   const listing = readyListing(flow);
   const loadError = typeof flow.listing === "object" && "error" in flow.listing ? flow.listing.error : null;
   const listingPath = flow.step === "folders" ? (listing?.path ?? null) : null;
@@ -417,7 +424,7 @@ function Results(props: {
               <Highlighted text={device.name} query={flow.query} />
               <span className="add-space-row-rest" />
               <span
-                className={`add-space-presence ${deviceOnline(device, now) ? "add-space-presence-online" : ""}`}
+                className={`add-space-presence ${deviceOnline(device, now, engineStates) ? "add-space-presence-online" : ""}`}
               />
             </MenuRowNav>
           ))}

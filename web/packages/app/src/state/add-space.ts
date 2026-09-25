@@ -8,7 +8,7 @@ import type {
   PrepareSpacePathReply,
   Space,
 } from "@zeron/proto";
-import { methods, encodeScopedId } from "@zeron/engine-client";
+import { methods, encodeScopedId, parseScopedId } from "@zeron/engine-client";
 import { classifyKey, menuStep } from "../lib/picker-search";
 import {
   addSpaceCompletion,
@@ -119,6 +119,8 @@ export interface AddSpaceSnapshot {
 /** What the mounted palette component supplies each session. */
 export interface AddSpaceContext {
   readonly session: EngineSession | null;
+  readonly sessions?: ReadonlyMap<string, EngineSession>;
+  readonly devices?: readonly Device[];
   /** Route to the blank canvas — the desktop's `Route::Chat` landing. */
   readonly goToCanvas: () => void;
 }
@@ -600,7 +602,7 @@ export class AddSpaceStore {
    */
   #submitBrowsed(): void {
     const flow = this.#aliveFlow();
-    const session = this.#session();
+    const session = this.#sessionForDevice(flow?.deviceId ?? null);
     if (
       flow === null ||
       session === null ||
@@ -620,9 +622,9 @@ export class AddSpaceStore {
     const identity = flow.identity;
     const existing = session.cache
       .getSnapshot()
-      .spaces.rows.find((row) => row.deviceId === deviceId && row.path === path);
+      .spaces.rows.find((row) => row.deviceId === parseScopedId(deviceId).rawId && row.path === path);
     if (existing !== undefined) {
-      this.#land(this.#scope(existing.id));
+      this.#land(this.#scope(existing.id, session));
       return;
     }
     const spaceId = mintId();
@@ -630,10 +632,9 @@ export class AddSpaceStore {
       ...this.#pending,
       {
         // The optimistic row lives in the MERGED (scoped) sidebar view —
-        // its ids are scoped to the routed engine so the confirming watch
-        // frame replaces the twin by id (ticket 31).
-        id: this.#scope(spaceId),
-        deviceId: this.#scope(deviceId),
+        // The confirming watch frame from the selected engine replaces this row.
+        id: this.#scope(spaceId, session),
+        deviceId: this.#scope(parseScopedId(deviceId).rawId, session),
         path,
         name: null,
         gitDetected,
@@ -646,19 +647,19 @@ export class AddSpaceStore {
     this.#flow = { ...flow, submitBusy: true, error: null };
     this.#commit();
     void session.client
-      .call(methods.MUTATE, { op: "createSpace", spaceId, deviceId, path, gitDetected })
+      .call(methods.MUTATE, { op: "createSpace", spaceId, deviceId: parseScopedId(deviceId).rawId, path, gitDetected })
       .then(() => {
         this.#submitInFlight = false;
         // The optimistic row STAYS — the watch frame replaces it by id.
         if (this.#aliveFlow()?.identity === identity) {
-          this.#land(this.#scope(spaceId));
+          this.#land(this.#scope(spaceId, session));
         } else {
           this.#commit();
         }
       })
       .catch((error: unknown) => {
         this.#submitInFlight = false;
-        this.#pending = this.#pending.filter((row) => row.id !== spaceId);
+        this.#pending = this.#pending.filter((row) => row.id !== this.#scope(spaceId, session));
         const current = this.#aliveFlow();
         if (current !== null && current.identity === identity) {
           this.#flow = { ...current, submitBusy: false, error: errorMessage(error) };
@@ -698,7 +699,7 @@ export class AddSpaceStore {
     if (flow === null) {
       return;
     }
-    const session = this.#session();
+    const session = this.#sessionForDevice(flow.deviceId);
     const deviceId = flow.deviceId;
     const request: StaleGuard = { identity: flow.identity, revision: null, deviceId };
     const query = flow.query;
@@ -723,10 +724,7 @@ export class AddSpaceStore {
     if (path !== null) {
       params.path = path;
     }
-    // Only target remote devices — local calls skip the relay.
-    if (this.#localDeviceId() !== deviceId) {
-      params.targetDeviceId = deviceId;
-    }
+    // The client is already connected to the selected device's engine.
     void session.client
       .call<FolderListing>(methods.LIST_FOLDERS, params)
       .then((listing) => {
@@ -762,7 +760,7 @@ export class AddSpaceStore {
    */
   #loadDrives(): void {
     const flow = this.#flow;
-    const session = this.#session();
+    const session = this.#sessionForDevice(flow?.deviceId ?? null);
     if (flow === null || session === null || flow.deviceId === null) {
       if (flow !== null && flow.drivesLoading) {
         this.#flow = { ...flow, drivesLoading: false };
@@ -771,10 +769,8 @@ export class AddSpaceStore {
       return;
     }
     const request: StaleGuard = { identity: flow.identity, revision: null, deviceId: flow.deviceId };
+    // The client is already connected to the selected device's engine.
     const params: Record<string, unknown> = {};
-    if (this.#localDeviceId() !== flow.deviceId) {
-      params.targetDeviceId = flow.deviceId;
-    }
     void session.client
       .call<DriveListing>(methods.LIST_DRIVES, params)
       .then((listing) => {
@@ -802,7 +798,7 @@ export class AddSpaceStore {
    */
   #prepareManual(create: boolean, submit: boolean): void {
     const flow = this.#aliveFlow();
-    const session = this.#session();
+    const session = this.#sessionForDevice(flow?.deviceId ?? null);
     if (flow === null || session === null || flow.submitBusy || flow.deviceId === null) {
       return;
     }
@@ -815,8 +811,6 @@ export class AddSpaceStore {
       .call<PrepareSpacePathReply>(methods.PREPARE_SPACE_PATH, {
         path,
         createIfMissing: create,
-        // Required here, unlike the two loads: path syntax resolves on the
-        // owning device, never assumed local.
         targetDeviceId: flow.deviceId,
       })
       .then((result) => {
@@ -868,14 +862,25 @@ export class AddSpaceStore {
     return this.#context?.session ?? null;
   }
 
-  /** Scope an id to the routed engine — the merged sidebar's id namespace. */
-  #scope(id: string): string {
-    const session = this.#session();
+  /** Resolve the selected scoped device before sending filesystem or mutation RPCs. */
+  #sessionForDevice(deviceId: string | null): EngineSession | null {
+    const current = this.#session();
+    if (deviceId === null) return current;
+    try {
+      const owner = parseScopedId(deviceId).engine;
+      return owner === null ? current : this.#context?.sessions?.get(owner) ?? null;
+    } catch {
+      return null;
+    }
+  }
+
+  /** Scope a raw id to the engine that owns it. */
+  #scope(id: string, session: EngineSession | null = this.#session()): string {
     return session === null ? id : encodeScopedId(session.engine.baseUrl, id);
   }
 
   #devices(): readonly Device[] {
-    return this.#session()?.cache.getSnapshot().devices.rows ?? [];
+    return this.#context?.devices ?? this.#session()?.cache.getSnapshot().devices.rows ?? [];
   }
 
   /** The Devices step's filtered rows (`add_space_devices`). */

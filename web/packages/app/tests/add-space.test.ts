@@ -1,6 +1,6 @@
 import { describe, expect, it } from "vitest";
 import type { Device, DriveEntry, FolderEntry } from "@zeron/proto";
-import { methods } from "@zeron/engine-client";
+import { encodeScopedId, methods } from "@zeron/engine-client";
 import type { EngineSession } from "../src/state/engine-session";
 import { addSpaceStore, toggleAddSpace } from "../src/state/add-space";
 import {
@@ -447,6 +447,55 @@ describe("device-first New project flow (spaces.rs project_flow_tests)", () => {
       cleanup();
     }
   });
+
+  it("browses and creates on the selected engine, not the routed threadripper", async () => {
+    try {
+      const localCalls: Array<{ method: string; params: Record<string, unknown> }> = [];
+      const remoteCalls: Array<{ method: string; params: Record<string, unknown> }> = [];
+      const local = fakeSession([device("threadripper", "Threadripper")], localCalls, "threadripper");
+      const remoteKey = "https://remote.test";
+      const remoteBase = fakeSession([device("ovh", "OVH")], remoteCalls, "ovh");
+      const remote = {
+        ...remoteBase,
+        engine: { ...remoteBase.engine, baseUrl: remoteKey },
+        cache: { getSnapshot: () => ({ devices: { rows: [device("ovh", "OVH")] }, spaces: { rows: [] } }) },
+      } as unknown as EngineSession;
+      const sessions = new Map([[local.engine.baseUrl, local], [remoteKey, remote]]);
+      addSpaceStore.attach({ session: local, sessions, goToCanvas: () => {} });
+      addSpaceStore.open();
+      addSpaceStore.pickDevice(encodeScopedId(remoteKey, "ovh"));
+      addSpaceStore.gotoLocation("Home", null);
+      await flush();
+      expect(localCalls).toEqual([]);
+      expect(remoteCalls.map((call) => call.method)).toEqual([methods.LIST_DRIVES, methods.LIST_FOLDERS]);
+      expect(addSpaceStore.getSnapshot().flow?.listing).toMatchObject({ path: "/home/studio" });
+      addSpaceStore.submit();
+      await flush();
+      expect(localCalls).toEqual([]);
+      expect(remoteCalls[2]?.method).toBe(methods.MUTATE);
+      expect(remoteCalls[2]?.params).toMatchObject({ op: "createSpace", deviceId: "ovh", path: "/home/studio" });
+    } finally {
+      cleanup();
+    }
+  });
+
+
+  it("does not browse a missing scoped engine through the active engine", async () => {
+    try {
+      const calls: Array<{ method: string; params: Record<string, unknown> }> = [];
+      const local = fakeSession([device("threadripper", "Threadripper")], calls, "threadripper");
+      addSpaceStore.attach({ session: local, sessions: new Map([[local.engine.baseUrl, local]]), goToCanvas: () => {} });
+      addSpaceStore.open();
+      addSpaceStore.pickDevice(encodeScopedId("https://missing.test", "ovh"));
+      addSpaceStore.gotoLocation("Home", null);
+      await flush();
+      expect(calls).toEqual([]);
+      expect(addSpaceStore.getSnapshot().flow?.listing).toEqual({ error: "Device is not connected" });
+    } finally {
+      cleanup();
+    }
+  });
+
 
   it("a deviceless folders load surfaces the error row instead of a forever-skeleton", async () => {
     try {
