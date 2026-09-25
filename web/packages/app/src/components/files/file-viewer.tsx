@@ -15,7 +15,6 @@ import { useEngineSession } from "../../state/session-provider";
 import { Tooltip, TOOLTIP_VIEW_OPTIONS_MS } from "../ui/Tooltip";
 import { CodeView, type CodeReviewWiring } from "./code-view";
 import { FileIcon } from "./file-icon";
-import { EditorContextMenu } from "./editor-context-menu";
 import { ImageView, loadWorkspaceImage, type WorkspaceImageLoad } from "./image-view";
 import { MarkdownView } from "./markdown-view";
 
@@ -374,7 +373,6 @@ function TextViewer({
   );
 
   const showEditor = snapshot.editable && !snapshot.showMarkdown;
-  const editorInputRef = useRef<HTMLTextAreaElement | null>(null);
   // ── Ticket 23: the editor-side comments (staged per the chat's composer
   // key; only File-sourced comments on THIS path reach the gutter —
   // `staged_file_comments`, preview.rs:751-762). The overlay mounts only
@@ -457,21 +455,18 @@ function TextViewer({
     );
   } else if (showEditor) {
     body = (
-      <EditorContextMenu textareaRef={editorInputRef} editable>
-        <div className="files-editor-body">
-          <CodeView
-            text={snapshot.text}
-            path={path}
-            editable
-            onChange={(text) => doc?.edit(text)}
-            codeFontSize={settings.codeFontSize}
-            wordWrap={settings.filesWordWrap}
-            autoFocus={markdownFocus}
-            inputRef={editorInputRef}
-            review={editorReview}
-          />
-        </div>
-      </EditorContextMenu>
+      <div className="files-editor-body">
+        <CodeView
+          text={snapshot.text}
+          path={path}
+          editable
+          onChange={(text) => doc?.edit(text)}
+          codeFontSize={settings.codeFontSize}
+          wordWrap={settings.filesWordWrap}
+          autoFocus={markdownFocus}
+          review={editorReview}
+        />
+      </div>
     );
   } else {
     const truncated = snapshot.file !== null ? truncatedMessage(snapshot.file) : null;

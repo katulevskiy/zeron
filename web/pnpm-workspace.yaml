@@ -4,3 +4,6 @@ packages:
 # vitest pulls esbuild, whose postinstall links the platform binary.
 allowBuilds:
   esbuild: true
+
+minimumReleaseAgeExclude:
+  - '@pierre/diffs@1.5.1'
