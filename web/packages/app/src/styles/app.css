@@ -5837,6 +5837,11 @@ a:focus-visible,
     padding-bottom: calc(var(--rb-space-xs) + var(--rb-safe-sheet-pad));
   }
 
+  /* The desktop model card is 304px; its phone drawer must fill the sheet. */
+  .rb-drawer-card.identity-card {
+    width: 100%;
+  }
+
   /*
    * The right pane's `+` menu in the strip's in-drawer phone form (ticket
    * 52, 49's explicit deferral — ticket 18 keeps this direction): the
