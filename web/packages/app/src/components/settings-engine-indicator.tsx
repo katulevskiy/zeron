@@ -1,7 +1,7 @@
 import { useState } from "react";
 import type { ReactElement } from "react";
 import { Icon } from "@zeron/icons";
-import { engineConnection, settingsEngineLabel } from "../lib/settings-engine";
+import { engineConnection, settingsDeviceName, settingsEngineLabel } from "../lib/settings-engine";
 import { setActiveDevice, useFleet, useFleetRegistry } from "../state/fleet";
 import { PickerCard } from "./ui/PickerCard";
 import { MenuRow } from "./ui/MenuRows";
@@ -29,7 +29,7 @@ export function SettingsEngineIndicator() {
   const fleet = useFleet();
   const registry = useFleetRegistry();
   const [open, setOpen] = useState(false);
-  const label = settingsEngineLabel(fleet);
+  const label = settingsEngineLabel(fleet, registry);
   if (label === null) {
     return null;
   }
@@ -73,7 +73,7 @@ export function SettingsEngineIndicator() {
             }}
           >
             <span className={`dot ${engineConnection(byKey.get(engine.baseUrl) ?? null).dot}`} />
-            <span className="settings-engine-row-host">{engine.label}</span>
+            <span className="settings-engine-row-host">{settingsDeviceName(engine, registry)}</span>
             {isActive && <Icon name="check" size={12} className="settings-engine-row-check" />}
           </MenuRow>
         );

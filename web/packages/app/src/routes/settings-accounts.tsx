@@ -2,8 +2,7 @@ import { useCallback, useEffect, useRef, useState } from "react";
 import { Icon } from "@zeron/icons";
 import type { AgentAccount, AgentAccountsSnapshot, AgentLoginStart, HarnessId } from "@zeron/proto";
 import { useEngineSession } from "../state/session-provider";
-import { useNow, useWatchSnapshot } from "../state/hooks";
-import { DeviceSwitcher } from "../components/ui/DeviceSwitcher";
+import { useNow } from "../state/hooks";
 import {
   BtnGhost,
   BtnPrimary,
@@ -42,10 +41,9 @@ import {
  * provider section per harness CLI (Claude Code, Codex, Cursor) with its
  * account rows — email, plan and Active badges, usage meters, Switch and
  * Forget on inactive rows — plus the add-account login flows (paste-code
- * and browser-poll) and the page-header device switcher that retargets
- * every call at another paired device via `targetDeviceId`. The visit's
- * first list forces a usage probe; post-action lists ride the still-warm
- * cache. All RPC failures render inline.
+ * and browser-poll). The edge-fleet picker selects the engine for every
+ * direct RPC call. The visit's first list forces a usage probe; post-action
+ * lists ride the still-warm cache. All RPC failures render inline.
  */
 
 type Loadable = { kind: "loading" } | { kind: "ready"; snapshot: AgentAccountsSnapshot } | { kind: "error"; message: string };
@@ -58,8 +56,8 @@ type LoginFlow =
 export function AccountsSettingsPage() {
   const session = useEngineSession();
   const client = session?.client ?? null;
-  const snapshot = useWatchSnapshot(session);
-  const [target, setTarget] = useState<string | null>(null);
+  // The selected edge engine owns these device-local logins; no relay target.
+  const target = null;
   const [snapshotState, setSnapshot] = useState<Loadable>({ kind: "loading" });
   const [busyAccount, setBusyAccount] = useState<string | null>(null);
   const [actionError, setActionError] = useState<string | null>(null);
@@ -215,26 +213,7 @@ export function AccountsSettingsPage() {
     }
   }
 
-  /**
-   * `set_target_device` (accounts.rs:242-256): a different device is a
-   * different accounts world — drop the in-flight login/action state; the
-   * `load` effect reloads with a forced usage probe (the new device's cache
-   * is cold).
-   */
-  function setTargetDevice(next: string | null) {
-    if (next === target) {
-      return;
-    }
-    setTarget(next);
-    setLogin(null);
-    setBusyAccount(null);
-    setActionError(null);
-  }
 
-  const devices = (snapshot?.devices.rows ?? [])
-    .slice()
-    .sort((a, b) => (a.createdAt ?? "").localeCompare(b.createdAt ?? "") || a.id.localeCompare(b.id));
-  const localDeviceId = session?.client.engineInfo?.deviceId ?? null;
   const refreshing = snapshotState.kind === "loading";
   const accountCount = snapshotState.kind === "ready" && snapshotState.snapshot.accounts.length > 0 ? snapshotState.snapshot.accounts.length : null;
 
@@ -253,18 +232,12 @@ export function AccountsSettingsPage() {
             <Icon name="refresh" size={16} />
             Refresh
           </button>
-          <DeviceSwitcher
-            devices={devices}
-            localDeviceId={localDeviceId}
-            target={target}
-            onTargetChange={setTargetDevice}
-          />
+          <SettingsEngineIndicator />
         </div>
       </div>
       <p className="settings-subtitle">
         The Claude Code, Codex, and Cursor logins on this device. Zeron detects the live session, keeps each account
         backed up, and can swap between them.
-        <SettingsEngineIndicator />
       </p>
 
       {actionError !== null && (

@@ -3,13 +3,11 @@ import type { ReactElement, ReactNode } from "react";
 import { Icon, harnessBrandIcon } from "@zeron/icons";
 import type { HarnessDescriptor, HarnessId, Model, TitleSettings } from "@zeron/proto";
 import { RbSwitch } from "../components/base/switch";
-import { DeviceSwitcher } from "../components/ui/DeviceSwitcher";
 import { SettingsEngineIndicator } from "../components/settings-engine-indicator";
 import { MenuRow } from "../components/ui/MenuRows";
 import { PickerCard } from "../components/ui/PickerCard";
 import { SkeletonRows } from "../components/ui/Skeleton";
 import { useEngineSession } from "../state/session-provider";
-import { useWatchSnapshot } from "../state/hooks";
 import {
   blurb,
   bumpHarnessCatalog,
@@ -33,12 +31,11 @@ import { cancelAgentLogin, pollAgentLoginOnce, startAgentLogin } from "../lib/ac
 
 /**
  * Agents settings — the desktop's HarnessesPage (nav label "Agents"):
- * per-device harness enablement rows (the composer offers what is on here),
- * the page-header device switcher, and the session-title pickers. Every
- * write is engine-side (`harness-prefs.json` on the target device); the
- * `SetHarnessEnabled` reply carries the fresh catalog, so the rows repaint
- * in one round trip, and the toggle ends with the composer-catalog bump so
- * the pickers re-fetch their harness list.
+ * per-engine harness enablement rows (the composer offers what is on here),
+ * the shared edge-fleet engine picker, and the session-title pickers. Every
+ * write goes directly to the selected engine; the `SetHarnessEnabled` reply
+ * carries the fresh catalog, so the rows repaint in one round trip, and
+ * the toggle bumps the composer's catalog.
  */
 
 type Loadable<T> =
@@ -67,8 +64,9 @@ interface SignInFailure {
 export function AgentsSettingsPage() {
   const session = useEngineSession();
   const client = session?.client ?? null;
-  const snapshot = useWatchSnapshot(session);
-  const [target, setTarget] = useState<string | null>(null);
+  // The edge fleet routes this settings page to the selected engine. Never
+  // forward via a second, independent device target.
+  const target = null;
   const [harnesses, setHarnesses] = useState<Loadable<readonly HarnessDescriptor[]>>({ kind: "loading" });
   const [titleSettings, setTitleSettings] = useState<Loadable<TitleSettings>>({ kind: "loading" });
   const [titleModels, setTitleModels] = useState<TitleModels>({ kind: "loading" });
@@ -82,10 +80,6 @@ export function AgentsSettingsPage() {
   /** Invalidates the poll loop of a cancelled/superseded sign-in. */
   const signInSeq = useRef(0);
 
-  const devices = (snapshot?.devices.rows ?? [])
-    .slice()
-    .sort((a, b) => (a.createdAt ?? "").localeCompare(b.createdAt ?? "") || a.id.localeCompare(b.id));
-  const localDeviceId = session?.client.engineInfo?.deviceId ?? null;
 
   const loadTitles = useCallback(
     async (save: TitleSettings | null) => {
@@ -184,12 +178,6 @@ export function AgentsSettingsPage() {
    */
   function startSignIn(harness: HarnessId) {
     if (client === null) {
-      return;
-    }
-    if (target !== null) {
-      // The sign-in redirect lands on a loopback port of the device running
-      // the agent, which a browser here can't reach.
-      setError("Turn this agent on from its own device to sign in.");
       return;
     }
     setError(null);
@@ -310,35 +298,14 @@ export function AgentsSettingsPage() {
     }
   }
 
-  function setTargetDevice(next: string | null) {
-    if (next === target) {
-      return;
-    }
-    // A retarget drops any in-flight sign-in (set_target_device cancels).
-    signInSeq.current += 1;
-    setSignIn(null);
-    setSignInFailure(null);
-    setTarget(next);
-    setTitleMenu(null);
-    setTitleSaving(false);
-    setError(null);
-  }
-
   return (
     <div className="settings-page">
       <div className="settings-title-row">
         <h1 className="settings-title">Agents</h1>
-        <DeviceSwitcher
-          devices={devices}
-          localDeviceId={localDeviceId}
-          target={target}
-          onTargetChange={setTargetDevice}
-        />
+        <SettingsEngineIndicator />
       </div>
       <p className="settings-subtitle">
-        Choose which coding agents the composer offers. The setting is per device — switch devices in the
-        header. Agents whose CLI isn't installed on a device can't be enabled there.
-        <SettingsEngineIndicator />
+        Choose which coding agents this engine offers. Agents whose CLI isn't installed here can't be enabled.
       </p>
 
       {error !== null && (

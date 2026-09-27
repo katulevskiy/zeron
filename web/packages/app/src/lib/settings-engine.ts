@@ -1,5 +1,5 @@
-import type { EngineEntrySnapshot } from "@zeron/engine-client";
-import { engineHost, type FleetState } from "./engine-store";
+import type { EngineEntrySnapshot, EngineRegistrySnapshot } from "@zeron/engine-client";
+import type { FleetState } from "./engine-store";
 
 /**
  * The engine-addressing settings vocabulary: which engine the settings
@@ -12,13 +12,23 @@ import { engineHost, type FleetState } from "./engine-store";
  */
 
 /**
- * The engine those settings pages address, named only when the fleet is
- * plural: `engineHost(fleet.active)` with two or more engines paired,
- * else null — the single-engine case is unambiguous and shows no
- * indicator at all.
+ * The engine's own WatchDevices row is the name of record (and reflects
+ * renames). Edge discovery can have only the device UUID: older relay hosts
+ * don't send a name on their WebSocket registration. Never borrow a peer's
+ * copy of this row, which may be stale or identify a different engine.
  */
-export function settingsEngineLabel(fleet: FleetState): string | null {
-  return fleet.engines.length > 1 && fleet.active !== null ? engineHost(fleet.active) : null;
+export function settingsDeviceName(engine: FleetState["engines"][number], registry?: EngineRegistrySnapshot): string {
+  const entry = registry?.engines.find((candidate) => candidate.key === engine.baseUrl);
+  const ownId = entry?.info?.deviceId ?? engine.deviceId ?? engine.baseUrl;
+  const name = entry?.devices.rows.find((device) => device.id === ownId)?.name?.trim();
+  return name || engine.label || engine.baseUrl;
+}
+
+/** Name the active engine only when more than one is available. */
+export function settingsEngineLabel(fleet: FleetState, registry?: EngineRegistrySnapshot): string | null {
+  if (fleet.engines.length < 2 || fleet.active === null) return null;
+  const engine = fleet.engines.find((entry) => entry.baseUrl === fleet.active);
+  return engine === undefined ? null : settingsDeviceName(engine, registry);
 }
 
 /** One paired engine's connection view off its registry entry state. */

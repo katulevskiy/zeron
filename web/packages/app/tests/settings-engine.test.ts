@@ -1,10 +1,7 @@
 import { describe, expect, it } from "vitest";
-import type { EngineEntrySnapshot, EngineConnectionState } from "@zeron/engine-client";
+import type { EngineEntrySnapshot, EngineConnectionState, EngineRegistrySnapshot } from "@zeron/engine-client";
 import type { FleetState, StoredEngine } from "../src/lib/engine-store";
 import { engineConnection, settingsEngineLabel } from "../src/lib/settings-engine";
-
-const HOST_A = "127.0.0.1:27699";
-const HOST_B = "192.168.1.20:27699";
 
 function stored(baseUrl: string): StoredEngine {
   return {
@@ -23,7 +20,7 @@ function fleetOf(active: string | null, engines: readonly StoredEngine[]): Fleet
 
 function entryOf(state: EngineConnectionState, lastError: string | null): EngineEntrySnapshot {
   return {
-    key: `http://${HOST_A}`,
+    key: "device-a",
     info: null,
     state,
     lastError,
@@ -36,16 +33,39 @@ function entryOf(state: EngineConnectionState, lastError: string | null): Engine
 }
 
 describe("settingsEngineLabel", () => {
-  it("settingsEngineLabelNamesActiveEngineOnlyWhenFleetIsPlural", () => {
-    const a = stored(`http://${HOST_A}`);
-    const b = stored(`http://${HOST_B}`);
-    // 0 engines: nothing to address.
+  it("names the active edge device only when the fleet is plural", () => {
+    const a = { ...stored("device-a"), label: "Workstation" };
+    const b = { ...stored("device-b"), label: "Laptop" };
     expect(settingsEngineLabel(fleetOf(null, []))).toBe(null);
-    // 1 engine: the single-engine case is unambiguous — no indicator.
-    expect(settingsEngineLabel(fleetOf(`http://${HOST_A}`, [a]))).toBe(null);
-    // 2+ engines: the active engine's host.
-    expect(settingsEngineLabel(fleetOf(`http://${HOST_A}`, [a, b]))).toBe(HOST_A);
-    expect(settingsEngineLabel(fleetOf(`http://${HOST_B}`, [a, b]))).toBe(HOST_B);
+    expect(settingsEngineLabel(fleetOf("device-a", [a]))).toBe(null);
+    expect(settingsEngineLabel(fleetOf("device-a", [a, b]))).toBe("Workstation");
+    expect(settingsEngineLabel(fleetOf("device-b", [a, b]))).toBe("Laptop");
+    expect(settingsEngineLabel(fleetOf("device-a", [a, { ...b, label: "" }]))).toBe("Workstation");
+    expect(settingsEngineLabel(fleetOf("device-b", [a, { ...b, label: "" }]))).toBe("device-b");
+    expect(settingsEngineLabel(fleetOf("missing", [a, b]))).toBe(null);
+  });
+
+  it("shows the engine's own WatchDevices name instead of an edge UUID, including after a rename", () => {
+    const id = "123e4567-e89b-12d3-a456-426614174000";
+    const other = "123e4567-e89b-12d3-a456-426614174001";
+    const fleet = fleetOf(id, [{ ...stored(id), label: id }, { ...stored(other), label: other }]);
+    const own = { id, name: "Work Laptop" };
+    const registry = { engines: [
+      { ...entryOf("connected", null), key: id, info: { deviceId: id }, devices: { rows: [own, { id: other, name: "Wrong peer copy" }] } },
+      { ...entryOf("connected", null), key: other, info: { deviceId: other }, devices: { rows: [{ id: other, name: "Server" }] } },
+    ] } as unknown as EngineRegistrySnapshot;
+    expect(settingsEngineLabel(fleet, registry)).toBe("Work Laptop");
+    expect(settingsEngineLabel(fleetOf(other, fleet.engines), registry)).toBe("Server");
+    const renamed = { ...registry, engines: registry.engines.map((entry) =>
+      entry.key === id ? { ...entry, devices: { rows: [{ id, name: "Renamed Laptop" }] } } : entry,
+    ) } as EngineRegistrySnapshot;
+    expect(settingsEngineLabel(fleet, renamed)).toBe("Renamed Laptop");
+    const peerOnly = { ...registry, engines: registry.engines.map((entry) =>
+      entry.key === id ? { ...entry, devices: { rows: [{ id: other, name: "Wrong peer copy" }] } } : entry,
+    ) } as EngineRegistrySnapshot;
+    expect(settingsEngineLabel(fleet, peerOnly)).toBe(id);
+    expect(settingsEngineLabel(fleetOf(id, [{ ...fleet.engines[0]!, label: "Edge Name" }, fleet.engines[1]!]), peerOnly))
+      .toBe("Edge Name");
   });
 });
 
