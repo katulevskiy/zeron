@@ -12200,6 +12200,13 @@ dependencies = [
 ]
 
 [[package]]
+name = "zeron-guide"
+version = "0.2.97"
+dependencies = [
+ "serde_json",
+]
+
+[[package]]
 name = "zeron-harness"
 version = "0.2.97"
 dependencies = [
