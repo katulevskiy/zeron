@@ -12239,6 +12239,7 @@ name = "zeron-markdown"
 version = "0.2.97"
 dependencies = [
  "pulldown-cmark",
+ "zeron-proto",
 ]
 
 [[package]]

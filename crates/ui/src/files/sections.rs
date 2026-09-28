@@ -287,28 +287,31 @@ pub(super) fn child_chat_rows(
     spawned_by_agent: bool,
     now: DateTime<Utc>,
 ) -> Vec<ChildChatRow> {
-    let mut rows: Vec<ChildChatRow> = state
-        .chats
-        .iter()
-        .filter(|chat| {
-            !chat.archived
-                && chat.parent_chat_id.as_deref() == Some(chat_id)
-                && chat.spawned_by_agent == spawned_by_agent
+    // The index is built once per `apply_chats` and keeps the most-recent
+    // activity order; per-row callers never rescan the whole chat list.
+    state
+        .children_by_parent
+        .activity
+        .get(chat_id)
+        .map(|children| {
+            children
+                .iter()
+                .map(|&ix| &state.chats[ix])
+                .filter(|chat| chat.spawned_by_agent == spawned_by_agent)
+                .map(|chat| {
+                    let activity = chat.last_message_at.unwrap_or(chat.created_at);
+                    ChildChatRow {
+                        chat_id: chat.id.clone(),
+                        title: child_chat_title(chat).into(),
+                        status: state.display_status_for(chat, now),
+                        time_ago: zeron_proto::view::format_time_ago(activity, now).into(),
+                        change_request: state.change_request_for_chat(chat).cloned(),
+                        activity,
+                    }
+                })
+                .collect()
         })
-        .map(|chat| {
-            let activity = chat.last_message_at.unwrap_or(chat.created_at);
-            ChildChatRow {
-                chat_id: chat.id.clone(),
-                title: child_chat_title(chat).into(),
-                status: state.display_status_for(chat, now),
-                time_ago: zeron_proto::view::format_time_ago(activity, now).into(),
-                change_request: state.change_request_for_chat(chat).cloned(),
-                activity,
-            }
-        })
-        .collect();
-    rows.sort_by_key(|row| std::cmp::Reverse(row.activity));
-    rows
+        .unwrap_or_default()
 }
 
 /// A side chat titles itself on its first turn; until then the preview or a
@@ -430,8 +433,7 @@ impl FilesSurface {
         let budget = FOOTER_HEIGHT - chrome_height();
         let heights = body_budget(budget, wants, open);
         let view = cx.entity_id();
-        let subagent_body =
-            self.render_subagent_rows(&subagents, &agent_chats, view, theme, cx);
+        let subagent_body = self.render_subagent_rows(&subagents, &agent_chats, view, theme, cx);
         let chat_body = self.render_chat_rows(&chats, theme, cx);
         let chats_actions = self.render_chats_header_actions(theme, cx);
         div()
@@ -750,8 +752,7 @@ impl FilesSurface {
             list = list.child(self.render_child_chat_row(row, view, theme, cx));
         }
         if total > shown {
-            list =
-                list.child(self.render_show_more(Section::Subagents, total - shown, theme, cx));
+            list = list.child(self.render_show_more(Section::Subagents, total - shown, theme, cx));
         }
         faded_list(list, &scroll)
     }
@@ -1245,6 +1246,7 @@ mod tests {
         spawned.spawned_by_agent = true;
         state.chats.push(spawned);
         state.chats.push(chat("side", Some("main"), 3));
+        state.refresh_children_index();
         let agent_rows = child_chat_rows(&state, "main", true, Utc::now());
         assert_eq!(
             agent_rows

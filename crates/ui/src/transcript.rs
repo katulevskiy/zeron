@@ -44,6 +44,7 @@ use zeron_proto::orchestration::{self, ChildOutcome};
 use zeron_proto::view::{ZeronChatVerb, zeron_chat_command};
 use zeron_proto::{ChatIndicator, ToolCall};
 
+use crate::markdown::chat_pills;
 use crate::markdown::parser::{
     Block, BlockTree, IncrementalParser, InlineRun, InlineStyle, parse_full,
 };
@@ -398,14 +399,58 @@ pub struct AgentExec {
     /// against the registry at render time.
     pub targets: Vec<SharedString>,
     /// The spawned child: the last `@chat:<uuid>` mention in the output.
-    /// `None` while the spawn is still running (or printed no id).
+    /// `None` while the spawn is still running (or printed no id) — and in
+    /// practice whenever the doc kept no output at all, so the chip falls
+    /// back to resolving the chat's agent children at paint time.
     pub child: Option<SharedString>,
     /// Requested label (`--title`, else the inline `--prompt` text) — the
     /// spawn chip's detail until the child's id (then title) arrives.
     pub label: Option<SharedString>,
+    /// The `--title` value alone: the spawned chat carries it verbatim, so
+    /// it names the child to look for when the output held no id.
+    pub title: Option<SharedString>,
     /// Requested `--model`, shown as the chip's model trail until the child
     /// resolves its own.
     pub model: Option<SharedString>,
+}
+
+/// Where a `zeron chat spawn` exec sits in the transcript's spawn sequence —
+/// the fallback that pairs an output-less chip with its child. `order` counts
+/// every spawn exec; `titled` counts only the ones sharing this spawn's
+/// `--title` (same-titled children line up in `created_at` order).
+#[derive(Debug, Clone, Copy)]
+struct SpawnOrder {
+    order: usize,
+    titled: usize,
+}
+
+/// Pair an output-less spawn exec with its child among the parent chat's
+/// `spawned_by_agent` children (`children` must be `created_at` ascending):
+/// the spawn's `--title` first — the child carries it verbatim, and
+/// same-titled children pair off in order — else the Nth spawn exec takes
+/// the Nth child.
+fn spawn_child_from_registry<'a>(
+    children: &[&'a zeron_proto::Chat],
+    agent: &AgentExec,
+    order: Option<SpawnOrder>,
+) -> Option<&'a zeron_proto::Chat> {
+    if let Some(title) = agent.title.as_deref() {
+        let named: Vec<&zeron_proto::Chat> = children
+            .iter()
+            .copied()
+            .filter(|chat| chat.title.as_deref() == Some(title))
+            .collect();
+        match named.as_slice() {
+            [child] => return Some(child),
+            [] => {}
+            _ => {
+                if let Some(child) = order.and_then(|order| named.get(order.titled).copied()) {
+                    return Some(child);
+                }
+            }
+        }
+    }
+    order.and_then(|order| children.get(order.order).copied())
 }
 
 /// Classify an exec as orchestration CLI traffic, and for spawns lift the
@@ -430,6 +475,7 @@ fn agent_exec(call: &ToolCall, output: Option<&str>) -> Option<AgentExec> {
         targets: command.targets.iter().map(SharedString::from).collect(),
         child,
         label: command.label.map(SharedString::from),
+        title: command.title.map(SharedString::from),
         model: command.model.map(SharedString::from),
     })
 }
@@ -438,6 +484,9 @@ fn agent_exec(call: &ToolCall, output: Option<&str>) -> Option<AgentExec> {
 struct AgentView {
     /// Spawn chips ride the native spawn path on a shimmed call.
     tool: Option<ToolItem>,
+    /// The spawn's resolved child id — output mention first, the registry
+    /// fallback otherwise. Drives the chip's whole-card click + open arrow.
+    child: Option<SharedString>,
     /// Messaging verbs keep their real call and only override the header's
     /// label/detail/trail text.
     content: Option<ChipContent>,
@@ -1082,6 +1131,12 @@ pub enum RowKind {
         attachments: Arc<Vec<crate::attachments::UserImageAttachment>>,
         /// Context the prompt folded in as text, lifted back out by `badges`.
         badges: Arc<Vec<crate::badges::MessageBadge>>,
+        /// `@chat:` mentions and agent-sender names in `text`, rendered as
+        /// live pills by `user_bubble_text`.
+        chat_refs: Arc<Vec<BubbleChatRef>>,
+        /// The `Message from <label>` span to bold — only for legacy sender
+        /// headers that carry no resolvable chat id (those become pills).
+        sender_label: Option<Range<usize>>,
         /// Optimistic echo not yet confirmed by a doc frame.
         pending: bool,
     },
@@ -1462,11 +1517,37 @@ pub fn rows_for_entry(
         // Lifted before the mention projection, so a comment body's own
         // Markdown never lands in the bubble.
         let (body, badges) = crate::badges::split(&parsed.text);
-        let body = agent_message_display(&body);
+        let (body, sender) = agent_message_display(&body);
         let (text, mentions) = match crate::composer::sent_mention_display(&body) {
             Some((display, spans)) => (display, spans),
             None => (body, Vec::new()),
         };
+        // `@chat:` pills scan the PROJECTED text — file-mention rewrites may
+        // have shifted every byte. The sender's label range is recomputed on
+        // it too so a projected mention in the header can't misalign it.
+        let mut chat_refs: Vec<BubbleChatRef> = zeron_proto::orchestration::chat_mentions(&text)
+            .into_iter()
+            .map(|m| BubbleChatRef {
+                range: m.range,
+                chat_id: m.chat_id.to_string(),
+            })
+            .collect();
+        let sender_label = sender.and_then(|sender| {
+            // The synthesized header survives mention projection untouched.
+            let range = text
+                .strip_prefix("Message from ")
+                .and_then(|rest| rest.find("\n\n"))
+                .map(|len| "Message from ".len().."Message from ".len() + len)?;
+            match sender.chat_id {
+                Some(chat_id) => {
+                    chat_refs.push(BubbleChatRef { range, chat_id });
+                    None
+                }
+                None => Some(range),
+            }
+        });
+        chat_refs.sort_by_key(|r| r.range.start);
+        chat_refs.dedup_by(|a, b| a.range == b.range);
         let copy_text = (!text.trim().is_empty()).then(|| SharedString::from(text.clone()));
         return vec![Row {
             id: entry.id.clone().into(),
@@ -1477,6 +1558,8 @@ pub fn rows_for_entry(
                 mentions: Arc::new(mentions),
                 attachments: Arc::new(parsed.attachments),
                 badges: Arc::new(badges),
+                chat_refs: Arc::new(chat_refs),
+                sender_label,
                 pending,
             },
             entry_id,
@@ -3458,9 +3541,27 @@ pub struct Transcript {
     /// repaints its chip without a transcript revision.
     chat_refs: std::collections::BTreeSet<String>,
     chat_ref_fingerprint: u64,
+    /// Spawn order of each `zeron chat spawn` exec in the rows (part id →
+    /// Nth spawn, Nth under its `--title`), rebuilt with `chat_refs`: the
+    /// registry fallback pairs an output-less spawn chip with its child.
+    spawn_ordinals: HashMap<String, SpawnOrder>,
+    /// Resolved-pill snapshot behind [`RenderOptions::chats`], rebuilt when
+    /// the fingerprint flips or the referenced set grows — never inside a
+    /// frame. Ids a snapshot could not cover are remembered and resolved
+    /// live on the next call.
+    chat_ui_cache: RefCell<Option<ChatUiSnapshot>>,
     _observe: Subscription,
     _chat_ref_watch: Subscription,
     _text_changes: Subscription,
+}
+
+/// Resolved-pill snapshot plus the ids it could not cover. A miss joins the
+/// next snapshot's resolve set, so an out-of-set id heals into a real pill
+/// instead of sticking at "Unavailable chat".
+struct ChatUiSnapshot {
+    ui: chat_pills::ChatUi,
+    fingerprint: u64,
+    misses: Rc<RefCell<std::collections::BTreeSet<String>>>,
 }
 
 /// One sidecar blob fetch's lifecycle.
@@ -3503,6 +3604,169 @@ impl Transcript {
             }
             link
         })
+    }
+
+    /// `RenderOptions::chats` + the user bubble's pill ui: `resolve` reads a
+    /// per-fingerprint snapshot of every referenced chat (flatten runs
+    /// without `App`, so resolution must be captured here), `open` activates
+    /// the chat, and `card` builds the sole-mention card from the same chip
+    /// chrome the spawn cards use.
+    fn chat_ui(&mut self, cx: &mut Context<Self>) -> chat_pills::ChatUi {
+        // Ids the cached resolver missed are queued for a live resolve —
+        // reuse the snapshot only while it covered everything asked of it
+        // and still matches the referenced-chats fingerprint.
+        let pending: std::collections::BTreeSet<String> = self
+            .chat_ui_cache
+            .borrow()
+            .as_ref()
+            .map(|cache| std::mem::take(&mut *cache.misses.borrow_mut()))
+            .unwrap_or_default();
+        if pending.is_empty()
+            && let Some(ui) = self
+                .chat_ui_cache
+                .borrow()
+                .as_ref()
+                .filter(|cache| cache.fingerprint == self.chat_ref_fingerprint)
+                .map(|cache| cache.ui.clone())
+        {
+            return ui;
+        }
+        if !pending.is_empty() {
+            // Missed ids resolved below change pill text ("Unavailable chat"
+            // → live title): the flats that baked the old answer must
+            // re-flatten, and a wider pill can rewrap the block.
+            self.render_cache.borrow_mut().clear();
+            self.list.remeasure();
+            cx.notify();
+        }
+        let resolved: HashMap<String, crate::chat_pill::ChatRef> = {
+            let state = self.state.read(cx);
+            self.chat_refs
+                .iter()
+                .chain(pending.iter())
+                .map(|id| (id.clone(), crate::chat_pill::ChatRef::resolve(state, id)))
+                .collect()
+        };
+        let misses = Rc::new(RefCell::new(std::collections::BTreeSet::new()));
+        let resolve = {
+            let resolved = Rc::new(resolved);
+            let misses = misses.clone();
+            Rc::new(move |chat_id: &str| {
+                resolved.get(chat_id).cloned().unwrap_or_else(|| {
+                    misses.borrow_mut().insert(chat_id.to_owned());
+                    crate::chat_pill::ChatRef::unavailable(chat_id)
+                })
+            })
+        };
+        let open = {
+            let entity = cx.weak_entity();
+            Rc::new(
+                move |chat_id: &str, _window: &mut Window, cx: &mut gpui::App| {
+                    let chat_id = chat_id.to_owned();
+                    entity
+                        .update(cx, |this: &mut Self, cx| {
+                            // A pill that points at the doc already on screen
+                            // opens nothing (the composer chip does the same).
+                            if this.chat_id.as_deref() == Some(chat_id.as_str()) {
+                                return;
+                            }
+                            cx.emit(TranscriptEvent::OpenChildChat { chat_id });
+                        })
+                        .ok();
+                },
+            )
+        };
+        let card = {
+            let state = self.state.clone();
+            let owner = cx.entity_id();
+            let open = open.clone();
+            Rc::new(
+                move |chat_id: &str, _window: &mut Window, cx: &mut gpui::App| {
+                    let chat = crate::chat_pill::ChatRef::resolve(state.read(cx), chat_id);
+                    let theme = Theme::of(cx).clone();
+                    let chat_id = chat_id.to_owned();
+                    // The sole-mention card is the spawn chip's chrome — 38px
+                    // slot, 30px card, hairline + ink wash — with the shared
+                    // `chat_chip` (harness mark · title · status glyph) as its
+                    // content and the same open-arrow trail tile.
+                    let arrow = div()
+                        .size(px(18.0))
+                        .flex_none()
+                        .rounded(px(5.0))
+                        .bg(crate::theme::ink(0.06))
+                        .flex()
+                        .items_center()
+                        .justify_center()
+                        .child(
+                            crate::icons::icon(crate::icons::ARROW_UP_RIGHT)
+                                .size(px(11.0))
+                                .text_color(theme.text_muted.opacity(0.8)),
+                        );
+                    let card = div()
+                        .id(SharedString::from(format!("sole-chat-{chat_id}")))
+                        .h(px(CHIP_CARD_HEIGHT))
+                        .w_full()
+                        .min_w_0()
+                        .flex()
+                        .items_center()
+                        .gap(px(8.0))
+                        .px(px(8.0))
+                        .overflow_hidden()
+                        .rounded(px(9.0))
+                        .border_1()
+                        .border_color(crate::theme::hairline(0.07))
+                        .bg(crate::theme::ink(0.03))
+                        .text_size(px(TOOL_LABEL_SIZE))
+                        .line_height(px(TOOL_LABEL_LINE_HEIGHT))
+                        .when(chat.known, |card| {
+                            card.cursor_pointer()
+                                .hover(|s| s.bg(crate::theme::ink(0.05)))
+                                .on_click({
+                                    let open = open.clone();
+                                    let chat_id = chat_id.clone();
+                                    move |_, window, cx| open(&chat_id, window, cx)
+                                })
+                        })
+                        .child(
+                            div()
+                                .min_w_0()
+                                .flex_1()
+                                .child(crate::chat_pill::chat_chip(&chat, &theme, owner, cx)),
+                        )
+                        .when(chat.known, |card| card.child(arrow));
+                    div()
+                        .h(px(CHIP_HEIGHT))
+                        .w_full()
+                        .flex_none()
+                        .flex()
+                        .items_center()
+                        .child(card)
+                        .into_any_element()
+                },
+            )
+        };
+        let ui = chat_pills::ChatUi {
+            resolve,
+            open,
+            card,
+            owner: cx.entity_id(),
+        };
+        self.chat_ui_cache.replace(Some(ChatUiSnapshot {
+            ui: ui.clone(),
+            fingerprint: self.chat_ref_fingerprint,
+            misses,
+        }));
+        ui
+    }
+
+    /// Drop the pill snapshot and every flat that baked it: a change in the
+    /// referenced set or its live identity must re-flatten and remeasure —
+    /// a longer title can rewrap the block.
+    fn invalidate_chat_pills(&mut self, cx: &mut Context<Self>) {
+        self.chat_ui_cache.replace(None);
+        self.render_cache.borrow_mut().clear();
+        self.list.remeasure();
+        cx.notify();
     }
 
     pub fn new(state: Entity<AppState>, cx: &mut Context<Self>) -> Self {
@@ -3571,7 +3835,10 @@ impl Transcript {
             );
             if fingerprint != this.chat_ref_fingerprint {
                 this.chat_ref_fingerprint = fingerprint;
-                cx.notify();
+                // Pill text is baked into cached FlatText rows: a rename or
+                // status flip must drop the flats and remeasure (a longer
+                // title can rewrap the block).
+                this.invalidate_chat_pills(cx);
             }
         });
         let text_changes = cx.subscribe(
@@ -3679,6 +3946,8 @@ impl Transcript {
             blob_fetch_counter: 0,
             chat_refs: std::collections::BTreeSet::new(),
             chat_ref_fingerprint: 0,
+            spawn_ordinals: HashMap::new(),
+            chat_ui_cache: RefCell::new(None),
             _observe: observe,
             _chat_ref_watch: chat_ref_watch,
             _text_changes: text_changes,
@@ -5225,6 +5494,10 @@ impl Transcript {
     /// sees it.
     fn refresh_chat_refs(&mut self, cx: &mut Context<Self>) {
         let mut refs = std::collections::BTreeSet::new();
+        let mut spawn_ordinals: HashMap<String, SpawnOrder> = HashMap::new();
+        let mut spawn_order = 0usize;
+        let mut titled_counts: HashMap<SharedString, usize> = HashMap::new();
+        let mut spawn_unresolved = false;
         for row in &self.rows {
             match &row.kind {
                 RowKind::ToolGroup { tools, .. } => {
@@ -5234,17 +5507,63 @@ impl Transcript {
                             if let Some(child) = &agent.child {
                                 refs.insert(child.to_string());
                             }
+                            if agent.verb == ZeronChatVerb::Spawn {
+                                if agent.child.is_none() {
+                                    spawn_unresolved = true;
+                                }
+                                let titled = agent
+                                    .title
+                                    .as_ref()
+                                    .map(|title| {
+                                        let count = titled_counts.entry(title.clone()).or_insert(0);
+                                        std::mem::replace(count, *count + 1)
+                                    })
+                                    .unwrap_or(0);
+                                spawn_ordinals.insert(
+                                    tool.part_id.clone(),
+                                    SpawnOrder {
+                                        order: spawn_order,
+                                        titled,
+                                    },
+                                );
+                                spawn_order += 1;
+                            }
                         }
                     }
                 }
                 RowKind::ChildUpdates { items } => {
                     refs.extend(items.iter().map(|item| item.child_chat_id.to_string()));
                 }
+                RowKind::User { chat_refs, .. } => {
+                    refs.extend(chat_refs.iter().map(|r| r.chat_id.clone()));
+                }
+                RowKind::Markdown { tree, block_ix } | RowKind::LiveMarkdown { tree, block_ix } => {
+                    if let Some(top) = tree.blocks.get(*block_ix) {
+                        chat_pills::block_chat_ids(&top.block, &mut refs);
+                    }
+                }
                 _ => {}
             }
         }
+        self.spawn_ordinals = spawn_ordinals;
+        // A spawn chip whose stored output named no child resolves against
+        // the registry instead: while one is pending, this chat's agent
+        // children join the watched set so a child's arrival, title or
+        // status flip repaints the chip that is about to claim it.
+        if spawn_unresolved && let Some(parent) = self.chat_id.as_deref() {
+            let state = self.state.read(cx);
+            if let Some(children) = state.children_by_parent.agents.get(parent) {
+                refs.extend(
+                    children
+                        .iter()
+                        .filter_map(|&ix| state.chats.get(ix))
+                        .map(|chat| chat.id.clone()),
+                );
+            }
+        }
+        let changed = refs != self.chat_refs;
         self.chat_refs = refs;
-        self.chat_ref_fingerprint = if self.chat_refs.is_empty() {
+        let fingerprint = if self.chat_refs.is_empty() {
             0
         } else {
             crate::chat_pill::chat_refs_fingerprint(
@@ -5252,6 +5571,14 @@ impl Transcript {
                 self.chat_refs.iter().map(String::as_str),
             )
         };
+        // Membership or identity changes invalidate the pill snapshot AND
+        // the flats that baked it. Storing the fingerprint here is exactly
+        // why the watcher alone could never notice a set change — it
+        // recomputes the same value after this already ran.
+        if changed || fingerprint != self.chat_ref_fingerprint {
+            self.chat_ref_fingerprint = fingerprint;
+            self.invalidate_chat_pills(cx);
+        }
     }
 
     fn compact_worked_secs_for(&self, entry: &SessionMessageEntry) -> Option<i64> {
@@ -5829,11 +6156,14 @@ impl Transcript {
         row_ix: usize,
         text: SharedString,
         mentions: Arc<Vec<crate::composer::SentMentionSpan>>,
+        chat_refs: Arc<Vec<BubbleChatRef>>,
+        sender_label: Option<Range<usize>>,
         theme: &Theme,
         window: &Window,
         cx: &mut Context<Self>,
     ) -> AnyElement {
         let fold = self.user_folds.get(row_id).copied().unwrap_or_default();
+        let chat_refs_empty = chat_refs.is_empty();
         let expanded = fold.open.unwrap_or(false);
         let line_height =
             f32::from(crate::typography::ui_rems(USER_LINE_HEIGHT).to_pixels(window.rem_size()));
@@ -5901,6 +6231,9 @@ impl Transcript {
                 row_id,
                 text,
                 mentions,
+                chat_refs,
+                (!chat_refs_empty).then(|| self.chat_ui(cx)),
+                sender_label,
                 theme,
                 measured_h.clone(),
                 cx.entity_id(),
@@ -6615,12 +6948,16 @@ impl Transcript {
                 mentions,
                 attachments,
                 badges,
+                chat_refs,
+                sender_label,
                 pending,
             } => {
                 let attachments = attachments.clone();
                 let badges = badges.clone();
                 let text = text.clone();
                 let mentions = mentions.clone();
+                let chat_refs = chat_refs.clone();
+                let sender_label = sender_label.clone();
                 let pending = *pending;
                 // Attachment thumbnails ride ABOVE the bubble, right-aligned
                 // (chat-view.tsx RowView: UserAttachmentStrip then the text
@@ -6675,7 +7012,15 @@ impl Transcript {
                                 .text_color(theme.text)
                                 .when(pending, |el| el.opacity(0.65))
                                 .child(self.render_user_body(
-                                    &row.id, ix, text, mentions, &theme, window, cx,
+                                    &row.id,
+                                    ix,
+                                    text,
+                                    mentions,
+                                    chat_refs,
+                                    sender_label,
+                                    &theme,
+                                    window,
+                                    cx,
                                 )),
                         ),
                     );
@@ -6696,6 +7041,7 @@ impl Transcript {
                     now: Instant::now(),
                     copy: Some(self.copy_ui_for(&row.id, cx)),
                     link: self.link_ui(),
+                    chats: (!self.chat_refs.is_empty()).then(|| self.chat_ui(cx)),
                     workspace_root: workspace_root.clone(),
                     code,
                 };
@@ -6746,6 +7092,7 @@ impl Transcript {
                     now: Instant::now(),
                     copy: Some(self.copy_ui_for(&row.id, cx)),
                     link: self.link_ui(),
+                    chats: (!self.chat_refs.is_empty()).then(|| self.chat_ui(cx)),
                     workspace_root: workspace_root.clone(),
                     code,
                 };
@@ -7619,10 +7966,8 @@ impl Transcript {
                 // the spawned CHILD CHAT (when its id is known) instead of a
                 // subagent doc.
                 if let Some(shim) = agent_view.and_then(|view| view.tool.as_ref()) {
-                    let on_open = tool
-                        .agent
-                        .as_ref()
-                        .and_then(|agent| agent.child.clone())
+                    let on_open = agent_view
+                        .and_then(|view| view.child.clone())
                         .map(|chat_id| {
                             cx.listener(move |_, _, _, cx| {
                                 cx.stop_propagation();
@@ -7892,6 +8237,35 @@ impl Transcript {
             .into_any_element()
     }
 
+    /// The spawn chip's registry fallback: this chat's `spawned_by_agent`
+    /// children in `created_at` order, paired by
+    /// [`spawn_child_from_registry`]. Runs per paint, so a child that lands
+    /// after the chip first rendered is picked up on the next repaint — the
+    /// referenced-chats fingerprint already watches those children (see
+    /// [`Self::refresh_chat_refs`]).
+    fn spawn_child_id(
+        &self,
+        tool: &ToolItem,
+        agent: &AgentExec,
+        state: &AppState,
+    ) -> Option<SharedString> {
+        let parent = self.chat_id.as_deref()?;
+        let ixs = state.children_by_parent.agents.get(parent)?;
+        let mut children: Vec<&zeron_proto::Chat> =
+            ixs.iter().filter_map(|&ix| state.chats.get(ix)).collect();
+        children.sort_by(|a, b| {
+            a.created_at
+                .cmp(&b.created_at)
+                .then_with(|| a.id.cmp(&b.id))
+        });
+        spawn_child_from_registry(
+            &children,
+            agent,
+            self.spawn_ordinals.get(&tool.part_id).copied(),
+        )
+        .map(|child| SharedString::from(child.id.clone()))
+    }
+
     /// What a `zeron chat` exec needs beyond its doc-resident fields,
     /// resolved against the registry per paint. A spawn gets a SHIMMED call
     /// so the native chip machinery renders it exactly like a driver-reported
@@ -7903,8 +8277,14 @@ impl Transcript {
         let state = self.state.read(cx);
         match agent.verb {
             ZeronChatVerb::Spawn => {
-                let child = agent
+                // The stored output usually holds no child id at all (exec
+                // output is not persisted): fall back to the registry — this
+                // chat's agent children, by `--title` then by spawn order.
+                let child_id = agent
                     .child
+                    .clone()
+                    .or_else(|| self.spawn_child_id(tool, agent, state));
+                let child = child_id
                     .as_deref()
                     .map(|id| crate::chat_pill::ChatRef::resolve(state, id));
                 let known = child.as_ref().filter(|c| c.known);
@@ -7935,8 +8315,7 @@ impl Transcript {
                 // The spinner gate reads (ref, status) — on an unresolved
                 // spawn the part id stands in as the spinner's key.
                 shim.subagent_ref = Some(
-                    agent
-                        .child
+                    child_id
                         .clone()
                         .unwrap_or_else(|| tool.part_id.clone().into()),
                 );
@@ -7949,6 +8328,7 @@ impl Transcript {
                 });
                 Some(AgentView {
                     tool: Some(shim),
+                    child: child_id,
                     content: None,
                 })
             }
@@ -7974,6 +8354,7 @@ impl Transcript {
                 };
                 Some(AgentView {
                     tool: None,
+                    child: None,
                     content: Some(ChipContent {
                         label: label.into(),
                         detail: detail.into(),
@@ -8386,21 +8767,68 @@ fn wait_outcome(tool: &ToolItem) -> Option<&'static str> {
 /// registry, so drags select, span into adjacent rows, and Cmd+C copies.
 /// Keep routing instructions in the stored prompt for agents, but show a
 /// concise attribution in the human transcript (including existing messages).
-fn agent_message_display(text: &str) -> String {
+/// An agent-to-agent message's sender chat id (`None` = legacy header; the
+/// label keeps the bold treatment since no pill can resolve it).
+struct AgentSender {
+    chat_id: Option<String>,
+}
+
+/// Rewrite the wire attribution header to the bubble's `Message from
+/// <label>` form; the caller recomputes the label's range on the final text
+/// so a projected file mention can't misalign it.
+fn agent_message_display(text: &str) -> (String, Option<AgentSender>) {
     let Some(msg) = zeron_proto::orchestration::parse_agent_message(text) else {
-        return text.to_owned();
+        return (text.to_owned(), None);
     };
-    format!("Message from {}\n\n{}", msg.sender_label, msg.body)
+    (
+        format!("Message from {}\n\n{}", msg.sender_label, msg.body),
+        Some(AgentSender {
+            chat_id: msg.sender_chat_id.map(str::to_owned),
+        }),
+    )
+}
+
+/// A `@chat:` token or an agent-sender name inside the user bubble —
+/// rendered as a live pill when the transcript's chat resolver is wired.
+#[derive(Debug, Clone)]
+pub struct BubbleChatRef {
+    /// Byte range of the substituted span in the row's display text.
+    pub range: Range<usize>,
+    pub chat_id: String,
 }
 
 fn user_bubble_text(
     row_id: &SharedString,
     text: SharedString,
     mentions: Arc<Vec<crate::composer::SentMentionSpan>>,
+    chat_refs: Arc<Vec<BubbleChatRef>>,
+    chats: Option<chat_pills::ChatUi>,
+    sender_label: Option<Range<usize>>,
     theme: &Theme,
     measured_h: Rc<Cell<f32>>,
     entity_id: gpui::EntityId,
 ) -> AnyElement {
+    // Substitute `@chat:` mentions and the sender's name for live pill text.
+    // The OffsetMap keeps selection/copy on the RAW string, so a selected
+    // pill still copies `@chat:<uuid>`.
+    let pill_inputs: Vec<(Range<usize>, String)> = chat_refs
+        .iter()
+        .map(|r| (r.range.clone(), r.chat_id.clone()))
+        .collect();
+    let ui = chats.filter(|_| !pill_inputs.is_empty());
+    let (display, pills, offsets) = match &ui {
+        Some(ui) => {
+            let (display, pills, offsets) =
+                chat_pills::substitute(&text, &pill_inputs, &*ui.resolve);
+            (SharedString::from(display), pills, Some(offsets))
+        }
+        None => (text.clone(), Vec::new(), None),
+    };
+    let map_displayed = |range: &Range<usize>| -> Range<usize> {
+        offsets
+            .as_ref()
+            .map_or_else(|| range.clone(), |map| map.displayed_range(range.clone()))
+    };
     // Split runs at chip boundaries (spans are in order): body text keeps the
     // sans font, chips read as inline code. Size/line-height flow from the
     // bubble's div like every text child.
@@ -8412,32 +8840,45 @@ fn user_bubble_text(
         underline: None,
         strikethrough: None,
     };
-    let chip_run = |len: usize| TextRun {
-        len,
-        font: gpui::font(theme.font_mono.clone()),
-        color: theme.code_text,
-        background_color: None,
-        underline: None,
-        strikethrough: None,
-    };
-    let mut runs = Vec::with_capacity(mentions.len() * 2 + 1);
+    let chip_run = |len: usize| chat_pills::pill_run(len, true, theme);
+    // File mentions and chat pills never overlap (chat refs were scanned on
+    // the projected text); merge the sorted ranges into one segmentation.
+    let mut chips: Vec<(Range<usize>, bool)> = mentions
+        .iter()
+        .map(|span| (map_displayed(&span.range), true))
+        .collect();
+    chips.extend(pills.iter().map(|pill| (pill.range.clone(), false)));
+    chips.sort_by_key(|(range, _)| range.start);
+    chips.dedup_by(|b, a| a.0 == b.0);
+    let mut runs = Vec::with_capacity(chips.len() * 2 + 1);
     let mut at = 0;
-    for span in mentions.iter() {
-        if at < span.range.start {
-            runs.push(body_run(span.range.start - at));
+    for (range, is_mention) in chips.iter() {
+        if range.start < at {
+            continue;
         }
-        runs.push(chip_run(span.range.len()));
-        at = span.range.end;
+        if at < range.start {
+            runs.push(body_run(range.start - at));
+        }
+        let known = *is_mention
+            || pills
+                .iter()
+                .find(|p| p.range == *range)
+                .map(|p| p.chat.known)
+                .unwrap_or(true);
+        let mut run = chip_run(range.len());
+        if !known {
+            run.color = theme.text_muted;
+        }
+        runs.push(run);
+        at = range.end;
     }
-    if at < text.len() {
-        runs.push(body_run(text.len() - at));
+    if at < display.len() {
+        runs.push(body_run(display.len() - at));
     }
-    // Attribution names are bold sans text, never Markdown/italic. Split
-    // existing runs so file-mention styling and selection offsets stay intact.
-    if let Some(rest) = text.strip_prefix("Message from ")
-        && let Some((name, _)) = rest.split_once("\n\n")
-    {
-        let bold = "Message from ".len().."Message from ".len() + name.len();
+    // Legacy attribution names (no chat id) stay bold sans text. The row's
+    // explicit `sender_label` range replaces the old strip-prefix heuristic,
+    // and it's mapped through pill substitution before splitting runs.
+    if let Some(bold) = sender_label.as_ref().map(&map_displayed) {
         let mut offset = 0;
         runs = runs
             .into_iter()
@@ -8465,16 +8906,25 @@ fn user_bubble_text(
             })
             .collect();
     }
-    let styled = StyledText::new(text.clone()).with_runs(runs);
+    let styled = StyledText::new(display.clone()).with_runs(runs);
     let layout = styled.layout().clone();
+    let overlay_layout = layout.clone();
     let wash = theme.code_wash;
     let sel_key: std::sync::Arc<str> = format!("{row_id}:u").into();
     let sel_theme = theme.clone();
+    let wash_ranges: Vec<Range<usize>> = {
+        let mut ranges: Vec<Range<usize>> = mentions
+            .iter()
+            .map(|span| map_displayed(&span.range))
+            .collect();
+        ranges.extend(pills.iter().map(|pill| pill.range.clone()));
+        ranges
+    };
     let underlay = canvas(
         |_, _, _| (),
         move |_, _, window, cx| {
-            for span in mentions.iter() {
-                for rect in render::range_rects(&layout, &span.range, 0.0, 2.0) {
+            for range in wash_ranges.iter() {
+                for rect in render::range_rects(&layout, range, 0.0, 2.0) {
                     window.paint_quad(quad(
                         rect,
                         px(5.0),
@@ -8485,7 +8935,16 @@ fn user_bubble_text(
                     ));
                 }
             }
-            render::paint_text_selection(window, &sel_key, &text, &layout, &sel_theme);
+            // The registry sees the ORIGINAL text: copy restores the raw
+            // `@chat:` tokens while the wash maps back into pill coordinates.
+            render::paint_text_selection_mapped(
+                window,
+                &sel_key,
+                &text,
+                offsets.clone(),
+                &layout,
+                &sel_theme,
+            );
             // Passive geometry cache only: no entity update and no notify.
             // `bounds().height` can be the collapsed clip height, so derive
             // the full text height from the wrapped line layouts instead. The
@@ -8511,10 +8970,21 @@ fn user_bubble_text(
     .size_full();
     // Same wrapper as the assistant markdown: user-bubble text is
     // selectable (paint_text_selection above), so it gets the I-beam too.
-    render::selectable_text_wrap()
+    let child = render::selectable_text_wrap()
         .child(underlay)
         .child(styled)
-        .into_any_element()
+        .into_any_element();
+    match ui {
+        Some(ui) if !pills.is_empty() => chat_pills::ChatPillRanges {
+            id: format!("{row_id}-u-pills").into(),
+            child,
+            layout: overlay_layout,
+            pills,
+            ui,
+        }
+        .into_any_element(),
+        _ => child,
+    }
 }
 
 /// The transcript ErrorChip — the shared [`notice_chip`] in its tile
@@ -14184,6 +14654,67 @@ mod tests {
     }
 
     #[test]
+    fn user_rows_collect_chat_refs_and_sender_attribution() {
+        let id = "3f6b2a18-9c4d-4e5f-8a7b-1c2d3e4f5a6b";
+        let mut entry = assistant("u4", MessageStatus::Complete, vec![]);
+        entry.role = MessageRole::User;
+        entry.status = None;
+
+        // A bare `@chat:` mention lands in chat_refs on the display text.
+        entry.parts = vec![text_part("t0", &format!("ping @chat:{id} now"))];
+        let rows = rows_for_entry(&entry, false, false, &mut parse);
+        let RowKind::User {
+            text,
+            chat_refs,
+            sender_label,
+            ..
+        } = &rows[0].kind
+        else {
+            panic!("expected a user row");
+        };
+        assert_eq!(chat_refs.len(), 1);
+        assert_eq!(chat_refs[0].chat_id, id);
+        assert_eq!(&text[chat_refs[0].range.clone()], format!("@chat:{id}"));
+        assert!(sender_label.is_none());
+
+        // A full agent header turns the sender name into a chat pill ref.
+        let wire = zeron_proto::orchestration::agent_message(Some("Scout"), id, "look here");
+        entry.parts = vec![text_part("t0", &wire)];
+        let rows = rows_for_entry(&entry, false, false, &mut parse);
+        let RowKind::User {
+            text,
+            chat_refs,
+            sender_label,
+            ..
+        } = &rows[0].kind
+        else {
+            panic!("expected a user row");
+        };
+        assert_eq!(text.as_ref(), "Message from Scout\n\nlook here");
+        assert_eq!(chat_refs.len(), 1);
+        assert_eq!(chat_refs[0].chat_id, id);
+        assert_eq!(&text[chat_refs[0].range.clone()], "Scout");
+        assert!(sender_label.is_none());
+
+        // The legacy header carries no chat id — the name stays a bold label.
+        let legacy = "[Message from Zeron chat Main (3f6b2a18). Reply to it with the Zeron `send_message` tool, chat 3f6b2a18.]\n\nbody";
+        entry.parts = vec![text_part("t0", legacy)];
+        let rows = rows_for_entry(&entry, false, false, &mut parse);
+        let RowKind::User {
+            text,
+            chat_refs,
+            sender_label,
+            ..
+        } = &rows[0].kind
+        else {
+            panic!("expected a user row");
+        };
+        assert!(chat_refs.is_empty());
+        let label = sender_label.clone().unwrap();
+        assert_eq!(&text[label], "Main");
+    }
+
+    #[test]
     fn diff_rows_appends_and_middle_edits() {
         let entry1 = assistant("m1", MessageStatus::Complete, vec![text_part("t0", "one")]);
         let entry2 = assistant("m2", MessageStatus::Complete, vec![text_part("t0", "two")]);
@@ -14964,6 +15495,251 @@ mod tests {
             }
             _ => panic!("expected a tool group row"),
         }
+    }
+
+    fn child_chat(id: &str, title: Option<&str>, created_s: i64) -> zeron_proto::Chat {
+        use chrono::{TimeDelta, TimeZone, Utc};
+        zeron_proto::Chat {
+            id: id.into(),
+            device_id: "device".into(),
+            title: title.map(str::to_owned),
+            archived: false,
+            cwd: None,
+            branch: None,
+            checkout_id: None,
+            source_context: None,
+            config: None,
+            last_message_preview: None,
+            last_message_at: None,
+            created_at: Utc.timestamp_opt(5, 0).unwrap() + TimeDelta::seconds(created_s),
+            harness_session_id: None,
+            harness_session_cwd: None,
+            parent_chat_id: Some("parent".into()),
+            spawned_by_agent: true,
+            space_id: None,
+            last_seen_at: None,
+            room_gen: None,
+        }
+    }
+
+    fn spawn_agent(title: Option<&str>) -> AgentExec {
+        AgentExec {
+            verb: ZeronChatVerb::Spawn,
+            targets: Vec::new(),
+            child: None,
+            label: title.map(SharedString::from),
+            title: title.map(SharedString::from),
+            model: None,
+        }
+    }
+
+    #[test]
+    fn outputless_spawn_falls_back_to_the_matching_title() {
+        // The stored exec kept no output: the spawn's `--title` names the
+        // child (children arrive `created_at`-ascending).
+        let alpha = child_chat("c-alpha", Some("alpha"), 10);
+        let beta = child_chat("c-beta", Some("beta"), 20);
+        let children = [&alpha, &beta];
+        let agent = spawn_agent(Some("beta"));
+        assert_eq!(
+            spawn_child_from_registry(
+                &children,
+                &agent,
+                Some(SpawnOrder {
+                    order: 0,
+                    titled: 0
+                }),
+            )
+            .map(|chat| chat.id.as_str()),
+            Some("c-beta")
+        );
+        // A lone same-titled child resolves without an ordinal.
+        assert_eq!(
+            spawn_child_from_registry(&children, &agent, None).map(|c| c.id.as_str()),
+            Some("c-beta")
+        );
+    }
+
+    #[test]
+    fn same_titled_children_pair_off_by_spawn_order() {
+        let first = child_chat("c-first", Some("dup"), 10);
+        let second = child_chat("c-second", Some("dup"), 20);
+        let children = [&first, &second];
+        let agent = spawn_agent(Some("dup"));
+        // The Nth "dup" spawn takes the Nth "dup" child.
+        for (order, titled, want) in [(0, 0, "c-first"), (1, 1, "c-second")] {
+            assert_eq!(
+                spawn_child_from_registry(&children, &agent, Some(SpawnOrder { order, titled }),)
+                    .map(|chat| chat.id.as_str()),
+                Some(want),
+            );
+        }
+        // Ordinal asked past the titled list falls back to the raw order.
+        assert_eq!(
+            spawn_child_from_registry(
+                &children,
+                &agent,
+                Some(SpawnOrder {
+                    order: 1,
+                    titled: 2
+                }),
+            )
+            .map(|chat| chat.id.as_str()),
+            Some("c-second")
+        );
+    }
+
+    #[test]
+    fn outputless_untitled_spawns_pair_with_the_nth_child() {
+        let first = child_chat("c-first", Some("alpha"), 10);
+        let second = child_chat("c-second", Some("beta"), 20);
+        let children = [&first, &second];
+        // No `--title` on the exec: the Nth spawn takes the Nth child.
+        let agent = spawn_agent(None);
+        assert_eq!(
+            spawn_child_from_registry(
+                &children,
+                &agent,
+                Some(SpawnOrder {
+                    order: 1,
+                    titled: 0
+                }),
+            )
+            .map(|chat| chat.id.as_str()),
+            Some("c-second")
+        );
+        // With no ordinal recorded the fallback must not guess.
+        assert!(spawn_child_from_registry(&children, &agent, None).is_none());
+    }
+
+    #[gpui::test]
+    fn spawn_chip_resolves_child_model_and_arrow_from_the_registry(cx: &mut gpui::TestAppContext) {
+        let dir = tempfile::tempdir().unwrap();
+        cx.update(|cx| {
+            gpui_base::init(cx);
+            cx.set_global(Theme::dark());
+            crate::settings::init(crate::settings::UiSettings::default(), dir.path(), cx);
+            let state = cx.new(|_| AppState::new());
+            let transcript = cx.new(|cx| Transcript::new(state.clone(), cx));
+            let mut beta = child_chat("c-beta", Some("beta"), 10);
+            beta.config = Some(zeron_proto::ChatConfig {
+                harness: zeron_proto::HarnessId::ClaudeCode,
+                model: Some("claude-haiku-4-5".into()),
+                reasoning: None,
+                model_options: serde_json::Map::new(),
+                sandbox: zeron_proto::SandboxLevel::WorkspaceWrite,
+            });
+            state.update(cx, |state, _| {
+                state.apply_chats(vec![beta]);
+            });
+            transcript.update(cx, |this, cx| {
+                this.chat_id = Some("parent".into());
+                // The real persisted row: the spawn kept no output at all.
+                let entry = assistant(
+                    "e1",
+                    MessageStatus::Complete,
+                    vec![exec_tool("t1", "zeron chat spawn --title beta", None)],
+                );
+                this.rows = rows_for_entry(&entry, false, false, &mut parse);
+                this.refresh_chat_refs(cx);
+                let Some(row) = this.rows.first() else {
+                    panic!("expected a row");
+                };
+                let RowKind::ToolGroup { tools, .. } = &row.kind else {
+                    panic!("expected a tool group row");
+                };
+                let view = this
+                    .agent_view(&tools[0], cx)
+                    .expect("the spawn should classify");
+                // Registry fallback paired the chip with its child.
+                assert_eq!(view.child.as_deref(), Some("c-beta"));
+                let shim = view.tool.expect("a spawn renders on a shimmed call");
+                assert_eq!(shim.subagent_ref.as_deref(), Some("c-beta"));
+                assert_eq!(
+                    shim.call.subagent_model(),
+                    Some("claude-haiku-4-5"),
+                    "the chip must name the child's real model"
+                );
+            });
+        });
+    }
+
+    #[gpui::test]
+    fn pill_references_resolve_against_late_rows_and_late_chats(cx: &mut gpui::TestAppContext) {
+        let dir = tempfile::tempdir().unwrap();
+        cx.update(|cx| {
+            gpui_base::init(cx);
+            cx.set_global(Theme::dark());
+            crate::settings::init(crate::settings::UiSettings::default(), dir.path(), cx);
+            let state = cx.new(|_| AppState::new());
+            let transcript = cx.new(|cx| Transcript::new(state.clone(), cx));
+            let alpha = child_chat("chat-a", Some("alpha"), 10);
+            state.update(cx, |state, _| {
+                state.apply_chats(vec![alpha]);
+            });
+            let ref_row = |id: &str, chat_id: &str| Row {
+                id: id.into(),
+                version: 0,
+                turn_start: true,
+                kind: RowKind::User {
+                    text: format!("see @chat:{chat_id}").into(),
+                    mentions: Arc::default(),
+                    attachments: Arc::default(),
+                    badges: Arc::default(),
+                    chat_refs: Arc::new(vec![BubbleChatRef {
+                        range: 4..(4 + 5 + chat_id.len()),
+                        chat_id: chat_id.into(),
+                    }]),
+                    sender_label: None,
+                    pending: false,
+                },
+                entry_id: id.into(),
+                timestamp: None,
+                copy_text: None,
+                compact_fold: None,
+            };
+            transcript.update(cx, |this, cx| {
+                // First render references chat A only.
+                this.rows = vec![ref_row("r1", "chat-a")];
+                this.refresh_chat_refs(cx);
+                let ui = this.chat_ui(cx);
+                assert!((ui.resolve)("chat-a").known);
+            });
+            // A later row references existing chat B while B is still
+            // unknown to the registry — the pill is genuinely unavailable.
+            state.update(cx, |state, _| {
+                let beta = child_chat("chat-b", Some("beta"), 20);
+                state.apply_chats(vec![beta]);
+            });
+            transcript.update(cx, |this, cx| {
+                this.rows.push(ref_row("r2", "chat-b"));
+                this.refresh_chat_refs(cx);
+                // The wider referenced set invalidates the snapshot — B's
+                // pill resolves live rather than sticking at unavailable.
+                let ui = this.chat_ui(cx);
+                let resolved = (ui.resolve)("chat-b");
+                assert!(resolved.known, "a late-referenced chat must resolve");
+                assert_eq!(resolved.title.as_ref(), "beta");
+            });
+            // A chat row landing after its pill first rendered heals the
+            // pill: the id is referenced, resolution arrives late.
+            state.update(cx, |state, cx| {
+                let gamma = child_chat("chat-c", Some("gamma"), 30);
+                state.apply_chats(vec![gamma]);
+                cx.notify();
+            });
+            transcript.update(cx, |this, cx| {
+                this.rows.push(ref_row("r3", "chat-c"));
+                this.refresh_chat_refs(cx);
+                let ui = this.chat_ui(cx);
+                let resolved = (ui.resolve)("chat-c");
+                assert!(
+                    resolved.known,
+                    "a late-arriving chat row must heal the pill"
+                );
+                assert_eq!(resolved.title.as_ref(), "gamma");
+            });
+        });
     }
 
     #[test]
