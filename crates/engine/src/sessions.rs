@@ -137,6 +137,10 @@ struct RoutedSteer {
     /// is recorded only when the runtime confirms consuming it (`Steered`).
     /// An orphan re-dispatches the bare prompt, still owing the history.
     fork_history: bool,
+    /// Agent-only prompt (child-notification delivery): no user transcript
+    /// entry was written for it, so an orphan re-dispatch must stay hidden
+    /// too rather than surfacing a `[Zeron system]` bubble.
+    hidden: bool,
 }
 
 struct Inner {
@@ -402,7 +406,23 @@ impl SessionsEngine {
         request: RunRequest,
         message_id: Option<String>,
     ) -> Result<String, EngineError> {
-        self.dispatch_with(chat_id, harness_id, request, message_id, false)
+        self.dispatch_with(chat_id, harness_id, request, message_id, false, false)
+            .await
+    }
+
+    /// Agent-only turn (the child notifier's combined prompt): same routing as
+    /// [`Self::dispatch`] but the prompt never lands in the transcript as a
+    /// user bubble — the parent agent reads it, the user sees the ChildUpdate
+    /// system entries instead. Never interrupts a live run: when the chat is
+    /// busy on a non-routable runtime this returns an error and the caller
+    /// retries after the turn ends.
+    pub(crate) async fn dispatch_agent_prompt(
+        &self,
+        chat_id: &str,
+        harness_id: HarnessId,
+        request: RunRequest,
+    ) -> Result<String, EngineError> {
+        self.dispatch_with(chat_id, harness_id, request, None, true, false)
             .await
     }
 
@@ -417,9 +437,17 @@ impl SessionsEngine {
         harness_id: HarnessId,
         request: RunRequest,
         message_id: Option<String>,
+        hidden: bool,
         startup_retry: bool,
     ) -> futures::future::BoxFuture<'a, Result<String, EngineError>> {
-        Box::pin(self.dispatch_inner(chat_id, harness_id, request, message_id, startup_retry))
+        Box::pin(self.dispatch_inner(
+            chat_id,
+            harness_id,
+            request,
+            message_id,
+            hidden,
+            startup_retry,
+        ))
     }
 
     async fn dispatch_inner(
@@ -428,6 +456,7 @@ impl SessionsEngine {
         harness_id: HarnessId,
         mut request: RunRequest,
         mut message_id: Option<String>,
+        hidden: bool,
         startup_retry: bool,
     ) -> Result<String, EngineError> {
         // Project-less chats store cwd `~` (the creating device can't know the
@@ -448,6 +477,7 @@ impl SessionsEngine {
                 h.fork_history_sent.clone(),
             )
         });
+        let mut fell_through_dead_run = false;
         if let Some((run_id, steerable, same_runtime, steer_tx, ledger, history_sent)) = routed {
             let user_id = message_id.clone().unwrap_or_else(new_id);
             let mut bootstrap = None;
@@ -480,6 +510,7 @@ impl SessionsEngine {
                                 prompt: request.prompt.clone(),
                                 message_id: user_id.clone(),
                                 fork_history: bootstrap.is_some(),
+                                hidden,
                             });
                             permit.send(message);
                         })
@@ -492,7 +523,9 @@ impl SessionsEngine {
             };
             if accepted {
                 let handle = self.doc_handle(chat_id)?;
-                handle.write_user_message(&user_id, &request.prompt, now_ms())?;
+                if !hidden {
+                    handle.write_user_message(&user_id, &request.prompt, now_ms())?;
+                }
                 self.note_turn_start(chat_id, &request.cwd);
                 if self.is_live(chat_id, &run_id) {
                     if bootstrap.is_some() {
@@ -504,7 +537,9 @@ impl SessionsEngine {
                     // — that gap read as unseen-with-no-live-run = a phantom
                     // "completed" flash on every remote send (2026-07-31).
                     self.set_status(chat_id, SessionStatus::Working, false);
-                    self.inner.note_message(chat_id, &request.prompt);
+                    if !hidden {
+                        self.inner.note_message(chat_id, &request.prompt);
+                    }
                     return Ok(run_id);
                 }
                 // The run died around the send. If its exit drain already
@@ -517,12 +552,24 @@ impl SessionsEngine {
                     ledger.len() != before
                 };
                 if !reclaimed {
-                    self.inner.note_message(chat_id, &request.prompt);
+                    if !hidden {
+                        self.inner.note_message(chat_id, &request.prompt);
+                    }
                     return Ok(run_id);
                 }
                 // Keep the already-written doc entry's id for the fresh run
                 // below (write_user_message dedupes by id).
                 message_id = Some(user_id);
+                fell_through_dead_run = true;
+            }
+            // A hidden (agent-only) prompt never interrupts: a live run that
+            // could not accept it means the parent is busy — the notifier
+            // retries when the turn ends. A reclaimed ledger entry means the
+            // run is already dead; that falls through to a fresh dispatch.
+            if hidden && !fell_through_dead_run {
+                return Err(EngineError::Other(
+                    "chat has a turn in flight; agent prompt held".into(),
+                ));
             }
             if !same_runtime {
                 tracing::debug!(
@@ -539,7 +586,9 @@ impl SessionsEngine {
         let harness = self.inner.registry.resolve(harness_id)?;
         let handle = self.doc_handle(chat_id)?;
         let user_id = message_id.unwrap_or_else(new_id);
-        handle.write_user_message(&user_id, &request.prompt, now_ms())?;
+        if !hidden {
+            handle.write_user_message(&user_id, &request.prompt, now_ms())?;
+        }
 
         // Engine-owned resume (zeron sessions.ts:736 — every dispatch read the
         // chat's stored harness session): callers always send `resume: None`;
@@ -604,14 +653,18 @@ impl SessionsEngine {
         self.set_status(chat_id, SessionStatus::Working, true);
         // AFTER Working (same causal-order guarantee as the steer path): the
         // lastMessageAt bump must never be observable ahead of the live run.
-        self.inner.note_message(chat_id, &request.prompt);
+        // Hidden agent prompts skip the bump: the sidebar preview must not
+        // read "[Zeron system]".
+        if !hidden {
+            self.inner.note_message(chat_id, &request.prompt);
+        }
 
         // Name the chat NOW, off the first prompt — not after the first
         // exchange completes ("called New session for a long time for no
         // reason"; the titler only needs the prompt and skips titled chats;
         // the Done-time call below stays as the retry for a failed
-        // generation).
-        if let Some(titles) = self.inner.titles.get() {
+        // generation). Hidden prompts are system text, not a topic.
+        if !hidden && let Some(titles) = self.inner.titles.get() {
             titles.maybe_generate(chat_id, harness_id, &request.prompt, &request.cwd);
         }
 
@@ -630,6 +683,7 @@ impl SessionsEngine {
                 resume_injected,
                 startup_retry,
                 fork_history_sent,
+                hidden,
             },
         ));
         Ok(run_id)
@@ -682,6 +736,30 @@ impl SessionsEngine {
         message_id: Option<String>,
         issued_at: i64,
     ) -> Result<SteerOutcome, EngineError> {
+        self.steer_inner(chat_id, prompt, message_id, issued_at, false)
+            .await
+    }
+
+    /// Agent-only steer (child-notification prompt): reaches the live run's
+    /// mailbox like [`Self::steer`] but writes no user transcript entry and
+    /// does not bump the chat's message preview.
+    pub(crate) async fn steer_agent(
+        &self,
+        chat_id: &str,
+        prompt: &str,
+    ) -> Result<SteerOutcome, EngineError> {
+        self.steer_inner(chat_id, prompt, None, now_ms(), true)
+            .await
+    }
+
+    async fn steer_inner(
+        &self,
+        chat_id: &str,
+        prompt: &str,
+        message_id: Option<String>,
+        issued_at: i64,
+        hidden: bool,
+    ) -> Result<SteerOutcome, EngineError> {
         let target = lock(&self.inner.runs)
             .get(chat_id)
             .filter(|h| h.steerable)
@@ -725,6 +803,7 @@ impl SessionsEngine {
                 prompt: prompt.to_string(),
                 message_id: user_id.clone(),
                 fork_history: bootstrap.is_some(),
+                hidden,
             });
             permit.send(message);
         });
@@ -732,7 +811,9 @@ impl SessionsEngine {
             return Ok(SteerOutcome::DeferredByUpdate);
         }
         let handle = self.doc_handle(chat_id)?;
-        handle.write_user_message(&user_id, prompt, issued_at.min(now_ms()))?;
+        if !hidden {
+            handle.write_user_message(&user_id, prompt, issued_at.min(now_ms()))?;
+        }
         // A routed steer is a turn too. Fired here (not only on the confirmed
         // path) — a reclaim falls back to dispatch, which just re-snapshots.
         if let Some(request) = self.last_request(chat_id) {
@@ -743,7 +824,9 @@ impl SessionsEngine {
                 history_sent.store(true, std::sync::atomic::Ordering::Release);
             }
             self.set_status(chat_id, SessionStatus::Working, false);
-            self.inner.note_message(chat_id, prompt);
+            if !hidden {
+                self.inner.note_message(chat_id, prompt);
+            }
             return Ok(SteerOutcome::Accepted);
         }
         // The run died around the send. Exit drain claimed the entry → its
@@ -759,7 +842,9 @@ impl SessionsEngine {
         if reclaimed {
             return Ok(SteerOutcome::NotSteerable);
         }
-        self.inner.note_message(chat_id, prompt);
+        if !hidden {
+            self.inner.note_message(chat_id, prompt);
+        }
         Ok(SteerOutcome::Accepted)
     }
 
@@ -944,6 +1029,7 @@ impl SessionsEngine {
                         harness_id,
                         request,
                         Some(user_id),
+                        false,
                     )
                     .await
                 {
@@ -1695,6 +1781,9 @@ struct RunResumeState {
     resume_injected: bool,
     startup_retry: bool,
     fork_history_sent: Arc<std::sync::atomic::AtomicBool>,
+    /// Agent-only prompt (no user entry); the startup-crash retry must keep
+    /// the same visibility.
+    hidden: bool,
 }
 
 fn cursor_unstarted_history(
@@ -2546,7 +2635,14 @@ async fn drive_run(
                 // The user entry write inside dispatch is idempotent by
                 // message id; `startup_retry` makes this attempt final.
                 if let Err(err) = engine
-                    .dispatch_with(&chat, harness_id, retry, Some(message_id), true)
+                    .dispatch_with(
+                        &chat,
+                        harness_id,
+                        retry,
+                        Some(message_id),
+                        resume_state.hidden,
+                        true,
+                    )
                     .await
                 {
                     tracing::error!(chat = %chat, error = %err, "startup-crash retry dispatch failed");
@@ -2705,8 +2801,10 @@ async fn drive_run(
                 inner.journal.clear_resume_attempts(&chat_id);
             }
             // Exchange completed on an untitled chat → name it (fire-and-forget;
-            // interrupted/errored turns never trigger naming).
+            // interrupted/errored turns never trigger naming). Hidden agent
+            // prompts are system text — they are not a topic either.
             if *status == DoneStatus::Completed
+                && !resume_state.hidden
                 && let Some(titles) = inner.titles.get()
             {
                 titles.maybe_generate(&chat_id, harness_id, &user_prompt, &run_cwd);
@@ -2825,6 +2923,7 @@ async fn drive_run(
                         harness_id,
                         request,
                         Some(steer.message_id.clone()),
+                        steer.hidden,
                     )
                     .await
                 {
