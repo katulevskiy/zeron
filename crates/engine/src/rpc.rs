@@ -530,6 +530,10 @@ enum MutateParams {
         /// on the row as `parentChatId` for orchestration trees.
         #[serde(default)]
         parent_chat_id: Option<String>,
+        /// An agent spawned this chat (`zeron chat spawn`, MCP create_chat):
+        /// only such children push settle notifications to their parent.
+        #[serde(default)]
+        spawned_by_agent: bool,
     },
     /// Create a space (device + folder pair). Idempotent by id; a live
     /// duplicate `(deviceId, path)` no-ops. `gitDetected` is seeded from the
@@ -1099,6 +1103,7 @@ impl EngineRpc {
                 branch,
                 cwd,
                 parent_chat_id,
+                spawned_by_agent,
             } => {
                 self.workspace
                     .create_chat_with_parent(
@@ -1108,6 +1113,7 @@ impl EngineRpc {
                         config,
                         cwd,
                         parent_chat_id,
+                        spawned_by_agent,
                     )
                     .map_err(failed)?;
                 if let Some(branch) = branch.as_deref().filter(|b| !b.is_empty()) {
@@ -1906,6 +1912,8 @@ impl RpcService for EngineRpc {
                 let mut chat = source.clone();
                 chat.id = p.chat_id;
                 chat.parent_chat_id = Some(parent_chat_id);
+                // Forks are user-made, not agent-spawned — they never notify.
+                chat.spawned_by_agent = false;
                 chat.title = None; // First side-chat turn receives its own generated title.
                 chat.archived = false;
                 chat.created_at = chrono::Utc::now();
@@ -1976,6 +1984,13 @@ impl RpcService for EngineRpc {
                 self.doc_host
                     .focus_chat(&p.chat_id)
                     .map_err(|e| RpcError::Failed(e.to_string()))?;
+                RpcReply::value(&serde_json::json!({}))
+            }
+            methods::ACK_CHILD_UPDATES => {
+                let _p: zeron_proto::orchestration::AckChildUpdatesParams =
+                    parse_params(params)?;
+                // Recorded by the child notifier once it exists; the ack is
+                // already durable on the caller's side.
                 RpcReply::value(&serde_json::json!({}))
             }
             methods::WATCH_DOC_MESSAGES => {

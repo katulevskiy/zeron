@@ -170,6 +170,7 @@ async fn fork_is_frozen_durable_idempotent_and_has_an_independent_provider_sessi
                 resume: None,
                 attachments: vec![],
                 worktree: None,
+                agent: None,
             },
             Some("side-user".into()),
         )
@@ -408,6 +409,7 @@ async fn side_turn(
             HarnessId::Mock,
             RunRequest {
                 mcp: None,
+                agent: None,
                 prompt: prompt.into(),
                 harness: Some(HarnessId::Mock),
                 model: None,
@@ -462,6 +464,7 @@ async fn native_commands_and_empty_side_chats_skip_the_history_wrapper() {
                 None,
                 Some("/tmp".into()),
                 parent.map(str::to_owned),
+                false,
             )
             .unwrap();
     }
@@ -616,6 +619,7 @@ async fn warm_side_chat_sends_owed_fork_history_once() {
         .unwrap();
     let request = |prompt: &str| RunRequest {
         mcp: None,
+        agent: None,
         prompt: prompt.into(),
         harness: Some(HarnessId::Mock),
         model: None,
@@ -801,6 +805,7 @@ async fn orphaned_history_steer_still_owes_the_history() {
         .unwrap();
     let request = |prompt: &str| RunRequest {
         mcp: None,
+        agent: None,
         prompt: prompt.into(),
         harness: Some(HarnessId::Mock),
         model: None,
@@ -866,5 +871,30 @@ async fn orphaned_history_steer_still_owes_the_history() {
         doc.doc().fork_history_session().as_deref(),
         Some("drop-session")
     );
+    core.shutdown().await;
+}
+
+#[tokio::test]
+async fn ack_child_updates_parses_and_replies_empty() {
+    let dir = tempfile::tempdir().unwrap();
+    let core = EngineCore::assemble(
+        dir.path(),
+        Arc::new(HarnessRegistry::new()),
+        HarnessId::Mock,
+        None,
+    )
+    .unwrap();
+    let client = zeron_rpc::memory_client(core.rpc_service());
+    let reply = client
+        .call(
+            methods::ACK_CHILD_UPDATES,
+            serde_json::json!({
+                "parentChatId": "main",
+                "updates": [{ "childChatId": "child", "turnKey": "done:t1" }],
+            }),
+        )
+        .await
+        .unwrap();
+    assert_eq!(reply, serde_json::json!({}));
     core.shutdown().await;
 }
