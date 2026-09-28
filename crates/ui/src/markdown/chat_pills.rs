@@ -30,7 +30,7 @@ const SLOT: &str = "\u{00A0}\u{00A0}";
 pub type ResolveChat = Rc<dyn Fn(&str) -> ChatRef>;
 /// Click activation for a resolved pill.
 pub type OpenChat = Rc<dyn Fn(&str, &mut Window, &mut App)>;
-/// A whole-paragraph-mention card body, built at layout time.
+/// A whole-paragraph-mention row body, built at layout time.
 pub type BuildChatCard = Rc<dyn Fn(&str, &mut Window, &mut App) -> AnyElement>;
 
 /// Transcript wiring for `@chat:` pills. `resolve` is a per-render snapshot —
@@ -42,8 +42,8 @@ pub struct ChatUi {
     pub resolve: ResolveChat,
     /// Click activation — opens the referenced chat in the right pane.
     pub open: OpenChat,
-    /// Whole-paragraph-mention card body. The renderer cannot build it
-    /// itself: `chat_chip`'s status spinner needs `App`, which only exists at
+    /// Whole-paragraph-mention row body. The renderer cannot build it
+    /// itself: the badge's status spinner needs `App`, which only exists at
     /// element request_layout — see [`DeferredElement`].
     pub card: BuildChatCard,
     /// View entity leasing the status glyph's loader.
