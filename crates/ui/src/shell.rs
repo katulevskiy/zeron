@@ -3751,6 +3751,9 @@ impl Shell {
                     cx,
                 );
             }
+            TranscriptEvent::OpenChildChat { chat_id } => {
+                self.open_child_chat_tab(chat_id, cx);
+            }
         }
     }
 
@@ -15712,6 +15715,7 @@ impl Shell {
         self.settings.sidebar_collapsed = collapsed;
         cx.notify();
     }
+
     pub fn fixture_appshots_transcript_start(&self, cx: &mut Context<Self>) {
         self.transcript
             .update(cx, |t, cx| t.fixture_appshots_start(cx));
