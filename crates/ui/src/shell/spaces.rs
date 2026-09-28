@@ -206,6 +206,8 @@ mod pinned_session_tests {
     };
     use std::collections::HashSet;
 
+    use gpui::px;
+
     fn ids(values: &[&str]) -> Vec<String> {
         values.iter().map(|value| (*value).to_string()).collect()
     }
@@ -1925,6 +1927,222 @@ mod pinned_session_tests {
         ));
         assert!(!pinned_drag_snapshot_is_valid("a", &snapshot, &ids(&["a"])));
     }
+
+    /// A chat another chat spawned, so the sidebar draws it inside its
+    /// parent's disclosure tree.
+    fn tree_chat(id: &str, parent: Option<&str>, created_s: i64) -> zeron_proto::Chat {
+        let mut chat = pin_test_chat(id);
+        chat.created_at = chrono::Utc::now() + chrono::Duration::seconds(created_s);
+        if let Some(parent) = parent {
+            chat.parent_chat_id = Some(parent.into());
+            chat.spawned_by_agent = true;
+        }
+        chat
+    }
+
+    struct TreeSidebarHost(gpui::Entity<super::Shell>);
+
+    impl gpui::Render for TreeSidebarHost {
+        fn render(
+            &mut self,
+            _: &mut gpui::Window,
+            cx: &mut gpui::Context<Self>,
+        ) -> impl gpui::IntoElement {
+            use super::*;
+            self.0.update(cx, |shell, cx| {
+                div()
+                    .w(px(280.0))
+                    .h(px(800.0))
+                    .child(shell.render_chat_sidebar(&Theme::default(), cx))
+            })
+        }
+    }
+
+    /// Sidebar host showing one parent with two spawned children in the
+    /// requested density, optionally with the jump hints held.
+    fn tree_sidebar<'a>(
+        cx: &'a mut gpui::TestAppContext,
+        path: &std::path::Path,
+        compact: bool,
+        jump_hints: bool,
+    ) -> (gpui::Entity<super::Shell>, &'a mut gpui::VisualTestContext) {
+        use super::*;
+        cx.update(|cx| {
+            gpui_base::init(cx);
+            cx.set_global(Theme::default());
+            crate::app_menus::init(cx);
+            crate::history::init(
+                Default::default(),
+                Default::default(),
+                Default::default(),
+                Default::default(),
+                cx,
+            );
+        });
+        let (host, cx) = cx.add_window_view(|_, cx| {
+            TreeSidebarHost(cx.new(|cx| {
+                let state = cx.new(|_| AppState::new());
+                let mut shell = Shell::new(
+                    state,
+                    EngineBootConfig {
+                        data_dir: path.into(),
+                        ipc_port: 0,
+                        edge_url: "http://127.0.0.1:1".into(),
+                        edge_token: None,
+                        org_id: None,
+                        workos_client_id: None,
+                        default_harness: zeron_proto::HarnessId::Mock,
+                    },
+                    cx,
+                );
+                shell.settings.sidebar_compact = compact;
+                shell.settings.sidebar_show_project_label = false;
+                shell.settings.sidebar_organization = SidebarOrganization::InOneList;
+                shell.state.update(cx, |state, _| {
+                    state.workspace_scope = Some(WorkspaceScope::Local);
+                    state.local_device_id = Some("local".into());
+                    state.chats = vec![
+                        tree_chat("parent", None, 0),
+                        tree_chat("child-new", Some("parent"), 20),
+                        tree_chat("child-old", Some("parent"), 10),
+                    ];
+                    state.refresh_children_index();
+                });
+                shell.set_jump_hints(jump_hints, cx);
+                shell
+            }))
+        });
+        (host.read_with(cx, |host, _| host.0.clone()), cx)
+    }
+
+    /// The tree's disclosure body must contain every painted child row at
+    /// rest: its height recipe and the rendered rows have to agree, or the
+    /// frame's clip shaves the last row's rounded hover wash. The sessions
+    /// section owns an outer frame around the same rows, so it is checked too.
+    #[gpui::test]
+    fn tree_disclosure_rest_height_covers_the_last_child_row(cx: &mut gpui::TestAppContext) {
+        let dir = tempfile::tempdir().unwrap();
+        let (_shell, cx) = tree_sidebar(cx, dir.path(), true, false);
+        let last = cx.debug_bounds("chat-child-old").unwrap();
+        for key in [
+            "sidebar-disclosure-chat-tree:parent",
+            "sidebar-disclosure-sessions",
+        ] {
+            let frame = cx
+                .debug_bounds(key)
+                .unwrap_or_else(|| panic!("missing {key}"));
+            assert!(
+                frame.bottom() >= last.bottom(),
+                "{key} clips the last child row: frame {frame:?}, row {last:?}"
+            );
+        }
+    }
+
+    /// Redraw after a test mutated the shell's settings or tree state.
+    fn redraw(cx: &mut gpui::VisualTestContext) {
+        cx.update(|window, cx| {
+            window.refresh();
+            window.draw(cx).clear();
+        });
+    }
+
+    /// Collapse the parent's subtree and redraw, so the corner count is
+    /// actually in play.
+    fn collapse_parent(shell: &gpui::Entity<super::Shell>, cx: &mut gpui::VisualTestContext) {
+        shell.update(cx, |shell, cx| {
+            shell.sidebar_collapsed_trees.insert("parent".into(), true);
+            cx.notify();
+        });
+        redraw(cx);
+    }
+
+    /// Hold Ctrl in the compact sidebar: every row's hint replaces the
+    /// trailing time column on one line — the fixed 30px column used to wrap
+    /// "Ctrl+2" over two lines on indented children — and a collapsed
+    /// parent's subagent count stands down while the hint is up.
+    #[gpui::test]
+    fn compact_jump_hints_never_wrap_or_share_the_corner(cx: &mut gpui::TestAppContext) {
+        let dir = tempfile::tempdir().unwrap();
+        let (shell, cx) = tree_sidebar(cx, dir.path(), true, true);
+        for (row_sel, hint_sel) in [
+            ("chat-parent", "chat-time-parent"),
+            ("chat-child-new", "chat-time-child-new"),
+            ("chat-child-old", "chat-time-child-old"),
+        ] {
+            let row = cx.debug_bounds(row_sel).unwrap();
+            let hint = cx
+                .debug_bounds(hint_sel)
+                .unwrap_or_else(|| panic!("missing hint on {row_sel}"));
+            assert!(
+                hint.size.height < px(20.0),
+                "hint wraps on {row_sel}: {hint:?}"
+            );
+            assert!(
+                hint.left() >= row.left() && hint.right() <= row.right(),
+                "hint leaves the row on {row_sel}: {hint:?} vs {row:?}"
+            );
+        }
+        // Collapsed, the count and the hint would both claim the corner —
+        // the hint wins for as long as Ctrl is down.
+        collapse_parent(&shell, cx);
+        assert!(
+            cx.debug_bounds("chat-time-parent").is_some(),
+            "the collapsed parent keeps its hint"
+        );
+        assert!(
+            cx.debug_bounds("chat-tree-count-parent").is_none(),
+            "the collapsed parent's count shares the corner with its hint"
+        );
+        // And with Ctrl released the count comes straight back.
+        shell.update(cx, |shell, cx| shell.set_jump_hints(false, cx));
+        redraw(cx);
+        assert!(
+            cx.debug_bounds("chat-tree-count-parent").is_some(),
+            "the collapsed parent lost its count without a hint"
+        );
+    }
+
+    /// Hold Ctrl in the regular sidebar: the corner chip replaces the
+    /// collapsed parent's subagent count instead of crowding it, and stays
+    /// inside its row at every depth.
+    #[gpui::test]
+    fn regular_jump_hints_replace_the_collapsed_parent_count(cx: &mut gpui::TestAppContext) {
+        let dir = tempfile::tempdir().unwrap();
+        let (shell, cx) = tree_sidebar(cx, dir.path(), false, true);
+        for (row_sel, chip_sel) in [
+            ("chat-parent", "chat-jump-parent"),
+            ("chat-child-new", "chat-jump-child-new"),
+            ("chat-child-old", "chat-jump-child-old"),
+        ] {
+            let row = cx.debug_bounds(row_sel).unwrap();
+            let chip = cx
+                .debug_bounds(chip_sel)
+                .unwrap_or_else(|| panic!("missing chip on {row_sel}"));
+            assert!(
+                chip.size.height <= px(16.0),
+                "chip grows on {row_sel}: {chip:?}"
+            );
+            assert!(
+                chip.left() >= row.left() && chip.right() <= row.right(),
+                "chip leaves the row on {row_sel}: {chip:?} vs {row:?}"
+            );
+        }
+        collapse_parent(&shell, cx);
+        assert!(
+            cx.debug_bounds("chat-jump-parent").is_some(),
+            "the collapsed parent keeps its chip"
+        );
+        assert!(
+            cx.debug_bounds("chat-tree-count-parent").is_none(),
+            "the collapsed parent's count shares the corner with its chip"
+        );
+        shell.update(cx, |shell, cx| shell.set_jump_hints(false, cx));
+        redraw(cx);
+        assert!(
+            cx.debug_bounds("chat-tree-count-parent").is_some(),
+            "the collapsed parent lost its count without a hint"
+        );
+    }
 }
 
 pub(super) fn pinned_drag_scroll_step(
@@ -2024,8 +2242,9 @@ fn agent_subtree(
     }
 }
 
-/// The chat-row corner affordance a parent carries: the disclosure
-/// chevron over its subtree plus the running count while collapsed.
+/// The chat-row affordance a parent carries: a disclosure chevron in the
+/// row's leading status slot plus the running count in the corner while
+/// collapsed.
 pub(super) struct SidebarTreeRow {
     pub children: Option<SidebarTreeChildren>,
 }
@@ -2396,7 +2615,18 @@ impl Shell {
         content: AnyElement,
     ) -> AnyElement {
         let target = if open { full_height } else { 0.0 };
-        let frame = div().w_full().flex_none().overflow_hidden().child(content);
+        let frame = div()
+            // Tests measure the resting frame against the rows it paints —
+            // the disclosure body is otherwise selector-free and the clip it
+            // owns is invisible in element bounds.
+            .debug_selector({
+                let key = key.to_owned();
+                move || format!("sidebar-disclosure-{key}")
+            })
+            .w_full()
+            .flex_none()
+            .overflow_hidden()
+            .child(content);
         let Some(tween) = self
             .sidebar_disclosure_motion
             .get(key)
@@ -2428,10 +2658,21 @@ impl Shell {
         open: bool,
         theme: &Theme,
     ) -> AnyElement {
+        self.sidebar_disclosure_chevron_colored(key, open, theme.text_muted.opacity(0.5))
+    }
+
+    /// The same chevron + rotation motion tinted by the caller — the chat
+    /// row's leading-slot disclosure blends muted → text on its own hover.
+    pub(super) fn sidebar_disclosure_chevron_colored(
+        &self,
+        key: &str,
+        open: bool,
+        color: gpui::Hsla,
+    ) -> AnyElement {
         let resting_reveal = if open { 1.0 } else { 0.0 };
         let chevron = icon(icons::ALT_ARROW_RIGHT)
             .size(px(12.0))
-            .text_color(theme.text_muted.opacity(0.5));
+            .text_color(color);
         if let Some(tween) = self
             .sidebar_disclosure_motion
             .get(key)
@@ -2616,6 +2857,7 @@ impl Shell {
         cx: &mut Context<Self>,
     ) {
         self.chat_status_hover = None;
+        self.chat_corner_hover = None;
         self.cancel_pinned_session_drag(cx);
         self.sidebar_session_return = None;
         self.pinned_session_drag_generation = self.pinned_session_drag_generation.wrapping_add(1);
@@ -2744,6 +2986,7 @@ impl Shell {
 
     pub(super) fn cancel_sidebar_session_transfer(&mut self, cx: &mut Context<Self>) {
         self.chat_status_hover = None;
+        self.chat_corner_hover = None;
         self.cancel_pinned_session_drag(cx);
         if let Some(mut transfer) = self.sidebar_session_transfer.take() {
             transfer.preview = None;
@@ -2860,6 +3103,7 @@ impl Shell {
         cx: &mut Context<Self>,
     ) {
         self.chat_status_hover = None;
+        self.chat_corner_hover = None;
         let matches_drag = self.sidebar_session_transfer.as_ref().is_some_and(|drag| {
             drag.payload.chat_id == payload.chat_id
                 && drag.payload.profile_key == payload.profile_key
@@ -4636,13 +4880,14 @@ impl Shell {
             let mut slot_height = row_height;
             if let Some(block) = nested {
                 let key = format!("chat-tree:{}", node.chat.id);
-                slot_height += SIDEBAR_LIST_GAP
-                    + sidebar_tree_body_height(
-                        &self.sidebar_disclosure_motion,
-                        &key,
-                        node.open,
-                        nested_full,
-                    );
+                // The nested block rides directly under its row — the slot
+                // paints no gap between them, so none is counted.
+                slot_height += sidebar_tree_body_height(
+                    &self.sidebar_disclosure_motion,
+                    &key,
+                    node.open,
+                    nested_full,
+                );
                 slot = slot.child(self.render_sidebar_disclosure_body(
                     &key,
                     node.open,
@@ -4653,6 +4898,10 @@ impl Shell {
             height += slot_height;
             column = column.child(slot);
         }
+        // The column's own `gap` paints between sibling slots; count it too
+        // or the fixed-height disclosure frame comes up short and clips the
+        // last row's hover wash.
+        height += SIDEBAR_LIST_GAP * nodes.len().saturating_sub(1) as f32;
         let block = div()
             .w_full()
             .flex_none()
