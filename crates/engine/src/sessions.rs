@@ -1291,6 +1291,7 @@ impl Inner {
             port,
             &self.device_id,
             chat_id,
+            spawn_parent(self.workspace().as_ref(), chat_id).as_deref(),
         ))
     }
 
@@ -1420,6 +1421,20 @@ fn note_fork_history_session(doc: &SessionDoc, carried: bool, session_id: &str) 
     if carried && !session_id.is_empty() {
         let _ = doc.set_fork_history_session(session_id);
     }
+}
+
+/// The parent named in `chat_id`'s instructions: an agent-spawned child whose
+/// row is readable through the workspace overlay. A missing or unreadable row
+/// reads as "not a child" so starting a run never waits on registry
+/// bookkeeping; the run simply gets the plain instructions.
+fn spawn_parent(
+    workspace: Option<&crate::workspace_host::WorkspaceHost>,
+    chat_id: &str,
+) -> Option<String> {
+    workspace
+        .and_then(|ws| ws.chat(chat_id).ok().flatten())
+        .filter(|chat| chat.spawned_by_agent)
+        .and_then(|chat| chat.parent_chat_id)
 }
 
 impl Inner {
@@ -2940,6 +2955,8 @@ async fn drive_run(
 
 #[cfg(test)]
 mod tests {
+    use super::*;
+
     #[test]
     fn cursor_recovery_converts_rich_messages_before_json_encoding() {
         let doc = zeron_doc::SessionDoc::init("cursor-rich-recovery").unwrap();
@@ -3165,5 +3182,70 @@ mod tests {
             subagent_doc_id("chat", "a:b"),
             subagent_doc_id("chat", "a:c")
         );
+    }
+    #[tokio::test]
+    async fn spawn_parent_names_only_agent_children_with_a_readable_row() {
+        use crate::workspace_host::{WorkspaceHost, WorkspaceHostConfig};
+        let dir = tempfile::tempdir().unwrap();
+        let store = Arc::new(zeron_sync::DocsStore::open(dir.path()).unwrap());
+        let host = WorkspaceHost::open(
+            store,
+            WorkspaceHostConfig {
+                device_id: "dev".into(),
+                device_name: "dev".into(),
+                platform: "linux".into(),
+                org_id: "org".into(),
+                user_id: "user".into(),
+                edge: None,
+            },
+        )
+        .unwrap();
+        host.create_chat_with_parent(
+            "child",
+            None,
+            Some("dev"),
+            None,
+            None,
+            Some("parent".into()),
+            true,
+        )
+        .unwrap();
+        // A user side chat carries a parent too, but reports like any other
+        // user chat — its row must not name one.
+        host.create_chat_with_parent(
+            "side",
+            None,
+            Some("dev"),
+            None,
+            None,
+            Some("parent".into()),
+            false,
+        )
+        .unwrap();
+        host.create_chat_with_parent("root", None, Some("dev"), None, None, None, false)
+            .unwrap();
+        assert_eq!(
+            spawn_parent(Some(&host), "child").as_deref(),
+            Some("parent")
+        );
+        assert_eq!(spawn_parent(Some(&host), "side"), None);
+        assert_eq!(spawn_parent(Some(&host), "root"), None);
+        assert_eq!(spawn_parent(Some(&host), "missing"), None);
+        // An unwired workspace is the unreadable-row case: plain instructions.
+        assert_eq!(spawn_parent(None, "child"), None);
+    }
+
+    #[test]
+    fn child_without_a_readable_row_gets_plain_instructions() {
+        let dir = tempfile::tempdir().unwrap();
+        let sessions = SessionsEngine::new(
+            "host".into(),
+            Arc::new(RunJournal::open(dir.path().join("journals")).unwrap()),
+            Arc::new(HarnessRegistry::new()),
+        );
+        sessions.set_ipc_port(27702);
+        sessions.set_agent_runtime(crate::agent_runtime::prepare(dir.path()));
+        let ctx = sessions.inner.agent_context("chat-9").expect("context");
+        assert_eq!(ctx.instructions, zeron_guide::instructions());
     }
 }
