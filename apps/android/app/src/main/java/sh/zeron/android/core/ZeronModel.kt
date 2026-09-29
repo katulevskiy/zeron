@@ -82,6 +82,9 @@ class ZeronModel(app: Application) : AndroidViewModel(app) {
     var epoch by mutableIntStateOf(0)
     var appearance by mutableIntStateOf(0)
     var toast by mutableStateOf<String?>(null)
+    var toastUndo by mutableStateOf<(() -> Unit)?>(null)
+        private set
+    private var toastToken = 0
     var tab by mutableStateOf(Tab.Sessions)
     val sessionStack: SnapshotStateList<Route> = mutableStateListOf()
     val settingsStack: SnapshotStateList<Route> = mutableStateListOf()
@@ -140,20 +143,24 @@ class ZeronModel(app: Application) : AndroidViewModel(app) {
         watchNetwork()
     }
 
-    fun isCollapsed(id: String): Boolean = collapsed.contains(id)
+    /** Folded front-page groups ("pinned", "recent", section ids); persisted. */
+    var collapsedIds by mutableStateOf<Set<String>>(collapsed.toSet())
+        private set
+
+    fun isCollapsed(id: String): Boolean = collapsedIds.contains(id)
 
     fun toggleCollapsed(id: String) {
         if (!collapsed.add(id)) collapsed.remove(id)
-        prefs.edit().putStringSet("collapsed", collapsed).apply()
-        epoch++
+        prefs.edit().putStringSet("collapsed", HashSet(collapsed)).apply()
+        collapsedIds = collapsed.toSet()
     }
 
     fun collapseAll() {
         val ws = workspace ?: return
         if (ws.front.pinned.isNotEmpty()) collapsed.add("pinned")
         ws.front.sections.forEach { collapsed.add(it.id) }
-        prefs.edit().putStringSet("collapsed", collapsed).apply()
-        epoch++
+        prefs.edit().putStringSet("collapsed", HashSet(collapsed)).apply()
+        collapsedIds = collapsed.toSet()
     }
 
     fun applyAppearance(mode: Int) {
@@ -177,8 +184,31 @@ class ZeronModel(app: Application) : AndroidViewModel(app) {
     }
 
     fun showToast(message: String) {
+        val token = ++toastToken
         toast = message
-        main.postDelayed({ if (toast == message) toast = null }, 2400)
+        toastUndo = null
+        main.postDelayed({ if (toastToken == token) toast = null }, 2400)
+    }
+
+    /** A toast with an Undo button (pin, unpin, archive), up a little longer. */
+    fun showUndo(message: String, undo: () -> Unit) {
+        val token = ++toastToken
+        toast = message
+        toastUndo = undo
+        main.postDelayed({
+            if (toastToken == token) {
+                toast = null
+                toastUndo = null
+            }
+        }, 4500)
+    }
+
+    fun runUndo() {
+        val undo = toastUndo ?: return
+        toastToken++
+        toast = null
+        toastUndo = null
+        undo()
     }
 
     fun back(): Boolean {
@@ -600,26 +630,34 @@ class ZeronModel(app: Application) : AndroidViewModel(app) {
         return c.search(q, 60u).map { it.session }
     }
 
-    fun pin(id: String, pinned: Boolean) = attempt { if (pinned) it.pinSession(id) else it.unpinSession(id) }
-    fun archive(id: String) {
-        attempt { it.archiveSession(id) }
-        showToast("Archived")
+    /** Pin or unpin, then offer Undo (a swipe or tap can land by accident). */
+    fun pin(id: String, pinned: Boolean) {
+        val done = attempt { if (pinned) it.pinSession(id) else it.unpinSession(id) }
+        if (done) showUndo(if (pinned) "Pinned" else "Unpinned") { attempt { if (pinned) it.unpinSession(id) else it.pinSession(id) } }
     }
-    fun unarchive(id: String) = attempt { it.unarchiveSession(id) }
+    fun archive(id: String) {
+        if (attempt { it.archiveSession(id) }) showUndo("Archived") { attempt { it.unarchiveSession(id) } }
+    }
+    fun unarchive(id: String) {
+        if (attempt { it.unarchiveSession(id) }) showUndo("Unarchived") { attempt { it.archiveSession(id) } }
+    }
     fun rename(id: String, title: String) = attempt { it.renameSession(id, title) }
     fun move(id: String, section: String?) = attempt { it.assignSection(id, section) }
     fun createSection(name: String) = attempt { it.createSection(name) }
     fun renameSection(id: String, name: String) = attempt { it.renameSection(id, name) }
     fun deleteSection(id: String) = attempt { it.deleteSection(id) }
 
-    private fun attempt(body: (CoreClient) -> Unit) {
-        val c = client ?: return
-        try {
+    private fun attempt(body: (CoreClient) -> Unit): Boolean {
+        val c = client ?: return false
+        val ok = try {
             body(c)
+            true
         } catch (t: Throwable) {
             showToast(t.message ?: "Couldn't update")
+            false
         }
         requestRefresh()
+        return ok
     }
 
     fun homeColorIndex(): Int = projectColorIndex("home").toInt()

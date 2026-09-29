@@ -40,8 +40,6 @@ import androidx.compose.foundation.shape.CircleShape
 import androidx.compose.foundation.shape.RoundedCornerShape
 import androidx.compose.foundation.text.BasicTextField
 import androidx.compose.material3.AlertDialog
-import androidx.compose.material3.DropdownMenu
-import androidx.compose.material3.DropdownMenuItem
 import androidx.compose.material3.Text
 import androidx.compose.material3.TextButton
 import androidx.compose.material3.pulltorefresh.PullToRefreshBox
@@ -79,7 +77,15 @@ import androidx.core.view.WindowCompat
 import kotlinx.coroutines.launch
 import sh.zeron.android.core.ZeronModel
 import androidx.compose.material3.HorizontalDivider
+import sh.zeron.android.design.AnchoredMenu
 import sh.zeron.android.design.AssetIcon
+import sh.zeron.android.design.Glyph
+import sh.zeron.android.design.Glyphs
+import sh.zeron.android.design.MenuEntry
+import sh.zeron.android.design.PinSlashGlyph
+import androidx.compose.ui.graphics.graphicsLayer
+import androidx.compose.ui.layout.boundsInRoot
+import androidx.compose.ui.layout.onGloballyPositioned
 import sh.zeron.android.design.BackChevron
 import sh.zeron.android.design.BrandMark
 import sh.zeron.android.design.ChevronMark
@@ -122,44 +128,59 @@ fun ZeronApp(model: ZeronModel) {
         controller.isAppearanceLightNavigationBars = !dark
     }
     androidx.compose.runtime.CompositionLocalProvider(LocalZeronColors provides colors) {
-        val phase = model.phase
-        when {
-            phase is ZeronModel.Phase.Loading -> CenterMessage(colors, "Opening the workspace…")
-            phase is ZeronModel.Phase.Failed -> Column(
-                Modifier.fillMaxSize().background(colors.background).padding(24.dp),
-                verticalArrangement = Arrangement.Center,
-                horizontalAlignment = Alignment.CenterHorizontally,
+        sh.zeron.android.design.ZeronMaterialTheme(colors) { AppContent(model, colors) }
+    }
+}
+
+@Composable
+private fun AppContent(model: ZeronModel, colors: ZeronColors) {
+    val phase = model.phase
+    when {
+        phase is ZeronModel.Phase.Loading -> CenterMessage(colors, "Opening the workspace…")
+        phase is ZeronModel.Phase.Failed -> Column(
+            Modifier.fillMaxSize().background(colors.background).padding(24.dp),
+            verticalArrangement = Arrangement.Center,
+            horizontalAlignment = Alignment.CenterHorizontally,
+        ) {
+            Text(phase.message, color = colors.danger, fontFamily = ZeronType.Sans)
+            Spacer(Modifier.height(16.dp))
+            Text("Try the demo", color = colors.background, modifier = Modifier.clip(RoundedCornerShape(20.dp)).background(colors.text).clickable { model.enterDemo() }.padding(horizontal = 18.dp, vertical = 12.dp))
+            Spacer(Modifier.height(10.dp))
+            Text("Machines…", color = colors.text, modifier = Modifier.clip(RoundedCornerShape(20.dp)).background(colors.controlFill).clickable { model.showMachines = true }.padding(horizontal = 18.dp, vertical = 12.dp))
+        }
+        phase is ZeronModel.Phase.SignedOut || model.showSignIn -> SignInScreen(model)
+        else -> Shell(model, colors)
+    }
+    if (model.showMachines) {
+        BackHandler { if (!model.back()) model.showMachines = false }
+        MachinesScreen(model)
+    }
+    model.editMachine?.let { machine ->
+        BackHandler { model.editMachine = null }
+        androidx.compose.runtime.key(machine.id) { MachineEditScreen(model, machine) }
+    }
+    if (model.showLinkDetails) {
+        BackHandler { model.showLinkDetails = false }
+        LinkDetailsScreen(model)
+    }
+    model.toast?.let { message ->
+        Box(Modifier.fillMaxSize().padding(bottom = 120.dp), contentAlignment = Alignment.BottomCenter) {
+            Row(
+                Modifier.clip(RoundedCornerShape(20.dp)).background(colors.text).padding(start = 16.dp, end = if (model.toastUndo != null) 6.dp else 16.dp),
+                verticalAlignment = Alignment.CenterVertically,
             ) {
-                Text(phase.message, color = colors.danger, fontFamily = ZeronType.Sans)
-                Spacer(Modifier.height(16.dp))
-                Text("Try the demo", color = colors.background, modifier = Modifier.clip(RoundedCornerShape(20.dp)).background(colors.text).clickable { model.enterDemo() }.padding(horizontal = 18.dp, vertical = 12.dp))
-                Spacer(Modifier.height(10.dp))
-                Text("Machines…", color = colors.text, modifier = Modifier.clip(RoundedCornerShape(20.dp)).background(colors.controlFill).clickable { model.showMachines = true }.padding(horizontal = 18.dp, vertical = 12.dp))
-            }
-            phase is ZeronModel.Phase.SignedOut || model.showSignIn -> SignInScreen(model)
-            else -> Shell(model, colors)
-        }
-        if (model.showMachines) {
-            BackHandler { if (!model.back()) model.showMachines = false }
-            MachinesScreen(model)
-        }
-        model.editMachine?.let { machine ->
-            BackHandler { model.editMachine = null }
-            androidx.compose.runtime.key(machine.id) { MachineEditScreen(model, machine) }
-        }
-        if (model.showLinkDetails) {
-            BackHandler { model.showLinkDetails = false }
-            LinkDetailsScreen(model)
-        }
-        model.toast?.let { message ->
-            Box(Modifier.fillMaxSize().padding(bottom = 120.dp), contentAlignment = Alignment.BottomCenter) {
-                Text(
-                    message,
-                    color = colors.background,
-                    fontFamily = ZeronType.Sans,
-                    fontSize = 14.sp,
-                    modifier = Modifier.clip(RoundedCornerShape(20.dp)).background(colors.text).padding(horizontal = 16.dp, vertical = 10.dp),
-                )
+                Text(message, color = colors.background, fontFamily = ZeronType.Sans, fontSize = 14.sp, modifier = Modifier.padding(vertical = 10.dp))
+                if (model.toastUndo != null) {
+                    Spacer(Modifier.width(6.dp))
+                    Text(
+                        "Undo",
+                        color = if (colors.dark) Color(0xFF5B43E8) else Color(0xFFB4A8FF),
+                        fontFamily = ZeronType.Sans,
+                        fontWeight = FontWeight.SemiBold,
+                        fontSize = 14.sp,
+                        modifier = Modifier.clip(RoundedCornerShape(14.dp)).clickable { model.runUndo() }.padding(horizontal = 10.dp, vertical = 10.dp),
+                    )
+                }
             }
         }
     }
@@ -185,6 +206,9 @@ private fun Shell(model: ZeronModel, colors: ZeronColors) {
     }
     var prompt by remember { mutableStateOf<Prompt?>(null) }
     var newProject by remember { mutableStateOf(false) }
+    val menus = remember { RowMenuHost() }
+    val swipe = remember { SwipeCoordinator() }
+    androidx.compose.runtime.CompositionLocalProvider(LocalRowMenus provides menus, LocalSwipe provides swipe) {
     Box(Modifier.fillMaxSize().background(page)) {
         if (frontPage) {
             model.wallpaper?.let { bmp ->
@@ -225,12 +249,73 @@ private fun Shell(model: ZeronModel, colors: ZeronColors) {
                 })
             }
         }
+        RowMenusOverlay(model, colors, menus) { prompt = it }
+    }
     }
     prompt?.let { current ->
         NameDialog(colors, current, onDismiss = { prompt = null }) { value ->
             current.onSubmit(value)
             prompt = null
         }
+    }
+}
+
+/**
+ * The long-press menus (iOS context menus): Pin/Unpin, move between sections,
+ * Rename…, Archive in red; archived rows get Unarchive and Rename…. The row is
+ * re-read when the menu opens so the pin label is never stale.
+ */
+@Composable
+private fun RowMenusOverlay(model: ZeronModel, colors: ZeronColors, menus: RowMenuHost, onPrompt: (Prompt) -> Unit) {
+    val screenHeight = with(androidx.compose.ui.platform.LocalDensity.current) {
+        androidx.compose.ui.platform.LocalConfiguration.current.screenHeightDp.dp.toPx()
+    }
+    menus.row?.let { target ->
+        val row = model.client?.sessionRow(target.id)
+            ?: model.workspace?.archived?.firstOrNull { it.id == target.id }
+        if (row == null) {
+            menus.row = null
+            return@let
+        }
+        val sections = model.workspace?.front?.sections.orEmpty()
+        val rename = MenuEntry("Rename…", icon = { c -> Glyph(Glyphs.Rename, 17.dp, c) }) {
+            onPrompt(Prompt("Rename", row.title, "Rename") { value -> if (value.isNotEmpty()) model.rename(row.id, value) })
+        }
+        val entries = if (target.archived || row.archived) {
+            listOf(
+                MenuEntry("Unarchive", icon = { c -> Glyph(Glyphs.Unarchive, 18.dp, c) }) { model.unarchive(row.id) },
+                rename,
+            )
+        } else {
+            buildList {
+                add(
+                    MenuEntry(if (row.pinned) "Unpin" else "Pin", icon = { c -> if (row.pinned) PinSlashGlyph(17.dp, c) else Glyph(Glyphs.Pin, 17.dp, c) }) {
+                        model.pin(row.id, !row.pinned)
+                    },
+                )
+                sections.filter { it.id != row.sectionId }.forEach { section ->
+                    add(MenuEntry("Move to ${section.name}", icon = { c -> Glyph(Glyphs.Folder, 17.dp, c) }) { model.move(row.id, section.id) })
+                }
+                if (row.sectionId != null) add(MenuEntry("No Section", icon = { c -> Glyph(Glyphs.Tray, 17.dp, c) }) { model.move(row.id, null) })
+                add(
+                    MenuEntry("New Section…", icon = { c -> Glyph(Glyphs.FolderPlus, 17.dp, c) }) {
+                        onPrompt(Prompt("New Section", "", "Create") { value -> if (value.isNotEmpty()) model.createSection(value) })
+                    },
+                )
+                add(rename)
+                add(MenuEntry("Archive", destructive = true, icon = { c -> Glyph(Glyphs.Archive, 17.dp, c) }) { model.archive(row.id) })
+            }
+        }
+        AnchoredMenu(colors, target.anchor, title = null, entries = entries, above = target.anchor.center.y > screenHeight * 0.55f) { menus.row = null }
+    }
+    menus.header?.let { (section, anchor) ->
+        val entries = listOf(
+            MenuEntry("Rename Section…", icon = { c -> Glyph(Glyphs.Rename, 17.dp, c) }) {
+                onPrompt(Prompt("Rename Section", section.name, "Rename") { value -> if (value.isNotEmpty()) model.renameSection(section.id, value) })
+            },
+            MenuEntry("Delete Section", destructive = true, icon = { c -> Glyph(Glyphs.Archive, 17.dp, c) }) { model.deleteSection(section.id) },
+        )
+        AnchoredMenu(colors, anchor, title = section.name, entries = entries, above = anchor.center.y > screenHeight * 0.55f) { menus.header = null }
     }
 }
 
@@ -285,30 +370,38 @@ private fun SessionsScreen(model: ZeronModel, colors: ZeronColors, onNewSpace: (
     val space = projects.firstOrNull { it.id == spaceId }
     // Keyed on the snapshot itself: ZeronModel only swaps `workspace` when its
     // content changed, so streaming updates elsewhere do not rebuild the list.
-    val rows = remember(front, spaceId, projects) {
-        val seen = LinkedHashSet<String>()
-        val out = ArrayList<SessionRow>()
-        fun take(list: List<SessionRow>) {
-            for (row in list) if (seen.add(row.id)) out.add(row)
-        }
-        if (spaceId == null) {
-            take(front?.pinned.orEmpty())
-            front?.sections.orEmpty().forEach { take(it.sessions) }
-            take(front?.recent.orEmpty())
+    // iOS front page: Pinned and the user's sections as foldable groups, then
+    // everything else under Recent (headed only when a group precedes it).
+    val groups = remember(front, spaceId, projects) {
+        val seen = HashSet<String>()
+        fun fresh(list: List<SessionRow>) = list.filter { seen.add(it.id) }
+        if (spaceId != null) {
+            listOf(ListGroup("space", null, fresh(projects.firstOrNull { it.id == spaceId }?.sessions.orEmpty())))
         } else {
-            take(projects.firstOrNull { it.id == spaceId }?.sessions.orEmpty())
+            val out = ArrayList<ListGroup>()
+            val pinned = fresh(front?.pinned.orEmpty())
+            if (pinned.isNotEmpty()) out.add(ListGroup("pinned", "Pinned", pinned))
+            front?.sections.orEmpty().forEach { section -> out.add(ListGroup(section.id, section.name, fresh(section.sessions), section = section)) }
+            val recent = fresh(front?.recent.orEmpty())
+            out.add(ListGroup("recent", if (out.isEmpty()) null else "Recent", recent))
+            out
         }
-        out
     }
+    val rows = remember(groups) { groups.flatMap { it.rows } }
     val archived = remember(workspace, spaceId) {
         workspace?.archived.orEmpty().filter { spaceId == null || it.project?.id == spaceId }
     }
-    val sections = front?.sections.orEmpty()
     val listState = rememberLazyListState()
     val guard = remember { TapGuard() }
+    val swipe = LocalSwipe.current
+    val menus = LocalRowMenus.current
     // Workspace refreshes wait while the list moves (see ZeronModel.requestRefresh).
     LaunchedEffect(listState) {
-        snapshotFlow { listState.isScrollInProgress }.collect { model.scrolling = it }
+        snapshotFlow { listState.isScrollInProgress }.collect {
+            model.scrolling = it
+            // Scrolling closes revealed swipe actions, like UITableView.
+            if (it) swipe.openId = null
+        }
     }
     DisposableEffect(listState) { onDispose { model.scrolling = false } }
     Box(Modifier.fillMaxSize()) {
@@ -333,8 +426,26 @@ private fun SessionsScreen(model: ZeronModel, colors: ZeronColors, onNewSpace: (
                     contentPadding = PaddingValues(top = topInset + 64.dp, bottom = 28.dp),
                 ) {
                     item(key = "direct-banner") { DirectBanner(model, colors) }
-                    items(rows, key = { it.id }) { row ->
-                        SessionRowView(row, colors, archived = false, sections = sections, model = model, tapGuard = guard)
+                    groups.forEach { group ->
+                        val folded = group.title != null && model.isCollapsed(group.id)
+                        if (group.title != null) {
+                            item(key = "head-${group.id}", contentType = "head") {
+                                GroupHeader(
+                                    colors,
+                                    title = group.title,
+                                    count = group.rows.size,
+                                    collapsed = folded,
+                                    working = folded && group.rows.any { it.indicator == ChatIndicator.WORKING },
+                                    onToggle = { model.toggleCollapsed(group.id) },
+                                    onLongPress = group.section?.let { section -> { rect: androidx.compose.ui.geometry.Rect -> menus.header = section to rect } },
+                                )
+                            }
+                        }
+                        if (!folded) {
+                            items(group.rows, key = { it.id }, contentType = { "row" }) { row ->
+                                SessionRowView(row, colors, archived = false, model = model, tapGuard = guard)
+                            }
+                        }
                     }
                     if (archived.isNotEmpty()) {
                         item(key = "archived-head") {
@@ -349,7 +460,7 @@ private fun SessionsScreen(model: ZeronModel, colors: ZeronColors, onNewSpace: (
                         }
                         if (archivedOpen) {
                             items(archived, key = { "arch-${it.id}" }) { row ->
-                                SessionRowView(row, colors, archived = true, sections = sections, model = model, tapGuard = guard)
+                                SessionRowView(row, colors, archived = true, model = model, tapGuard = guard)
                             }
                         }
                     }
@@ -462,59 +573,95 @@ private fun projectSubtitle(project: ProjectView): String {
     return if (project.deviceOnline) "@ $host" else "@ $host · offline"
 }
 
+/** One front-page group: Pinned, a user section, or Recent (headerless alone). */
+private class ListGroup(val id: String, val title: String?, val rows: List<SessionRow>, val section: SectionView? = null)
+
+@Composable
+private fun GroupHeader(
+    colors: ZeronColors,
+    title: String,
+    count: Int,
+    collapsed: Boolean,
+    working: Boolean,
+    onToggle: () -> Unit,
+    onLongPress: ((androidx.compose.ui.geometry.Rect) -> Unit)?,
+) {
+    var bounds by remember { mutableStateOf(androidx.compose.ui.geometry.Rect.Zero) }
+    // SectionHeaderCell: 40pt, semibold title + count, chevron on the right
+    // that turns sideways when folded.
+    Row(
+        Modifier
+            .fillMaxWidth()
+            .height(40.dp)
+            .padding(horizontal = 8.dp)
+            .clip(RoundedCornerShape(12.dp))
+            .onGloballyPositioned { bounds = it.boundsInRoot() }
+            .combinedClickable(onClick = onToggle, onLongClick = onLongPress?.let { cb -> { cb(bounds) } })
+            .padding(start = 12.dp, end = 12.dp, bottom = 6.dp),
+        verticalAlignment = Alignment.Bottom,
+    ) {
+        Text(title, color = colors.secondary, fontFamily = ZeronType.Sans, fontWeight = FontWeight.SemiBold, fontSize = 13.5.sp, maxLines = 1, overflow = TextOverflow.Ellipsis, modifier = Modifier.weight(1f, fill = false))
+        Spacer(Modifier.width(7.dp))
+        Text("$count", color = colors.tertiary, fontFamily = ZeronType.Sans, fontWeight = FontWeight.Medium, fontSize = 13.5.sp)
+        if (working) {
+            Spacer(Modifier.width(7.dp))
+            StatusMark(MarkKind.Spinner, colors, Modifier.size(12.dp).align(Alignment.CenterVertically))
+        }
+        Spacer(Modifier.weight(1f))
+        ChevronMark(colors.tertiary, Modifier.size(12.dp).align(Alignment.CenterVertically).graphicsLayer { rotationZ = if (collapsed) -90f else 0f }, expanded = true)
+    }
+}
+
 @Composable
 private fun SessionRowView(
     row: SessionRow,
     colors: ZeronColors,
     archived: Boolean,
-    sections: List<SectionView>,
     model: ZeronModel,
     tapGuard: TapGuard? = null,
 ) {
-    var offset by remember(row.id) { mutableFloatStateOf(0f) }
-    val latestRow by rememberUpdatedState(row)
-    var menu by remember { mutableStateOf(false) }
-    var renaming by remember { mutableStateOf(false) }
-    var name by remember { mutableStateOf(row.title) }
+    val swipe = LocalSwipe.current
+    val menus = LocalRowMenus.current
     val corner = cornerOf(row, colors)
     val backdrop = if (colors.dark) SessionsBackdrop else colors.background
-    val revealed = abs(offset) > 1f
-    Box(Modifier.fillMaxWidth().height(if (archived) 46.dp else 74.dp)) {
-        if (revealed) {
-            Row(
-                Modifier.matchParentSize().background(backdrop).padding(horizontal = 20.dp),
-                horizontalArrangement = Arrangement.SpaceBetween,
-                verticalAlignment = Alignment.CenterVertically,
-            ) {
-                Text(if (archived) "Restore" else if (row.pinned) "Unpin" else "Pin", color = colors.accent, fontFamily = ZeronType.Sans, fontSize = 13.sp)
-                if (!archived) Text("Archive", color = colors.danger, fontFamily = ZeronType.Sans, fontSize = 13.sp)
-            }
-        }
+    var bounds by remember { mutableStateOf(androidx.compose.ui.geometry.Rect.Zero) }
+    val latestRow by rememberUpdatedState(row)
+    // iOS: leading Pin/Unpin (accent), trailing Archive (red) or Unarchive.
+    val leading = if (archived) null else SwipeAction(
+        title = if (row.pinned) "Unpin" else "Pin",
+        color = colors.accent,
+        icon = { tint -> if (row.pinned) PinSlashGlyph(20.dp, tint) else Glyph(Glyphs.Pin, 20.dp, tint) },
+        // The gesture outlives recompositions: act on the row's current state.
+        onAction = { model.pin(latestRow.id, !latestRow.pinned) },
+    )
+    val trailing = if (archived) {
+        SwipeAction("Unarchive", colors.accent, { tint -> Glyph(Glyphs.Unarchive, 20.dp, tint) }) { model.unarchive(latestRow.id) }
+    } else {
+        SwipeAction("Archive", colors.danger, { tint -> Glyph(Glyphs.Archive, 20.dp, tint) }) { model.archive(latestRow.id) }
+    }
+    SwipeRow(
+        id = if (archived) "arch-${row.id}" else row.id,
+        height = if (archived) 46.dp else 74.dp,
+        coordinator = swipe,
+        leading = leading,
+        trailing = trailing,
+    ) { scope ->
         Row(
             Modifier
                 .fillMaxSize()
-                .offset { IntOffset(offset.roundToInt(), 0) }
-                .background(if (revealed) backdrop else Color.Transparent)
+                .then(scope.offset)
+                .background(if (scope.revealed) backdrop else Color.Transparent)
+                .onGloballyPositioned { bounds = it.boundsInRoot() }
                 .combinedClickable(
-                    onClick = { if (tapGuard?.allowsTap() != false) model.openSession(row.id) },
-                    onLongClick = { menu = true },
+                    onClick = {
+                        if (!scope.closeIfOpen() && tapGuard?.allowsTap() != false) model.openSession(row.id)
+                    },
+                    onLongClick = {
+                        scope.closeIfOpen()
+                        menus.row = RowMenuTarget(row.id, archived, bounds)
+                    },
                 )
-                .pointerInput(row.id, archived) {
-                    detectRowSwipe(
-                        onDrag = { total -> offset = total.coerceIn(if (archived) 0f else -150f, 150f) },
-                        onEnd = { drag ->
-                            // The gesture outlives recompositions: read the row's
-                            // current pin state, not the one captured at start
-                            // (swiping to re-pin a just-unpinned row did nothing).
-                            if (drag > 96f) {
-                                if (archived) model.unarchive(row.id) else model.pin(row.id, !latestRow.pinned)
-                            }
-                            if (drag < -96f && !archived) model.archive(row.id)
-                            offset = 0f
-                        },
-                        onCancel = { offset = 0f },
-                    )
-                }
+                .then(scope.gesture)
                 .padding(horizontal = 20.dp),
             verticalAlignment = Alignment.CenterVertically,
         ) {
@@ -544,6 +691,11 @@ private fun SessionRowView(
                             overflow = TextOverflow.Ellipsis,
                             modifier = Modifier.weight(1f),
                         )
+                        if (row.pinned) {
+                            // Pinned rows carry a quiet pin beside the time.
+                            Glyph(Glyphs.Pin, 12.dp, colors.tertiary, Modifier.graphicsLayer { rotationZ = 30f })
+                            Spacer(Modifier.width(4.dp))
+                        }
                         if (corner != null) {
                             StatusMark(corner.mark, colors, Modifier.size(12.dp))
                             Spacer(Modifier.width(4.dp))
@@ -599,25 +751,6 @@ private fun SessionRowView(
                     }
                 }
             }
-            DropdownMenu(expanded = menu, onDismissRequest = { menu = false }) {
-                if (archived) {
-                    DropdownMenuItem(text = { Text("Unarchive") }, onClick = { menu = false; model.unarchive(row.id) })
-                } else {
-                    DropdownMenuItem(text = { Text(if (row.pinned) "Unpin" else "Pin") }, onClick = { menu = false; model.pin(row.id, !row.pinned) })
-                    DropdownMenuItem(text = { Text("Rename") }, onClick = { menu = false; name = row.title; renaming = true })
-                    sections.forEach { section ->
-                        DropdownMenuItem(text = { Text("Move to ${section.name}") }, onClick = { menu = false; model.move(row.id, section.id) })
-                    }
-                    if (row.sectionId != null) DropdownMenuItem(text = { Text("Move to Recent") }, onClick = { menu = false; model.move(row.id, null) })
-                    DropdownMenuItem(text = { Text("Archive") }, onClick = { menu = false; model.archive(row.id) })
-                }
-            }
-        }
-    }
-    if (renaming) {
-        NameDialog(colors, Prompt("Rename", name, "Rename") {}, onDismiss = { renaming = false }) { value ->
-            if (value.isNotEmpty()) model.rename(row.id, value)
-            renaming = false
         }
     }
 }
@@ -657,7 +790,7 @@ private fun FolderScreen(model: ZeronModel, colors: ZeronColors, folder: ZeronMo
         } else {
             LazyColumn(Modifier.weight(1f)) {
                 items(rows, key = { it.id }) { row ->
-                    SessionRowView(row, colors, archived, model.workspace?.front?.sections.orEmpty(), model)
+                    SessionRowView(row, colors, archived, model)
                 }
             }
         }
@@ -696,7 +829,7 @@ private fun SearchScreen(model: ZeronModel, colors: ZeronColors) {
         } else {
             LazyColumn(Modifier.weight(1f).padding(top = 8.dp)) {
                 items(results, key = { it.id }) { row ->
-                    SessionRowView(row, colors, archived = row.archived, sections = model.workspace?.front?.sections.orEmpty(), model = model)
+                    SessionRowView(row, colors, archived = row.archived, model = model)
                 }
             }
         }
