@@ -405,6 +405,13 @@ impl Shell {
         let available_titlebar_width =
             (self.viewport_width - row_left - right_pad - trailing_width - row_gap * 3.0).max(0.0);
 
+        let running_subagents = {
+            let state = self.state.read(cx);
+            state
+                .selected_chat
+                .as_deref()
+                .map_or(0, |chat| state.running_subagents_for(chat, Utc::now()))
+        };
         let trailing: Option<gpui::AnyElement> = if on_canvas {
             None
         } else {
@@ -505,6 +512,25 @@ impl Shell {
                                 .aria_label(files_panel_label)
                                 .when(self.files_panel_open(cx), |button| {
                                     button.bg(crate::theme::wash(0.09))
+                                })
+                                // Running subagents live in this panel: badge
+                                // the button so they are findable while it is
+                                // closed.
+                                .when(running_subagents > 0, |button| {
+                                    button.relative().child(
+                                        div()
+                                            .absolute()
+                                            .left_0()
+                                            .right_0()
+                                            .bottom(px(-8.0))
+                                            .flex()
+                                            .justify_center()
+                                            .child(crate::running_pill::running_pill(
+                                                "toggle-files-panel-subagents",
+                                                running_subagents,
+                                                &theme,
+                                            )),
+                                    )
                                 }),
                             )
                             .child(header_icon_button_with(
