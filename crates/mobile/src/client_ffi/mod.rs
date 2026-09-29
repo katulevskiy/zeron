@@ -11,6 +11,7 @@
 //! through [`CoreClient::session_handle`] → [`zeron_client::SessionHandle`]
 //! (`snapshot()` / `subscribe()`), never over FFI.
 
+mod direct;
 mod session;
 mod types;
 
@@ -92,6 +93,21 @@ impl CoreClient {
 
     pub fn is_demo(&self) -> bool {
         self.client.is_demo()
+    }
+
+    /// Direct (SSH) mode.
+    pub fn is_direct(&self) -> bool {
+        self.client.is_direct()
+    }
+
+    /// Direct mode: link phase, errors and stream counters (`None` otherwise).
+    pub fn direct_status(&self) -> Option<direct::DirectStatus> {
+        self.client.direct_status().map(Into::into)
+    }
+
+    /// Direct mode: drop the current link, even a stalled one, and redial.
+    pub fn reconnect_direct(&self) {
+        self.client.reconnect_direct();
     }
 
     pub fn device_id(&self) -> String {

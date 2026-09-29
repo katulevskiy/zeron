@@ -193,6 +193,8 @@ pub enum Credentials {
     Dev { user_id: String, org_id: String },
     /// Fully offline dataset with a simulated host.
     Demo { options: DemoOptions },
+    /// SSH straight to the user's own machine (no edge, no account).
+    Direct { target: super::direct::SshTarget },
 }
 
 impl From<Credentials> for zc::Credentials {
@@ -209,6 +211,7 @@ impl From<Credentials> for zc::Credentials {
             },
             Credentials::Dev { user_id, org_id } => zc::Credentials::Dev { user_id, org_id },
             Credentials::Demo { options } => zc::Credentials::Demo(options.into()),
+            Credentials::Direct { target } => zc::Credentials::Direct(target.into()),
         }
     }
 }
