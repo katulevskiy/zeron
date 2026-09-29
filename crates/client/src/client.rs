@@ -1479,6 +1479,26 @@ impl Client {
         }
     }
 
+    /// Plan / rate-limit usage of every agent login on a device (host
+    /// `ListAgentAccounts`). `force` re-probes the providers (the engine
+    /// throttles it); otherwise the engine serves its last good probe.
+    pub async fn list_agent_usage(&self, device_id: &str, force: bool) -> Result<Vec<crate::rpc::AgentUsage>> {
+        match self.inner.backend() {
+            Backend::Demo(_) => Ok(Vec::new()),
+            Backend::Live(_) | Backend::Direct(_) => {
+                let value = self
+                    .inner
+                    .host_rpc(
+                        device_id,
+                        zeron_rpc::methods::LIST_AGENT_ACCOUNTS,
+                        serde_json::json!({ "forceUsage": force }),
+                    )
+                    .await?;
+                Ok(crate::rpc::parse_agent_usage(&value))
+            }
+        }
+    }
+
     /// `git checkout <ref>` in `repo_path` on the device.
     pub async fn switch_ref(&self, device_id: &str, repo_path: &str, ref_name: &str) -> Result<()> {
         match self.inner.backend() {

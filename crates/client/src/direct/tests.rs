@@ -75,13 +75,25 @@ struct Engine(Mode);
 
 #[async_trait::async_trait]
 impl RpcService for Engine {
-    async fn handle(&self, method: &str, _params: serde_json::Value) -> Result<RpcReply, RpcError> {
+    async fn handle(&self, method: &str, params: serde_json::Value) -> Result<RpcReply, RpcError> {
         if method == "EngineInfo" {
             return Ok(RpcReply::Value(fixture("EngineInfo")));
         }
         if method == "ListDrives" {
             return Ok(RpcReply::Value(serde_json::json!({
                 "drives": [{ "name": "C:", "path": "C:\\" }, { "name": "D:", "path": "D:\\" }]
+            })));
+        }
+        if method == "ListAgentAccounts" {
+            // Echo the force flag in the plan label so the test sees it arrive.
+            let force = params["forceUsage"].as_bool().unwrap_or(false);
+            return Ok(RpcReply::Value(serde_json::json!({
+                "accounts": [{
+                    "id": "slot", "harness": "codex", "active": true,
+                    "planLabel": if force { "Plus (forced)" } else { "Plus" },
+                    "usageWindows": [{ "label": "5-hour", "usedFraction": 0.25, "resetsAt": null }]
+                }],
+                "warnings": []
             })));
         }
         if !matches!(
@@ -455,6 +467,11 @@ async fn lists_windows_drives_over_the_direct_link() {
     let drives = client.list_drives(&device).await.unwrap();
     let paths: Vec<&str> = drives.iter().map(|d| d.path.as_str()).collect();
     assert_eq!(paths, ["C:\\", "D:\\"]);
+    // Plan usage travels the same link (ListAgentAccounts).
+    let usage = client.list_agent_usage(&device, true).await.unwrap();
+    assert_eq!(usage.len(), 1);
+    assert_eq!(usage[0].plan_label.as_deref(), Some("Plus (forced)"));
+    assert_eq!(usage[0].windows[0].used_fraction, 0.25);
     // Methods the engine lacks surface as Unsupported, not a dead link.
     assert!(matches!(
         client.list_folders(&device, None).await,
