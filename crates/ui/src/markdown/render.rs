@@ -2038,6 +2038,7 @@ fn code_copy_button(
                 cx.stop_propagation();
                 handler(ix, code_text.clone(), window, cx);
             })
+            .tooltip(|_, cx| cx.new(|_| CodeBlockTooltip("Copy code")).into())
             .child(
                 crate::icons::icon(if copied {
                     crate::icons::CHECK

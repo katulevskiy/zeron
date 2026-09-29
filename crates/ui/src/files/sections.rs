@@ -875,6 +875,7 @@ fn header_action(
         .cursor_pointer()
         .hover(|s| s.bg(crate::theme::wash(0.09)))
         .on_mouse_down(MouseButton::Left, |_, window, _| window.prevent_default())
+        .tooltip(crate::settings::widgets::text_tooltip(label))
         // Icons take their color on the element itself, never inherited.
         .child(
             icon(icon_path)

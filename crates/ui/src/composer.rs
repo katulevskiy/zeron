@@ -5952,6 +5952,7 @@ impl Composer {
             let group: SharedString = format!("composer-att-{}", att.id).into();
             let preview = attachments::PreviewImage::new(att.name.clone(), att.image.clone());
             let remove_id = att.id.clone();
+            let remove_label: SharedString = format!("Remove {}", att.name).into();
             strip = strip.child(
                 div()
                     .group(group.clone())
@@ -6016,6 +6017,10 @@ impl Composer {
                                 cx.stop_propagation();
                                 this.remove_attachment(&remove_id, cx);
                             }))
+                            .tooltip(move |_, cx| {
+                                cx.new(|_| AppshotActionTooltip(remove_label.clone()))
+                                    .into()
+                            })
                             .child(
                                 crate::icons::icon(crate::icons::CLOSE_CIRCLE)
                                     .size(px(14.0))
@@ -8776,6 +8781,7 @@ impl Composer {
                 .cursor_pointer()
                 .hover(|s| s.opacity(0.85))
                 .on_click(cx.listener(|this, _, _, cx| this.interrupt_selected(cx)))
+                .tooltip(crate::settings::widgets::text_tooltip("Stop"))
                 .child(div().size(px(11.0)).rounded(px(3.0)).bg(theme.bg))
                 .into_any_element(),
             SendButtonMode::Send | SendButtonMode::Queue => {
@@ -8797,6 +8803,13 @@ impl Composer {
                             .hover(|s| s.opacity(0.85))
                             .on_click(cx.listener(|this, _, _, cx| this.on_submit(cx)))
                     })
+                    .tooltip(crate::settings::widgets::text_tooltip(
+                        if mode == SendButtonMode::Queue {
+                            "Queue message"
+                        } else {
+                            "Send message"
+                        },
+                    ))
                     .child(
                         crate::icons::icon(crate::icons::ARROW_UP)
                             .size(px(14.0))
@@ -9308,6 +9321,7 @@ impl Render for Composer {
             ))
             .on_hover(motion::hover_listener("composer-attach"))
             .on_click(cx.listener(|this, _, _, cx| this.open_file_picker(cx)))
+            .tooltip(crate::settings::widgets::text_tooltip("Attach images"))
             .child(
                 crate::icons::icon(crate::icons::PAPERCLIP)
                     // Its painted bounds are centered in the 24px viewbox;
