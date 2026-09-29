@@ -874,6 +874,8 @@ internal object IntegrityCheckingUniffiLib {
     ): Int
     external fun uniffi_zeron_mobile_checksum_method_coreclient_is_direct(
     ): Int
+    external fun uniffi_zeron_mobile_checksum_method_coreclient_list_agent_usage(
+    ): Int
     external fun uniffi_zeron_mobile_checksum_method_coreclient_list_drives(
     ): Int
     external fun uniffi_zeron_mobile_checksum_method_coreclient_list_folders(
@@ -1134,6 +1136,8 @@ internal object UniffiLib {
     ): Byte
     external fun uniffi_zeron_mobile_fn_method_coreclient_is_direct(`ptr`: Long,uniffi_out_err: UniffiRustCallStatus, 
     ): Byte
+    external fun uniffi_zeron_mobile_fn_method_coreclient_list_agent_usage(`ptr`: Long,`deviceId`: RustBuffer.ByValue,`force`: Byte,
+    ): Long
     external fun uniffi_zeron_mobile_fn_method_coreclient_list_drives(`ptr`: Long,`deviceId`: RustBuffer.ByValue,
     ): Long
     external fun uniffi_zeron_mobile_fn_method_coreclient_list_folders(`ptr`: Long,`deviceId`: RustBuffer.ByValue,`path`: RustBuffer.ByValue,
@@ -1668,6 +1672,9 @@ private fun uniffiCheckApiChecksums(lib: IntegrityCheckingUniffiLib) {
         throw RuntimeException("UniFFI API checksum mismatch: try cleaning and rebuilding your project")
     }
     if ((lib.uniffi_zeron_mobile_checksum_method_coreclient_is_direct() and 0xFFFF) != 38946) {
+        throw RuntimeException("UniFFI API checksum mismatch: try cleaning and rebuilding your project")
+    }
+    if ((lib.uniffi_zeron_mobile_checksum_method_coreclient_list_agent_usage() and 0xFFFF) != 60657) {
         throw RuntimeException("UniFFI API checksum mismatch: try cleaning and rebuilding your project")
     }
     if ((lib.uniffi_zeron_mobile_checksum_method_coreclient_list_drives() and 0xFFFF) != 863) {
@@ -2930,6 +2937,12 @@ public interface CoreClientInterface {
     fun `isDirect`(): kotlin.Boolean
     
     /**
+     * Plan / rate-limit usage of the agent logins on a device. `force`
+     * re-probes the providers; otherwise the host's last probe is served.
+     */
+    suspend fun `listAgentUsage`(`deviceId`: kotlin.String, `force`: kotlin.Boolean): List<AgentUsage>
+    
+    /**
      * Drives / volumes to browse beyond home (empty on older engines).
      */
     suspend fun `listDrives`(`deviceId`: kotlin.String): List<DriveEntry>
@@ -3540,6 +3553,33 @@ open class CoreClient: Disposable, AutoCloseable, CoreClientInterface
     )
     }
     
+
+    
+    /**
+     * Plan / rate-limit usage of the agent logins on a device. `force`
+     * re-probes the providers; otherwise the host's last probe is served.
+     */
+    @Throws(CoreException::class)
+    @Suppress("ASSIGNED_BUT_NEVER_ACCESSED_VARIABLE")
+    override suspend fun `listAgentUsage`(`deviceId`: kotlin.String, `force`: kotlin.Boolean) : List<AgentUsage> {
+        return uniffiRustCallAsync(
+        callWithHandle { uniffiHandle ->
+            UniffiLib.uniffi_zeron_mobile_fn_method_coreclient_list_agent_usage(
+                uniffiHandle,
+                
+        FfiConverterString.lower(`deviceId`),
+        FfiConverterBoolean.lower(`force`),
+            )
+        },
+        { future, callback, continuation -> UniffiLib.ffi_zeron_mobile_rust_future_poll_rust_buffer(future, callback, continuation) },
+        { future, continuation -> UniffiLib.ffi_zeron_mobile_rust_future_complete_rust_buffer(future, continuation) },
+        { future -> UniffiLib.ffi_zeron_mobile_rust_future_free_rust_buffer(future) },
+        // lift function
+        { FfiConverterSequenceTypeAgentUsage.lift(it) },
+        // Error FFI converter
+        CoreException.ErrorHandler,
+    )
+    }
 
     
     /**
@@ -7200,6 +7240,72 @@ public object FfiConverterTypeUploadProgress: FfiConverter<UploadProgress, Long>
 
 
 
+/**
+ * One agent login's plan usage on a host (ListAgentAccounts), meters only.
+ */
+data class AgentUsage (
+    var `harness`: kotlin.String
+    , 
+    var `email`: kotlin.String?
+    , 
+    var `planLabel`: kotlin.String?
+    , 
+    var `active`: kotlin.Boolean
+    , 
+    var `windows`: List<UsageWindow>
+    , 
+    var `fetchedAtMs`: kotlin.Long?
+    , 
+    var `error`: kotlin.String?
+    
+){
+    
+
+    
+
+    
+    companion object
+}
+
+/**
+ * @suppress
+ */
+public object FfiConverterTypeAgentUsage: FfiConverterRustBuffer<AgentUsage> {
+    override fun read(buf: ByteBuffer): AgentUsage {
+        return AgentUsage(
+            FfiConverterString.read(buf),
+            FfiConverterOptionalString.read(buf),
+            FfiConverterOptionalString.read(buf),
+            FfiConverterBoolean.read(buf),
+            FfiConverterSequenceTypeUsageWindow.read(buf),
+            FfiConverterOptionalLong.read(buf),
+            FfiConverterOptionalString.read(buf),
+        )
+    }
+
+    override fun allocationSize(value: AgentUsage) = (
+            FfiConverterString.allocationSize(value.`harness`) +
+            FfiConverterOptionalString.allocationSize(value.`email`) +
+            FfiConverterOptionalString.allocationSize(value.`planLabel`) +
+            FfiConverterBoolean.allocationSize(value.`active`) +
+            FfiConverterSequenceTypeUsageWindow.allocationSize(value.`windows`) +
+            FfiConverterOptionalLong.allocationSize(value.`fetchedAtMs`) +
+            FfiConverterOptionalString.allocationSize(value.`error`)
+    )
+
+    override fun write(value: AgentUsage, buf: ByteBuffer) {
+            FfiConverterString.write(value.`harness`, buf)
+            FfiConverterOptionalString.write(value.`email`, buf)
+            FfiConverterOptionalString.write(value.`planLabel`, buf)
+            FfiConverterBoolean.write(value.`active`, buf)
+            FfiConverterSequenceTypeUsageWindow.write(value.`windows`, buf)
+            FfiConverterOptionalLong.write(value.`fetchedAtMs`, buf)
+            FfiConverterOptionalString.write(value.`error`, buf)
+    }
+}
+
+
+
 data class AppshotLabel (
     var `appName`: kotlin.String
     , 
@@ -10767,6 +10873,52 @@ public object FfiConverterTypeTranscriptStatus: FfiConverterRustBuffer<Transcrip
             FfiConverterBoolean.write(value.`working`, buf)
             FfiConverterOptionalLong.write(value.`workingSinceMs`, buf)
             FfiConverterOptionalString.write(value.`lastEntryId`, buf)
+    }
+}
+
+
+
+/**
+ * A rate-limit window ("5-hour", "Weekly", …); `used_fraction` is 0…1.
+ */
+data class UsageWindow (
+    var `label`: kotlin.String
+    , 
+    var `usedFraction`: kotlin.Float
+    , 
+    var `resetsAtMs`: kotlin.Long?
+    
+){
+    
+
+    
+
+    
+    companion object
+}
+
+/**
+ * @suppress
+ */
+public object FfiConverterTypeUsageWindow: FfiConverterRustBuffer<UsageWindow> {
+    override fun read(buf: ByteBuffer): UsageWindow {
+        return UsageWindow(
+            FfiConverterString.read(buf),
+            FfiConverterFloat.read(buf),
+            FfiConverterOptionalLong.read(buf),
+        )
+    }
+
+    override fun allocationSize(value: UsageWindow) = (
+            FfiConverterString.allocationSize(value.`label`) +
+            FfiConverterFloat.allocationSize(value.`usedFraction`) +
+            FfiConverterOptionalLong.allocationSize(value.`resetsAtMs`)
+    )
+
+    override fun write(value: UsageWindow, buf: ByteBuffer) {
+            FfiConverterString.write(value.`label`, buf)
+            FfiConverterFloat.write(value.`usedFraction`, buf)
+            FfiConverterOptionalLong.write(value.`resetsAtMs`, buf)
     }
 }
 
@@ -14754,6 +14906,34 @@ public object FfiConverterSequenceString: FfiConverterRustBuffer<List<kotlin.Str
 /**
  * @suppress
  */
+public object FfiConverterSequenceTypeAgentUsage: FfiConverterRustBuffer<List<AgentUsage>> {
+    override fun read(buf: ByteBuffer): List<AgentUsage> {
+        val len = buf.getInt()
+        return List<AgentUsage>(len) {
+            FfiConverterTypeAgentUsage.read(buf)
+        }
+    }
+
+    override fun allocationSize(value: List<AgentUsage>): ULong {
+        val sizeForLength = 4UL
+        val sizeForItems = value.map { FfiConverterTypeAgentUsage.allocationSize(it) }.sum()
+        return sizeForLength + sizeForItems
+    }
+
+    override fun write(value: List<AgentUsage>, buf: ByteBuffer) {
+        buf.putInt(value.size)
+        value.iterator().forEach {
+            FfiConverterTypeAgentUsage.write(it, buf)
+        }
+    }
+}
+
+
+
+
+/**
+ * @suppress
+ */
 public object FfiConverterSequenceTypeAuthOrg: FfiConverterRustBuffer<List<AuthOrg>> {
     override fun read(buf: ByteBuffer): List<AuthOrg> {
         val len = buf.getInt()
@@ -15528,6 +15708,34 @@ public object FfiConverterSequenceTypeTextRun: FfiConverterRustBuffer<List<TextR
         buf.putInt(value.size)
         value.iterator().forEach {
             FfiConverterTypeTextRun.write(it, buf)
+        }
+    }
+}
+
+
+
+
+/**
+ * @suppress
+ */
+public object FfiConverterSequenceTypeUsageWindow: FfiConverterRustBuffer<List<UsageWindow>> {
+    override fun read(buf: ByteBuffer): List<UsageWindow> {
+        val len = buf.getInt()
+        return List<UsageWindow>(len) {
+            FfiConverterTypeUsageWindow.read(buf)
+        }
+    }
+
+    override fun allocationSize(value: List<UsageWindow>): ULong {
+        val sizeForLength = 4UL
+        val sizeForItems = value.map { FfiConverterTypeUsageWindow.allocationSize(it) }.sum()
+        return sizeForLength + sizeForItems
+    }
+
+    override fun write(value: List<UsageWindow>, buf: ByteBuffer) {
+        buf.putInt(value.size)
+        value.iterator().forEach {
+            FfiConverterTypeUsageWindow.write(it, buf)
         }
     }
 }
