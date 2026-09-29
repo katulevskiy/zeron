@@ -16,6 +16,7 @@ import android.view.GestureDetector
 import android.view.MotionEvent
 import android.view.VelocityTracker
 import android.view.View
+import android.view.ViewConfiguration
 import android.widget.OverScroller
 import sh.zeron.android.design.FontChain
 import sh.zeron.android.design.ZeronColors
@@ -32,8 +33,10 @@ import uniffi.zeron_core.TranscriptView
 import uniffi.zeron_core.Widget
 import uniffi.zeron_core.WidgetKind
 import kotlin.math.abs
+import kotlin.math.hypot
 import kotlin.math.max
 import kotlin.math.min
+import kotlin.math.sign
 
 /**
  * Virtualized transcript. Rust publishes a [LayoutFrame]; this view paints the
@@ -54,6 +57,8 @@ class TranscriptListView(context: Context) : View(context) {
     var onDistanceFromBottom: (Float) -> Unit = {}
     var savedScroll: Float = 0f
     var onScroll: (Float) -> Unit = {}
+    /** A drag or fling started (true) or ended (false). */
+    var onScrollActive: (Boolean) -> Unit = {}
     /** Composer / chrome covering the bottom, in pixels. Last row can scroll above it. */
     var bottomInsetPx: Int = 0
     /** Header covering the top, in pixels. Resting content starts below it and can scroll under the fade. */
@@ -69,6 +74,9 @@ class TranscriptListView(context: Context) : View(context) {
     }
     private val styles = HashMap<UShort, StyleDesc>()
     private val paints = HashMap<UShort, Paint>()
+    private val boxPaint = Paint(Paint.ANTI_ALIAS_FLAG)
+    private val boxRect = RectF()
+    private val barPaint = Paint(Paint.ANTI_ALIAS_FLAG).apply { style = Paint.Style.FILL }
     private val hScroll = HashMap<String, Float>()
     private val clusterBreaks = android.icu.text.BreakIterator.getCharacterInstance()
     private val veilFrom = HashMap<ULong, Int>()
@@ -78,6 +86,13 @@ class TranscriptListView(context: Context) : View(context) {
     private var lastY = 0f
     private var lastX = 0f
     private var dragScroller: String? = null
+    private val touchSlop = ViewConfiguration.get(context).scaledTouchSlop.toFloat()
+    private var downX = 0f
+    private var downY = 0f
+    private var dragging = false
+    private var horizontal = false
+    private var downWhileFlinging = false
+    private var scrollingNow = false
     private var velocity: VelocityTracker? = null
     private val tap = GestureDetector(context, object : GestureDetector.SimpleOnGestureListener() {
         override fun onDown(e: MotionEvent): Boolean = true
@@ -95,6 +110,22 @@ class TranscriptListView(context: Context) : View(context) {
     init {
         setWillNotDraw(false)
         isFocusable = true
+    }
+
+    private val framePending = java.util.concurrent.atomic.AtomicBoolean(false)
+
+    /**
+     * Called from any thread when the engine has a new frame. A streaming turn
+     * can publish many frames between two screen refreshes; only the newest
+     * matters, so they collapse into one pass on the next vsync.
+     */
+    fun requestFrame() {
+        if (framePending.compareAndSet(false, true)) {
+            postOnAnimation {
+                framePending.set(false)
+                onFrame()
+            }
+        }
     }
 
     fun onFrame() {
@@ -214,9 +245,11 @@ class TranscriptListView(context: Context) : View(context) {
     private fun drawLayer(canvas: Canvas, display: RowDisplay, colors: ZeronColors, scroller: UInt?, hair: Float) {
         for (box in display.boxes) {
             if (box.scroller != scroller) continue
-            val paint = Paint(Paint.ANTI_ALIAS_FLAG)
+            // Reused: a new Paint (native peer) and RectF per box per frame
+            // added GC pressure while scrolling.
+            val paint = boxPaint
             val color = colors.of(box.color).toArgb()
-            val rect = RectF(box.x, box.y, box.x + box.w, box.y + box.h)
+            val rect = boxRect.apply { set(box.x, box.y, box.x + box.w, box.y + box.h) }
             when (box.style) {
                 BoxStyle.FILL -> {
                     paint.color = color
@@ -272,7 +305,6 @@ class TranscriptListView(context: Context) : View(context) {
         val start = run.start.toInt()
         val end = start + run.len.toInt()
         if (start < 0 || end > display.text.length || start > end) return
-        val slice = display.text.substring(start, end)
         val paint = (paints[run.style] ?: paints.values.firstOrNull() ?: Paint(Paint.ANTI_ALIAS_FLAG).apply { textSize = 16.5f }).also {
             it.color = colors.of(run.color).toArgb()
         }
@@ -286,17 +318,20 @@ class TranscriptListView(context: Context) : View(context) {
             paint.alpha = 255
         }
         val runStyle = styles[run.style]
-        if (runStyle != null && FontChain.isMono(runStyle.face) && FontChain.hasWide(slice)) {
-            drawMonoWide(canvas, slice, run.x, run.baseline, paint)
+        if (runStyle != null && FontChain.isMono(runStyle.face)) {
+            val slice = display.text.substring(start, end)
+            if (FontChain.hasWide(slice)) {
+                drawMonoWide(canvas, slice, run.x, run.baseline, paint)
+            } else {
+                canvas.drawText(slice, run.x, run.baseline, paint)
+            }
         } else {
-            canvas.drawText(slice, run.x, run.baseline, paint)
+            // Draw straight from the row text: no substring per run per frame.
+            canvas.drawText(display.text, start, end, run.x, run.baseline, paint)
         }
         if (run.decoration != Decoration.NONE) {
             val y = if (run.decoration == Decoration.UNDERLINE) run.baseline + 2f else run.baseline - 5f
-            val bar = Paint(Paint.ANTI_ALIAS_FLAG).apply {
-                color = paint.color
-                style = Paint.Style.FILL
-            }
+            val bar = barPaint.apply { color = paint.color }
             canvas.drawRect(run.x, y, run.x + run.width, y + max(hair, 1f / density), bar)
         }
     }
@@ -498,11 +533,23 @@ class TranscriptListView(context: Context) : View(context) {
         block(canvas, RectF(w.x + inset, w.y + inset, w.x + w.w - inset, w.y + w.h - inset))
     }
 
+    /**
+     * Touch handling, iOS-style: nothing moves until the finger passes the
+     * system touch slop, then the gesture locks to one axis (a code block's
+     * horizontal scroller or the transcript) for its whole length. Before this
+     * the list followed every pixel from the first touch, so a tap with a tiny
+     * wobble both nudged the list and fired the tap, and a slightly diagonal
+     * drag over a code block flipped between scrolling it and the transcript.
+     * A touch that lands while the list is still flinging only stops it.
+     */
     override fun onTouchEvent(event: MotionEvent): Boolean {
-        tap.onTouchEvent(event)
         when (event.actionMasked) {
             MotionEvent.ACTION_DOWN -> {
                 tracking = true
+                dragging = false
+                downWhileFlinging = !scroller.isFinished
+                downX = event.x
+                downY = event.y
                 lastX = event.x
                 lastY = event.y
                 dragScroller = scrollerAt(event.x, event.y)
@@ -511,13 +558,29 @@ class TranscriptListView(context: Context) : View(context) {
                 velocity = VelocityTracker.obtain()
                 velocity?.addMovement(event)
                 parent.requestDisallowInterceptTouchEvent(true)
+                if (!downWhileFlinging) tap.onTouchEvent(event)
             }
             MotionEvent.ACTION_MOVE -> {
                 velocity?.addMovement(event)
+                if (!dragging) {
+                    val tdx = event.x - downX
+                    val tdy = event.y - downY
+                    if (hypot(tdx, tdy) <= touchSlop) {
+                        if (!downWhileFlinging) tap.onTouchEvent(event)
+                        return true
+                    }
+                    dragging = true
+                    horizontal = dragScroller != null && abs(tdx) > abs(tdy)
+                    // Start from the slop edge so the content does not jump.
+                    lastX = if (horizontal) downX + sign(tdx) * touchSlop else event.x
+                    lastY = if (horizontal) event.y else downY + sign(tdy) * touchSlop
+                    cancelTap(event)
+                    setScrolling(true)
+                }
                 val dx = event.x - lastX
                 val dy = event.y - lastY
                 val sc = dragScroller
-                if (sc != null && abs(dx) > abs(dy)) {
+                if (horizontal && sc != null) {
                     val max = maxScroll(sc)
                     hScroll[sc] = ((hScroll[sc] ?: 0f) - dx / density).coerceIn(0f, max)
                     invalidate()
@@ -532,17 +595,39 @@ class TranscriptListView(context: Context) : View(context) {
                 velocity?.addMovement(event)
                 velocity?.computeCurrentVelocity(1000)
                 val vy = velocity?.yVelocity ?: 0f
-                if (dragScroller == null && abs(vy) > 80f) {
+                var flinging = false
+                if (dragging && !horizontal && event.actionMasked == MotionEvent.ACTION_UP && abs(vy) > 80f) {
                     scroller.fling(0, scroll.toInt(), 0, (-vy).toInt(), 0, 0, 0, maxScrollPx(), 0, height / 4)
                     postInvalidateOnAnimation()
+                    flinging = true
                 }
+                // A touch that ends away from where it began is never a tap,
+                // even if its move events were merged away.
+                val stayed = hypot(event.x - downX, event.y - downY) <= touchSlop
+                if (!dragging && !downWhileFlinging && stayed) tap.onTouchEvent(event) else cancelTap(event)
+                if (!flinging) setScrolling(false)
                 tracking = false
+                dragging = false
                 dragScroller = null
                 velocity?.recycle()
                 velocity = null
             }
+            else -> if (!dragging && !downWhileFlinging) tap.onTouchEvent(event)
         }
         return true
+    }
+
+    private fun cancelTap(event: MotionEvent) {
+        val cancel = MotionEvent.obtain(event)
+        cancel.action = MotionEvent.ACTION_CANCEL
+        tap.onTouchEvent(cancel)
+        cancel.recycle()
+    }
+
+    private fun setScrolling(active: Boolean) {
+        if (active == scrollingNow) return
+        scrollingNow = active
+        onScrollActive(active)
     }
 
     override fun computeScroll() {
@@ -553,6 +638,8 @@ class TranscriptListView(context: Context) : View(context) {
             onDistanceFromBottom(maxScroll - scroll)
             onScroll(scroll)
             postInvalidateOnAnimation()
+        } else if (scrollingNow && !tracking) {
+            setScrolling(false)
         }
     }
 

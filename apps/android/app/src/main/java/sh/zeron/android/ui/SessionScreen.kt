@@ -151,7 +151,9 @@ fun SessionScreen(model: ZeronModel, chatId: String) {
     }
     val images = remember { HashMap<String, Bitmap>() }
     var view by remember { mutableStateOf<TranscriptListView?>(null) }
-    var distance by remember { mutableStateOf(0f) }
+    // Only whether the jump-to-bottom button shows, not the raw distance: a
+    // state write per scrolled pixel recomposed the whole chat screen.
+    var awayFromBottom by remember { mutableStateOf(false) }
     var draft by remember(chatId) { mutableStateOf("") }
     var focused by remember { mutableStateOf(false) }
     var staged by remember { mutableStateOf(listOf<Staged>()) }
@@ -173,6 +175,7 @@ fun SessionScreen(model: ZeronModel, chatId: String) {
     }
     DisposableEffect(chatId) {
         onDispose {
+            model.scrolling = false
             runCatching { handle.setViewAttached(false) }
             runCatching { engine.closeEngine() }
             runCatching { engine.close() }
@@ -191,7 +194,7 @@ fun SessionScreen(model: ZeronModel, chatId: String) {
                     created.faces = model.faces
                     created.colors = colors
                     view = created
-                    relay.onReady = { created.post { created.onFrame() } }
+                    relay.onReady = { created.requestFrame() }
                     created.post { created.onFrame() }
                 }
             },
@@ -227,8 +230,12 @@ fun SessionScreen(model: ZeronModel, chatId: String) {
                         host.postInvalidate()
                     }
                 }
-                host.onDistanceFromBottom = { distance = it }
-                relay.onReady = { host.post { host.onFrame() } }
+                host.onDistanceFromBottom = { d ->
+                    val away = d > 140f
+                    if (away != awayFromBottom) awayFromBottom = away
+                }
+                host.onScrollActive = { model.scrolling = it }
+                relay.onReady = { host.requestFrame() }
             },
         )
         val density = LocalDensity.current
@@ -302,7 +309,7 @@ fun SessionScreen(model: ZeronModel, chatId: String) {
         Column(
             Modifier.align(Alignment.BottomCenter).widthIn(max = 768.dp).fillMaxWidth().padding(horizontal = 16.dp).windowInsetsPadding(WindowInsets.ime.union(WindowInsets.navigationBars)).padding(bottom = 6.dp).onSizeChanged { composerHeight = it.height },
         ) {
-            if (distance > 140f) {
+            if (awayFromBottom) {
                 Row(Modifier.fillMaxWidth(), horizontalArrangement = Arrangement.End) {
                     Box(
                         Modifier.size(40.dp).glassSurface(colors, 20.dp).clickable { view?.jumpToBottom() },
