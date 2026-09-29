@@ -4,7 +4,9 @@
 
 use std::sync::Arc;
 
-pub use zeron_proto::{FolderEntry, FolderListing, RepoRef, WorktreeSpec};
+pub use zeron_proto::{
+    DriveEntry, DriveListing, FolderEntry, FolderListing, RepoRef, WorktreeSpec,
+};
 
 /// Engine capability strings a device row advertises (`Device::capabilities`).
 /// Capabilities, not semver: a personal integration build can share an

@@ -1454,6 +1454,31 @@ impl Client {
         }
     }
 
+    /// Browse roots beyond home on a device: drive letters on Windows,
+    /// mounted volumes elsewhere (host `ListDrives`). Engines that predate
+    /// it answer `Unsupported`; callers then offer home only.
+    pub async fn list_drives(&self, device_id: &str) -> Result<Vec<crate::rpc::DriveEntry>> {
+        match self.inner.backend() {
+            Backend::Demo(_) => Ok(vec![crate::rpc::DriveEntry {
+                name: "System".into(),
+                path: "/".into(),
+            }]),
+            Backend::Live(_) | Backend::Direct(_) => {
+                let value = self
+                    .inner
+                    .host_rpc(
+                        device_id,
+                        zeron_rpc::methods::LIST_DRIVES,
+                        serde_json::json!({}),
+                    )
+                    .await?;
+                serde_json::from_value::<crate::rpc::DriveListing>(value)
+                    .map(|l| l.drives)
+                    .map_err(|e| ClientError::HostError(e.to_string()))
+            }
+        }
+    }
+
     /// `git checkout <ref>` in `repo_path` on the device.
     pub async fn switch_ref(&self, device_id: &str, repo_path: &str, ref_name: &str) -> Result<()> {
         match self.inner.backend() {

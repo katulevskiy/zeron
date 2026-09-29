@@ -444,6 +444,18 @@ impl CoreClient {
         )
     }
 
+    /// Drives / volumes to browse beyond home (empty on older engines).
+    pub async fn list_drives(&self, device_id: String) -> CoreResult<Vec<DriveEntry>> {
+        let client = self.client.clone();
+        Ok(
+            on_runtime(async move { client.list_drives(&device_id).await })
+                .await?
+                .into_iter()
+                .map(Into::into)
+                .collect(),
+        )
+    }
+
     /// `git checkout <ref>` in `repo_path` on the device.
     pub async fn switch_ref(
         &self,

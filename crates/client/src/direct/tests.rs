@@ -79,6 +79,11 @@ impl RpcService for Engine {
         if method == "EngineInfo" {
             return Ok(RpcReply::Value(fixture("EngineInfo")));
         }
+        if method == "ListDrives" {
+            return Ok(RpcReply::Value(serde_json::json!({
+                "drives": [{ "name": "C:", "path": "C:\\" }, { "name": "D:", "path": "D:\\" }]
+            })));
+        }
         if !matches!(
             method,
             "WatchDevices" | "WatchSpaces" | "WatchChats" | "WatchSessions"
@@ -414,13 +419,46 @@ async fn direct_pins_are_phone_only_and_start_empty() {
     let id = ws.front.recent[0].id.clone();
     assert!(!ws.session(&id).unwrap().pinned);
     client.pin_session(&id).unwrap();
-    wait_for(&client, "pinned", |c| c.workspace().session(&id).is_some_and(|r| r.pinned)).await;
-    let other = client.workspace().front.recent.first().map(|r| r.id.clone());
+    wait_for(&client, "pinned", |c| {
+        c.workspace().session(&id).is_some_and(|r| r.pinned)
+    })
+    .await;
+    let other = client
+        .workspace()
+        .front
+        .recent
+        .first()
+        .map(|r| r.id.clone());
     if let Some(other) = other {
         assert!(!client.workspace().session(&other).unwrap().pinned);
     }
     client.unpin_session(&id).unwrap();
-    wait_for(&client, "unpinned", |c| c.workspace().session(&id).is_some_and(|r| !r.pinned)).await;
+    wait_for(&client, "unpinned", |c| {
+        c.workspace().session(&id).is_some_and(|r| !r.pinned)
+    })
+    .await;
     assert!(client.workspace().front.pinned.is_empty());
+    client.shutdown();
+}
+
+#[tokio::test(flavor = "multi_thread")]
+async fn lists_windows_drives_over_the_direct_link() {
+    start_engine("drives.test", Mode::Real).await;
+    let dir = tempfile::tempdir().unwrap();
+    let client = direct_client("drives.test", dir.path());
+    wait_for(&client, "live", |c| {
+        c.direct_status()
+            .is_some_and(|s| s.phase == DirectPhase::Live)
+    })
+    .await;
+    let device = client.workspace().devices[0].id.clone();
+    let drives = client.list_drives(&device).await.unwrap();
+    let paths: Vec<&str> = drives.iter().map(|d| d.path.as_str()).collect();
+    assert_eq!(paths, ["C:\\", "D:\\"]);
+    // Methods the engine lacks surface as Unsupported, not a dead link.
+    assert!(matches!(
+        client.list_folders(&device, None).await,
+        Err(crate::ClientError::Unsupported(_))
+    ));
     client.shutdown();
 }

@@ -1024,6 +1024,22 @@ impl From<zc::rpc::FolderListing> for FolderListing {
     }
 }
 
+/// A browse root beyond home (a Windows drive letter, a mounted volume).
+#[derive(Debug, Clone, PartialEq, Eq, uniffi::Record)]
+pub struct DriveEntry {
+    pub name: String,
+    pub path: String,
+}
+
+impl From<zc::rpc::DriveEntry> for DriveEntry {
+    fn from(d: zc::rpc::DriveEntry) -> Self {
+        Self {
+            name: d.name,
+            path: d.path,
+        }
+    }
+}
+
 // ── attachments ───────────────────────────────────────────────────────────
 
 #[derive(Debug, Clone, PartialEq, Eq, uniffi::Record)]
