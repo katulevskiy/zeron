@@ -47,7 +47,10 @@ import androidx.compose.ui.focus.FocusRequester
 import androidx.compose.ui.text.style.TextAlign
 import androidx.compose.ui.unit.dp
 import kotlinx.coroutines.launch
+import sh.zeron.android.core.AppMode
 import sh.zeron.android.core.AppModel
+import sh.zeron.android.core.PhoneEngine
+import sh.zeron.android.core.userMessage
 import sh.zeron.android.design.HarnessMark
 import sh.zeron.android.design.ZIcon
 import sh.zeron.android.design.ZIcons
@@ -87,6 +90,9 @@ fun NewSessionScreen(model: AppModel, onClose: () -> Unit, onCreated: (String) -
     val hosts = workspace?.devices.orEmpty().filter { it.isExecutionHost }
     val project = projects.firstOrNull { it.id == draft.projectId }
     LaunchedEffect(workspace) {
+        // A remembered project or host from before a reset (or another mode) is gone.
+        if (workspace != null && draft.projectId != null && projects.none { it.id == draft.projectId }) draft = draft.copy(projectId = null)
+        if (workspace != null && draft.hostId != null && hosts.none { it.id == draft.hostId }) draft = draft.copy(hostId = null)
         if (draft.projectId == null && draft.hostId == null) {
             draft = draft.copy(projectId = (projects.firstOrNull { it.deviceOnline } ?: projects.firstOrNull())?.id)
         }
@@ -109,12 +115,25 @@ fun NewSessionScreen(model: AppModel, onClose: () -> Unit, onCreated: (String) -
         if (fresh.isNotEmpty()) {
             modelCache[deviceId] = fresh
             models = fresh
+            // The live list holds only harnesses installed on this device: a
+            // fresh phone engine may have OpenCode but not the Claude Code
+            // default, and sending to a missing harness just fails the turn.
+            if (fresh.none { it.harness == draft.harness }) {
+                val first = fresh.first()
+                draft = draft.copy(harness = first.harness, model = first.model.id, effort = null)
+            }
         }
     }
     val choice = models.firstOrNull { it.harness == draft.harness && it.model.id == draft.model }
         ?: models.firstOrNull { it.harness == draft.harness }
 
     LaunchedEffect(Unit) { focus.requestFocus() }
+
+    // New projects: cloned (or, on this phone, created empty) on the draft's device.
+    val mode by model.mode.collectAsState()
+    val phone = mode == AppMode.Phone
+    var adding by remember { mutableStateOf<ProjectSource?>(null) }
+    val targetDevice = deviceId.ifEmpty { hosts.firstOrNull { it.online }?.id ?: hosts.firstOrNull()?.id.orEmpty() }
 
     fun create() {
         model.lastDraft = draft
@@ -177,7 +196,13 @@ fun NewSessionScreen(model: AppModel, onClose: () -> Unit, onCreated: (String) -
                     .widthIn(max = 768.dp)
                     .onGloballyPositioned { composerBounds = it.boundsInRoot() },
             ) {
-                ProjectChip(draft, projects, onPick = { draft = it })
+                ProjectChip(
+                    draft,
+                    projects,
+                    onPick = { draft = it },
+                    onAdd = if (mode == AppMode.Demo || targetDevice.isEmpty()) null else { source -> adding = source },
+                    phone = phone,
+                )
                 if (project != null) {
                     if (project.gitDetected) BranchChip(model, draft, project.deviceId, project.path) { draft = it }
                 } else {
@@ -192,7 +217,92 @@ fun NewSessionScreen(model: AppModel, onClose: () -> Unit, onCreated: (String) -
             }
         }
     }
+    adding?.let { source ->
+        NewProjectDialog(source, phone, onDismiss = { adding = null }) { input ->
+            val result = when (source) {
+                ProjectSource.Clone -> model.cloneRepo(targetDevice, input)
+                ProjectSource.Empty -> model.newPhoneProject(targetDevice, input)
+            }
+            result.onSuccess { id ->
+                adding = null
+                draft = draft.copy(projectId = id, hostId = null, branch = null)
+            }.exceptionOrNull()?.userMessage()
+        }
+    }
 }
+}
+
+private enum class ProjectSource { Clone, Empty }
+
+/**
+ * Clone a repository (on this phone: `git clone` in the guest, into
+ * /home/zeron/projects) or start an empty one, then make it a project.
+ * `submit` returns an error to show, or null once it's done.
+ */
+@Composable
+private fun NewProjectDialog(source: ProjectSource, phone: Boolean, onDismiss: () -> Unit, submit: suspend (String) -> String?) {
+    var text by remember { mutableStateOf("") }
+    var busy by remember { mutableStateOf(false) }
+    var error by remember { mutableStateOf<String?>(null) }
+    val scope = rememberCoroutineScope()
+    val clone = source == ProjectSource.Clone
+    val valid = if (clone) PhoneEngine.repoName(text) != null else PhoneEngine.folderName(text) != null
+    fun go() {
+        if (!valid || busy) return
+        busy = true
+        error = null
+        scope.launch {
+            error = submit(text.trim())
+            busy = false
+        }
+    }
+    androidx.compose.material3.AlertDialog(
+        onDismissRequest = { if (!busy) onDismiss() },
+        icon = { ZIcon(if (clone) ZIcons.Branch else ZIcons.Folder, null) },
+        title = { Text(if (clone) "Clone a repository" else "New project") },
+        text = {
+            Column {
+                Text(
+                    when {
+                        clone && phone -> "Cloned into ${PhoneEngine.PROJECTS_ROOT} on this phone."
+                        clone -> "Cloned by the device's engine."
+                        else -> "An empty git repository in ${PhoneEngine.PROJECTS_ROOT}."
+                    },
+                    style = MaterialTheme.typography.bodyMedium,
+                    color = MaterialTheme.colorScheme.onSurfaceVariant,
+                )
+                Spacer(Modifier.height(12.dp))
+                androidx.compose.material3.OutlinedTextField(
+                    text,
+                    {
+                        text = it
+                        error = null
+                    },
+                    placeholder = { Text(if (clone) "https://github.com/org/repo.git" else "my-app") },
+                    singleLine = true,
+                    enabled = !busy,
+                    isError = error != null,
+                    supportingText = error?.let { { Text(it) } },
+                    shape = androidx.compose.foundation.shape.RoundedCornerShape(16.dp),
+                    textStyle = MaterialTheme.typography.bodyLarge.copy(fontFamily = sh.zeron.android.design.GeistMono),
+                    keyboardOptions = androidx.compose.foundation.text.KeyboardOptions(
+                        keyboardType = if (clone) androidx.compose.ui.text.input.KeyboardType.Uri else androidx.compose.ui.text.input.KeyboardType.Text,
+                        imeAction = androidx.compose.ui.text.input.ImeAction.Go,
+                    ),
+                    keyboardActions = androidx.compose.foundation.text.KeyboardActions(onGo = { go() }),
+                    modifier = Modifier.fillMaxWidth(),
+                )
+                if (busy) {
+                    Spacer(Modifier.height(8.dp))
+                    androidx.compose.material3.LinearWavyProgressIndicator(Modifier.fillMaxWidth())
+                }
+            }
+        },
+        confirmButton = {
+            androidx.compose.material3.TextButton(onClick = ::go, enabled = valid && !busy) { Text(if (clone) "Clone" else "Create") }
+        },
+        dismissButton = { androidx.compose.material3.TextButton(onClick = onDismiss, enabled = !busy) { Text("Cancel") } },
+    )
 }
 
 @Composable
@@ -200,6 +310,8 @@ private fun ProjectChip(
     draft: sh.zeron.android.core.NewSessionDraft,
     projects: List<uniffi.zeron_core.ProjectView>,
     onPick: (sh.zeron.android.core.NewSessionDraft) -> Unit,
+    onAdd: ((ProjectSource) -> Unit)?,
+    phone: Boolean,
 ) {
     var open by remember { mutableStateOf(false) }
     val project = projects.firstOrNull { it.id == draft.projectId }
@@ -211,9 +323,17 @@ private fun ProjectChip(
         },
         onClick = { open = true },
     )
-    if (open) ProjectSheet(draft, projects, onDismiss = { open = false }) {
-        onPick(it)
-        open = false
+    if (open) {
+        ProjectSheet(
+            draft,
+            projects,
+            onDismiss = { open = false },
+            onAdd = onAdd?.let { add -> { source: ProjectSource -> open = false; add(source) } },
+            phone = phone,
+        ) {
+            onPick(it)
+            open = false
+        }
     }
 }
 
@@ -223,6 +343,8 @@ private fun ProjectSheet(
     draft: sh.zeron.android.core.NewSessionDraft,
     projects: List<uniffi.zeron_core.ProjectView>,
     onDismiss: () -> Unit,
+    onAdd: ((ProjectSource) -> Unit)?,
+    phone: Boolean,
     onPick: (sh.zeron.android.core.NewSessionDraft) -> Unit,
 ) {
     val sheet = androidx.compose.material3.rememberModalBottomSheetState(skipPartiallyExpanded = true)
@@ -247,7 +369,7 @@ private fun ProjectSheet(
                         Modifier.padding(start = 24.dp, end = 24.dp, top = 16.dp, bottom = 8.dp),
                         verticalAlignment = Alignment.CenterVertically,
                     ) {
-                        ZIcon(ZIcons.Laptop, null, Modifier.size(18.dp), tint = MaterialTheme.colorScheme.onSurfaceVariant)
+                        ZIcon(if (phone) ZIcons.Phone else ZIcons.Laptop, null, Modifier.size(18.dp), tint = MaterialTheme.colorScheme.onSurfaceVariant)
                         Spacer(Modifier.size(8.dp))
                         Text(host.deviceName ?: "Host", style = MaterialTheme.typography.titleSmallEmphasized, color = MaterialTheme.colorScheme.onSurfaceVariant)
                         Spacer(Modifier.size(8.dp))
@@ -287,6 +409,35 @@ private fun ProjectSheet(
                     supporting = "Run in a host's home folder",
                     mono = false,
                 ) { onPick(draft.copy(projectId = null, hostId = draft.hostId ?: projects.firstOrNull()?.deviceId, worktree = false)) }
+            }
+            if (onAdd != null) {
+                val sources = if (phone) listOf(ProjectSource.Clone, ProjectSource.Empty) else listOf(ProjectSource.Clone)
+                item("add-title") {
+                    Text(
+                        "New project",
+                        style = MaterialTheme.typography.titleSmallEmphasized,
+                        color = MaterialTheme.colorScheme.onSurfaceVariant,
+                        modifier = Modifier.padding(start = 24.dp, top = 16.dp, bottom = 8.dp),
+                    )
+                }
+                sources.forEachIndexed { i, source ->
+                    item("add-$source") {
+                        val clone = source == ProjectSource.Clone
+                        ProjectRow(
+                            selected = false,
+                            index = i,
+                            count = sources.size,
+                            leading = { IconTile(if (clone) ZIcons.Branch else ZIcons.Plus) },
+                            title = if (clone) "Clone repository" else "Empty project",
+                            supporting = when {
+                                clone && phone -> "git clone into ${PhoneEngine.PROJECTS_ROOT}"
+                                clone -> "The device's engine clones it"
+                                else -> "A new git repository in ${PhoneEngine.PROJECTS_ROOT}"
+                            },
+                            mono = false,
+                        ) { onAdd(source) }
+                    }
+                }
             }
         }
     }

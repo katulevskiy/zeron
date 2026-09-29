@@ -121,6 +121,33 @@ pub struct EngineConfig {
     pub org_id: Option<String>,
     /// WorkOS client id — enables real auth; `None` = dev mode (bearer = `edge_token`).
     pub workos_client_id: Option<String>,
+    /// Development identity when `edge_token` is an opaque shared secret rather
+    /// than `user[@org]` (the embedded local edge, see [`Self::with_local_edge`]).
+    /// `None` = the bearer names the user, as a dev edge parses it.
+    pub dev_user_id: Option<String>,
+}
+
+/// The fixed user and org of a runtime served by an embedded local edge —
+/// the same identity `zeron-client`'s `Credentials::Local` assumes.
+pub const LOCAL_EDGE_IDENTITY: &str = "local";
+
+impl EngineConfig {
+    /// Run against an embedded local edge (docs/android.md): its loopback URL
+    /// and shared-secret bearer, in `Development` scope (no WorkOS) under the
+    /// fixed [`LOCAL_EDGE_IDENTITY`]. The identity is not derived from the
+    /// token, so rotating the secret never moves the profile's store.
+    pub fn with_local_edge(
+        mut self,
+        edge_url: impl Into<String>,
+        token: impl Into<String>,
+    ) -> Self {
+        self.edge_url = edge_url.into();
+        self.edge_token = Some(token.into());
+        self.dev_user_id = Some(LOCAL_EDGE_IDENTITY.into());
+        self.org_id = Some(LOCAL_EDGE_IDENTITY.into());
+        self.workos_client_id = None;
+        self
+    }
 }
 
 /// The assembled engine core — also constructible without the IPC server for tests
@@ -237,7 +264,7 @@ impl EngineCore {
             WorkspaceHostConfig {
                 device_id: device_id.clone(),
                 device_name: local_device_name(&device_id),
-                platform: std::env::consts::OS.to_string(),
+                platform: local_device_platform(),
                 org_id: profile.org_id().to_string(),
                 user_id: profile.user_id().to_string(),
                 edge: edge.clone(),
@@ -635,7 +662,13 @@ impl Engine {
                 .unwrap_or(27641),
         );
         if let Some(token) = &config.edge_token {
-            auth_config.dev_user_id = token.clone();
+            match &config.dev_user_id {
+                Some(user) => {
+                    auth_config.dev_user_id = user.clone();
+                    auth_config.dev_bearer = Some(token.clone());
+                }
+                None => auth_config.dev_user_id = token.clone(),
+            }
         }
         Auth::new(auth_config)
     }
@@ -1144,6 +1177,17 @@ async fn run_org_onboarding(auth: Auth) {
 }
 
 /// Best-effort human name for this device's registry row.
+/// The platform on this engine's device row: `ZERON_DEVICE_PLATFORM` when set
+/// (an engine inside the Android app's Linux guest reports `android`, not the
+/// guest's `linux`), else the OS this binary was built for.
+fn local_device_platform() -> String {
+    std::env::var("ZERON_DEVICE_PLATFORM")
+        .ok()
+        .map(|platform| platform.trim().to_string())
+        .filter(|platform| !platform.is_empty())
+        .unwrap_or_else(|| std::env::consts::OS.to_string())
+}
+
 fn local_device_name(device_id: &str) -> String {
     select_local_device_name(
         [

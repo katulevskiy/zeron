@@ -43,6 +43,7 @@ import androidx.navigation.NavHostController
 import androidx.navigation.compose.NavHost
 import androidx.navigation.compose.composable
 import androidx.navigation.compose.rememberNavController
+import sh.zeron.android.core.AppMode
 import sh.zeron.android.core.AppModel
 import sh.zeron.android.design.ZeronTheme
 
@@ -52,31 +53,50 @@ fun ZeronRoot(model: AppModel) {
     ZeronTheme(appearance) {
         Surface(Modifier.fillMaxSize(), color = MaterialTheme.colorScheme.background) {
             val client by model.client.collectAsState()
-            AnimatedContent(client != null, transitionSpec = { fadeIn() togetherWith fadeOut() }, label = "root") { signedIn ->
-                if (signedIn) MainNav(model) else SignInScreen(model)
+            val mode by model.mode.collectAsState()
+            // Phone mode without a client yet: set up / start the on-device engine.
+            val gate = when {
+                client != null -> Gate.Main
+                mode == AppMode.Phone -> Gate.PhoneSetup
+                else -> Gate.SignIn
+            }
+            AnimatedContent(gate, transitionSpec = { fadeIn() togetherWith fadeOut() }, label = "root") {
+                when (it) {
+                    Gate.Main -> MainNav(model)
+                    Gate.PhoneSetup -> PhoneSetupScreen(model)
+                    Gate.SignIn -> SignInScreen(model)
+                }
             }
         }
     }
 }
+
+private enum class Gate { Main, PhoneSetup, SignIn }
 
 object Routes {
     const val HOME = "home"
     const val CHAT = "chat/{id}"
     const val NEW = "new"
     const val SEARCH = "search"
+    const val ENGINE = "engine"
+    const val AGENTS = "agents"
     fun chat(id: String) = "chat/$id"
 }
 
 @Composable
 private fun MainNav(model: AppModel) {
     val nav = rememberNavController()
-    LaunchedEffect(Unit) {
-        when (val route = model.launch.route) {
+    val pending by model.pendingRoute.collectAsState()
+    LaunchedEffect(pending) {
+        when (val route = pending) {
             null -> Unit
             "new" -> nav.navigate(Routes.NEW)
             "search" -> nav.navigate(Routes.SEARCH)
+            "engine" -> nav.navigate(Routes.ENGINE)
+            "agents" -> nav.navigate(Routes.AGENTS)
             else -> if (route.startsWith("chat:")) nav.navigate(Routes.chat(route.removePrefix("chat:")))
         }
+        model.pendingRoute.value = null
     }
     NavHost(nav, startDestination = Routes.HOME) {
         composable(Routes.HOME) { Home(model, nav) }
@@ -93,6 +113,8 @@ private fun MainNav(model: AppModel) {
         composable(Routes.SEARCH) {
             SearchScreen(model, onBack = { nav.popBackStack() }, onOpen = { nav.navigate(Routes.chat(it)) })
         }
+        composable(Routes.ENGINE) { EngineScreen(model, onBack = { nav.popBackStack() }) }
+        composable(Routes.AGENTS) { AgentsScreen(model, onBack = { nav.popBackStack() }) }
     }
 }
 
@@ -106,7 +128,7 @@ private fun Home(model: AppModel, nav: NavHostController) {
     Box(Modifier.fillMaxSize().background(MaterialTheme.colorScheme.background)) {
         when (tab) {
             Tab.Sessions -> SessionsScreen(model, onOpen = { nav.navigate(Routes.chat(it)) })
-            Tab.Settings -> SettingsScreen(model)
+            Tab.Settings -> SettingsScreen(model, onOpen = { nav.navigate(it) })
         }
         // Floating chrome over a soft scrim: new session, then the nav capsule.
         Column(

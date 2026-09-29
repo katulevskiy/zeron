@@ -44,7 +44,9 @@ import androidx.compose.ui.semantics.Role
 import androidx.compose.ui.semantics.role
 import androidx.compose.ui.semantics.semantics
 import androidx.compose.ui.unit.dp
+import sh.zeron.android.core.AppMode
 import sh.zeron.android.core.AppModel
+import sh.zeron.android.core.PhoneEngine
 import sh.zeron.android.design.ThemeMode
 import sh.zeron.android.design.ZIcon
 import sh.zeron.android.design.ZIcons
@@ -53,8 +55,9 @@ import kotlinx.coroutines.launch
 
 @OptIn(ExperimentalMaterial3ExpressiveApi::class)
 @Composable
-fun SettingsScreen(model: AppModel) {
+fun SettingsScreen(model: AppModel, onOpen: (String) -> Unit) {
     val appearance by model.appearance.collectAsState()
+    val mode by model.mode.collectAsState()
     val workspace by model.workspace.collectAsState()
     val devices = workspace?.devices.orEmpty()
     val list = androidx.compose.foundation.lazy.rememberLazyListState()
@@ -85,6 +88,35 @@ fun SettingsScreen(model: AppModel) {
                         Text(model.accountDetail, style = MaterialTheme.typography.bodyMedium, color = MaterialTheme.colorScheme.onPrimaryContainer.copy(alpha = 0.8f))
                     }
                 }
+            }
+        }
+        section("Where agents run")
+        item { ModeSettings(model, mode) }
+        section("Agents")
+        item {
+            // The engine page exists only for this phone's engine; agents for any engine device.
+            val phone = mode == AppMode.Phone
+            val rows = if (phone) 2 else 1
+            Column(Modifier.padding(horizontal = 16.dp), verticalArrangement = Arrangement.spacedBy(ListItemDefaults.SegmentedGap)) {
+                if (phone) {
+                    val state by model.phone.state.collectAsState()
+                    SegmentedListItem(
+                        onClick = { onOpen(Routes.ENGINE) },
+                        shapes = segmentedShapes(0, rows),
+                        colors = ListItemDefaults.segmentedColors(containerColor = cardColor()),
+                        leadingContent = { IconTile(ZIcons.Terminal) },
+                        supportingContent = { Text(PhoneEngine.stateLabel(state)) },
+                        trailingContent = { ZIcon(ZIcons.ChevronRight, null, Modifier.size(20.dp)) },
+                    ) { Text("On-device engine") }
+                }
+                SegmentedListItem(
+                    onClick = { onOpen(Routes.AGENTS) },
+                    shapes = segmentedShapes(rows - 1, rows),
+                    colors = ListItemDefaults.segmentedColors(containerColor = cardColor()),
+                    leadingContent = { IconTile(ZIcons.Bot) },
+                    supportingContent = { Text("Install agents and sign in to their accounts") },
+                    trailingContent = { ZIcon(ZIcons.ChevronRight, null, Modifier.size(20.dp)) },
+                ) { Text("Coding agents") }
             }
         }
         section("Appearance")
@@ -185,7 +217,16 @@ fun SettingsScreen(model: AppModel) {
                     shapes = segmentedShapes(1, 2),
                     colors = ListItemDefaults.segmentedColors(containerColor = cardColor()),
                     leadingContent = { IconTile(ZIcons.Logout, MaterialTheme.colorScheme.errorContainer, MaterialTheme.colorScheme.onErrorContainer) },
-                ) { Text(if (model.isDemo) "Leave demo" else "Sign out", color = MaterialTheme.colorScheme.error) }
+                ) {
+                    Text(
+                        when (mode) {
+                            AppMode.Demo -> "Leave demo"
+                            AppMode.Phone -> "Leave phone mode"
+                            else -> "Sign out"
+                        },
+                        color = MaterialTheme.colorScheme.error,
+                    )
+                }
             }
         }
     }
@@ -201,6 +242,41 @@ private fun LazyListScope.section(title: String) {
             color = MaterialTheme.colorScheme.primary,
             modifier = Modifier.padding(start = 28.dp, top = 24.dp, bottom = 8.dp),
         )
+    }
+}
+
+/**
+ * The mode switch: this phone's engine, an account's computers, or the demo.
+ * Account without a stored sign-in lands on the sign-in screen.
+ */
+@Composable
+private fun ModeSettings(model: AppModel, current: AppMode?) {
+    val modes = buildList {
+        if (model.phone.isSupportedAbi) add(AppMode.Phone)
+        add(AppMode.Account)
+        add(AppMode.Demo)
+    }
+    Column(Modifier.padding(horizontal = 16.dp), verticalArrangement = Arrangement.spacedBy(ListItemDefaults.SegmentedGap)) {
+        modes.forEachIndexed { i, m ->
+            val selected = m == current
+            SegmentedListItem(
+                onClick = { model.chooseMode(m) },
+                shapes = segmentedShapes(i, modes.size),
+                colors = ListItemDefaults.segmentedColors(containerColor = if (selected) MaterialTheme.colorScheme.secondaryContainer else cardColor()),
+                leadingContent = { IconTile(m.icon()) },
+                supportingContent = { Text(m.detail()) },
+                trailingContent = if (selected) {
+                    {
+                        Box(
+                            Modifier.size(28.dp).clip(CircleShape).background(MaterialTheme.colorScheme.primary),
+                            contentAlignment = Alignment.Center,
+                        ) { ZIcon(ZIcons.Check, "Selected", Modifier.size(16.dp), tint = MaterialTheme.colorScheme.onPrimary) }
+                    }
+                } else {
+                    null
+                },
+            ) { Text(m.title()) }
+        }
     }
 }
 

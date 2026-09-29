@@ -17,6 +17,7 @@ import androidx.compose.material3.AlertDialog
 import androidx.compose.material3.Button
 import androidx.compose.material3.ButtonDefaults
 import androidx.compose.material3.ExperimentalMaterial3ExpressiveApi
+import androidx.compose.material3.FilledTonalButton
 import androidx.compose.material3.ListItem
 import androidx.compose.material3.MaterialShapes
 import androidx.compose.material3.MaterialTheme
@@ -35,7 +36,10 @@ import androidx.compose.ui.res.painterResource
 import androidx.compose.ui.text.style.TextAlign
 import androidx.compose.ui.unit.dp
 import sh.zeron.android.R
+import sh.zeron.android.core.AppMode
 import sh.zeron.android.core.AppModel
+import sh.zeron.android.design.ZIcon
+import sh.zeron.android.design.ZIcons
 
 @OptIn(ExperimentalMaterial3ExpressiveApi::class)
 @Composable
@@ -73,6 +77,19 @@ fun SignInScreen(model: AppModel) {
             contentPadding = ButtonDefaults.contentPaddingFor(ButtonDefaults.MediumContainerHeight),
         ) {
             Text("Sign in", style = ButtonDefaults.textStyleFor(ButtonDefaults.MediumContainerHeight))
+        }
+        Spacer(Modifier.height(12.dp))
+        // Or no computer at all: the engine and the agents run on this phone.
+        FilledTonalButton(
+            onClick = { model.chooseMode(AppMode.Phone) },
+            enabled = model.phone.isSupportedAbi,
+            modifier = Modifier.fillMaxWidth().heightIn(min = ButtonDefaults.MediumContainerHeight),
+            shapes = ButtonDefaults.shapes(),
+            contentPadding = ButtonDefaults.contentPaddingFor(ButtonDefaults.MediumContainerHeight),
+        ) {
+            ZIcon(ZIcons.Phone, null, Modifier.size(ButtonDefaults.iconSizeFor(ButtonDefaults.MediumContainerHeight)))
+            Spacer(Modifier.size(ButtonDefaults.iconSpacingFor(ButtonDefaults.MediumContainerHeight)))
+            Text("Run agents on this phone", style = ButtonDefaults.textStyleFor(ButtonDefaults.MediumContainerHeight))
         }
         Spacer(Modifier.height(12.dp))
         OutlinedButton(

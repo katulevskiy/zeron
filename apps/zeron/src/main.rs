@@ -203,8 +203,11 @@ fn main() -> anyhow::Result<()> {
         Some(Command::Headless) => {
             let runtime = tokio::runtime::Runtime::new()?;
             runtime.block_on(async {
-                let engine = zeron_engine::Engine::new(engine_config_from_env());
-                engine.run().await
+                let config = engine_config_from_env();
+                match local_edge_from_env()? {
+                    Some((port, token)) => headless_with_local_edge(config, port, token).await,
+                    None => zeron_engine::Engine::new(config).run().await,
+                }
             })
         }
         Some(Command::Login) => {
@@ -217,7 +220,11 @@ fn main() -> anyhow::Result<()> {
         }
         Some(Command::Status) => {
             let runtime = tokio::runtime::Runtime::new()?;
-            runtime.block_on(auth_cli::status(engine_config_from_env()))
+            let mut config = engine_config_from_env();
+            if let Some((port, token)) = local_edge_from_env()? {
+                config = config.with_local_edge(local_edge_url(port), token);
+            }
+            runtime.block_on(auth_cli::status(config))
         }
         Some(Command::Sync) => {
             let runtime = tokio::runtime::Runtime::new()?;
@@ -227,11 +234,13 @@ fn main() -> anyhow::Result<()> {
             let runtime = tokio::runtime::Runtime::new()?;
             runtime.block_on(zeron_mcp::run(zeron_mcp::McpConfig::from_env()))
         }
-        #[cfg(target_os = "linux")]
+        #[cfg(all(target_os = "linux", feature = "ui"))]
         Some(Command::Appshot) => {
             zeron_ui::appshots::request_running_appshot(&engine_config_from_env().data_dir)
                 .map_err(anyhow::Error::msg)
         }
+        #[cfg(all(target_os = "linux", not(feature = "ui")))]
+        Some(Command::Appshot) => anyhow::bail!("this build has no UI"),
         Some(Command::Update { check }) => {
             let runtime = tokio::runtime::Runtime::new()?;
             runtime.block_on(update_cli::update(&edge_url_from_env(), check))
@@ -244,6 +253,9 @@ fn main() -> anyhow::Result<()> {
             DaemonCommand::Restart => daemon::restart(),
             DaemonCommand::Status => daemon::status(),
         },
+        #[cfg(not(feature = "ui"))]
+        None => anyhow::bail!("this build has no UI; run `zeron headless`"),
+        #[cfg(feature = "ui")]
         None => {
             let edge_token = std::env::var("ZERON_EDGE_TOKEN").ok();
             // Headed: the UI probes ZERON_IPC_PORT and connects to a running
@@ -312,7 +324,62 @@ fn engine_config_from_env() -> zeron_engine::EngineConfig {
         // `workos_client_id_from_env` for the dev-mode escape hatches.
         workos_client_id: workos_client_id_from_env(&edge_token),
         edge_token,
+        dev_user_id: None,
     }
+}
+
+/// `ZERON_LOCAL_EDGE_PORT` + `ZERON_LOCAL_EDGE_TOKEN` (docs/android.md): both
+/// set embeds a local edge in `zeron headless`; neither keeps the default.
+fn local_edge_from_env() -> anyhow::Result<Option<(u16, String)>> {
+    let read = |key: &str| {
+        std::env::var(key)
+            .ok()
+            .map(|v| v.trim().to_string())
+            .filter(|v| !v.is_empty())
+    };
+    match (
+        read("ZERON_LOCAL_EDGE_PORT"),
+        read("ZERON_LOCAL_EDGE_TOKEN"),
+    ) {
+        (None, None) => Ok(None),
+        (Some(port), Some(token)) => {
+            let port = port
+                .parse()
+                .map_err(|_| anyhow::anyhow!("ZERON_LOCAL_EDGE_PORT is not a port: {port}"))?;
+            Ok(Some((port, token)))
+        }
+        _ => anyhow::bail!("ZERON_LOCAL_EDGE_PORT and ZERON_LOCAL_EDGE_TOKEN must be set together"),
+    }
+}
+
+/// The URL a local edge on `port` serves (it binds loopback only).
+fn local_edge_url(port: u16) -> String {
+    format!("http://127.0.0.1:{port}")
+}
+
+/// `zeron headless` hosting its own edge on loopback: start the local edge
+/// (state under `{data_dir}/local-edge/`), run the engine against it in
+/// `Development` scope with the shared secret as bearer, and stop the edge
+/// only after the engine has drained its last pushes into it.
+async fn headless_with_local_edge(
+    config: zeron_engine::EngineConfig,
+    port: u16,
+    token: String,
+) -> anyhow::Result<()> {
+    if zeron_rpc::ipc_token().is_none() {
+        // Loopback is shared by every app on an Android device.
+        tracing::warn!("local edge without ZERON_IPC_TOKEN: the engine's IPC port is ungated");
+    }
+    let edge = zeron_localedge::LocalEdge::start(zeron_localedge::LocalEdgeConfig {
+        data_dir: config.data_dir.join("local-edge"),
+        port,
+        token: token.clone(),
+    })
+    .await?;
+    let config = config.with_local_edge(edge.url(), token);
+    let result = zeron_engine::Engine::new(config).run().await;
+    edge.shutdown().await;
+    result
 }
 
 /// `ZERON_HARNESS` (kebab-case id) picks the default harness for chats without a
@@ -338,7 +405,9 @@ async fn sync_cli(ipc_port: u16) -> anyhow::Result<()> {
     let client = zeron_rpc::connect_ws(&format!("ws://127.0.0.1:{ipc_port}"))
         .await
         .map_err(|e| {
-            anyhow::anyhow!("no engine listening on 127.0.0.1:{ipc_port} ({e}) — is zeron running?")
+            anyhow::anyhow!(
+                "cannot reach an engine on 127.0.0.1:{ipc_port} ({e}) — is zeron running?"
+            )
         })?;
     let status = client
         .call(zeron_rpc::methods::SYNC_STATUS, serde_json::json!({}))

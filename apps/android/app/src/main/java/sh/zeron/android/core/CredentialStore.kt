@@ -34,7 +34,8 @@ class CredentialStore(context: Context) {
                 .put("access", credentials.tokens.accessToken)
                 .put("refresh", credentials.tokens.refreshToken)
             is Credentials.Dev -> JSONObject().put("kind", "dev").put("userId", credentials.userId).put("orgId", credentials.orgId)
-            is Credentials.Demo -> return
+            // The phone engine's token lives with the runtime (docs/android.md § Runtime API).
+            is Credentials.Demo, is Credentials.Local -> return
         }
         prefs.edit().putString("credentials", json.toString()).apply()
     }

@@ -15,7 +15,9 @@ import sh.zeron.android.ui.ZeronRoot
 /**
  * Launch extras mirror the iOS launch arguments, e.g.
  * `adb shell am start -n sh.zeron.android/.MainActivity --ez demo true --es route chat:chat-veil`
- * (`--es wallpaper <path>` sets the wallpaper from a file the app can read).
+ * (`--es wallpaper <path>` sets the wallpaper from a file the app can read;
+ * `--ez phone true` starts in phone mode). Session notifications reopen it
+ * with `route chat:<id>`.
  */
 class MainActivity : ComponentActivity() {
     private val model get() = (application as ZeronApplication).model
@@ -34,6 +36,7 @@ class MainActivity : ComponentActivity() {
                 huge = extras?.getBoolean("huge") == true,
                 noProjects = extras?.getBoolean("noprojects") == true,
                 signedOut = extras?.getBoolean("signedout") == true,
+                phone = extras?.getBoolean("phone") == true,
                 route = extras?.getString("route"),
                 wallpaper = extras?.getString("wallpaper"),
                 wallpaperEffect = extras?.getString("wallpaper-effect"),
@@ -50,6 +53,7 @@ class MainActivity : ComponentActivity() {
     override fun onNewIntent(intent: Intent) {
         super.onNewIntent(intent)
         handleCallback(intent)
+        intent.getStringExtra("route")?.let { model.pendingRoute.value = it }
     }
 
     private fun handleCallback(intent: Intent?) {

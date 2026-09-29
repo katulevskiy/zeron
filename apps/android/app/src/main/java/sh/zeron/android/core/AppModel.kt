@@ -19,7 +19,10 @@ import kotlinx.coroutines.flow.MutableStateFlow
 import kotlinx.coroutines.flow.SharedFlow
 import kotlinx.coroutines.flow.StateFlow
 import kotlinx.coroutines.flow.asStateFlow
+import kotlinx.coroutines.Job
 import kotlinx.coroutines.launch
+import org.json.JSONObject
+import sh.zeron.runtime.RuntimeState
 import uniffi.zeron_core.AuthCallback
 import uniffi.zeron_core.AuthOrg
 import uniffi.zeron_core.ChatConfig
@@ -28,9 +31,11 @@ import uniffi.zeron_core.ClientListener
 import uniffi.zeron_core.Connectivity
 import uniffi.zeron_core.CoreClient
 import uniffi.zeron_core.CoreConfig
+import uniffi.zeron_core.CoreException
 import uniffi.zeron_core.Credentials
 import uniffi.zeron_core.DemoFixture
 import uniffi.zeron_core.DemoOptions
+import uniffi.zeron_core.DeviceView
 import uniffi.zeron_core.NewSession
 import uniffi.zeron_core.SandboxLevel
 import uniffi.zeron_core.SendRequest
@@ -59,21 +64,43 @@ data class LaunchOptions(
     val huge: Boolean = false,
     val noProjects: Boolean = false,
     val signedOut: Boolean = false,
+    /** Start in phone mode (the on-device engine). */
+    val phone: Boolean = false,
     val route: String? = null,
     val wallpaper: String? = null,
     val wallpaperEffect: String? = null,
 )
 
+/** Where agents run: chosen on the sign-in screen, switchable in Settings. */
+enum class AppMode {
+    /** Remote control of an account's computers via the production edge. */
+    Account,
+
+    /** The on-device engine (the `:runtime` guest) over its local edge. */
+    Phone,
+
+    /** Offline dataset with a simulated host. */
+    Demo,
+}
+
 /**
- * App-wide state owner: holds the Rust [CoreClient], republishes its
- * snapshots as flows, and fans session events out to screens. Core events
- * arrive on Rust threads and hop to the main thread here.
+ * App-wide state owner: holds the Rust [CoreClient] for the current mode,
+ * republishes its snapshots as flows, and fans session events out to
+ * screens. Core events arrive on Rust threads and hop to the main thread here.
  */
 class AppModel(private val app: Application) {
     private val scope = MainScope()
     private val main = Handler(Looper.getMainLooper())
     val credentials = CredentialStore(app)
     val wallpaper = WallpaperStore(app)
+    val phone by lazy { PhoneEngine(app) }
+    val notifier by lazy { Notifier(app) }
+
+    private val _mode = MutableStateFlow<AppMode?>(null)
+    val mode: StateFlow<AppMode?> = _mode.asStateFlow()
+
+    /** A route to open once the main UI is up (`chat:<id>` from a notification). */
+    val pendingRoute = MutableStateFlow<String?>(null)
 
     private val _client = MutableStateFlow<CoreClient?>(null)
     val client: StateFlow<CoreClient?> = _client.asStateFlow()
@@ -106,22 +133,27 @@ class AppModel(private val app: Application) {
         settings.edit().putString("theme", value.mode.name).putBoolean("dynamicColor", value.dynamicColor).apply()
     }
 
-    var lastDraft: NewSessionDraft = NewSessionDraft(
-        projectId = settings.getString("draft.project", null),
-        hostId = settings.getString("draft.host", null),
-        harness = settings.getString("draft.harness", null) ?: "claude-code",
-        model = settings.getString("draft.model", null),
-        effort = settings.getString("draft.effort", null),
+    // The phone's engine has its own devices and projects: its own draft.
+    private val draftPrefix get() = if (_mode.value == AppMode.Phone) "draft.phone." else "draft."
+
+    private fun storedDraft() = NewSessionDraft(
+        projectId = settings.getString("${draftPrefix}project", null),
+        hostId = settings.getString("${draftPrefix}host", null),
+        harness = settings.getString("${draftPrefix}harness", null) ?: "claude-code",
+        model = settings.getString("${draftPrefix}model", null),
+        effort = settings.getString("${draftPrefix}effort", null),
     )
+
+    var lastDraft: NewSessionDraft = storedDraft()
         set(value) {
             field = value
-            if (!launch.demo) {
+            if (!launch.demo && _mode.value != AppMode.Demo) {
                 settings.edit()
-                    .putString("draft.project", value.projectId)
-                    .putString("draft.host", value.hostId)
-                    .putString("draft.harness", value.harness)
-                    .putString("draft.model", value.model)
-                    .putString("draft.effort", value.effort)
+                    .putString("${draftPrefix}project", value.projectId)
+                    .putString("${draftPrefix}host", value.hostId)
+                    .putString("${draftPrefix}harness", value.harness)
+                    .putString("${draftPrefix}model", value.model)
+                    .putString("${draftPrefix}effort", value.effort)
                     .apply()
             }
         }
@@ -131,6 +163,7 @@ class AppModel(private val app: Application) {
 
     val isDemo: Boolean get() = _client.value?.isDemo() == true
     private var refreshScheduled = false
+    private var foreground = false
     private var authState: String? = null
 
     private val listener = object : ClientListener {
@@ -142,7 +175,11 @@ class AppModel(private val app: Application) {
     fun boot(options: LaunchOptions) {
         launch = options
         if (_client.value != null) return
-        if (options.signedOut) credentials.clear()
+        pendingRoute.value = options.route
+        if (options.signedOut) {
+            credentials.clear()
+            settings.edit().remove("mode").apply()
+        }
         watchNetwork()
         // `wallpaper <path>` / `wallpaper none` and `wallpaper-effect <name>`:
         // set the wallpaper at launch (screenshots, tests).
@@ -155,6 +192,7 @@ class AppModel(private val app: Application) {
         val stored = credentials.stored()
         when {
             options.demo -> start(Credentials.Demo(demoOptions()))
+            options.phone || settings.getString("mode", null) == AppMode.Phone.name -> startPhone()
             stored != null -> start(stored)
         }
         // Relative times ("4m") and staleness age without events.
@@ -179,12 +217,15 @@ class AppModel(private val app: Application) {
 
     private val coreDir get() = File(app.filesDir, "core")
 
+    /** Phone mode's docs: one identity (local/local) for the life of the guest. */
+    private val phoneDir get() = File(app.filesDir, "phone")
+
     /** Local docs belong to one identity: another account starts empty. */
     private fun claimCoreDir(credentials: Credentials) {
         val owner = when (credentials) {
             is Credentials.WorkOs -> "${credentials.userId}/${credentials.orgId}"
             is Credentials.Dev -> "${credentials.userId}/${credentials.orgId}"
-            is Credentials.Demo -> return
+            is Credentials.Demo, is Credentials.Local -> return
         }
         val marker = File(coreDir, ".owner")
         if (runCatching { marker.readText() }.getOrNull() != owner) coreDir.deleteRecursively()
@@ -192,22 +233,31 @@ class AppModel(private val app: Application) {
         marker.writeText(owner)
     }
 
-    private fun start(credentials: Credentials): Boolean {
-        val demo = credentials is Credentials.Demo
-        val dir = if (demo) File(app.filesDir, "demo") else coreDir
-        if (!demo) claimCoreDir(credentials)
+    private fun start(credentials: Credentials, edge: String = edgeUrl, name: String = deviceName()): Boolean {
+        val dir = when (credentials) {
+            is Credentials.Demo -> File(app.filesDir, "demo")
+            is Credentials.Local -> phoneDir
+            else -> coreDir.also { claimCoreDir(credentials) }
+        }
         dir.mkdirs()
         val config = CoreConfig(
-            edgeUrl = edgeUrl,
+            edgeUrl = edge,
             dataDir = dir.path,
             deviceId = deviceId,
-            deviceName = deviceName(),
+            deviceName = name,
             platform = "android",
             appVersion = app.packageManager.getPackageInfo(app.packageName, 0).versionName ?: "0",
         )
         return try {
             val client = CoreClient(config, credentials, listener)
             if (credentials is Credentials.WorkOs) this.credentials.store(credentials)
+            setMode(
+                when (credentials) {
+                    is Credentials.Demo -> AppMode.Demo
+                    is Credentials.Local -> AppMode.Phone
+                    else -> AppMode.Account
+                },
+            )
             _client.value = client
             refreshWorkspace()
             client.preloadSessions()
@@ -220,6 +270,84 @@ class AppModel(private val app: Application) {
 
     fun startDemo() {
         start(Credentials.Demo(demoOptions()))
+    }
+
+    // ── modes ──────────────────────────────────────────────────────────────
+
+    /** Demo is never remembered: a relaunch returns to the last real mode. */
+    private fun setMode(mode: AppMode?) {
+        if (_mode.value == mode) return
+        _mode.value = mode
+        if (mode != AppMode.Demo) settings.edit().putString("mode", mode?.name).apply()
+        lastDraft = storedDraft()
+    }
+
+    /** Sign-in screen / Settings: switch where agents run. */
+    fun chooseMode(mode: AppMode) {
+        if (mode == _mode.value && _client.value != null) return
+        closeClient()
+        when (mode) {
+            AppMode.Demo -> startDemo()
+            AppMode.Phone -> startPhone()
+            // Signed out of the account: the sign-in screen takes over.
+            AppMode.Account -> credentials.stored()?.let { start(it) } ?: setMode(null)
+        }
+    }
+
+    private var phoneWatch: Job? = null
+    private var phoneToken: String? = null
+
+    /**
+     * Phone mode: a client exists while the on-device engine runs. A restart
+     * (Starting) keeps it — it redials on its own; a stop, reset or failure
+     * drops it so the setup screen (state, Start, the log) takes over. Launch
+     * restarts the engine unless the user stopped it.
+     */
+    private fun startPhone() {
+        setMode(AppMode.Phone)
+        if (settings.getBoolean("phoneAutostart", false) && phone.state.value == RuntimeState.Stopped) phone.start()
+        phoneWatch?.cancel()
+        phoneWatch = scope.launch {
+            phone.state.collect { state ->
+                when (state) {
+                    is RuntimeState.Running -> if (_client.value == null || phoneToken != state.edgeToken) {
+                        dropClient()
+                        phoneToken = state.edgeToken
+                        start(Credentials.Local(state.edgeToken), state.edgeUrl, state.deviceName)
+                    }
+                    RuntimeState.Stopped, RuntimeState.NotInstalled, is RuntimeState.Failed -> {
+                        phoneToken = null
+                        dropClient()
+                    }
+                    else -> Unit
+                }
+            }
+        }
+    }
+
+    /** Start the engine (the user asked): relaunches bring it back up. */
+    fun startEngine() {
+        settings.edit().putBoolean("phoneAutostart", true).apply()
+        phone.start()
+    }
+
+    fun stopEngine() {
+        settings.edit().putBoolean("phoneAutostart", false).apply()
+        phone.stop()
+    }
+
+    /**
+     * Wipe the guest and this app's copy of its sessions. Runs in the app's
+     * scope: the engine stopping swaps the screen that asked for it away.
+     */
+    fun resetEngine() {
+        settings.edit().putBoolean("phoneAutostart", false).apply()
+        if (_mode.value == AppMode.Phone) dropClient()
+        phoneToken = null
+        scope.launch {
+            phone.reset()
+            phoneDir.deleteRecursively()
+        }
     }
 
     val edgeUrl: String get() = authProductionEdgeUrl()
@@ -279,28 +407,46 @@ class AppModel(private val app: Application) {
         }
     }
 
+    /** Leave demo / sign out of the account / leave phone mode (the engine keeps running). */
     fun signOut() {
-        val wasDemo = isDemo
-        _client.value?.shutdown()
-        _client.value = null
-        _workspace.value = null
-        _connectivity.value = null
-        if (!wasDemo) {
+        val was = _mode.value
+        closeClient()
+        setMode(null)
+        if (was == AppMode.Account) {
             credentials.clear()
             coreDir.deleteRecursively()
         }
     }
 
+    private fun dropClient() {
+        _client.value?.shutdown()
+        _client.value = null
+        _workspace.value = null
+        _connectivity.value = null
+    }
+
+    private fun closeClient() {
+        phoneWatch?.cancel()
+        phoneWatch = null
+        phoneToken = null
+        dropClient()
+    }
+
     val accountName: String
         get() = when {
             isDemo -> "Demo"
+            _mode.value == AppMode.Phone -> "This phone"
             _client.value == null -> "Signed out"
             else -> credentials.profile.let { it.name ?: it.email ?: "Signed in" }
         }
 
     val accountDetail: String
-        get() = if (isDemo) "Offline demo workspace" else credentials.profile.let { p ->
-            listOfNotNull(if (p.name != null) p.email else null, p.orgName).joinToString(" · ").ifEmpty { "Zeron account" }
+        get() = when {
+            isDemo -> "Offline demo workspace"
+            _mode.value == AppMode.Phone -> "Agents run on this device"
+            else -> credentials.profile.let { p ->
+                listOfNotNull(if (p.name != null) p.email else null, p.orgName).joinToString(" · ").ifEmpty { "Zeron account" }
+            }
         }
 
     // ── events ─────────────────────────────────────────────────────────────
@@ -312,7 +458,13 @@ class AppModel(private val app: Application) {
             is ClientEvent.ComposerChanged -> _sessionEvents.tryEmit(event.chatId)
             is ClientEvent.ConnectivityChanged -> _connectivity.value = event.connectivity
             is ClientEvent.AuthRefreshed -> credentials.updateTokens(event.tokens)
-            is ClientEvent.AuthExpired -> signOut()
+            // The phone's edge never expires a token; a rejected one waits for the next engine start.
+            is ClientEvent.AuthExpired -> if (_mode.value == AppMode.Phone) {
+                phoneToken = null
+                dropClient()
+            } else {
+                signOut()
+            }
         }
     }
 
@@ -328,15 +480,20 @@ class AppModel(private val app: Application) {
 
     fun refreshWorkspace() {
         val client = _client.value ?: return
-        _workspace.value = client.workspace()
+        val previous = _workspace.value
+        val next = client.workspace()
+        _workspace.value = next
+        if (_mode.value == AppMode.Phone) notifier.onWorkspace(previous, next, foreground)
     }
 
     fun onForeground() {
+        foreground = true
         _client.value?.onForeground()
         refreshWorkspace()
     }
 
     fun onBackground() {
+        foreground = false
         _client.value?.onBackground()
     }
 
@@ -385,6 +542,43 @@ class AppModel(private val app: Application) {
 
     fun row(id: String): SessionRow? = _client.value?.sessionRow(id)
 
+    /** Devices that run agents (this phone's engine in phone mode). */
+    fun executionDevices(): List<DeviceView> = runCatching { _client.value?.executionDevices() }.getOrNull().orEmpty()
+
+    // ── host calls ─────────────────────────────────────────────────────────
+
+    /** Untyped engine RPC (harness installs, agent sign-ins). Throws on failure. */
+    suspend fun hostCall(deviceId: String, method: String, params: JSONObject = JSONObject()): Any {
+        val c = _client.value ?: throw IllegalStateException("Not connected")
+        return Agents.parse(c.hostCall(deviceId, method, params.toString()))
+    }
+
+    /**
+     * Clone a repository and make it a project. On this phone the runtime runs
+     * `git clone` into /home/zeron/projects (the engine's CloneRepo would put
+     * it under its data dir); elsewhere the device's engine clones it.
+     */
+    suspend fun cloneRepo(deviceId: String, url: String): Result<String> {
+        val path = if (_mode.value == AppMode.Phone) {
+            phone.clone(url).getOrElse { return Result.failure(it) }
+        } else {
+            runCatching {
+                val reply = hostCall(deviceId, "CloneRepo", JSONObject().put("url", url.trim())) as? JSONObject
+                reply?.optString("path")?.ifEmpty { null } ?: error("The device didn't say where it cloned to.")
+            }.getOrElse { return Result.failure(it) }
+        }
+        return createProject(deviceId, path)
+    }
+
+    /** Phone mode: an empty repository under /home/zeron/projects, as a project. */
+    suspend fun newPhoneProject(deviceId: String, name: String): Result<String> =
+        createProject(deviceId, phone.newProject(name).getOrElse { return Result.failure(it) })
+
+    private suspend fun createProject(deviceId: String, path: String): Result<String> {
+        val c = _client.value ?: return Result.failure(IllegalStateException("Not connected"))
+        return runCatching { c.createProject(deviceId, path, true) }.onSuccess { refreshWorkspace() }
+    }
+
     /** Create the chat and send its first message. */
     fun createSession(draft: NewSessionDraft, text: String, attachments: List<uniffi.zeron_core.OutgoingAttachment> = emptyList()): String? {
         val client = _client.value ?: return null
@@ -407,6 +601,24 @@ class AppModel(private val app: Application) {
             null
         }
     }
+}
+
+/** Human wording for core errors. */
+fun Throwable.userMessage(): String = when (this) {
+    is CoreException.HostUnavailable ->
+        if (Agents.isTimeout(reason)) "The device took too long to answer." else "The device isn't reachable right now."
+    is CoreException.Unsupported -> "Not supported by this device's engine."
+    is CoreException.Closed -> "Not connected."
+    // Host errors arrive as "Method: reason" — the reason is what people read.
+    is CoreException.HostException -> reason.substringAfter(": ", reason).ifBlank { "The device couldn't do that." }
+    is CoreException.NotFound -> reason
+    is CoreException.InvalidArgument -> reason
+    is CoreException.Network -> reason
+    is CoreException.Auth -> reason
+    is CoreException.Storage -> reason
+    is CoreException.NotImplemented -> reason
+    is CoreException.Internal -> reason
+    else -> message ?: "Something went wrong."
 }
 
 /** The new-session page's options (kept across launches). */

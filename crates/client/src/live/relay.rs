@@ -30,7 +30,14 @@ const DARK_AFTER_MS: i64 = 5 * 60_000;
 const LIVENESS_WARMUP_MS: i64 = 60_000;
 
 pub(crate) fn deadline(method: &str) -> Duration {
+    // Mirrors the engine's forward_deadline tiers: a vendor installer or a
+    // clone legitimately runs for minutes, and timing out here only hides a
+    // result the host still delivers.
     match method {
+        methods::INSTALL_HARNESS | methods::CLONE_REPO | methods::FETCH_ALL => {
+            Duration::from_secs(15 * 60)
+        }
+        methods::APPLY_HARNESS_UPDATE => Duration::from_secs(20 * 60),
         methods::CREATE_WORKTREE => Duration::from_secs(120),
         methods::LIST_MODELS => Duration::from_secs(100),
         methods::UPLOAD_COMMIT => Duration::from_secs(150),
@@ -363,4 +370,23 @@ fn spawn_watch(weak: Weak<ClientInner>, key: WatchKey, cancel: CancellationToken
             backoff = (backoff * 2).min(Duration::from_secs(5));
         }
     });
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    /// A vendor installer runs for minutes; a 30s client deadline reported
+    /// failure while the host was still installing (Android Agents panel).
+    #[test]
+    fn long_host_operations_outlive_the_default_deadline() {
+        for method in [
+            methods::INSTALL_HARNESS,
+            methods::CLONE_REPO,
+            methods::FETCH_ALL,
+        ] {
+            assert_eq!(deadline(method), Duration::from_secs(15 * 60), "{method}");
+        }
+        assert_eq!(deadline(methods::LIST_REFS), CALL_TIMEOUT);
+    }
 }

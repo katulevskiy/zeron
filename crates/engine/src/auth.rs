@@ -164,6 +164,10 @@ pub struct AuthConfig {
     pub workos_api_base: String,
     /// Dev-mode bearer/user id (mirrors the old `ZERON_EDGE_TOKEN` behavior).
     pub dev_user_id: String,
+    /// Dev-mode bearer when it is an opaque shared secret rather than the
+    /// user id — the embedded local edge (docs/android.md). `None` = the
+    /// bearer is `dev_user_id`.
+    pub dev_bearer: Option<String>,
     /// Loopback callback port; `None` = ephemeral.
     pub callback_port: Option<u16>,
 }
@@ -176,6 +180,7 @@ impl AuthConfig {
             workos_client_id: None,
             workos_api_base: "https://api.workos.com".into(),
             dev_user_id: "dev-user".into(),
+            dev_bearer: None,
             callback_port: None,
         }
     }
@@ -392,11 +397,15 @@ impl Auth {
 
     /// Current bearer. Network failures preserve the session and return
     /// `TemporarilyUnavailable`; only absent/revoked credentials are `SignedOut`.
-    /// Dev mode: the configured user id. WorkOS: cached access token, refreshed when
-    /// it has under 30s left.
+    /// Dev mode: the configured bearer (by default the user id). WorkOS: cached
+    /// access token, refreshed when it has under 30s left.
     pub async fn access_token(&self) -> Result<String, TokenError> {
         if self.inner.workos.is_none() {
-            return Ok(self.inner.config.dev_user_id.clone());
+            let config = &self.inner.config;
+            return Ok(config
+                .dev_bearer
+                .clone()
+                .unwrap_or_else(|| config.dev_user_id.clone()));
         }
         if let Some(entry) = &*lock(&self.inner.access)
             && entry.remaining() > TOKEN_SLACK
