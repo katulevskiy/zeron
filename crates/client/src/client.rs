@@ -1076,7 +1076,7 @@ impl Client {
         if let Some(existing) = state
             .spaces
             .iter()
-            .find(|s| s.device_id == device_id && s.path == path)
+            .find(|s| s.device_id == device_id && same_folder(&s.path, path))
         {
             return Ok(existing.id.clone());
         }
@@ -1687,4 +1687,50 @@ pub struct PushPrefs {
     pub input: bool,
     /// A run failed.
     pub failed: bool,
+}
+
+/// Whether two project paths name the same folder. Windows hosts accept
+/// either separator (real spaces carry paths like `D:\\/Work/app`) and are
+/// case-insensitive, so compare those normalized; POSIX paths only ignore a
+/// trailing slash.
+pub(crate) fn same_folder(a: &str, b: &str) -> bool {
+    fn windowsy(p: &str) -> bool {
+        let bytes = p.as_bytes();
+        (bytes.len() >= 2 && bytes[1] == b':' && bytes[0].is_ascii_alphabetic()) || p.starts_with("\\\\")
+    }
+    fn norm(p: &str) -> String {
+        if windowsy(p) {
+            let mut out = String::with_capacity(p.len());
+            for c in p.chars() {
+                let c = if c == '/' { '\\' } else { c };
+                if c == '\\' && out.ends_with('\\') && out.len() > 1 {
+                    continue;
+                }
+                out.push(c);
+            }
+            out.trim_end_matches('\\').to_lowercase()
+        } else {
+            let t = p.trim_end_matches('/');
+            if t.is_empty() { "/".into() } else { t.to_owned() }
+        }
+    }
+    a == b || norm(a) == norm(b)
+}
+
+#[cfg(test)]
+mod folder_tests {
+    use super::same_folder;
+
+    #[test]
+    fn windows_paths_match_across_separators_and_case() {
+        assert!(same_folder("D:\\/Work/Projects/app", "D:\\Work\\Projects\\app"));
+        assert!(same_folder("c:\\Users\\dev\\", "C:\\Users\\dev"));
+        assert!(!same_folder("C:\\Users\\dev", "C:\\Users\\dev2"));
+    }
+
+    #[test]
+    fn posix_paths_ignore_only_a_trailing_slash() {
+        assert!(same_folder("/home/dev/app/", "/home/dev/app"));
+        assert!(!same_folder("/home/dev/App", "/home/dev/app"));
+    }
 }
