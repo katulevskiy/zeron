@@ -128,7 +128,11 @@ fun NewProjectScreen(model: ZeronModel, initialDeviceId: String? = null, onClose
     LaunchedEffect(deviceId) {
         drives = runCatching { client.listDrives(deviceId) }.getOrDefault(emptyList())
     }
-    LaunchedEffect(deviceId, path, model.epoch) {
+    // Re-read when the host comes back online, not on every workspace tick:
+    // the epoch moves whenever any session updates, and reloading then made
+    // the list flicker and ignore taps while it was busy.
+    val online = devices.firstOrNull { it.id == deviceId }?.online
+    LaunchedEffect(deviceId, path, online) {
         busy = true
         error = null
         try {
