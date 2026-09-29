@@ -144,6 +144,8 @@ internal data class Chip(
     val prState: uniffi.zeron_core.PullRequestState? = null,
     /** Project chips show the project's tile. */
     val colorIndex: Int? = null,
+    /** Context chip past 85%: warning tint (iOS Palette.warning). */
+    val warn: Boolean = false,
 )
 
 internal enum class Delivery { Send, Queue, Steer, Interrupt }
@@ -154,6 +156,7 @@ fun SessionScreen(model: ZeronModel, chatId: String) {
     val client = model.client ?: return
     val text = model.text ?: return
     val context = LocalContext.current
+    val focusManager = androidx.compose.ui.platform.LocalFocusManager.current
     val scope = rememberCoroutineScope()
     val handle = remember(chatId) { client.openSession(chatId) }
     var chrome by remember(chatId) { mutableStateOf(handle.composer()) }
@@ -175,13 +178,24 @@ fun SessionScreen(model: ZeronModel, chatId: String) {
     // Only whether the jump-to-bottom button shows, not the raw distance: a
     // state write per scrolled pixel recomposed the whole chat screen.
     var awayFromBottom by remember { mutableStateOf(false) }
-    var draft by remember(chatId) { mutableStateOf("") }
+    // Unsent text survives leaving the chat and app restarts (iOS Drafts).
+    val drafts = remember { context.getSharedPreferences("drafts", android.content.Context.MODE_PRIVATE) }
+    var draft by remember(chatId) { mutableStateOf(drafts.getString(chatId, "") ?: "") }
+    var usageOpen by remember { mutableStateOf(false) }
+    var sendFailure by remember(chatId) { mutableStateOf<String?>(null) }
     var focused by remember { mutableStateOf(false) }
     var staged by remember { mutableStateOf(listOf<Staged>()) }
     var menu by remember { mutableStateOf(false) }
     var renaming by remember { mutableStateOf(false) }
     var renameText by remember { mutableStateOf("") }
     var editingQueue by remember { mutableStateOf<String?>(null) }
+    // The user's own draft, parked while a queued message is in the composer.
+    var stash by remember { mutableStateOf<String?>(null) }
+    LaunchedEffect(chatId, draft, editingQueue) {
+        if (editingQueue != null) return@LaunchedEffect
+        kotlinx.coroutines.delay(400)
+        drafts.edit().apply { if (draft.isBlank()) remove(chatId) else putString(chatId, draft) }.apply()
+    }
     var lightbox by remember { mutableStateOf<Bitmap?>(null) }
     var detail by remember { mutableStateOf<Pair<String, String>?>(null) }
     // Root-relative top of the composer stack and the screen height: the
@@ -246,6 +260,7 @@ fun SessionScreen(model: ZeronModel, chatId: String) {
                 }
                 host.onImage = { bmp -> lightbox = bmp }
                 host.onDetail = { title, body -> detail = title to body }
+                host.onTap = { focusManager.clearFocus() }
                 host.bottomFadePx = gapPx
                 host.bottomInsetPx = bottomInset
                 host.topInsetPx = headerPx
@@ -332,11 +347,18 @@ fun SessionScreen(model: ZeronModel, chatId: String) {
         Column(
             Modifier.align(Alignment.BottomCenter).widthIn(max = 768.dp).fillMaxWidth().padding(horizontal = 16.dp).windowInsetsPadding(WindowInsets.ime.union(WindowInsets.navigationBars)).padding(bottom = 6.dp).onGloballyPositioned { composerTop = it.boundsInRoot().top.roundToInt() },
         ) {
-            StatusLine(chrome, colors) {
-                if (chrome.sendState == SendState.FAILED) runCatching { handle.retryDelivery() }
+            StatusPill(chrome, model.connectivity, sendFailure, editingQueue != null, colors) {
+                if (editingQueue != null) {
+                    editingQueue = null
+                    draft = stash ?: ""
+                    stash = null
+                } else if (chrome.sendState == SendState.FAILED) {
+                    runCatching { handle.retryDelivery() }
+                }
             }
             if (chrome.queue.isNotEmpty()) {
-                QueueCard(chrome.queue, colors, onNow = { id -> scope.launch { runCatching { handle.sendQueuedNow(id) } } }, onRemove = { id -> scope.launch { runCatching { handle.removeQueued(id) } } }, onEdit = { item ->
+                QueueCard(chrome.queue, colors, onMove = { id, delta -> runCatching { handle.moveQueuedBy(id, delta) } }, onNow = { id -> scope.launch { runCatching { handle.sendQueuedNow(id) } } }, onRemove = { id -> scope.launch { runCatching { handle.removeQueued(id) } } }, onEdit = { item ->
+                    if (stash == null) stash = draft
                     editingQueue = item.id
                     draft = item.visibleText
                 })
@@ -351,13 +373,13 @@ fun SessionScreen(model: ZeronModel, chatId: String) {
                     colors = colors,
                     text = draft,
                     onText = { draft = it },
-                    placeholder = "Message",
+                    placeholder = if (editingQueue != null) "Edit queued message" else "Message ${row?.harness?.let { runCatching { harnessLabel(it) }.getOrNull() } ?: "the agent"}",
                     running = running,
                     canSteer = chrome.host.capabilities.midTurnSteering == true,
                     focused = focused,
                     onFocus = { focused = it },
                     chips = chipsFor(row, chrome),
-                    onChip = { chip, rect -> if (chip.id != "context") chipMenu = chip to rect },
+                    onChip = { chip, rect -> if (chip.id == "context") usageOpen = true else chipMenu = chip to rect },
                     images = staged,
                     onRemoveImage = { staged = staged.filterNot { s -> s === it } },
                     onAttach = { picker.launch("image/*") },
@@ -386,6 +408,9 @@ fun SessionScreen(model: ZeronModel, chatId: String) {
                                     }
                                 }
                                 editingQueue = null
+                                draft = stash ?: ""
+                                stash = null
+                                return@send
                             } else {
                                 handle.send(
                                     SendRequest(
@@ -398,8 +423,10 @@ fun SessionScreen(model: ZeronModel, chatId: String) {
                             }
                             draft = ""
                             staged = emptyList()
+                            sendFailure = null
                         } catch (t: Throwable) {
-                            model.showToast(t.message ?: "Couldn't send")
+                            // Kept in the pill until the next send (iOS sendFailure).
+                            sendFailure = "Couldn't send: ${t.message ?: "unknown error"}"
                         }
                     },
                     mentionSearch = { q ->
@@ -457,6 +484,7 @@ fun SessionScreen(model: ZeronModel, chatId: String) {
                             model.showToast("Transcript copied")
                         }
                     },
+                    MenuEntry("Usage", icon = { c -> GaugeGlyph(c, Modifier.size(17.dp)) }) { usageOpen = true },
                     MenuEntry("Archive", destructive = true, icon = { c -> Glyph(Glyphs.Archive, 17.dp, c) }) {
                         model.archive(chatId)
                         model.back()
@@ -464,6 +492,9 @@ fun SessionScreen(model: ZeronModel, chatId: String) {
                 ),
                 above = false,
             ) { menu = false }
+        }
+        if (usageOpen) {
+            UsageSheet(colors, client, row?.deviceId ?: chrome.host.deviceId, row?.harness, chrome.contextUsage) { usageOpen = false }
         }
         chipMenu?.let { (chip, anchor) ->
             ChipMenu(chip, anchor, row, chrome, client, chatId, colors, model) { chipMenu = null }
@@ -582,37 +613,79 @@ private fun ChipMenu(
     AnchoredMenu(colors, anchor, title, entries, loading = (chip.id == "model" || chip.id == "effort") && models == null, onDismiss = onDismiss)
 }
 
+/**
+ * iOS StatusPill: a small glass capsule above the composer with a status dot
+ * — offline, reconnecting countdown, not delivered (tap to retry), a failed
+ * send, editing a queued message (tap to cancel), upload progress.
+ */
 @Composable
-private fun StatusLine(chrome: uniffi.zeron_core.ComposerState, colors: ZeronColors, onTap: () -> Unit) {
-    val text = when {
-        chrome.sendState == SendState.FAILED -> "Not delivered — tap to retry"
-        chrome.sendState == SendState.QUEUED -> "${chrome.host.name ?: "Host"} is offline — will send when it's back"
-        chrome.queueError != null -> chrome.queueError
-        !chrome.room.connected && chrome.room.retryAtMs != null -> "Reconnecting…"
-        else -> null
-    } ?: return
-    Text(
-        text,
-        color = if (chrome.sendState == SendState.FAILED) colors.danger else colors.secondary,
-        fontFamily = ZeronType.Sans,
-        fontSize = 13.sp,
-        modifier = Modifier.padding(bottom = 6.dp, start = 8.dp).clickable(onClick = onTap),
-    )
+private fun StatusPill(
+    chrome: uniffi.zeron_core.ComposerState,
+    connectivity: uniffi.zeron_core.Connectivity?,
+    sendFailure: String?,
+    editing: Boolean,
+    colors: ZeronColors,
+    onTap: () -> Unit,
+) {
+    var now by remember { mutableStateOf(System.currentTimeMillis()) }
+    val retryAt = chrome.room.retryAtMs.takeIf { !chrome.room.connected }
+    LaunchedEffect(retryAt) {
+        while (retryAt != null) {
+            now = System.currentTimeMillis()
+            kotlinx.coroutines.delay(1000)
+        }
+    }
+    val progress = chrome.transferProgress
+    val (dot, text) = when {
+        editing -> colors.input to "Editing queued message · Tap to cancel"
+        sendFailure != null -> colors.danger to sendFailure
+        chrome.sendState == SendState.FAILED -> colors.danger to "Not delivered · Tap to retry"
+        chrome.sendState == SendState.QUEUED -> colors.tertiary to "${chrome.host.name ?: "Host"} is offline — will send when it's back"
+        progress != null && progress < 1.0 -> colors.accent to "Uploading · ${Math.round(progress * 100)}%"
+        connectivity?.state == uniffi.zeron_core.ConnectivityState.OFFLINE -> colors.tertiary to "Offline — sends are saved"
+        retryAt != null -> colors.tertiary to "Reconnecting in ${((retryAt - now) / 1000).coerceAtLeast(1)}s"
+        chrome.queueError != null -> colors.danger to chrome.queueError!!
+        else -> return
+    }
+    Row(Modifier.padding(bottom = 8.dp)) {
+        Row(
+            Modifier.height(30.dp).glassSurface(colors, 15.dp).clickable(onClick = onTap).padding(start = 11.dp, end = 12.dp),
+            verticalAlignment = Alignment.CenterVertically,
+        ) {
+            Box(Modifier.size(8.dp).clip(RoundedCornerShape(4.dp)).background(dot))
+            Spacer(Modifier.width(8.dp))
+            Text(text, color = colors.secondary, fontFamily = ZeronType.Sans, fontWeight = FontWeight.Medium, fontSize = 13.sp, maxLines = 1, overflow = TextOverflow.Ellipsis)
+        }
+    }
 }
 
 @Composable
 private fun QueueCard(
     items: List<uniffi.zeron_core.QueueItem>,
     colors: ZeronColors,
+    onMove: (String, Int) -> Unit,
     onNow: (String) -> Unit,
     onRemove: (String) -> Unit,
     onEdit: (uniffi.zeron_core.QueueItem) -> Unit,
 ) {
     Column(Modifier.fillMaxWidth().glassSurface(colors, 22.dp).padding(12.dp)) {
         Text("Queued", color = colors.secondary, fontFamily = ZeronType.Sans, fontWeight = FontWeight.Medium, fontSize = 12.sp)
-        items.forEach { item ->
+        items.forEachIndexed { index, item ->
+            // iOS QueuePanel gate labels: who holds the row, or why it waits.
+            val gate = when (val g = item.gate) {
+                is uniffi.zeron_core.QueueGate.Editing -> if (g.mine) "Editing" else "Being edited"
+                is uniffi.zeron_core.QueueGate.ReviewRequired -> "Needs review"
+                null -> if (item.actionPending) "Updating" else null
+            }
             Row(Modifier.fillMaxWidth().padding(top = 8.dp), verticalAlignment = Alignment.CenterVertically) {
-                Text(item.visibleText, color = colors.text, fontFamily = ZeronType.Sans, fontSize = 14.sp, maxLines = 2, overflow = TextOverflow.Ellipsis, modifier = Modifier.weight(1f))
+                Column(Modifier.weight(1f)) {
+                    Text(item.visibleText, color = colors.text, fontFamily = ZeronType.Sans, fontSize = 14.sp, maxLines = 2, overflow = TextOverflow.Ellipsis)
+                    if (gate != null) Text(gate, color = colors.input, fontFamily = ZeronType.Sans, fontSize = 12.sp)
+                }
+                if (items.size > 1) {
+                    Text("↑", color = if (index > 0) colors.secondary else colors.tertiary.copy(alpha = 0.4f), fontSize = 15.sp, modifier = Modifier.clickable(enabled = index > 0) { onMove(item.id, -1) }.padding(6.dp))
+                    Text("↓", color = if (index < items.size - 1) colors.secondary else colors.tertiary.copy(alpha = 0.4f), fontSize = 15.sp, modifier = Modifier.clickable(enabled = index < items.size - 1) { onMove(item.id, 1) }.padding(6.dp))
+                }
                 Text("Edit", color = colors.accent, fontSize = 13.sp, modifier = Modifier.clickable { onEdit(item) }.padding(6.dp))
                 Text("Now", color = colors.text, fontSize = 13.sp, modifier = Modifier.clickable { onNow(item.id) }.padding(6.dp))
                 Text("Remove", color = colors.danger, fontSize = 13.sp, modifier = Modifier.clickable { onRemove(item.id) }.padding(6.dp))
@@ -682,7 +755,7 @@ private fun chipsFor(row: uniffi.zeron_core.SessionRow?, chrome: uniffi.zeron_co
     val window = chrome.contextUsage?.window
     if (tokens != null && window != null && window > 0uL) {
         val fraction = tokens.toDouble() / window.toDouble()
-        if (fraction >= 0.5) chips.add(Chip("context", "${Math.round(fraction * 100)}% context"))
+        if (fraction >= 0.5) chips.add(Chip("context", "${Math.round(fraction * 100)}% context", warn = fraction >= 0.85))
     }
     return chips
 }
@@ -691,7 +764,7 @@ private fun chipsFor(row: uniffi.zeron_core.SessionRow?, chrome: uniffi.zeron_co
 private fun ChipView(chip: Chip, colors: ZeronColors, onTap: (Rect) -> Unit) {
     var bounds by remember { mutableStateOf(Rect.Zero) }
     val tone = when (chip.prState) {
-        null -> null
+        null -> if (chip.warn) colors.warning else null
         uniffi.zeron_core.PullRequestState.MERGED -> colors.accent
         uniffi.zeron_core.PullRequestState.CLOSED -> colors.danger
         else -> colors.success
@@ -714,9 +787,10 @@ private fun ChipView(chip: Chip, colors: ZeronColors, onTap: (Rect) -> Unit) {
             "effort" -> GaugeGlyph(fg, Modifier.size(13.dp))
             "pr" -> PrGlyph(fg, Modifier.size(12.dp))
             "branch" -> AssetIcon("tool-git-branch", 12.dp, fg)
+            "context" -> ContextGlyph(fg, warn = chip.warn, Modifier.size(13.dp))
             else -> Unit
         }
-        if (chip.id in setOf("project", "host", "model", "effort", "pr", "branch")) Spacer(Modifier.width(if (chip.id == "pr") 5.dp else 6.dp))
+        if (chip.id in setOf("project", "host", "model", "effort", "pr", "branch", "context")) Spacer(Modifier.width(if (chip.id == "pr") 5.dp else 6.dp))
         Text(
             chip.title,
             color = fg,
@@ -995,3 +1069,20 @@ internal fun Modifier.fadeEdges(state: androidx.compose.foundation.ScrollState, 
                 )
             }
         }
+
+/** iOS `circle.lefthalf.filled` / `exclamationmark.circle` for the context chip. */
+@Composable
+private fun ContextGlyph(color: Color, warn: Boolean, modifier: Modifier) {
+    androidx.compose.foundation.Canvas(modifier) {
+        val r = size.minDimension / 2f
+        val stroke = size.minDimension * 0.11f
+        drawCircle(color, radius = r - stroke / 2f, style = androidx.compose.ui.graphics.drawscope.Stroke(stroke))
+        if (warn) {
+            val cx = size.width / 2f
+            drawLine(color, androidx.compose.ui.geometry.Offset(cx, size.height * 0.27f), androidx.compose.ui.geometry.Offset(cx, size.height * 0.58f), strokeWidth = stroke * 1.2f, cap = androidx.compose.ui.graphics.StrokeCap.Round)
+            drawCircle(color, radius = stroke * 0.75f, center = androidx.compose.ui.geometry.Offset(cx, size.height * 0.74f))
+        } else {
+            drawArc(color, startAngle = 90f, sweepAngle = 180f, useCenter = true, topLeft = androidx.compose.ui.geometry.Offset(stroke, stroke), size = androidx.compose.ui.geometry.Size(size.width - 2 * stroke, size.height - 2 * stroke))
+        }
+    }
+}

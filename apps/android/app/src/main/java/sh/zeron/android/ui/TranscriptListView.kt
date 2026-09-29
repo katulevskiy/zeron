@@ -53,6 +53,8 @@ class TranscriptListView(context: Context) : View(context) {
     var onLink: (String) -> Unit = {}
     var onImage: (Bitmap) -> Unit = {}
     var onDetail: (String, String) -> Unit = { _, _ -> }
+    /** Any tap on the transcript (iOS puts the composer/keyboard away). */
+    var onTap: () -> Unit = {}
     var imageFor: (String) -> Bitmap? = { null }
     var requestImage: (String) -> Unit = {}
     var onDistanceFromBottom: (Float) -> Unit = {}
@@ -113,6 +115,7 @@ class TranscriptListView(context: Context) : View(context) {
     private val tap = GestureDetector(context, object : GestureDetector.SimpleOnGestureListener() {
         override fun onDown(e: MotionEvent): Boolean = true
         override fun onSingleTapUp(e: MotionEvent): Boolean {
+            onTap()
             hit(e.x, e.y)
             return true
         }
