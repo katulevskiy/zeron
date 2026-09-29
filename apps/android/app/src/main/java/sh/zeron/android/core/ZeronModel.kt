@@ -368,7 +368,11 @@ class ZeronModel(app: Application) : AndroidViewModel(app) {
                 )
                 val created = CoreClient(config, credentials, object : ClientListener {
                     override fun onEvent(event: ClientEvent) {
-                        main.post { onEvent(event) }
+                        // Must name the model's handler: a bare `onEvent(event)`
+                        // here resolves to this listener method, which re-posted
+                        // every event to the main thread forever (the main
+                        // thread spun at 100% and the UI never saw the event).
+                        main.post { handleEvent(event) }
                     }
                 })
                 created.preloadSessions()
@@ -392,7 +396,7 @@ class ZeronModel(app: Application) : AndroidViewModel(app) {
         }
     }
 
-    private fun onEvent(event: ClientEvent) {
+    private fun handleEvent(event: ClientEvent) {
         val c = client ?: return
         when (event) {
             is ClientEvent.WorkspaceChanged -> workspace = c.workspace()
@@ -449,6 +453,15 @@ class ZeronModel(app: Application) : AndroidViewModel(app) {
         prefs.edit().putString("dismissedNotice", notice).apply()
     }
 
+    private var dismissedNotice by mutableStateOf(prefs.getString("dismissedNotice", null))
+
+    fun noticeDismissed(notice: String) = dismissedNotice == notice
+
+    fun dismissNotice(notice: String) {
+        dismissedNotice = notice
+        prefs.edit().putString("dismissedNotice", notice).apply()
+    }
+
     /** Drop the current SSH link (even a stalled one) and dial again. */
     fun retryDirect() {
         val c = client ?: return
@@ -468,9 +481,11 @@ class ZeronModel(app: Application) : AndroidViewModel(app) {
             appendLine("Engine: ${s.engineVersion ?: "?"} (device ${s.engineDeviceId?.take(8) ?: "?"})")
             s.lastError?.let { appendLine("Last error: $it") }
             s.notice?.let { appendLine("Note: $it") }
+            s.notice?.let { appendLine("Note: $it") }
             for (st in s.streams) {
                 append("${st.name}: ${st.frames} frames, ${st.rows} rows")
                 if (st.skippedRows > 0u) append(", ${st.skippedRows} skipped")
+                if (st.repairedRows > 0u) append(", ${st.repairedRows} repaired")
                 if (st.repairedRows > 0u) append(", ${st.repairedRows} repaired")
                 st.error?.let { append(" — $it") }
                 appendLine()
