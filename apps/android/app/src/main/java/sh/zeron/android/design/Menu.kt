@@ -195,3 +195,34 @@ fun GaugeGlyph(color: Color, modifier: Modifier = Modifier) {
         drawCircle(color, s * 0.08f, c)
     }
 }
+
+/**
+ * [AnchoredMenu] for anchors nested inside layouts that can't host a
+ * full-screen overlay (the composer's send button): drawn in a popup window
+ * spanning the screen. [anchor] is in window coordinates. Not focusable, so
+ * an open keyboard stays up.
+ */
+@Composable
+fun PopupAnchoredMenu(
+    colors: ZeronColors,
+    anchor: Rect,
+    title: String?,
+    entries: List<MenuEntry>,
+    above: Boolean = true,
+    onDismiss: () -> Unit,
+) {
+    androidx.compose.ui.window.Popup(
+        popupPositionProvider = object : androidx.compose.ui.window.PopupPositionProvider {
+            override fun calculatePosition(
+                anchorBounds: androidx.compose.ui.unit.IntRect,
+                windowSize: androidx.compose.ui.unit.IntSize,
+                layoutDirection: androidx.compose.ui.unit.LayoutDirection,
+                popupContentSize: androidx.compose.ui.unit.IntSize,
+            ) = androidx.compose.ui.unit.IntOffset.Zero
+        },
+        onDismissRequest = onDismiss,
+        properties = androidx.compose.ui.window.PopupProperties(focusable = false, clippingEnabled = false),
+    ) {
+        AnchoredMenu(colors, anchor, title, entries, above = above, onDismiss = onDismiss)
+    }
+}
