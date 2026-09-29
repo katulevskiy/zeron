@@ -792,10 +792,11 @@ impl ChatDocHandle {
     /// since. Returns whether a seam was written.
     pub fn write_provider_switch(
         &self,
-        from: &str,
-        to: &str,
+        from: (HarnessId, &str),
+        to: (HarnessId, &str),
         created_at: i64,
     ) -> Result<bool, DocError> {
+        let ((from_id, from), (to_id, to)) = (from, to);
         let entries = self.doc.read_entries()?;
         if entries.is_empty() {
             return Ok(false);
@@ -817,6 +818,8 @@ impl ChatDocHandle {
                 id,
                 from: from.to_string(),
                 to: to.to_string(),
+                from_harness: Some(from_id.as_str().to_owned()),
+                to_harness: Some(to_id.as_str().to_owned()),
             }],
             created_at,
             device_id: self.device_id.clone(),

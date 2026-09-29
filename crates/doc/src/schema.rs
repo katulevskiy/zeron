@@ -104,6 +104,11 @@ struct DocPartJson {
     from_provider: Option<String>,
     #[serde(default, skip_serializing_if = "Option::is_none")]
     to_provider: Option<String>,
+    /// Harness slugs of the same two providers, for their logos.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    from_harness: Option<String>,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    to_harness: Option<String>,
     /// Tool output summary (additive — absent on old rows and old writers;
     /// pre-strip writers stored up to 4KB of capped output here).
     #[serde(default, skip_serializing_if = "Option::is_none")]
@@ -230,11 +235,19 @@ fn to_doc_part(part: &MessagePart) -> Result<DocPartJson, DocError> {
             source_title: Some(source_title.clone()),
             ..Default::default()
         },
-        MessagePart::Switch { id, from, to } => DocPartJson {
+        MessagePart::Switch {
+            id,
+            from,
+            to,
+            from_harness,
+            to_harness,
+        } => DocPartJson {
             id: id.clone(),
             kind: "switch".into(),
             from_provider: Some(from.clone()),
             to_provider: Some(to.clone()),
+            from_harness: from_harness.clone(),
+            to_harness: to_harness.clone(),
             ..Default::default()
         },
     })
@@ -296,6 +309,8 @@ fn from_doc_part(p: DocPartJson) -> MessagePart {
             id: p.id,
             from: p.from_provider.unwrap_or_default(),
             to: p.to_provider.unwrap_or_default(),
+            from_harness: p.from_harness,
+            to_harness: p.to_harness,
         },
         _ => MessagePart::Text {
             id: p.id,
@@ -907,6 +922,8 @@ fn push_part(parts: &LoroList, part: &MessagePart) -> Result<(), DocError> {
         ("sourceTitle", &doc_part.source_title),
         ("fromProvider", &doc_part.from_provider),
         ("toProvider", &doc_part.to_provider),
+        ("fromHarness", &doc_part.from_harness),
+        ("toHarness", &doc_part.to_harness),
     ] {
         if let Some(value) = value {
             map.insert(key, value.as_str())?;
@@ -1483,6 +1500,8 @@ mod tests {
             id: "switch:1".into(),
             from: "Claude Code".into(),
             to: "Codex".into(),
+            from_harness: Some("claude-code".into()),
+            to_harness: Some("codex".into()),
         };
         doc.push_message(&SessionMessageEntry {
             duration_ms: None,

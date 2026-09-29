@@ -255,6 +255,24 @@ async fn switching_provider_drops_the_foreign_resume_id_and_replays_the_history_
         rig.seams(),
         vec![("Claude".to_string(), "Codex".to_string())]
     );
+    // The seam names both providers by id too, for their logos.
+    let ids: Vec<_> = rig
+        .entries()
+        .iter()
+        .flat_map(|entry| entry.parts.iter())
+        .filter_map(|part| match part {
+            MessagePart::Switch {
+                from_harness,
+                to_harness,
+                ..
+            } => Some((from_harness.clone(), to_harness.clone())),
+            _ => None,
+        })
+        .collect();
+    assert_eq!(
+        ids,
+        vec![(Some("claude-code".to_string()), Some("codex".to_string()))]
+    );
     assert_eq!(
         rig.row().harness_session_id.as_deref(),
         Some("codex-session")

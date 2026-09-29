@@ -1445,7 +1445,11 @@ impl Inner {
                 .find(|d| d.id == id)
                 .map_or_else(|| id.as_str().to_owned(), |d| d.name)
         };
-        match doc.write_provider_switch(&label(previous), &label(harness_id), now_ms()) {
+        match doc.write_provider_switch(
+            (previous, &label(previous)),
+            (harness_id, &label(harness_id)),
+            now_ms(),
+        ) {
             Ok(true) => tracing::info!(
                 chat = %chat_id,
                 from = previous.as_str(),
