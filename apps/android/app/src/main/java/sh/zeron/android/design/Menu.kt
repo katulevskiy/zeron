@@ -1,5 +1,6 @@
 package sh.zeron.android.design
 
+import androidx.activity.compose.BackHandler
 import androidx.compose.foundation.Canvas
 import androidx.compose.foundation.clickable
 import androidx.compose.foundation.interaction.MutableInteractionSource
@@ -163,6 +164,9 @@ fun AnchoredMenu(
     val margin = with(density) { 12.dp.roundToPx() }
     val top = WindowInsets.statusBars.getTop(density) + with(density) { 8.dp.roundToPx() }
     val none = remember { MutableInteractionSource() }
+    // Android's Back closes the menu first (iOS has no Back; tapping outside
+    // does the same there).
+    BackHandler(onBack = onDismiss)
     BoxWithConstraints(
         Modifier
             .fillMaxSize()
