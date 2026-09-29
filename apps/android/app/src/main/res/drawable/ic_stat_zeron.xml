@@ -1,0 +1,11 @@
+<?xml version="1.0" encoding="utf-8"?>
+<!-- Status-bar glyph: the sparkle mark on a 24 grid. -->
+<vector xmlns:android="http://schemas.android.com/apk/res/android"
+    android:width="24dp"
+    android:height="24dp"
+    android:viewportWidth="24"
+    android:viewportHeight="24">
+    <path
+        android:fillColor="#FFFFFFFF"
+        android:pathData="M12,2.5l2.3,6.2L20.5,11l-6.2,2.3L12,19.5l-2.3,-6.2L3.5,11l6.2,-2.3z" />
+</vector>

@@ -41,7 +41,8 @@ pub mod workspace;
 
 pub use client::{Client, NewSession, PRELOAD_CAP, PushPrefs, SessionTarget, WARM_SESSION_CAP};
 pub use config::{
-    AuthTokens, ClientConfig, Credentials, DemoFixture, DemoOptions, StreamSpeed, TranscriptScale,
+    AuthTokens, ClientConfig, Credentials, DemoFixture, DemoOptions, LOCAL_IDENTITY, StreamSpeed,
+    TranscriptScale,
 };
 pub use connectivity::{Connectivity, ConnectivityState, SendState};
 pub use error::ClientError;

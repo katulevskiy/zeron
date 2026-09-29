@@ -1,10 +1,11 @@
 //! Edge auth — `/auth/exchange`, `/auth/orgs`, `/auth/refresh`
 //! (edge/src/auth-routes.ts), plus the per-client bearer provider.
 //!
-//! Two live modes, mirroring the engine:
+//! Three live modes, mirroring the engine:
 //! - WorkOS: paste-code exchange → access/refresh pair; a refresh scoped to an
 //!   organization adds the `org_id` claim the registry room requires.
 //! - Dev (`AUTH_MODE=dev` edge): the bearer IS `userId@orgId`.
+//! - Local (an engine's embedded local edge): the bearer is its shared secret.
 //!
 //! WorkOS refresh tokens are single-use: [`TokenProvider`] single-flights every
 //! refresh (a cold launch's N room dials used to race N refreshes with the
@@ -297,7 +298,8 @@ fn base64url_decode(input: &str) -> Option<Vec<u8>> {
 
 enum Mode {
     Demo,
-    Dev {
+    /// A fixed bearer: the dev edge's `userId@orgId`, or a local edge's secret.
+    Static {
         bearer: String,
     },
     WorkOs {
@@ -308,8 +310,8 @@ enum Mode {
     },
 }
 
-/// Per-client bearer source: dev bearer, or a WorkOS access token refreshed
-/// (single-flight) when inside the early-refresh margin.
+/// Per-client bearer source: a static (dev / local-edge) bearer, or a WorkOS
+/// access token refreshed (single-flight) when inside the early-refresh margin.
 pub(crate) struct TokenProvider {
     mode: Mode,
     events: Arc<EventPump>,
@@ -325,12 +327,15 @@ impl TokenProvider {
         use crate::config::Credentials;
         let mode = match credentials {
             Credentials::Demo(_) => Mode::Demo,
-            Credentials::Dev { user_id, org_id } => Mode::Dev {
+            Credentials::Dev { user_id, org_id } => Mode::Static {
                 bearer: if org_id.is_empty() {
                     user_id.clone()
                 } else {
                     format!("{user_id}@{org_id}")
                 },
+            },
+            Credentials::Local { token } => Mode::Static {
+                bearer: token.clone(),
             },
             Credentials::WorkOs { org_id, tokens, .. } => Mode::WorkOs {
                 edge_url: edge_url.to_owned(),
@@ -362,7 +367,7 @@ impl TokenProvider {
             Mode::Demo => Err(ClientError::Auth(
                 "demo mode has no edge credentials".into(),
             )),
-            Mode::Dev { bearer } => Ok(bearer.clone()),
+            Mode::Static { bearer } => Ok(bearer.clone()),
             Mode::WorkOs {
                 edge_url,
                 org_id,

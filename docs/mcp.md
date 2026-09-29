@@ -21,6 +21,7 @@ originating chat in the environment:
 | `ZERON_IPC_PORT`  | Engine to proxy (default 27654).                              |
 | `ZERON_CHAT_ID`   | The chat whose agent spawned this server.                     |
 | `ZERON_DEVICE_ID` | That chat's host device.                                      |
+| `ZERON_IPC_TOKEN` | The engine's IPC secret, when its port is token-gated.        |
 
 When `ZERON_CHAT_ID` is set, every `send_message` is prefixed with a
 `[Message from Zeron chat <title> (<id8>) …]` line so the receiving agent and the

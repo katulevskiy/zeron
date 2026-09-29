@@ -156,7 +156,8 @@ pub struct DeviceView {
     pub last_seen_ms: Option<i64>,
     pub version: Option<String>,
     pub capabilities: Vec<String>,
-    /// Can run sessions (desktop/server engines — not phones).
+    /// Can run sessions: an engine's row (desktop, server, or a phone running
+    /// its own engine) — never a viewer app (`Device::is_execution_host`).
     pub is_execution_host: bool,
     /// This device.
     pub is_self: bool,
@@ -324,10 +325,6 @@ pub(crate) struct DeriveContext<'a> {
 pub(crate) fn device_display_name(device: &Device) -> Option<String> {
     let name = device.name.trim();
     (!name.is_empty() && name != "unknown-device").then(|| name.to_owned())
-}
-
-fn is_execution_host(device: &Device) -> bool {
-    !matches!(device.platform.as_str(), "ios" | "android" | "ipados")
 }
 
 pub(crate) fn device_online(
@@ -694,7 +691,7 @@ pub(crate) fn derive(
                 .or_else(|| device.last_seen_at.map(|t| t.timestamp_millis())),
             version: device.version.clone(),
             capabilities: device.capabilities.clone(),
-            is_execution_host: is_execution_host(device),
+            is_execution_host: device.is_execution_host(),
             is_self: device.id == cx.self_device_id,
             session_count: active.iter().filter(|c| c.device_id == device.id).count() as u32,
         })

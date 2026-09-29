@@ -731,7 +731,7 @@ impl Client {
                     .iter()
                     .find(|d| &d.id == device_id)
                     .ok_or_else(|| ClientError::NotFound(device_id.clone()))?;
-                if matches!(host.platform.as_str(), "ios" | "android" | "ipados") {
+                if !host.is_execution_host() {
                     return Err(ClientError::InvalidArgument(
                         "that device can't host sessions".into(),
                     ));
@@ -1307,6 +1307,21 @@ impl Client {
                     .await?;
                 serde_json::from_value(value).map_err(|e| ClientError::HostError(e.to_string()))
             }
+        }
+    }
+
+    /// Untyped relay call to `device_id`'s engine, for host RPCs the typed
+    /// surface doesn't wrap (Android settings: harness installs, agent
+    /// logins). Demo mode has no generic host: `Unsupported`.
+    pub async fn host_call(
+        &self,
+        device_id: &str,
+        method: &str,
+        params: serde_json::Value,
+    ) -> Result<serde_json::Value> {
+        match self.inner.backend() {
+            Backend::Demo(_) => Err(ClientError::Unsupported(method.to_owned())),
+            Backend::Live(live) => live.relay.call(device_id, method, params).await,
         }
     }
 

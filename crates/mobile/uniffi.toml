@@ -1,0 +1,22 @@
+# UniFFI binding options (read by `uniffi-bindgen generate --library`).
+#
+# Kotlin: `CoreError` variants carry a field called `message`, which collides
+# with `Throwable.message` in the generated exception classes (Kotlin then
+# can't resolve `value.message` — uniffi-rs#1260). Rename the field on the
+# Kotlin side only; Swift keeps `message`, and the wire format is positional,
+# so nothing else changes.
+[bindings.kotlin.rename]
+"CoreError.NotFound.message" = "detail"
+"CoreError.InvalidArgument.message" = "detail"
+"CoreError.HostUnavailable.message" = "detail"
+"CoreError.Unsupported.message" = "detail"
+"CoreError.HostError.message" = "detail"
+"CoreError.Network.message" = "detail"
+"CoreError.Auth.message" = "detail"
+"CoreError.Storage.message" = "detail"
+"CoreError.NotImplemented.message" = "detail"
+"CoreError.Internal.message" = "detail"
+# `TranscriptView.close()` (stop the layout thread) collides with the
+# `AutoCloseable.close()` every generated Kotlin object has (which frees the
+# Rust handle). Kotlin calls it `shutdown()`; `close()` stays the handle free.
+"TranscriptView.close" = "shutdown"

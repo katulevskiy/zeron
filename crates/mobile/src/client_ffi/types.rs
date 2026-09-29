@@ -191,6 +191,9 @@ pub enum Credentials {
     },
     /// `AUTH_MODE=dev` edge: the bearer is `userId@orgId`.
     Dev { user_id: String, org_id: String },
+    /// The local edge of this device's own engine (Android on-device mode):
+    /// the bearer is its shared secret verbatim.
+    Local { token: String },
     /// Fully offline dataset with a simulated host.
     Demo { options: DemoOptions },
 }
@@ -208,6 +211,7 @@ impl From<Credentials> for zc::Credentials {
                 tokens: tokens.into(),
             },
             Credentials::Dev { user_id, org_id } => zc::Credentials::Dev { user_id, org_id },
+            Credentials::Local { token } => zc::Credentials::Local { token },
             Credentials::Demo { options } => zc::Credentials::Demo(options.into()),
         }
     }

@@ -63,9 +63,18 @@ pub enum Credentials {
     },
     /// `AUTH_MODE=dev` edge: the bearer is `userId@orgId`.
     Dev { user_id: String, org_id: String },
+    /// A local edge embedded in an engine on this same device (docs/android.md
+    /// — the phone's own `zeron headless`): the bearer is the shared secret
+    /// verbatim, and the identity is the fixed [`LOCAL_IDENTITY`] user and
+    /// org the engine runs under.
+    Local { token: String },
     /// Fully offline, deterministic dataset with a simulated host.
     Demo(DemoOptions),
 }
+
+/// User and org of a local-edge workspace (the engine's
+/// `LOCAL_EDGE_IDENTITY`): one tenant, so the ids are constants.
+pub const LOCAL_IDENTITY: &str = "local";
 
 impl Credentials {
     pub fn is_demo(&self) -> bool {
@@ -75,6 +84,7 @@ impl Credentials {
     pub fn org_id(&self) -> &str {
         match self {
             Credentials::WorkOs { org_id, .. } | Credentials::Dev { org_id, .. } => org_id,
+            Credentials::Local { .. } => LOCAL_IDENTITY,
             Credentials::Demo(_) => "demo",
         }
     }
@@ -82,6 +92,7 @@ impl Credentials {
     pub fn user_id(&self) -> &str {
         match self {
             Credentials::WorkOs { user_id, .. } | Credentials::Dev { user_id, .. } => user_id,
+            Credentials::Local { .. } => LOCAL_IDENTITY,
             Credentials::Demo(_) => "demo",
         }
     }
