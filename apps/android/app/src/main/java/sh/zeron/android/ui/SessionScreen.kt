@@ -53,6 +53,7 @@ import androidx.compose.ui.Modifier
 import androidx.compose.ui.draw.clip
 import androidx.compose.ui.focus.onFocusChanged
 import androidx.compose.ui.graphics.Brush
+import androidx.compose.ui.draw.drawWithContent
 import androidx.compose.ui.graphics.Color
 import androidx.compose.ui.graphics.SolidColor
 import androidx.compose.ui.graphics.asImageBitmap
@@ -842,8 +843,9 @@ internal fun ComposerBar(
                     ) {
                         PlusMark(colors.text, Modifier.size(16.dp))
                     }
+                    val chipScroll = rememberScrollState()
                     Row(
-                        Modifier.weight(1f).padding(horizontal = 8.dp).horizontalScroll(rememberScrollState()),
+                        Modifier.weight(1f).padding(horizontal = 8.dp).fadeEdges(chipScroll).horizontalScroll(chipScroll),
                         horizontalArrangement = Arrangement.spacedBy(6.dp),
                         verticalAlignment = Alignment.CenterVertically,
                     ) {
@@ -965,3 +967,31 @@ private val ChatIndicator.word: String?
         ChatIndicator.COMPLETED -> "Done"
         ChatIndicator.IDLE -> null
     }
+
+/**
+ * Soft edges on a horizontally scrolling row (like iOS's scroll edge effect):
+ * content fades out over [width] at a side only when there is more to scroll
+ * that way, instead of being cut off hard.
+ */
+internal fun Modifier.fadeEdges(state: androidx.compose.foundation.ScrollState, width: androidx.compose.ui.unit.Dp = 16.dp): Modifier =
+    this
+        .graphicsLayer { compositingStrategy = androidx.compose.ui.graphics.CompositingStrategy.Offscreen }
+        .drawWithContent {
+            drawContent()
+            val w = width.toPx().coerceAtMost(size.width / 2f)
+            if (state.value > 0) {
+                drawRect(
+                    androidx.compose.ui.graphics.Brush.horizontalGradient(listOf(Color.Transparent, Color.Black), startX = 0f, endX = w),
+                    size = androidx.compose.ui.geometry.Size(w, size.height),
+                    blendMode = androidx.compose.ui.graphics.BlendMode.DstIn,
+                )
+            }
+            if (state.value < state.maxValue) {
+                drawRect(
+                    androidx.compose.ui.graphics.Brush.horizontalGradient(listOf(Color.Black, Color.Transparent), startX = size.width - w, endX = size.width),
+                    topLeft = androidx.compose.ui.geometry.Offset(size.width - w, 0f),
+                    size = androidx.compose.ui.geometry.Size(w, size.height),
+                    blendMode = androidx.compose.ui.graphics.BlendMode.DstIn,
+                )
+            }
+        }

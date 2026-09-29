@@ -602,10 +602,10 @@ private fun GroupHeader(
         Text("$count", color = colors.tertiary, fontFamily = ZeronType.Sans, fontWeight = FontWeight.Medium, fontSize = 13.5.sp)
         if (working) {
             Spacer(Modifier.width(7.dp))
-            StatusMark(MarkKind.Spinner, colors, Modifier.size(12.dp).align(Alignment.CenterVertically))
+            StatusMark(MarkKind.Spinner, colors, Modifier.padding(bottom = 3.dp).size(12.dp))
         }
         Spacer(Modifier.weight(1f))
-        ChevronMark(colors.tertiary, Modifier.size(12.dp).align(Alignment.CenterVertically).graphicsLayer { rotationZ = if (collapsed) -90f else 0f }, expanded = true)
+        ChevronMark(colors.tertiary, Modifier.padding(bottom = 4.dp).size(12.dp).graphicsLayer { rotationZ = if (collapsed) -90f else 0f }, expanded = true)
     }
 }
 
