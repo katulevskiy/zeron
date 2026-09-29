@@ -272,8 +272,11 @@ fun NewSessionSheet(model: ZeronModel, onDismiss: () -> Unit) {
                         }
                     }
                 }
-                "effort" -> "Reasoning effort" to current?.efforts.orEmpty().map { e ->
-                    MenuEntry(reasoningLabel(e), checked = e == effort) { effort = e }
+                "effort" -> "Reasoning effort" to current?.efforts.orEmpty().let { levels ->
+                    // The chip shows the middle level while nothing is picked
+                    // (the engine default); check that same row so they agree.
+                    val shown = effort ?: levels.getOrNull(levels.size / 2)
+                    levels.map { e -> MenuEntry(reasoningLabel(e), checked = e == shown) { effort = e } }
                 }
                 else -> null to emptyList()
             }
