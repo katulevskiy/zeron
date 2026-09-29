@@ -133,12 +133,19 @@ private class FrameRelay : LayoutListener {
     }
 }
 
-private class Staged(val name: String, val bytes: ByteArray, val preview: Bitmap?)
+internal class Staged(val name: String, val bytes: ByteArray, val preview: Bitmap?)
 
 /** A composer context chip (iOS `ComposerChip`): model, effort, PR/branch, context. */
-private data class Chip(val id: String, val title: String, val harness: String? = null, val prState: uniffi.zeron_core.PullRequestState? = null)
+internal data class Chip(
+    val id: String,
+    val title: String,
+    val harness: String? = null,
+    val prState: uniffi.zeron_core.PullRequestState? = null,
+    /** Project chips show the project's tile. */
+    val colorIndex: Int? = null,
+)
 
-private enum class Delivery { Send, Queue, Steer, Interrupt }
+internal enum class Delivery { Send, Queue, Steer, Interrupt }
 
 @Composable
 fun SessionScreen(model: ZeronModel, chatId: String) {
@@ -700,13 +707,15 @@ private fun ChipView(chip: Chip, colors: ZeronColors, onTap: (Rect) -> Unit) {
     ) {
         val fg = tone?.copy(alpha = 0.85f) ?: colors.text
         when (chip.id) {
+            "project" -> if (chip.colorIndex != null) ProjectTile(chip.title, chip.colorIndex, colors, 14.dp) else Glyph(Glyphs.Tray, 14.dp, fg)
+            "host" -> Glyph(Glyphs.Computer, 14.dp, fg)
             "model" -> BrandMark(chip.harness, colors, 13.dp)
             "effort" -> GaugeGlyph(fg, Modifier.size(13.dp))
             "pr" -> PrGlyph(fg, Modifier.size(12.dp))
             "branch" -> AssetIcon("tool-git-branch", 12.dp, fg)
             else -> Unit
         }
-        if (chip.id in setOf("model", "effort", "pr", "branch")) Spacer(Modifier.width(if (chip.id == "pr") 5.dp else 6.dp))
+        if (chip.id in setOf("project", "host", "model", "effort", "pr", "branch")) Spacer(Modifier.width(if (chip.id == "pr") 5.dp else 6.dp))
         Text(
             chip.title,
             color = fg,
@@ -719,7 +728,7 @@ private fun ChipView(chip: Chip, colors: ZeronColors, onTap: (Rect) -> Unit) {
 }
 
 @Composable
-private fun ComposerBar(
+internal fun ComposerBar(
     colors: ZeronColors,
     text: String,
     onText: (String) -> Unit,
@@ -892,97 +901,6 @@ private fun SendButton(
                 ),
                 above = true,
             ) { onMenu(false) }
-        }
-    }
-}
-
-@Composable
-fun NewSessionSheet(model: ZeronModel, onDismiss: () -> Unit) {
-    val colors = LocalZeronColors.current
-    val client = model.client ?: return
-    val scope = rememberCoroutineScope()
-    var text by remember { mutableStateOf("") }
-    var harness by remember { mutableStateOf("claude-code") }
-    var modelId by remember { mutableStateOf<String?>(null) }
-    var effort by remember { mutableStateOf<String?>(null) }
-    var projectId by remember { mutableStateOf(client.projects().firstOrNull()?.id) }
-    var focused by remember { mutableStateOf(true) }
-    val projects = client.projects()
-    val project = projects.firstOrNull { it.id == projectId }
-    Column(Modifier.fillMaxSize().background(colors.background).padding(horizontal = 16.dp).windowInsetsPadding(WindowInsets.ime.union(WindowInsets.navigationBars))) {
-        Row(Modifier.fillMaxWidth().padding(top = 8.dp), horizontalArrangement = Arrangement.SpaceBetween) {
-            Text("Close", color = colors.text, modifier = Modifier.clickable(onClick = onDismiss).padding(8.dp), fontFamily = ZeronType.Sans)
-            Text("New Session", color = colors.text, fontFamily = ZeronType.Sans, fontWeight = FontWeight.SemiBold, fontSize = 17.sp, modifier = Modifier.padding(8.dp))
-            Spacer(Modifier.width(48.dp))
-        }
-        Column(Modifier.weight(1f, fill = false).fillMaxWidth().padding(vertical = 28.dp), horizontalAlignment = Alignment.CenterHorizontally) {
-            BrandMark(harness, colors, 34.dp)
-            Spacer(Modifier.height(14.dp))
-            Text("What are we building?", color = colors.text, fontFamily = ZeronType.Sans, fontWeight = FontWeight.SemiBold, fontSize = 22.sp)
-        }
-        ComposerBar(
-            colors = colors,
-            text = text,
-            onText = { text = it },
-            placeholder = "Describe the task",
-            running = false,
-            canSteer = false,
-            focused = true,
-            onFocus = { focused = it },
-            chips = listOfNotNull(
-                Chip("project", project?.name ?: "No project"),
-                Chip("model", modelId?.let { modelLabel(harness, it) } ?: harnessLabel(harness), harness = harness),
-                effort?.let { Chip("effort", reasoningLabel(it)) },
-            ),
-            images = emptyList(),
-            onRemoveImage = {},
-            onSend = send@{
-                val body = text.trim()
-                if (body.isEmpty()) return@send
-                try {
-                    val target = if (project != null) SessionTarget.Project(project.id) else {
-                        val host = client.executionDevices().firstOrNull()?.id ?: client.deviceId()
-                        SessionTarget.Projectless(host)
-                    }
-                    val id = client.createSession(NewSession(target, model.defaultConfig(harness, modelId, effort), null, null, null))
-                    val handle = client.openSession(id)
-                    handle.send(SendRequest(body, emptyList(), null, BusyPolicy.QUEUE))
-                    handle.close()
-                    onDismiss()
-                    model.openSession(id)
-                } catch (t: Throwable) {
-                    model.showToast(t.message ?: "Couldn't start the session")
-                }
-            },
-            mentionSearch = search@{ q ->
-                val p = project ?: return@search emptyList()
-                runCatching { client.searchFiles(p.deviceId, null, p.id, q) }.getOrDefault(emptyList())
-            },
-            onMention = { path, dir -> text = text.replace(Regex("@[^\\s]*$"), fileMentionLink(path, dir) + " ") },
-        )
-        Spacer(Modifier.height(12.dp))
-        // Project / harness pickers live under the composer, matching the chip row's menus.
-        if (projects.isNotEmpty()) {
-            Text("Project", color = colors.secondary, fontFamily = ZeronType.Sans, fontSize = 12.sp, modifier = Modifier.padding(top = 8.dp))
-            LazyColumn(Modifier.heightIn(max = 160.dp)) {
-                items(projects, key = { it.id }) { p ->
-                    Row(
-                        Modifier.fillMaxWidth().clickable { projectId = p.id }.padding(vertical = 8.dp),
-                        verticalAlignment = Alignment.CenterVertically,
-                    ) {
-                        ProjectTile(p.name, p.colorIndex.toInt(), colors, 16.dp)
-                        Spacer(Modifier.width(8.dp))
-                        Text(p.name, color = if (p.id == projectId) colors.text else colors.secondary, fontFamily = ZeronType.Sans, fontWeight = FontWeight.Medium)
-                        if (!p.deviceOnline) Text("  offline", color = colors.tertiary, fontSize = 12.sp)
-                    }
-                }
-            }
-        }
-        LaunchedEffect(project?.deviceId, harness) {
-            val device = project?.deviceId ?: client.executionDevices().firstOrNull()?.id ?: return@LaunchedEffect
-            val models = runCatching { client.listModels(device, harness) }.getOrDefault(emptyList())
-            if (modelId == null) modelId = models.firstOrNull()?.id
-            if (effort == null) effort = models.firstOrNull()?.defaultReasoning
         }
     }
 }

@@ -46,8 +46,13 @@ data class MenuEntry(
     val checked: Boolean = false,
     val destructive: Boolean = false,
     val icon: (@Composable (Color) -> Unit)? = null,
+    /** An inline section start (UIMenu .displayInline): divider + small title, not tappable. */
+    val header: Boolean = false,
     val onClick: () -> Unit,
 )
+
+/** Starts an inline group; a blank title draws just the divider. */
+fun menuSection(title: String = "") = MenuEntry(title, header = true) {}
 
 /**
  * A UIMenu look-alike: glass panel, optional small title, rows with a leading
@@ -63,7 +68,7 @@ fun MenuPanel(
     loading: Boolean = false,
     onDismiss: () -> Unit,
 ) {
-    val stateful = entries.any { it.checked }
+    val stateful = entries.any { it.checked && !it.header }
     Column(
         modifier
             .widthIn(min = 230.dp, max = 300.dp)
@@ -90,7 +95,22 @@ fun MenuPanel(
         if (loading && entries.isEmpty()) {
             Text("Loading…", color = colors.tertiary, fontFamily = ZeronType.Sans, fontSize = 16.sp, modifier = Modifier.padding(horizontal = 16.dp, vertical = 12.dp))
         }
-        entries.forEach { entry ->
+        entries.forEachIndexed { index, entry ->
+            if (entry.header) {
+                if (index > 0 || !title.isNullOrBlank()) HorizontalDivider(color = colors.hairline, thickness = 6.dp, modifier = Modifier.padding(vertical = 2.dp))
+                if (entry.title.isNotBlank()) {
+                    Text(
+                        entry.title,
+                        color = colors.secondary,
+                        fontFamily = ZeronType.Sans,
+                        fontSize = 13.sp,
+                        maxLines = 1,
+                        overflow = TextOverflow.Ellipsis,
+                        modifier = Modifier.padding(start = 16.dp, end = 16.dp, top = 6.dp, bottom = 2.dp),
+                    )
+                }
+                return@forEachIndexed
+            }
             val tint = if (entry.destructive) colors.danger else colors.text
             Row(
                 Modifier
