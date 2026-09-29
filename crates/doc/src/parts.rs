@@ -218,6 +218,16 @@ pub enum MessagePart {
         /// source does not rewrite history.
         source_title: String,
     },
+    /// The seam where a chat changed provider: the turns above ran on
+    /// `from`, the turns below run on `to`. Written by the host engine when
+    /// the first run after a harness change is dispatched. Labels are
+    /// display names ("Claude Code", "Codex"), frozen as of the switch.
+    /// Old builds' unknown-kind fallback yields an invisible empty text part.
+    Switch {
+        id: String,
+        from: String,
+        to: String,
+    },
 }
 
 impl MessagePart {
@@ -229,7 +239,8 @@ impl MessagePart {
             | MessagePart::Tool { id, .. }
             | MessagePart::Input { id, .. }
             | MessagePart::Error { id, .. }
-            | MessagePart::Fork { id, .. } => id,
+            | MessagePart::Fork { id, .. }
+            | MessagePart::Switch { id, .. } => id,
         }
     }
 
@@ -267,6 +278,7 @@ impl MessagePart {
                 source_title,
                 ..
             } => source_chat_id.len() + source_title.len(),
+            MessagePart::Switch { from, to, .. } => from.len() + to.len(),
         }
     }
 }

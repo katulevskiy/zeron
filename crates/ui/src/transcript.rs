@@ -1059,6 +1059,8 @@ pub enum RowKind {
     /// The fork seam: a labeled divider between copied history and the
     /// chat's own turns.
     ForkMarker {
+        /// Divider caption: "Forked from" or "Switched provider".
+        label: SharedString,
         source_chat_id: SharedString,
         source_title: SharedString,
     },
@@ -1635,8 +1637,26 @@ pub fn rows_for_entry(
                             version: fnv1a(source_title.as_bytes()),
                             turn_start: false,
                             kind: RowKind::ForkMarker {
+                                label: "Forked from".into(),
                                 source_chat_id: source_chat_id.clone().into(),
                                 source_title: single_line(source_title).into(),
+                            },
+                            entry_id: entry_id.clone(),
+                            timestamp: None,
+                            copy_text: None,
+                            compact_fold: None,
+                        });
+                    }
+                    MessagePart::Switch { id: part_id, from, to } => {
+                        let title = format!("{from} → {to}");
+                        rows.push(Row {
+                            id: format!("{}#{}", entry.id, part_id).into(),
+                            version: fnv1a(title.as_bytes()),
+                            turn_start: false,
+                            kind: RowKind::ForkMarker {
+                                label: "Switched provider".into(),
+                                source_chat_id: SharedString::default(),
+                                source_title: single_line(&title).into(),
                             },
                             entry_id: entry_id.clone(),
                             timestamp: None,
@@ -6624,7 +6644,9 @@ impl Transcript {
                 mime_type,
             } => self.render_generated_image(&row.id, owner, path, name, mime_type, cx),
             RowKind::ErrorChip { message } => error_chip(message.clone(), &theme),
-            RowKind::ForkMarker { source_title, .. } => fork_marker(source_title.clone(), &theme),
+            RowKind::ForkMarker { label, source_title, .. } => {
+                fork_marker(label.clone(), source_title.clone(), &theme)
+            }
         };
 
         // Hover-revealed metadata strip: a RESERVED 32px lane under the
@@ -7836,7 +7858,7 @@ fn error_chip(message: SharedString, theme: &Theme) -> AnyElement {
 
 /// A quiet fork seam. The source gets its own constrained line so long
 /// titles cannot widen a narrow side-chat pane. No message metadata lane.
-fn fork_marker(source_title: SharedString, theme: &Theme) -> AnyElement {
+fn fork_marker(label: SharedString, source_title: SharedString, theme: &Theme) -> AnyElement {
     let rule = || div().flex_1().min_w_0().h(px(1.0)).bg(theme.border_strong);
     div()
         .py(px(14.0))
@@ -7859,7 +7881,7 @@ fn fork_marker(source_title: SharedString, theme: &Theme) -> AnyElement {
                         .flex_none()
                         .text_size(crate::typography::ui_rems(12.0))
                         .text_color(theme.text_muted.opacity(0.7))
-                        .child("Forked from"),
+                        .child(label),
                 )
                 .child(rule()),
         )
