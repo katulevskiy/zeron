@@ -172,9 +172,17 @@ Tap **Test**, compare the fingerprint, tap **Trust**, wait for
   clipboard: no keys or passwords, but it names the user and host, so redact
   those before posting it anywhere. If a stream sends nothing for 20
   seconds, the app names it and reconnects.
-- **Engine newer than the app:** unknown fields are ignored and unknown enum
-  values are defaulted; a row that still can't be read is skipped (not deleted),
-  and the banner and Details say how many were skipped or repaired.
+- **Zeron on the computer updated; does the app need updating too?** Usually
+  not. Unknown fields are ignored and unknown enum values (status, effort,
+  harness, …) are shown as defaults, which Details records as "read with
+  unknown values ignored". An unknown message or tool kind in a transcript
+  shows as an "Unsupported content" placeholder and the rest renders normally;
+  new notification-only messages are ignored. A row that still can't be read
+  is skipped (not deleted), and the banner and Details say how many were
+  skipped or repaired. Patch releases (0.2.97 → 0.2.98) are silent; an engine
+  whose major or minor version is newer than the app was tested with (0.3.x)
+  gets a dismissible card on the sessions page suggesting an app update. It
+  keeps working either way.
 
 ## Current limits
 
