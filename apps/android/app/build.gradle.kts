@@ -58,6 +58,12 @@ android {
     }
 }
 
+composeCompiler {
+    // See the file: UniFFI records are read-only snapshots, so unchanged list
+    // rows can skip recomposition.
+    stabilityConfigurationFile = rootProject.layout.projectDirectory.file("compose-stability.conf")
+}
+
 dependencies {
     val composeBom = platform("androidx.compose:compose-bom:2024.12.01")
     implementation(composeBom)
