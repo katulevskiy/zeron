@@ -174,11 +174,16 @@ where
     }
 }
 
-/// The parent spawns a background subagent and finishes its turn (parking the
-/// session); the subagent keeps working for several idle windows, then
-/// finishes. It must finish `Done`, not be reaped mid-flight as `Failed`.
-#[tokio::test]
-async fn reaper_spares_a_parked_session_with_a_live_subagent() {
+/// A parked session: the parent spawned a background subagent and finished
+/// its turn. The returned feed pushes further (tagged) harness events; it
+/// closes when the engine reaps the run.
+struct Parked {
+    core: EngineCore,
+    feed: mpsc::UnboundedSender<AgentEvent>,
+    _dir: tempfile::TempDir,
+}
+
+async fn park_after_spawn() -> Parked {
     init_env();
     let (feed, rx) = mpsc::unbounded_channel();
     let registry = HarnessRegistry::new();
@@ -228,6 +233,19 @@ async fn reaper_spares_a_parked_session_with_a_live_subagent() {
         "park after Done",
     )
     .await;
+    Parked {
+        core,
+        feed,
+        _dir: dir,
+    }
+}
+
+/// The subagent keeps working for several idle windows, then finishes. It
+/// must finish `Done`, not be reaped mid-flight as `Failed`; once it settles,
+/// the parked session is reaped as usual, counted from its last activity.
+#[tokio::test]
+async fn reaper_spares_a_parked_session_with_a_live_subagent() {
+    let Parked { core, feed, _dir } = park_after_spawn().await;
 
     // The subagent works on, well past the idle window, with the parent parked.
     let started = tokio::time::Instant::now();
@@ -250,6 +268,44 @@ async fn reaper_spares_a_parked_session_with_a_live_subagent() {
         Some(SubagentStatus::Done),
         "the idle reaper killed a live background subagent"
     );
+
+    // Settled: nothing is using the child any more, so the ordinary window
+    // (from the subagent's last event, not the long-past park) ends it.
+    wait_for(|| feed.is_closed(), "reap after the subagent settled").await;
+    assert_eq!(chip_status(&core), Some(SubagentStatus::Done));
+
+    core.sessions.shutdown().await;
+}
+
+/// A subagent whose terminal signal never arrives must not pin the child
+/// forever: the stretched window (8x the idle window) still reaps it, and the
+/// reap stamps the lost subagent `Failed`.
+#[tokio::test]
+async fn reaper_still_ends_a_session_whose_subagent_went_silent() {
+    let Parked { core, feed, _dir } = park_after_spawn().await;
+
+    feed.send(tagged(AgentEvent::TextDelta {
+        text: "starting. ".into(),
+    }))
+    .unwrap();
+    wait_for(
+        || chip_status(&core) == Some(SubagentStatus::Running),
+        "subagent chip to run",
+    )
+    .await;
+
+    // Past the plain idle window, the open sink still holds the reaper off...
+    tokio::time::sleep(Duration::from_millis(IDLE_MS * 3)).await;
+    assert!(!feed.is_closed(), "reaped a subagent inside its window");
+    assert_eq!(chip_status(&core), Some(SubagentStatus::Running));
+
+    // ...but not forever.
+    wait_for(|| feed.is_closed(), "reap of the silent subagent").await;
+    wait_for(
+        || chip_status(&core) == Some(SubagentStatus::Failed),
+        "lost subagent chip to fail",
+    )
+    .await;
 
     core.sessions.shutdown().await;
 }
