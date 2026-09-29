@@ -1378,8 +1378,6 @@ fn vesper() -> ThemeVariant {
         ),
     });
 
-    // Keep Vesper's neutral surfaces and selection instead of tinting them.
-    // Use opaque comments so they stay readable on code and diff surfaces.
     variant.colors.dialog = c("#161616");
     variant.colors.overlay = c("#161616");
     variant.colors.hover = c("#282828");
