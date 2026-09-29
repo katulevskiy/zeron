@@ -95,7 +95,9 @@ install_desktop_entry() {
   mkdir -p "$apps_dir" "$icon_dir" || return 1
   # Write beside the final name, then rename, so a launcher watching the
   # directory never reads a half-written entry (a leading dot is ignored).
-  tmp="$apps_dir/.zeron.desktop.$$"
+  # Not `tmp`: sh has no `local`, and the curl installer's EXIT trap removes
+  # its download dir through `$tmp`.
+  entry_tmp="$apps_dir/.zeron.desktop.$$"
   while IFS= read -r line || [ -n "$line" ]; do
     case "$line" in
       Exec=*) printf 'Exec=%s %%u\n' "$exec_bin" ;;
@@ -103,15 +105,19 @@ install_desktop_entry() {
       Icon=*) printf 'Icon=%s\n' "$icon_val" ;;
       *) printf '%s\n' "$line" ;;
     esac
-  done <"$src/zeron.desktop" >"$tmp" || { rm -f "$tmp"; return 1; }
-  mv -f "$tmp" "$apps_dir/zeron.desktop" || { rm -f "$tmp"; return 1; }
+  done <"$src/zeron.desktop" >"$entry_tmp" || { rm -f "$entry_tmp"; return 1; }
+  mv -f "$entry_tmp" "$apps_dir/zeron.desktop" || { rm -f "$entry_tmp"; return 1; }
   cp "$src/zeron.png" "$icon_dir/.zeron.png.$$" \
     && mv -f "$icon_dir/.zeron.png.$$" "$icon_dir/zeron.png" || return 1
 
-  # Best-effort cache refresh; both tools are optional.
+  # Best-effort cache refresh; both tools are optional. The icon cache is only
+  # refreshed, never created: a user-level hicolor cache nobody else maintains
+  # would hide icons other apps later install there, and the entry above
+  # references the icon by path anyway.
   command -v update-desktop-database >/dev/null 2>&1 \
     && update-desktop-database "$apps_dir" >/dev/null 2>&1 || true
-  command -v gtk-update-icon-cache >/dev/null 2>&1 \
+  [ -f "$data_home/icons/hicolor/icon-theme.cache" ] \
+    && command -v gtk-update-icon-cache >/dev/null 2>&1 \
     && gtk-update-icon-cache -q -t -f "$data_home/icons/hicolor" >/dev/null 2>&1 || true
   return 0
 }

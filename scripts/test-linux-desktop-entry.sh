@@ -31,18 +31,29 @@ sed -n "/<<'INSTALL'/,/^INSTALL\$/p" "$ROOT/scripts/package-linux.sh" | sed '1d;
   | sed "s/__VERSION__/$VERSION/" >"$WORK/pkg/$PKG/install.sh"
 chmod 755 "$WORK/pkg/$PKG/install.sh"
 
+# The two copies of install_desktop_entry must stay identical.
+fn_body() { sed -n '/^install_desktop_entry() {$/,/^}$/p' "$1"; }
+[ -n "$(fn_body "$ROOT/edge/src/install.sh")" ] || fail "install_desktop_entry not found"
+[ "$(fn_body "$ROOT/edge/src/install.sh")" = "$(fn_body "$ROOT/scripts/package-linux.sh")" ] \
+  || fail "install_desktop_entry differs between edge/src/install.sh and scripts/package-linux.sh"
+
 # run_curl HOME [ENV=VALUE ...] / run_tarball HOME [ENV=VALUE ...]
+# Each run gets its own TMPDIR, which must be empty again afterwards (the curl
+# installer's EXIT trap removes its download dir).
+mkdir -p "$WORK/tmp"
 run_curl() {
   local home="$1"; shift
-  env -i HOME="$home" USER=tester PATH="$WORK/shim:/usr/bin:/bin" "$@" \
+  env -i HOME="$home" USER=tester PATH="$WORK/shim:/usr/bin:/bin" TMPDIR="$WORK/tmp" "$@" \
     ZERON_BASE_URL="file://$WORK/site" sh "$ROOT/edge/src/install.sh" >"$WORK/out.log" 2>&1 \
     || { cat "$WORK/out.log" >&2; fail "curl installer exited non-zero"; }
+  [ -z "$(ls -A "$WORK/tmp")" ] || fail "curl installer left files in TMPDIR: $(ls -A "$WORK/tmp")"
 }
 run_tarball() {
   local home="$1"; shift
-  env -i HOME="$home" USER=tester PATH="/usr/bin:/bin" "$@" \
+  env -i HOME="$home" USER=tester PATH="/usr/bin:/bin" TMPDIR="$WORK/tmp" "$@" \
     bash "$WORK/pkg/$PKG/install.sh" >"$WORK/out.log" 2>&1 \
     || { cat "$WORK/out.log" >&2; fail "tarball installer exited non-zero"; }
+  [ -z "$(ls -A "$WORK/tmp")" ] || fail "tarball installer left files in TMPDIR: $(ls -A "$WORK/tmp")"
 }
 
 # check HOME DATA_HOME
@@ -57,6 +68,8 @@ check() {
   [ "$(grep -c '^\[Desktop Entry\]' "$entry")" = 1 ] || fail "duplicated entry"
   [ "$(grep -c '^Exec=' "$entry")" = 1 ] || fail "Exec lines"
   [ -z "$(find "$data" -name '.zeron*')" ] || fail "temp files left behind"
+  # A user-level icon cache is only ever refreshed, never created.
+  [ ! -e "$data/icons/hicolor/icon-theme.cache" ] || fail "created a hicolor icon cache"
   if command -v desktop-file-validate >/dev/null 2>&1; then
     desktop-file-validate "$entry" || fail "desktop-file-validate"
   fi
