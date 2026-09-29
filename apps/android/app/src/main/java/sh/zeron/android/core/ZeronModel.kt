@@ -89,6 +89,8 @@ class ZeronModel(app: Application) : AndroidViewModel(app) {
     val sessionStack: SnapshotStateList<Route> = mutableStateListOf()
     val settingsStack: SnapshotStateList<Route> = mutableStateListOf()
     var showNewSession by mutableStateOf(false)
+    /** Project the next New Session opens on (just added from the folder browser). */
+    var newSessionProject by mutableStateOf<String?>(null)
     var showSignIn by mutableStateOf(false)
     var searchQuery by mutableStateOf("")
     /** Set by the `spaces` launch route so a screenshot can open the filter. */

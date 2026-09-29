@@ -101,8 +101,6 @@ import sh.zeron.android.design.ZeronLight
 import sh.zeron.android.design.ZeronType
 import sh.zeron.android.design.glassSurface
 import uniffi.zeron_core.ChatIndicator
-import uniffi.zeron_core.FolderEntry
-import uniffi.zeron_core.FolderListing
 import uniffi.zeron_core.ProjectView
 import uniffi.zeron_core.PullRequestState
 import uniffi.zeron_core.SectionView
@@ -235,16 +233,15 @@ private fun Shell(model: ZeronModel, colors: ZeronColors) {
         }
         if (model.showNewSession) {
             Box(Modifier.fillMaxSize().background(Color.Black.copy(alpha = 0.35f))) {
-                Column(Modifier.fillMaxSize().statusBarsPadding()) {
-                    NewSessionSheet(model, onDismiss = { model.showNewSession = false })
-                }
+                NewSessionSheet(model, onDismiss = { model.showNewSession = false })
             }
         }
         if (newProject) {
             Box(Modifier.fillMaxSize().background(colors.background)) {
-                NewProjectScreen(model, onClose = { newProject = false }, onCreated = {
+                NewProjectScreen(model, onClose = { newProject = false }, onCreated = { id, name ->
                     newProject = false
-                    model.showToast("Project created")
+                    model.showToast("Added $name")
+                    model.newSessionProject = id
                     model.showNewSession = true
                 })
             }
@@ -947,9 +944,10 @@ private fun SettingsScreen(model: ZeronModel, colors: ZeronColors) {
     }
     if (newProject) {
         Box(Modifier.fillMaxSize().background(colors.background)) {
-            NewProjectScreen(model, onClose = { newProject = false }, onCreated = {
+            NewProjectScreen(model, onClose = { newProject = false }, onCreated = { id, name ->
                 newProject = false
-                model.showToast("Project created")
+                model.showToast("Added $name")
+                model.newSessionProject = id
                 model.showNewSession = true
             })
         }
@@ -982,95 +980,3 @@ internal fun SettingRow(
     }
 }
 
-@Composable
-private fun NewProjectScreen(model: ZeronModel, onClose: () -> Unit, onCreated: (String) -> Unit) {
-    val colors = LocalZeronColors.current
-    val client = model.client ?: return
-    val devices = client.executionDevices().ifEmpty { client.devices() }
-    var deviceId by remember { mutableStateOf(devices.firstOrNull()?.id ?: client.deviceId()) }
-    var path by remember { mutableStateOf<String?>(null) }
-    var listing by remember { mutableStateOf<FolderListing?>(null) }
-    var error by remember { mutableStateOf<String?>(null) }
-    var busy by remember { mutableStateOf(false) }
-    val scope = rememberCoroutineScope()
-    LaunchedEffect(deviceId, path, model.epoch) {
-        busy = true
-        error = null
-        try {
-            listing = client.listFolders(deviceId, path)
-        } catch (t: Throwable) {
-            error = t.message ?: "Couldn't read that folder"
-            listing = null
-        } finally {
-            busy = false
-        }
-    }
-    Column(Modifier.fillMaxSize().statusBarsPadding().padding(horizontal = 16.dp).navigationBarsPadding()) {
-        Row(Modifier.fillMaxWidth(), horizontalArrangement = Arrangement.SpaceBetween, verticalAlignment = Alignment.CenterVertically) {
-            Text("Close", color = colors.text, modifier = Modifier.clickable(onClick = onClose).padding(8.dp))
-            Text("New Project", color = colors.text, fontFamily = ZeronType.Sans, fontWeight = FontWeight.SemiBold, fontSize = 17.sp)
-            Spacer(Modifier.width(48.dp))
-        }
-        if (devices.size > 1) {
-            Row(Modifier.padding(vertical = 8.dp)) {
-                devices.forEach { device ->
-                    Text(
-                        device.name,
-                        color = if (device.id == deviceId) colors.background else colors.text,
-                        modifier = Modifier.padding(end = 8.dp).clip(RoundedCornerShape(12.dp)).background(if (device.id == deviceId) colors.text else colors.controlFill).clickable { deviceId = device.id; path = null }.padding(horizontal = 10.dp, vertical = 6.dp),
-                        fontSize = 13.sp,
-                    )
-                }
-            }
-        }
-        Text(listing?.path ?: path ?: "Home", color = colors.secondary, fontFamily = ZeronType.Sans, fontSize = 13.sp, maxLines = 2)
-        if (busy) Text("Reading folders…", color = colors.tertiary, modifier = Modifier.padding(top = 8.dp))
-        error?.let { Text(it, color = colors.danger, modifier = Modifier.padding(top = 8.dp)) }
-        LazyColumn(Modifier.weight(1f).padding(top = 8.dp)) {
-            if (path != null) {
-                item {
-                    Text("Parent Folder", color = colors.text, modifier = Modifier.fillMaxWidth().clickable {
-                        val current = path ?: return@clickable
-                        val cut = current.trimEnd('/').lastIndexOf('/')
-                        path = if (cut <= 0) null else current.substring(0, cut)
-                    }.padding(vertical = 12.dp), fontFamily = ZeronType.Sans, fontWeight = FontWeight.Medium)
-                }
-            }
-            items(listing?.entries.orEmpty(), key = { it.name }) { entry ->
-                FolderRow(colors, entry) {
-                    if (entry.isDir) {
-                        val base = listing?.path?.trimEnd('/') ?: path
-                        path = if (base.isNullOrEmpty()) entry.name else "$base/${entry.name}"
-                    }
-                }
-            }
-        }
-        Text(
-            "Use this folder",
-            color = colors.background,
-            fontFamily = ZeronType.Sans,
-            fontWeight = FontWeight.SemiBold,
-            modifier = Modifier.fillMaxWidth().padding(bottom = 12.dp).clip(RoundedCornerShape(24.dp)).background(colors.text).clickable {
-                scope.launch {
-                    try {
-                        val folder = listing?.path ?: path ?: ""
-                        val git = listing?.entries?.any { it.name == ".git" } == true
-                        val id = client.createProject(deviceId, folder, git)
-                        onCreated(id)
-                    } catch (t: Throwable) {
-                        model.showToast(t.message ?: "Couldn't create the project")
-                    }
-                }
-            }.padding(vertical = 14.dp),
-        )
-    }
-}
-
-@Composable
-private fun FolderRow(colors: ZeronColors, entry: FolderEntry, onClick: () -> Unit) {
-    Row(Modifier.fillMaxWidth().clickable(onClick = onClick).padding(vertical = 12.dp), verticalAlignment = Alignment.CenterVertically) {
-        Text(entry.name, color = if (entry.isRepo) colors.accent else colors.text, fontFamily = ZeronType.Sans, fontWeight = FontWeight.Medium, fontSize = 16.sp, modifier = Modifier.weight(1f))
-        if (entry.isRepo) Text("repo", color = colors.accent, fontSize = 12.sp)
-        else if (entry.isDir) Text("›", color = colors.tertiary, fontSize = 18.sp)
-    }
-}
