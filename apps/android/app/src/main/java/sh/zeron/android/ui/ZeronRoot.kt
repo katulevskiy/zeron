@@ -53,6 +53,7 @@ import androidx.compose.runtime.mutableFloatStateOf
 import androidx.compose.runtime.mutableStateOf
 import androidx.compose.runtime.remember
 import androidx.compose.runtime.rememberCoroutineScope
+import androidx.compose.runtime.rememberUpdatedState
 import androidx.compose.runtime.setValue
 import androidx.compose.runtime.snapshotFlow
 import androidx.compose.ui.Alignment
@@ -471,6 +472,7 @@ private fun SessionRowView(
     tapGuard: TapGuard? = null,
 ) {
     var offset by remember(row.id) { mutableFloatStateOf(0f) }
+    val latestRow by rememberUpdatedState(row)
     var menu by remember { mutableStateOf(false) }
     var renaming by remember { mutableStateOf(false) }
     var name by remember { mutableStateOf(row.title) }
@@ -501,8 +503,11 @@ private fun SessionRowView(
                     detectRowSwipe(
                         onDrag = { total -> offset = total.coerceIn(if (archived) 0f else -150f, 150f) },
                         onEnd = { drag ->
+                            // The gesture outlives recompositions: read the row's
+                            // current pin state, not the one captured at start
+                            // (swiping to re-pin a just-unpinned row did nothing).
                             if (drag > 96f) {
-                                if (archived) model.unarchive(row.id) else model.pin(row.id, !row.pinned)
+                                if (archived) model.unarchive(row.id) else model.pin(row.id, !latestRow.pinned)
                             }
                             if (drag < -96f && !archived) model.archive(row.id)
                             offset = 0f
