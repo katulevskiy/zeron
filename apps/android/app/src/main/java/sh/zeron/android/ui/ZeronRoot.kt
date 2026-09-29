@@ -11,7 +11,6 @@ import androidx.compose.foundation.background
 import androidx.compose.foundation.clickable
 import androidx.compose.foundation.interaction.MutableInteractionSource
 import androidx.compose.foundation.combinedClickable
-import androidx.compose.foundation.gestures.detectHorizontalDragGestures
 import androidx.compose.ui.input.pointer.changedToUp
 import androidx.compose.foundation.layout.Arrangement
 import androidx.compose.foundation.layout.Box
@@ -47,6 +46,7 @@ import androidx.compose.material3.Text
 import androidx.compose.material3.TextButton
 import androidx.compose.material3.pulltorefresh.PullToRefreshBox
 import androidx.compose.runtime.Composable
+import androidx.compose.runtime.DisposableEffect
 import androidx.compose.runtime.LaunchedEffect
 import androidx.compose.runtime.getValue
 import androidx.compose.runtime.mutableFloatStateOf
@@ -54,6 +54,7 @@ import androidx.compose.runtime.mutableStateOf
 import androidx.compose.runtime.remember
 import androidx.compose.runtime.rememberCoroutineScope
 import androidx.compose.runtime.setValue
+import androidx.compose.runtime.snapshotFlow
 import androidx.compose.ui.Alignment
 import androidx.compose.ui.Modifier
 import androidx.compose.ui.draw.clip
@@ -301,6 +302,14 @@ private fun SessionsScreen(model: ZeronModel, colors: ZeronColors, onNewSpace: (
     val archived = remember(workspace, spaceId) {
         workspace?.archived.orEmpty().filter { spaceId == null || it.project?.id == spaceId }
     }
+    val sections = front?.sections.orEmpty()
+    val listState = rememberLazyListState()
+    val guard = remember { TapGuard() }
+    // Workspace refreshes wait while the list moves (see ZeronModel.requestRefresh).
+    LaunchedEffect(listState) {
+        snapshotFlow { listState.isScrollInProgress }.collect { model.scrolling = it }
+    }
+    DisposableEffect(listState) { onDispose { model.scrolling = false } }
     Box(Modifier.fillMaxSize()) {
         PullToRefreshBox(isRefreshing = refreshing, onRefresh = {
             refreshing = true
@@ -318,13 +327,13 @@ private fun SessionsScreen(model: ZeronModel, colors: ZeronColors, onNewSpace: (
             } else {
                 val topInset = WindowInsets.statusBars.asPaddingValues().calculateTopPadding()
                 LazyColumn(
-                    state = rememberLazyListState(),
-                    modifier = Modifier.fillMaxSize(),
+                    state = listState,
+                    modifier = Modifier.fillMaxSize().tapGuard(guard) { listState.isScrollInProgress },
                     contentPadding = PaddingValues(top = topInset + 64.dp, bottom = 28.dp),
                 ) {
                     item(key = "direct-banner") { DirectBanner(model, colors) }
                     items(rows, key = { it.id }) { row ->
-                        SessionRowView(row, colors, archived = false, sections = front?.sections.orEmpty(), model = model)
+                        SessionRowView(row, colors, archived = false, sections = sections, model = model, tapGuard = guard)
                     }
                     if (archived.isNotEmpty()) {
                         item(key = "archived-head") {
@@ -339,7 +348,7 @@ private fun SessionsScreen(model: ZeronModel, colors: ZeronColors, onNewSpace: (
                         }
                         if (archivedOpen) {
                             items(archived, key = { "arch-${it.id}" }) { row ->
-                                SessionRowView(row, colors, archived = true, sections = front?.sections.orEmpty(), model = model)
+                                SessionRowView(row, colors, archived = true, sections = sections, model = model, tapGuard = guard)
                             }
                         }
                     }
@@ -453,7 +462,14 @@ private fun projectSubtitle(project: ProjectView): String {
 }
 
 @Composable
-private fun SessionRowView(row: SessionRow, colors: ZeronColors, archived: Boolean, sections: List<SectionView>, model: ZeronModel) {
+private fun SessionRowView(
+    row: SessionRow,
+    colors: ZeronColors,
+    archived: Boolean,
+    sections: List<SectionView>,
+    model: ZeronModel,
+    tapGuard: TapGuard? = null,
+) {
     var offset by remember(row.id) { mutableFloatStateOf(0f) }
     var menu by remember { mutableStateOf(false) }
     var renaming by remember { mutableStateOf(false) }
@@ -478,26 +494,20 @@ private fun SessionRowView(row: SessionRow, colors: ZeronColors, archived: Boole
                 .offset { IntOffset(offset.roundToInt(), 0) }
                 .background(if (revealed) backdrop else Color.Transparent)
                 .combinedClickable(
-                    onClick = { model.openSession(row.id) },
+                    onClick = { if (tapGuard?.allowsTap() != false) model.openSession(row.id) },
                     onLongClick = { menu = true },
                 )
                 .pointerInput(row.id, archived) {
-                    var drag = 0f
-                    detectHorizontalDragGestures(
-                        onDragStart = { drag = 0f },
-                        onHorizontalDrag = { change, dx ->
-                            drag += dx
-                            change.consume()
-                            offset = drag.coerceIn(if (archived) 0f else -150f, 150f)
-                        },
-                        onDragEnd = {
+                    detectRowSwipe(
+                        onDrag = { total -> offset = total.coerceIn(if (archived) 0f else -150f, 150f) },
+                        onEnd = { drag ->
                             if (drag > 96f) {
                                 if (archived) model.unarchive(row.id) else model.pin(row.id, !row.pinned)
                             }
                             if (drag < -96f && !archived) model.archive(row.id)
                             offset = 0f
                         },
-                        onDragCancel = { offset = 0f },
+                        onCancel = { offset = 0f },
                     )
                 }
                 .padding(horizontal = 20.dp),
