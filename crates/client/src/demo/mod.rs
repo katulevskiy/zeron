@@ -106,6 +106,9 @@ struct Lease {
     expires_at_ms: i64,
 }
 
+/// The demo harness's context window (tokens).
+const DEMO_CONTEXT_WINDOW: u64 = 200_000;
+
 pub(crate) struct DemoHost {
     options: DemoOptions,
     client: Weak<ClientInner>,
@@ -599,6 +602,15 @@ impl DemoHost {
                 );
                 let _ = core.write(|doc| doc.push_message(&entry));
             }
+            // Each prompt fills the context window a little more, as a live
+            // harness reports it, so the composer's indicator has a reading.
+            let _ = core.write(|doc| {
+                let used = doc.context_usage().and_then(|u| u.tokens).unwrap_or(24_000);
+                doc.update_context_usage(
+                    Some((used + 41_000).min(DEMO_CONTEXT_WINDOW)),
+                    Some(DEMO_CONTEXT_WINDOW),
+                )
+            });
             let preview = crate::attachments::parse_user_message(prompt).text;
             let untitled = client
                 .workspace
