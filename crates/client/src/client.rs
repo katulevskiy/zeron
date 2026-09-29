@@ -1482,7 +1482,11 @@ impl Client {
     /// Plan / rate-limit usage of every agent login on a device (host
     /// `ListAgentAccounts`). `force` re-probes the providers (the engine
     /// throttles it); otherwise the engine serves its last good probe.
-    pub async fn list_agent_usage(&self, device_id: &str, force: bool) -> Result<Vec<crate::rpc::AgentUsage>> {
+    pub async fn list_agent_usage(
+        &self,
+        device_id: &str,
+        force: bool,
+    ) -> Result<Vec<crate::rpc::AgentUsage>> {
         match self.inner.backend() {
             Backend::Demo(_) => Ok(Vec::new()),
             Backend::Live(_) | Backend::Direct(_) => {
@@ -1716,7 +1720,8 @@ pub struct PushPrefs {
 pub(crate) fn same_folder(a: &str, b: &str) -> bool {
     fn windowsy(p: &str) -> bool {
         let bytes = p.as_bytes();
-        (bytes.len() >= 2 && bytes[1] == b':' && bytes[0].is_ascii_alphabetic()) || p.starts_with("\\\\")
+        (bytes.len() >= 2 && bytes[1] == b':' && bytes[0].is_ascii_alphabetic())
+            || p.starts_with("\\\\")
     }
     fn norm(p: &str) -> String {
         if windowsy(p) {
@@ -1731,7 +1736,11 @@ pub(crate) fn same_folder(a: &str, b: &str) -> bool {
             out.trim_end_matches('\\').to_lowercase()
         } else {
             let t = p.trim_end_matches('/');
-            if t.is_empty() { "/".into() } else { t.to_owned() }
+            if t.is_empty() {
+                "/".into()
+            } else {
+                t.to_owned()
+            }
         }
     }
     a == b || norm(a) == norm(b)
@@ -1743,7 +1752,10 @@ mod folder_tests {
 
     #[test]
     fn windows_paths_match_across_separators_and_case() {
-        assert!(same_folder("D:\\/Work/Projects/app", "D:\\Work\\Projects\\app"));
+        assert!(same_folder(
+            "D:\\/Work/Projects/app",
+            "D:\\Work\\Projects\\app"
+        ));
         assert!(same_folder("c:\\Users\\dev\\", "C:\\Users\\dev"));
         assert!(!same_folder("C:\\Users\\dev", "C:\\Users\\dev2"));
     }

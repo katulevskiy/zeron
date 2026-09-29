@@ -1070,7 +1070,11 @@ impl From<zc::rpc::AgentUsage> for AgentUsage {
             windows: a
                 .windows
                 .into_iter()
-                .map(|w| UsageWindow { label: w.label, used_fraction: w.used_fraction, resets_at_ms: w.resets_at_ms })
+                .map(|w| UsageWindow {
+                    label: w.label,
+                    used_fraction: w.used_fraction,
+                    resets_at_ms: w.resets_at_ms,
+                })
                 .collect(),
             fetched_at_ms: a.fetched_at_ms,
             error: a.error,

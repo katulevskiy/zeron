@@ -36,7 +36,8 @@ pub struct UsageWindow {
 /// build doesn't know still shows, and a malformed one is skipped rather
 /// than failing the whole list.
 pub fn parse_agent_usage(value: &serde_json::Value) -> Vec<AgentUsage> {
-    let str_of = |v: &serde_json::Value, k: &str| v.get(k).and_then(|x| x.as_str()).map(str::to_owned);
+    let str_of =
+        |v: &serde_json::Value, k: &str| v.get(k).and_then(|x| x.as_str()).map(str::to_owned);
     value
         .get("accounts")
         .and_then(|a| a.as_array())
@@ -53,9 +54,15 @@ pub fn parse_agent_usage(value: &serde_json::Value) -> Vec<AgentUsage> {
                                 .filter_map(|w| {
                                     Some(UsageWindow {
                                         label: str_of(w, "label")?,
-                                        used_fraction: w.get("usedFraction")?.as_f64()?.clamp(0.0, 1.0) as f32,
+                                        used_fraction: w
+                                            .get("usedFraction")?
+                                            .as_f64()?
+                                            .clamp(0.0, 1.0)
+                                            as f32,
                                         resets_at_ms: str_of(w, "resetsAt")
-                                            .and_then(|t| chrono::DateTime::parse_from_rfc3339(&t).ok())
+                                            .and_then(|t| {
+                                                chrono::DateTime::parse_from_rfc3339(&t).ok()
+                                            })
                                             .map(|t| t.timestamp_millis()),
                                     })
                                 })
