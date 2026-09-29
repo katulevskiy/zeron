@@ -226,6 +226,7 @@ fun SessionScreen(model: ZeronModel, chatId: String) {
     val questions = chrome.openInput
     val density = LocalDensity.current
     val gapPx = with(density) { ComposerGap.roundToPx() }
+    val headerGapPx = with(density) { HeaderGap.roundToPx() }
     val bottomInset = if (composerTop > 0 && rootHeight > 0) (rootHeight - composerTop + gapPx).coerceAtLeast(0) else 0
     Box(Modifier.fillMaxSize().background(colors.background).onSizeChanged { rootHeight = it.height }) {
         AndroidView(
@@ -263,7 +264,8 @@ fun SessionScreen(model: ZeronModel, chatId: String) {
                 host.onTap = { focusManager.clearFocus() }
                 host.bottomFadePx = gapPx
                 host.bottomInsetPx = bottomInset
-                host.topInsetPx = headerPx
+                host.topFadePx = headerGapPx
+                host.topInsetPx = headerPx + headerGapPx
                 host.imageFor = { images[it] }
                 host.requestImage = req@{ ref ->
                     if (images.containsKey(ref) || ref.startsWith("pending:")) return@req
@@ -282,26 +284,12 @@ fun SessionScreen(model: ZeronModel, chatId: String) {
                 relay.onReady = { host.requestFrame() }
             },
         )
-        val fadeHeight = with(density) { (headerPx + 28).coerceAtLeast(1).toDp() }
-        Box(
-            Modifier
-                .align(Alignment.TopCenter)
-                .fillMaxWidth()
-                .height(fadeHeight)
-                .background(
-                    Brush.verticalGradient(
-                        0f to colors.background,
-                        0.62f to colors.background,
-                        1f to colors.background.copy(alpha = 0f),
-                    ),
-                ),
-        )
         Column(
             Modifier
                 .align(Alignment.TopCenter)
                 .onSizeChanged {
                     headerPx = it.height
-                    view?.topInsetPx = it.height
+                    view?.topInsetPx = it.height + headerGapPx
                 }
                 .statusBarsPadding()
                 .padding(horizontal = 12.dp, vertical = 4.dp),
@@ -542,6 +530,9 @@ fun SessionScreen(model: ZeronModel, chatId: String) {
 
 /** Gap between the last message and the composer; the fade edge lives in it. */
 private val ComposerGap = 18.dp
+
+/** Gap between the header and the first visible row; the top fade lives in it. */
+private val HeaderGap = 14.dp
 
 /** The chip menus the iOS session composer shows (CoreSessionSource.chipMenu). */
 @Composable

@@ -57,6 +57,7 @@ import androidx.compose.runtime.snapshotFlow
 import androidx.compose.ui.Alignment
 import androidx.compose.ui.Modifier
 import androidx.compose.ui.draw.clip
+import androidx.compose.ui.graphics.Brush
 import androidx.compose.ui.graphics.Color
 import androidx.compose.ui.graphics.SolidColor
 import androidx.compose.ui.graphics.asImageBitmap
@@ -318,6 +319,12 @@ private fun RowMenusOverlay(model: ZeronModel, colors: ZeronColors, menus: RowMe
 
 private val SessionsBackdrop = Color(0xFF0D0D0D)
 
+/** The list's floating header row: 6 + 44 (capsules) + 6. */
+private val ListHeaderHeight = 56.dp
+
+/** Gap below the header where rows fade out. */
+private val ListHeaderGap = 14.dp
+
 private data class Prompt(val title: String, val initial: String, val confirm: String, val onSubmit: (String) -> Unit)
 
 @Composable
@@ -402,14 +409,23 @@ private fun SessionsScreen(model: ZeronModel, colors: ZeronColors, onNewSpace: (
     }
     DisposableEffect(listState) { onDispose { model.scrolling = false } }
     Box(Modifier.fillMaxSize()) {
+        val pullState = androidx.compose.material3.pulltorefresh.rememberPullToRefreshState()
+        val headerBottom = WindowInsets.statusBars.asPaddingValues().calculateTopPadding() + ListHeaderHeight
         PullToRefreshBox(isRefreshing = refreshing, onRefresh = {
             refreshing = true
             model.refreshPull()
             refreshing = false
-        }, modifier = Modifier.fillMaxSize()) {
+        }, modifier = Modifier.fillMaxSize(), state = pullState, indicator = {
+            // Below the solid header band, or it would pull out of sight.
+            androidx.compose.material3.pulltorefresh.PullToRefreshDefaults.Indicator(
+                state = pullState,
+                isRefreshing = refreshing,
+                modifier = Modifier.align(Alignment.TopCenter).padding(top = headerBottom),
+            )
+        }) {
             if (rows.isEmpty() && archived.isEmpty()) {
                 val topInset = WindowInsets.statusBars.asPaddingValues().calculateTopPadding()
-                Column(Modifier.fillMaxSize().verticalScroll(rememberScrollState()).padding(top = topInset + 64.dp)) {
+                Column(Modifier.fillMaxSize().verticalScroll(rememberScrollState()).padding(top = topInset + ListHeaderHeight + ListHeaderGap)) {
                     DirectBanner(model, colors)
                     Box(Modifier.fillMaxWidth().padding(32.dp).padding(top = 120.dp), contentAlignment = Alignment.Center) {
                         Text(emptySessionsText(model), color = colors.secondary, fontFamily = ZeronType.Sans, fontSize = 16.sp)
@@ -420,7 +436,7 @@ private fun SessionsScreen(model: ZeronModel, colors: ZeronColors, onNewSpace: (
                 LazyColumn(
                     state = listState,
                     modifier = Modifier.fillMaxSize().tapGuard(guard) { listState.isScrollInProgress },
-                    contentPadding = PaddingValues(top = topInset + 64.dp, bottom = 28.dp),
+                    contentPadding = PaddingValues(top = topInset + ListHeaderHeight + ListHeaderGap, bottom = 28.dp),
                 ) {
                     item(key = "direct-banner") { DirectBanner(model, colors) }
                     groups.forEach { group ->
@@ -464,12 +480,14 @@ private fun SessionsScreen(model: ZeronModel, colors: ZeronColors, onNewSpace: (
                 }
             }
         }
-        Box(
-            Modifier
-                .fillMaxWidth()
-                .windowInsetsTopHeight(WindowInsets.statusBars)
-                .background(if (colors.dark) SessionsBackdrop else colors.background),
-        )
+        // Solid band behind the status bar and the floating capsules, then a
+        // fade: rows scrolling up dissolve a gap below the header instead of
+        // running under "All" and the buttons (like the chat's top edge).
+        val band = if (colors.dark) SessionsBackdrop else colors.background
+        Column(Modifier.fillMaxWidth()) {
+            Box(Modifier.fillMaxWidth().height(headerBottom).background(band))
+            Box(Modifier.fillMaxWidth().height(ListHeaderGap).background(Brush.verticalGradient(listOf(band, band.copy(alpha = 0f)))))
+        }
         Row(
             Modifier.fillMaxWidth().statusBarsPadding().padding(horizontal = 16.dp, vertical = 6.dp),
             verticalAlignment = Alignment.CenterVertically,

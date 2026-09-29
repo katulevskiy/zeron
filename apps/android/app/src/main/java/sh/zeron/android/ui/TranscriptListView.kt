@@ -79,8 +79,21 @@ class TranscriptListView(context: Context) : View(context) {
     var bottomFadePx: Int = 0
     private val fadePaint = Paint()
     private var fadeShaderKey = 0L
-    /** Header covering the top, in pixels. Resting content starts below it and can scroll under the fade. */
+    /**
+     * Where messages start below the header (header height plus a gap).
+     * Rows scrolled above it fade out over [topFadePx] and are hidden behind
+     * a solid band under the header, so text never runs under the title.
+     */
     var topInsetPx: Int = 0
+        set(value) {
+            if (field == value) return
+            field = value
+            reclamp()
+        }
+    /** Height of the fade band just below the header (part of [topInsetPx]). */
+    var topFadePx: Int = 0
+    private val topFadePaint = Paint()
+    private var topShaderKey = 0L
 
     private val scroller = OverScroller(context)
     private val density get() = resources.displayMetrics.density
@@ -211,6 +224,7 @@ class TranscriptListView(context: Context) : View(context) {
         }
         canvas.restore()
         drawBottomEdge(canvas, colors)
+        drawTopEdge(canvas, colors)
         if (animate) postInvalidateOnAnimation()
     }
 
@@ -230,6 +244,24 @@ class TranscriptListView(context: Context) : View(context) {
             )
         }
         canvas.drawRect(0f, cut, width.toFloat(), height.toFloat(), fadePaint)
+    }
+
+    /** Page colour behind the header, then the fade edge down to where rows rest. */
+    private fun drawTopEdge(canvas: Canvas, colors: ZeronColors) {
+        if (topInsetPx <= 0) return
+        val bg = colors.background.toArgb()
+        val cut = topInsetPx.toFloat()
+        val fade = topFadePx.coerceIn(0, topInsetPx).toFloat()
+        val key = (bg.toLong() shl 32) xor (cut.toLong() shl 12) xor fade.toLong()
+        if (key != topShaderKey) {
+            topShaderKey = key
+            topFadePaint.shader = android.graphics.LinearGradient(
+                0f, cut - fade, 0f, cut,
+                bg, bg and 0x00FFFFFF,
+                android.graphics.Shader.TileMode.CLAMP,
+            )
+        }
+        canvas.drawRect(0f, 0f, width.toFloat(), cut, topFadePaint)
     }
 
     private fun displayFor(row: uniffi.zeron_core.RowPlacement): RowDisplay? {
@@ -711,6 +743,8 @@ class TranscriptListView(context: Context) : View(context) {
         val frame = frame ?: return null
         // Rows faded out above the composer aren't tappable.
         if (bottomInsetPx > 0 && yPx > height - bottomInsetPx) return null
+        // Nor rows hidden behind the header.
+        if (topInsetPx > 0 && yPx < topInsetPx - topFadePx) return null
         val y = (scroll + yPx - topInsetPx) / density
         return frame.rowsIn(y, y + 1f).firstOrNull()
     }
