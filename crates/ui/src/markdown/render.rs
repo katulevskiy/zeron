@@ -8,7 +8,7 @@
 //! chunk opacity veil over the text runs (see [`super::veil`]) — opacity only,
 //! zero translate, applied after layout-relevant properties are fixed.
 
-use std::cell::RefCell;
+use std::cell::{Cell, RefCell};
 use std::collections::HashMap;
 use std::ops::Range;
 use std::path::PathBuf;
@@ -1245,6 +1245,7 @@ pub(super) fn flat_text_presented_element(
             // mouse listeners.
             REGISTRY.with(|r| {
                 r.borrow_mut().push(RegEntry {
+                    surface: PAINTING_SURFACE.with(Cell::get),
                     key: sel_key.clone(),
                     text: flat_text.clone(),
                     layout: layout.clone(),
@@ -1255,6 +1256,7 @@ pub(super) fn flat_text_presented_element(
                 window,
                 hitbox,
                 &sel_key,
+                PAINTING_SURFACE.with(Cell::get),
                 &flat_text,
                 &layout,
                 offsets.clone(),
@@ -1366,15 +1368,17 @@ fn paint_text_selection_with_wash(
             ));
         }
     }
+    let surface = PAINTING_SURFACE.with(Cell::get);
     REGISTRY.with(|r| {
         r.borrow_mut().push(RegEntry {
+            surface,
             key: key.clone(),
             text: text.clone(),
             layout: layout.clone(),
             offsets: None,
         })
     });
-    register_selection_listeners(window, hitbox, key, text, layout, None);
+    register_selection_listeners(window, hitbox, key, surface, text, layout, None);
 }
 
 /// The wrapping div shared by every selectable text region: markdown
@@ -1418,6 +1422,9 @@ fn code_line_selection_key(row_key: &str, code_ix: usize, line_ix: usize) -> std
 /// continuity model that lets a drag span paragraphs/list items (Zed gets
 /// this for free from its single-element markdown; our tree rebuilds it).
 struct RegEntry {
+    /// Which painted transcript this element belongs to (see
+    /// `selection_frame_reset_for`); 0 for surfaces that never share a frame.
+    surface: u64,
     key: std::sync::Arc<str>,
     text: SharedString,
     layout: gpui::TextLayout,
@@ -1426,6 +1433,12 @@ struct RegEntry {
 
 thread_local! {
     static REGISTRY: RefCell<Vec<RegEntry>> = const { RefCell::new(Vec::new()) };
+    /// The surface currently painting: set by its reset canvas, which paints
+    /// before any of its text, and stamped onto each entry it registers.
+    static PAINTING_SURFACE: Cell<u64> = const { Cell::new(0) };
+    /// The surface the live drag started in. A drag only resolves against its
+    /// own surface, so a second transcript on screen can't capture it.
+    static ANCHOR_SURFACE: Cell<u64> = const { Cell::new(0) };
 }
 
 #[cfg(test)]
@@ -1466,12 +1479,21 @@ pub(super) fn selection_test_snapshot(
 /// the transcript root (before any markdown), so each frame's registry holds
 /// exactly that frame's visible text elements in paint order.
 pub fn selection_frame_reset() -> impl IntoElement {
+    selection_frame_reset_for(0)
+}
+
+/// `selection_frame_reset` for one of several surfaces painted in the same
+/// frame (the main chat beside a side chat or subagent tab). It clears only
+/// its own surface's entries and stamps the text painted after it, so
+/// another transcript's reset can't wipe this one's drag anchor.
+pub fn selection_frame_reset_for(surface: u64) -> impl IntoElement {
     canvas(
         |_, _, _| (),
-        |_, _, _, _| {
+        move |_, _, _, _| {
+            PAINTING_SURFACE.with(|s| s.set(surface));
             REGISTRY.with(|r| {
                 r.borrow_mut()
-                    .retain(|e| !selection_scope(&e.key).is_empty())
+                    .retain(|e| !selection_scope(&e.key).is_empty() || e.surface != surface)
             })
         },
     )
@@ -1517,9 +1539,12 @@ fn registry_point(position: gpui::Point<gpui::Pixels>) -> Option<(usize, usize)>
     REGISTRY.with(|r| {
         let reg = r.borrow();
         let anchor = super::selection::anchor_key().unwrap_or_default();
+        let anchor_surface = ANCHOR_SURFACE.with(Cell::get);
         let mut best: Option<(usize, f32, f32)> = None;
         for (ei, entry) in reg.iter().enumerate() {
-            if selection_scope(&entry.key) != selection_scope(&anchor) {
+            if selection_scope(&entry.key) != selection_scope(&anchor)
+                || entry.surface != anchor_surface
+            {
                 continue;
             }
             let b = entry.layout.bounds();
@@ -1568,7 +1593,7 @@ fn resolve_drag(head: (usize, usize)) -> bool {
         let filtered: Vec<_> = reg
             .iter()
             .enumerate()
-            .filter(|(_, e)| selection_scope(&e.key) == scope)
+            .filter(|(_, e)| selection_scope(&e.key) == scope && e.surface == entry.surface)
             .collect();
         let Some(index) = filtered.iter().position(|(ix, _)| *ix == head.0) else {
             return false;
@@ -1598,6 +1623,7 @@ fn register_selection_listeners(
     window: &mut Window,
     hitbox: gpui::Hitbox,
     key: &std::sync::Arc<str>,
+    surface: u64,
     text: &SharedString,
     layout: &gpui::TextLayout,
     offsets: Option<super::link_presentation::OffsetMap>,
@@ -1617,6 +1643,7 @@ fn register_selection_listeners(
                     Ok(ix) | Err(ix) => ix,
                 };
                 let ix = offsets.as_ref().map_or(ix, |map| map.original(ix));
+                ANCHOR_SURFACE.with(|s| s.set(surface));
                 match e.click_count {
                     2 => {
                         let range = super::selection::word_range(&text, ix);
@@ -2797,6 +2824,77 @@ mod tests {
             super::super::selection::end_active_drag();
             super::super::selection::clear_if_owner(anchor_key);
             assert_eq!(selected.as_deref(), Some(expected.as_str()));
+        }
+    }
+
+    /// Two transcripts painted side by side (main chat + side chat or subagent
+    /// tab), each opening with its own `selection_frame_reset()`.
+    struct TwoPaneSelectionHarness;
+
+    impl Render for TwoPaneSelectionHarness {
+        fn render(&mut self, _: &mut Window, cx: &mut Context<Self>) -> impl IntoElement {
+            let theme = Theme::of(cx).clone();
+            let pane = |prefix: &str, surface: u64| {
+                let opts = RenderOptions::settled(prefix.to_string().into());
+                div()
+                    .w(px(320.0))
+                    .h_full()
+                    .child(selection_frame_reset_for(surface))
+                    .child(text_element(
+                        &[InlineRun {
+                            text: "alpha beta gamma delta".into(),
+                            style: InlineStyle::default(),
+                        }],
+                        MD_TEXT_SIZE,
+                        MD_LINE_HEIGHT,
+                        false,
+                        0,
+                        0,
+                        &opts,
+                        &theme,
+                    ))
+            };
+            div()
+                .size_full()
+                .flex()
+                .child(pane("pane-a", 1))
+                .child(pane("pane-b", 2))
+        }
+    }
+
+    #[gpui::test]
+    fn dragging_selects_text_in_every_pane_of_a_two_transcript_layout(cx: &mut TestAppContext) {
+        let _selection = super::super::selection::test_state_lock();
+        cx.update(|cx| cx.set_global(Theme::dark()));
+        let (_, cx) = cx.add_window_view(|_, _| TwoPaneSelectionHarness);
+        cx.simulate_resize(size(px(640.0), px(240.0)));
+        cx.update(|window, cx| {
+            window.refresh();
+            let _ = window.draw(cx);
+        });
+
+        // Each pane is 320px wide; drag across the start of its text. The
+        // last-painted pane is the control: it always worked.
+        for (name, left) in [("pane-b", 320.0), ("pane-a", 0.0)] {
+            let start = point(px(left + 1.0), px(9.0));
+            cx.simulate_event(gpui::MouseDownEvent {
+                button: gpui::MouseButton::Left,
+                position: start,
+                click_count: 1,
+                ..Default::default()
+            });
+            cx.simulate_event(gpui::MouseMoveEvent {
+                position: start + point(px(60.0), px(0.0)),
+                pressed_button: Some(gpui::MouseButton::Left),
+                ..Default::default()
+            });
+            let selected = super::super::selection::selected_text();
+            super::super::selection::end_active_drag();
+            super::super::selection::clear_if_owner(&format!("{name}:0"));
+            assert!(
+                selected.is_some_and(|text| !text.is_empty()),
+                "a drag in {name} must select text"
+            );
         }
     }
 
