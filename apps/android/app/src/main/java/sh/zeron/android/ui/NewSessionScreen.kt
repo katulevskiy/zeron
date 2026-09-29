@@ -58,8 +58,6 @@ import uniffi.zeron_core.modelLabel
 import uniffi.zeron_core.harnessLabel
 import uniffi.zeron_core.reasoningLabel
 
-private data class ModelChoice(val harness: String, val harnessLabel: String, val model: ModelInfo)
-
 /** The last catalog each host reported, so chips open on real model names. */
 private val modelCache = HashMap<String, List<ModelChoice>>()
 
@@ -116,9 +114,17 @@ fun NewSessionScreen(model: AppModel, onClose: () -> Unit, onCreated: (String) -
 
     LaunchedEffect(Unit) { focus.requestFocus() }
 
+    // Reported by the branch chip (it reloads, and re-reports, per project).
+    var currentBranch by remember { mutableStateOf<String?>(null) }
+    // `::create` is handed to the composer once: read what it needs as it is now.
+    val latestProject by androidx.compose.runtime.rememberUpdatedState(project)
+    val latestChoice by androidx.compose.runtime.rememberUpdatedState(choice)
+
     fun create() {
         model.lastDraft = draft
-        val id = model.createSession(draft.copy(model = draft.model ?: choice?.model?.id), composer.encoded(), composer.images.map { it.outgoing })
+        // No pick: the session runs on (and is labelled with) the checked-out branch.
+        val branch = draft.branch ?: currentBranch.takeIf { latestProject?.gitDetected == true }
+        val id = model.createSession(draft.copy(model = draft.model ?: latestChoice?.model?.id, branch = branch), composer.encoded(), composer.images.map { it.outgoing })
         if (id != null) onCreated(id) else scope.launch { snackbar.showSnackbar("Choose a project or a host that can run it.") }
     }
 
@@ -179,11 +185,11 @@ fun NewSessionScreen(model: AppModel, onClose: () -> Unit, onCreated: (String) -
             ) {
                 ProjectChip(draft, projects, onPick = { draft = it })
                 if (project != null) {
-                    if (project.gitDetected) BranchChip(model, draft, project.deviceId, project.path) { draft = it }
+                    if (project.gitDetected) BranchChip(model, draft, project.deviceId, project.path, onCurrent = { currentBranch = it }) { draft = it }
                 } else {
                     HostChip(draft, hosts) { draft = it }
                 }
-                ModelChip(draft, choice, models) { draft = it }
+                ModelChip(model, draft, choice, models) { draft = it }
                 val efforts = choice?.model?.reasoningLevels.orEmpty()
                 if (efforts.isNotEmpty()) {
                     val effort = draft.effort?.takeIf { it in efforts } ?: choice?.model?.defaultReasoning ?: efforts[efforts.size / 2]
@@ -272,7 +278,7 @@ private fun ProjectSheet(
                             title = p.name,
                             supporting = p.path.replace(Regex("^/(Users|home)/[^/]+"), "~"),
                             mono = true,
-                        ) { onPick(draft.copy(projectId = p.id, hostId = null, branch = null)) }
+                        ) { onPick(draft.copy(projectId = p.id, hostId = null, branch = null, cwd = null)) }
                     }
                 }
             }
@@ -286,7 +292,7 @@ private fun ProjectSheet(
                     title = "No project",
                     supporting = "Run in a host's home folder",
                     mono = false,
-                ) { onPick(draft.copy(projectId = null, hostId = draft.hostId ?: projects.firstOrNull()?.deviceId, worktree = false)) }
+                ) { onPick(draft.copy(projectId = null, hostId = draft.hostId ?: projects.firstOrNull()?.deviceId, worktree = false, branch = null, cwd = null)) }
             }
         }
     }
@@ -352,58 +358,30 @@ private fun HostChip(
 }
 
 @Composable
-private fun BranchChip(
-    model: AppModel,
-    draft: sh.zeron.android.core.NewSessionDraft,
-    deviceId: String,
-    repoPath: String,
-    onPick: (sh.zeron.android.core.NewSessionDraft) -> Unit,
-) {
-    var open by remember { mutableStateOf(false) }
-    var refs by remember(deviceId, repoPath) { mutableStateOf<List<String>?>(null) }
-    val client by model.client.collectAsState()
-    LaunchedEffect(open, deviceId, repoPath) {
-        if (open && refs == null) {
-            refs = runCatching { client?.listRefs(deviceId, repoPath) }.getOrNull().orEmpty()
-                .sortedByDescending { it.current }.map { it.name }
-        }
-    }
-    ContextChip(
-        if (draft.worktree) "New worktree" else draft.branch ?: "Current branch",
-        leading = { ZIcon(ZIcons.Branch, null, Modifier.size(16.dp)) },
-        onClick = { open = true },
-    ) {
-        val branches = refs.orEmpty()
-        ChoiceMenu(open, { open = false }, listOf(
-            MenuSection("Checkout", listOf(
-                MenuChoice("New worktree", draft.worktree, "Run isolated from the checkout") { onPick(draft.copy(worktree = !draft.worktree)) },
-            )),
-            MenuSection("Branch", branches.map { b ->
-                MenuChoice(b, b == (draft.branch ?: branches.firstOrNull())) { onPick(draft.copy(branch = b)) }
-            }),
-        ))
-    }
-}
-
-@Composable
 private fun ModelChip(
+    app: AppModel,
     draft: sh.zeron.android.core.NewSessionDraft,
     choice: ModelChoice?,
     models: List<ModelChoice>,
     onPick: (sh.zeron.android.core.NewSessionDraft) -> Unit,
 ) {
     var open by remember { mutableStateOf(false) }
+    val favorites by app.favorites.favorites.collectAsState()
+    val latest by androidx.compose.runtime.rememberUpdatedState(draft)
     // Never the harness name in place of a model.
     val title = choice?.model?.label ?: draft.model?.let { modelLabel(draft.harness, it) }
         ?: fallbackModels(draft.harness).firstOrNull()?.label ?: harnessLabel(draft.harness)
     ContextChip(title, leading = { HarnessMark(draft.harness, 14.dp) }, onClick = { open = true }) {
-        ChoiceMenu(open, { open = false }, models.groupBy { it.harness }.map { (harness, list) ->
-            MenuSection(list.first().harnessLabel, list.map { m ->
-                MenuChoice(m.model.label, m.harness == draft.harness && m.model.id == choice?.model?.id, leading = { HarnessMark(harness, 18.dp) }) {
-                    onPick(draft.copy(harness = m.harness, model = m.model.id, effort = null))
-                }
-            })
-        })
+        ModelPickerPopover(
+            expanded = open,
+            onDismiss = { open = false },
+            catalog = models,
+            current = choice,
+            favorites = favorites,
+            onToggleFavorite = app.favorites::toggle,
+            onPick = { m -> onPick(latest.copy(harness = m.harness, model = m.model.id, effort = null)) },
+            labelFor = { harnessLabel(it) },
+        )
     }
 }
 
