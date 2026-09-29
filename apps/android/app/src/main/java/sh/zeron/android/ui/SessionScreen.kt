@@ -379,7 +379,7 @@ fun SessionScreen(model: ZeronModel, chatId: String) {
                     focused = focused,
                     onFocus = { focused = it },
                     chips = chipsFor(row, chrome),
-                    onChip = { chip, rect -> if (chip.id == "context") usageOpen = true else chipMenu = chip to rect },
+                    onChip = { chip, rect -> if (chip.id == "context") { focusManager.clearFocus(); usageOpen = true } else chipMenu = chip to rect },
                     images = staged,
                     onRemoveImage = { staged = staged.filterNot { s -> s === it } },
                     onAttach = { picker.launch("image/*") },
@@ -484,7 +484,7 @@ fun SessionScreen(model: ZeronModel, chatId: String) {
                             model.showToast("Transcript copied")
                         }
                     },
-                    MenuEntry("Usage", icon = { c -> GaugeGlyph(c, Modifier.size(17.dp)) }) { usageOpen = true },
+                    MenuEntry("Usage", icon = { c -> GaugeGlyph(c, Modifier.size(17.dp)) }) { focusManager.clearFocus(); usageOpen = true },
                     MenuEntry("Archive", destructive = true, icon = { c -> Glyph(Glyphs.Archive, 17.dp, c) }) {
                         model.archive(chatId)
                         model.back()

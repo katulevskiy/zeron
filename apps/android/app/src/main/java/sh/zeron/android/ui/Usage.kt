@@ -12,7 +12,11 @@ import androidx.compose.foundation.layout.Spacer
 import androidx.compose.foundation.layout.fillMaxSize
 import androidx.compose.foundation.layout.fillMaxWidth
 import androidx.compose.foundation.layout.height
-import androidx.compose.foundation.layout.navigationBarsPadding
+import androidx.compose.foundation.layout.WindowInsets
+import androidx.compose.foundation.layout.ime
+import androidx.compose.foundation.layout.navigationBars
+import androidx.compose.foundation.layout.union
+import androidx.compose.foundation.layout.windowInsetsPadding
 import androidx.compose.foundation.layout.padding
 import androidx.compose.foundation.layout.widthIn
 import androidx.compose.foundation.rememberScrollState
@@ -37,7 +41,6 @@ import androidx.compose.ui.unit.sp
 import kotlinx.coroutines.launch
 import sh.zeron.android.design.ZeronColors
 import sh.zeron.android.design.ZeronType
-import sh.zeron.android.design.glassSurface
 import uniffi.zeron_core.AgentUsage
 import uniffi.zeron_core.ContextUsage
 import uniffi.zeron_core.CoreClient
@@ -93,9 +96,11 @@ internal fun UsageSheet(
             Modifier
                 .widthIn(max = 560.dp)
                 .fillMaxWidth()
-                .navigationBarsPadding()
+                .windowInsetsPadding(WindowInsets.ime.union(WindowInsets.navigationBars))
                 .padding(12.dp)
-                .glassSurface(colors, 28.dp)
+                // Solid (not glass): meters over moving transcript text read poorly.
+                .clip(RoundedCornerShape(28.dp))
+                .background(if (colors.dark) Color(0xFF1C1C1E) else Color.White)
                 .clickable(interactionSource = none, indication = null) {}
                 .verticalScroll(rememberScrollState())
                 .padding(horizontal = 20.dp, vertical = 18.dp),
