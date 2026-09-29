@@ -7387,9 +7387,10 @@ impl Shell {
         let shows_metadata = branch.is_some() || change_request.is_some();
         let queued = queued && !undelivered;
         let working = status == zeron_proto::ChatIndicator::Working && !queued && !undelivered;
-        // Subagents running under this chat trade the working spinner for the
-        // "● N" pill: the count is the more useful thing to know, and it keeps
-        // showing after the parent's own turn has settled.
+        // Subagents running under this chat show as a "● N" pill beside the
+        // row's own activity indicator, never in place of it: the pill takes
+        // the time stamp's spot (compact) or leads the status (regular), and
+        // keeps showing after the parent's own turn has settled.
         let running_subagents = self.state.read(cx).running_subagents_for(&id, Utc::now());
         let subagent_pill = |suffix: &str| {
             (running_subagents > 0).then(|| {
@@ -7401,11 +7402,7 @@ impl Shell {
             })
         };
         let compact_status = compact.then(|| {
-            let pill = subagent_pill("compact");
-            let has_pill = pill.is_some();
-            let glyph = if let Some(pill) = pill {
-                pill
-            } else if working {
+            let glyph = if working {
                 loaders::mini_glyph_spinner(
                     format!("{row_id}-working"),
                     2.0,
@@ -7432,10 +7429,7 @@ impl Shell {
                     let id = id.clone();
                     move || format!("chat-status-{id}")
                 })
-                // The pill is wider than the 13px glyph slot: the slot keeps its
-                // height and lets the width follow.
-                .h(px(13.0))
-                .when(!has_pill, |slot| slot.w(px(13.0)))
+                .size(px(13.0))
                 .flex_none()
                 .flex()
                 .items_center()
@@ -7527,9 +7521,7 @@ impl Shell {
                     // Glyph slot: Working wears the preset's animated pixel
                     // glyph beside its label, Done wears the check, and the
                     // remaining statuses use a compact dot.
-                    let glyph: AnyElement = if let Some(pill) = subagent_pill("label") {
-                        pill
-                    } else if status == zeron_proto::ChatIndicator::Completed {
+                    let glyph: AnyElement = if status == zeron_proto::ChatIndicator::Completed {
                         icon(icons::CHECK)
                             .size(px(11.0))
                             .flex_none()
@@ -7556,14 +7548,22 @@ impl Shell {
                         .flex()
                         .flex_row()
                         .items_center()
-                        .gap(px(4.0))
-                        .child(glyph)
+                        .gap(px(6.0))
+                        .children(subagent_pill("label"))
                         .child(
                             div()
-                                .text_size(crate::typography::ui_rems(10.0))
-                                .font_weight(gpui::FontWeight::MEDIUM)
-                                .text_color(status_color)
-                                .child(SharedString::from(label)),
+                                .flex()
+                                .flex_row()
+                                .items_center()
+                                .gap(px(4.0))
+                                .child(glyph)
+                                .child(
+                                    div()
+                                        .text_size(crate::typography::ui_rems(10.0))
+                                        .font_weight(gpui::FontWeight::MEDIUM)
+                                        .text_color(status_color)
+                                        .child(SharedString::from(label)),
+                                ),
                         )
                         .into_any_element()
                 }
@@ -7907,6 +7907,11 @@ impl Shell {
                         let text_hint = compact_jump_label
                             .as_ref()
                             .is_some_and(|label| label.chars().count() > 3);
+                        // Running subagents take the time stamp's place; the
+                        // legend and the hover archive still win.
+                        let pill = (!show_legend && !show_archive)
+                            .then(|| subagent_pill("compact"))
+                            .flatten();
                         let archive_id = id.clone();
                         el.children(change_request.clone().map(|summary| {
                             if preview {
@@ -7935,7 +7940,8 @@ impl Shell {
                                 .when(text_hint, |el| {
                                     el.min_w(crate::typography::ui_rems(COMPACT_JUMP_HINT_WIDTH))
                                 })
-                                .when(!text_hint, |el| el.w(px(30.0)))
+                                // A running-subagents pill can be wider than the plain time.
+                                .when(!text_hint, |el| el.min_w(px(30.0)))
                                 // Fixed height so swapping the time text for the
                                 // archive glyph never resizes the slot.
                                 .h(px(14.0))
@@ -7980,6 +7986,8 @@ impl Shell {
                                     .flex_none()
                                     .text_color(theme.text_muted)
                                     .into_any_element()
+                                } else if let Some(pill) = pill {
+                                    pill
                                 } else {
                                     div()
                                         .whitespace_nowrap()
