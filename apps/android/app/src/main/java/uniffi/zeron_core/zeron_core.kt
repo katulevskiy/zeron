@@ -874,6 +874,8 @@ internal object IntegrityCheckingUniffiLib {
     ): Int
     external fun uniffi_zeron_mobile_checksum_method_coreclient_is_direct(
     ): Int
+    external fun uniffi_zeron_mobile_checksum_method_coreclient_list_drives(
+    ): Int
     external fun uniffi_zeron_mobile_checksum_method_coreclient_list_folders(
     ): Int
     external fun uniffi_zeron_mobile_checksum_method_coreclient_list_harnesses(
@@ -1132,6 +1134,8 @@ internal object UniffiLib {
     ): Byte
     external fun uniffi_zeron_mobile_fn_method_coreclient_is_direct(`ptr`: Long,uniffi_out_err: UniffiRustCallStatus, 
     ): Byte
+    external fun uniffi_zeron_mobile_fn_method_coreclient_list_drives(`ptr`: Long,`deviceId`: RustBuffer.ByValue,
+    ): Long
     external fun uniffi_zeron_mobile_fn_method_coreclient_list_folders(`ptr`: Long,`deviceId`: RustBuffer.ByValue,`path`: RustBuffer.ByValue,
     ): Long
     external fun uniffi_zeron_mobile_fn_method_coreclient_list_harnesses(`ptr`: Long,`deviceId`: RustBuffer.ByValue,
@@ -1664,6 +1668,9 @@ private fun uniffiCheckApiChecksums(lib: IntegrityCheckingUniffiLib) {
         throw RuntimeException("UniFFI API checksum mismatch: try cleaning and rebuilding your project")
     }
     if ((lib.uniffi_zeron_mobile_checksum_method_coreclient_is_direct() and 0xFFFF) != 38946) {
+        throw RuntimeException("UniFFI API checksum mismatch: try cleaning and rebuilding your project")
+    }
+    if ((lib.uniffi_zeron_mobile_checksum_method_coreclient_list_drives() and 0xFFFF) != 863) {
         throw RuntimeException("UniFFI API checksum mismatch: try cleaning and rebuilding your project")
     }
     if ((lib.uniffi_zeron_mobile_checksum_method_coreclient_list_folders() and 0xFFFF) != 2324) {
@@ -2923,6 +2930,11 @@ public interface CoreClientInterface {
     fun `isDirect`(): kotlin.Boolean
     
     /**
+     * Drives / volumes to browse beyond home (empty on older engines).
+     */
+    suspend fun `listDrives`(`deviceId`: kotlin.String): List<DriveEntry>
+    
+    /**
      * Browse folders on a device (`None` = its home folder).
      */
     suspend fun `listFolders`(`deviceId`: kotlin.String, `path`: kotlin.String?): FolderListing
@@ -3528,6 +3540,31 @@ open class CoreClient: Disposable, AutoCloseable, CoreClientInterface
     )
     }
     
+
+    
+    /**
+     * Drives / volumes to browse beyond home (empty on older engines).
+     */
+    @Throws(CoreException::class)
+    @Suppress("ASSIGNED_BUT_NEVER_ACCESSED_VARIABLE")
+    override suspend fun `listDrives`(`deviceId`: kotlin.String) : List<DriveEntry> {
+        return uniffiRustCallAsync(
+        callWithHandle { uniffiHandle ->
+            UniffiLib.uniffi_zeron_mobile_fn_method_coreclient_list_drives(
+                uniffiHandle,
+                
+        FfiConverterString.lower(`deviceId`),
+            )
+        },
+        { future, callback, continuation -> UniffiLib.ffi_zeron_mobile_rust_future_poll_rust_buffer(future, callback, continuation) },
+        { future, continuation -> UniffiLib.ffi_zeron_mobile_rust_future_complete_rust_buffer(future, continuation) },
+        { future -> UniffiLib.ffi_zeron_mobile_rust_future_free_rust_buffer(future) },
+        // lift function
+        { FfiConverterSequenceTypeDriveEntry.lift(it) },
+        // Error FFI converter
+        CoreException.ErrorHandler,
+    )
+    }
 
     
     /**
@@ -8176,6 +8213,47 @@ public object FfiConverterTypeDirectStreamStat: FfiConverterRustBuffer<DirectStr
             FfiConverterUInt.write(value.`repairedRows`, buf)
             FfiConverterOptionalLong.write(value.`lastFrameMs`, buf)
             FfiConverterOptionalString.write(value.`error`, buf)
+    }
+}
+
+
+
+/**
+ * A browse root beyond home (a Windows drive letter, a mounted volume).
+ */
+data class DriveEntry (
+    var `name`: kotlin.String
+    , 
+    var `path`: kotlin.String
+    
+){
+    
+
+    
+
+    
+    companion object
+}
+
+/**
+ * @suppress
+ */
+public object FfiConverterTypeDriveEntry: FfiConverterRustBuffer<DriveEntry> {
+    override fun read(buf: ByteBuffer): DriveEntry {
+        return DriveEntry(
+            FfiConverterString.read(buf),
+            FfiConverterString.read(buf),
+        )
+    }
+
+    override fun allocationSize(value: DriveEntry) = (
+            FfiConverterString.allocationSize(value.`name`) +
+            FfiConverterString.allocationSize(value.`path`)
+    )
+
+    override fun write(value: DriveEntry, buf: ByteBuffer) {
+            FfiConverterString.write(value.`name`, buf)
+            FfiConverterString.write(value.`path`, buf)
     }
 }
 
@@ -14834,6 +14912,34 @@ public object FfiConverterSequenceTypeDirectStreamStat: FfiConverterRustBuffer<L
         buf.putInt(value.size)
         value.iterator().forEach {
             FfiConverterTypeDirectStreamStat.write(it, buf)
+        }
+    }
+}
+
+
+
+
+/**
+ * @suppress
+ */
+public object FfiConverterSequenceTypeDriveEntry: FfiConverterRustBuffer<List<DriveEntry>> {
+    override fun read(buf: ByteBuffer): List<DriveEntry> {
+        val len = buf.getInt()
+        return List<DriveEntry>(len) {
+            FfiConverterTypeDriveEntry.read(buf)
+        }
+    }
+
+    override fun allocationSize(value: List<DriveEntry>): ULong {
+        val sizeForLength = 4UL
+        val sizeForItems = value.map { FfiConverterTypeDriveEntry.allocationSize(it) }.sum()
+        return sizeForLength + sizeForItems
+    }
+
+    override fun write(value: List<DriveEntry>, buf: ByteBuffer) {
+        buf.putInt(value.size)
+        value.iterator().forEach {
+            FfiConverterTypeDriveEntry.write(it, buf)
         }
     }
 }
