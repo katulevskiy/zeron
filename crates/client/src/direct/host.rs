@@ -535,7 +535,10 @@ impl DirectHost {
         params: serde_json::Value,
     ) -> Result<serde_json::Value> {
         let link = self.wait_link(LINK_WAIT).await?;
-        match tokio::time::timeout(CALL_TIMEOUT, link.rpc.call(method, params)).await {
+        // Same per-method budget as the relay (a cold `ListModels` probes the
+        // harness CLI and can take well past the default), never below ours.
+        let budget = crate::live::relay::deadline(method).max(CALL_TIMEOUT);
+        match tokio::time::timeout(budget, link.rpc.call(method, params)).await {
             Err(_) => Err(ClientError::HostUnavailable(format!("{method} timed out"))),
             Ok(Err(zeron_rpc::RpcError::Closed)) | Ok(Err(zeron_rpc::RpcError::Transport(_))) => {
                 link.cancel.cancel();
