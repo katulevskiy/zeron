@@ -69,6 +69,8 @@ object ZIcons {
     val Globe = R.drawable.zi_globe
     val AddCircle = R.drawable.zi_add_circle
     val Cloud = R.drawable.zi_cloud
+    val Star = R.drawable.zi_star
+    val StarFilled = R.drawable.zi_star_bold
 }
 
 @Composable
