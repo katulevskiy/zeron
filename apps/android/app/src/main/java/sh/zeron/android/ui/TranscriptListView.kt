@@ -20,6 +20,7 @@ import android.view.ViewConfiguration
 import android.widget.OverScroller
 import sh.zeron.android.design.FontChain
 import sh.zeron.android.design.ZeronColors
+import androidx.compose.ui.graphics.toArgb
 import sh.zeron.android.design.glyphOpacity
 import uniffi.zeron_core.BoxStyle
 import uniffi.zeron_core.ColorRole
@@ -59,8 +60,23 @@ class TranscriptListView(context: Context) : View(context) {
     var onScroll: (Float) -> Unit = {}
     /** A drag or fling started (true) or ended (false). */
     var onScrollActive: (Boolean) -> Unit = {}
-    /** Composer / chrome covering the bottom, in pixels. Last row can scroll above it. */
+    /**
+     * Distance from the view's bottom edge to where messages stop: composer,
+     * keyboard, and the gap above the composer. The last row rests just above
+     * it; rows scrolled past it fade out over [bottomFadePx] and are hidden
+     * below (they never show through the composer). Changing it while at the
+     * bottom (the keyboard opening) keeps the latest message in view.
+     */
     var bottomInsetPx: Int = 0
+        set(value) {
+            if (field == value) return
+            field = value
+            reclamp()
+        }
+    /** Height of the fade band just above the composer (part of [bottomInsetPx]). */
+    var bottomFadePx: Int = 0
+    private val fadePaint = Paint()
+    private var fadeShaderKey = 0L
     /** Header covering the top, in pixels. Resting content starts below it and can scroll under the fade. */
     var topInsetPx: Int = 0
 
@@ -147,6 +163,16 @@ class TranscriptListView(context: Context) : View(context) {
         invalidate()
     }
 
+    private fun reclamp() {
+        val content = (frame?.totalHeight() ?: 0f) * density
+        val viewport = (height - bottomInsetPx - topInsetPx).coerceAtLeast(1)
+        val maxScroll = max(0f, content - viewport)
+        if (following) scroll = maxScroll
+        scroll = scroll.coerceIn(0f, maxScroll)
+        onDistanceFromBottom(maxScroll - scroll)
+        invalidate()
+    }
+
     fun jumpToBottom() {
         following = true
         val content = (frame?.totalHeight() ?: 0f) * density
@@ -181,7 +207,26 @@ class TranscriptListView(context: Context) : View(context) {
             canvas.restore()
         }
         canvas.restore()
+        drawBottomEdge(canvas, colors)
         if (animate) postInvalidateOnAnimation()
+    }
+
+    /** The fade edge above the composer, then page color down to the bottom. */
+    private fun drawBottomEdge(canvas: Canvas, colors: ZeronColors) {
+        if (bottomInsetPx <= 0) return
+        val bg = colors.background.toArgb()
+        val cut = (height - bottomInsetPx).toFloat()
+        val fade = bottomFadePx.coerceIn(0, bottomInsetPx).toFloat()
+        val key = (bg.toLong() shl 32) xor (cut.toLong() shl 12) xor fade.toLong()
+        if (key != fadeShaderKey) {
+            fadeShaderKey = key
+            fadePaint.shader = android.graphics.LinearGradient(
+                0f, cut, 0f, cut + fade,
+                bg and 0x00FFFFFF, bg,
+                android.graphics.Shader.TileMode.CLAMP,
+            )
+        }
+        canvas.drawRect(0f, cut, width.toFloat(), height.toFloat(), fadePaint)
     }
 
     private fun displayFor(row: uniffi.zeron_core.RowPlacement): RowDisplay? {
@@ -661,6 +706,8 @@ class TranscriptListView(context: Context) : View(context) {
 
     private fun rowAt(yPx: Float): uniffi.zeron_core.RowPlacement? {
         val frame = frame ?: return null
+        // Rows faded out above the composer aren't tappable.
+        if (bottomInsetPx > 0 && yPx > height - bottomInsetPx) return null
         val y = (scroll + yPx - topInsetPx) / density
         return frame.rowsIn(y, y + 1f).firstOrNull()
     }

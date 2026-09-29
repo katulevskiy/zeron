@@ -37,9 +37,7 @@ import androidx.compose.foundation.shape.RoundedCornerShape
 import androidx.compose.foundation.text.BasicTextField
 import androidx.compose.foundation.verticalScroll
 import androidx.compose.material3.AlertDialog
-import androidx.compose.material3.DropdownMenu
 import androidx.compose.material3.TextButton
-import androidx.compose.material3.DropdownMenuItem
 import androidx.compose.material3.Text
 import androidx.compose.runtime.Composable
 import androidx.compose.runtime.DisposableEffect
@@ -62,6 +60,21 @@ import androidx.compose.ui.layout.ContentScale
 import androidx.compose.ui.layout.onSizeChanged
 import androidx.compose.ui.layout.onGloballyPositioned
 import androidx.compose.ui.layout.boundsInRoot
+import androidx.compose.ui.layout.boundsInWindow
+import androidx.compose.animation.AnimatedVisibility
+import androidx.compose.animation.core.tween
+import androidx.compose.animation.fadeIn
+import androidx.compose.animation.fadeOut
+import androidx.compose.animation.scaleIn
+import androidx.compose.animation.scaleOut
+import androidx.compose.foundation.layout.offset
+import androidx.compose.ui.graphics.graphicsLayer
+import androidx.compose.ui.unit.IntOffset
+import kotlin.math.roundToInt
+import sh.zeron.android.design.Glyph
+import sh.zeron.android.design.Glyphs
+import sh.zeron.android.design.PinSlashGlyph
+import sh.zeron.android.design.PopupAnchoredMenu
 import androidx.compose.ui.geometry.Rect
 import androidx.compose.ui.platform.LocalContext
 import androidx.compose.ui.platform.LocalDensity
@@ -163,7 +176,11 @@ fun SessionScreen(model: ZeronModel, chatId: String) {
     var editingQueue by remember { mutableStateOf<String?>(null) }
     var lightbox by remember { mutableStateOf<Bitmap?>(null) }
     var detail by remember { mutableStateOf<Pair<String, String>?>(null) }
-    var composerHeight by remember { mutableIntStateOf(0) }
+    // Root-relative top of the composer stack and the screen height: the
+    // transcript stops a gap above the composer (keyboard included).
+    var composerTop by remember { mutableIntStateOf(0) }
+    var rootHeight by remember { mutableIntStateOf(0) }
+    var menuAnchor by remember { mutableStateOf(Rect.Zero) }
     var chipMenu by remember { mutableStateOf<Pair<Chip, Rect>?>(null) }
     var headerPx by remember { mutableIntStateOf(0) }
     val picker = rememberLauncherForActivityResult(ActivityResultContracts.GetContent()) { uri ->
@@ -185,7 +202,10 @@ fun SessionScreen(model: ZeronModel, chatId: String) {
     }
     val running = chrome.live.turnRunning
     val questions = chrome.openInput
-    Box(Modifier.fillMaxSize().background(colors.background)) {
+    val density = LocalDensity.current
+    val gapPx = with(density) { ComposerGap.roundToPx() }
+    val bottomInset = if (composerTop > 0 && rootHeight > 0) (rootHeight - composerTop + gapPx).coerceAtLeast(0) else 0
+    Box(Modifier.fillMaxSize().background(colors.background).onSizeChanged { rootHeight = it.height }) {
         AndroidView(
             modifier = Modifier.fillMaxSize(),
             factory = { ctx ->
@@ -218,7 +238,8 @@ fun SessionScreen(model: ZeronModel, chatId: String) {
                 }
                 host.onImage = { bmp -> lightbox = bmp }
                 host.onDetail = { title, body -> detail = title to body }
-                host.bottomInsetPx = composerHeight
+                host.bottomFadePx = gapPx
+                host.bottomInsetPx = bottomInset
                 host.topInsetPx = headerPx
                 host.imageFor = { images[it] }
                 host.requestImage = req@{ ref ->
@@ -238,7 +259,6 @@ fun SessionScreen(model: ZeronModel, chatId: String) {
                 relay.onReady = { host.requestFrame() }
             },
         )
-        val density = LocalDensity.current
         val fadeHeight = with(density) { (headerPx + 28).coerceAtLeast(1).toDp() }
         Box(
             Modifier
@@ -295,29 +315,15 @@ fun SessionScreen(model: ZeronModel, chatId: String) {
                 }
                 Box {
                     Box(
-                        Modifier.size(44.dp).glassSurface(colors, 22.dp).clickable { menu = true },
+                        Modifier.size(44.dp).onGloballyPositioned { menuAnchor = it.boundsInRoot() }.glassSurface(colors, 22.dp).clickable { menu = true },
                         contentAlignment = Alignment.Center,
                     ) { EllipsisMark(colors.text, Modifier.size(18.dp)) }
-                    DropdownMenu(expanded = menu, onDismissRequest = { menu = false }) {
-                        DropdownMenuItem(text = { Text(if (row?.pinned == true) "Unpin" else "Pin") }, onClick = { menu = false; model.pin(chatId, row?.pinned != true) })
-                        DropdownMenuItem(text = { Text("Rename") }, onClick = { menu = false; renameText = chrome.title; renaming = true })
-                        DropdownMenuItem(text = { Text("Archive") }, onClick = { menu = false; model.archive(chatId); model.back() })
-                    }
                 }
             }
         }
         Column(
-            Modifier.align(Alignment.BottomCenter).widthIn(max = 768.dp).fillMaxWidth().padding(horizontal = 16.dp).windowInsetsPadding(WindowInsets.ime.union(WindowInsets.navigationBars)).padding(bottom = 6.dp).onSizeChanged { composerHeight = it.height },
+            Modifier.align(Alignment.BottomCenter).widthIn(max = 768.dp).fillMaxWidth().padding(horizontal = 16.dp).windowInsetsPadding(WindowInsets.ime.union(WindowInsets.navigationBars)).padding(bottom = 6.dp).onGloballyPositioned { composerTop = it.boundsInRoot().top.roundToInt() },
         ) {
-            if (awayFromBottom) {
-                Row(Modifier.fillMaxWidth(), horizontalArrangement = Arrangement.End) {
-                    Box(
-                        Modifier.size(40.dp).glassSurface(colors, 20.dp).clickable { view?.jumpToBottom() },
-                        contentAlignment = Alignment.Center,
-                    ) { Text("↓", color = colors.text, fontSize = 16.sp) }
-                }
-                Spacer(Modifier.height(8.dp))
-            }
             StatusLine(chrome, colors) {
                 if (chrome.sendState == SendState.FAILED) runCatching { handle.retryDelivery() }
             }
@@ -398,6 +404,59 @@ fun SessionScreen(model: ZeronModel, chatId: String) {
                 )
             }
         }
+        // iOS jump-to-latest: a 40pt glass circle 16 from the trailing edge,
+        // 12 above the composer, popping in once you're away from the bottom.
+        if (composerTop > 0) {
+            val buttonPx = with(density) { 40.dp.roundToPx() }
+            val lift = with(density) { 12.dp.roundToPx() }
+            Box(Modifier.align(Alignment.TopEnd).padding(end = 16.dp).offset { IntOffset(0, composerTop - lift - buttonPx) }) {
+                AnimatedVisibility(
+                    visible = awayFromBottom,
+                    enter = fadeIn(tween(180)) + scaleIn(tween(220), initialScale = 0.6f),
+                    exit = fadeOut(tween(160)) + scaleOut(tween(160), targetScale = 0.6f),
+                ) {
+                    Box(
+                        Modifier.size(40.dp).glassSurface(colors, 20.dp).clickable { view?.jumpToBottom() },
+                        contentAlignment = Alignment.Center,
+                    ) { ArrowUpMark(colors.text, Modifier.size(16.dp).graphicsLayer { rotationZ = 180f }) }
+                }
+            }
+        }
+        if (menu) {
+            // iOS sessionMenu(), read when it opens: Pin/Unpin, Rename…, Copy
+            // Transcript, Archive (destructive).
+            val current = client.sessionRow(chatId)
+            val pinned = current?.pinned == true
+            AnchoredMenu(
+                colors,
+                menuAnchor,
+                title = null,
+                entries = listOf(
+                    MenuEntry(if (pinned) "Unpin" else "Pin", icon = { c -> if (pinned) PinSlashGlyph(17.dp, c) else Glyph(Glyphs.Pin, 17.dp, c) }) {
+                        model.pin(chatId, !pinned)
+                    },
+                    MenuEntry("Rename…", icon = { c -> Glyph(Glyphs.Rename, 17.dp, c) }) {
+                        renameText = chrome.title.ifBlank { current?.title ?: "" }
+                        renaming = true
+                    },
+                    MenuEntry("Copy Transcript", icon = { c -> Glyph(Glyphs.Copy, 17.dp, c) }) {
+                        val text = runCatching { engine.frame().let { f -> try { f.plainText() } finally { f.close() } } }.getOrDefault("")
+                        if (text.isBlank()) {
+                            model.showToast("Nothing to copy yet")
+                        } else {
+                            val cm = context.getSystemService(android.content.ClipboardManager::class.java)
+                            cm.setPrimaryClip(android.content.ClipData.newPlainText("transcript", text))
+                            model.showToast("Transcript copied")
+                        }
+                    },
+                    MenuEntry("Archive", destructive = true, icon = { c -> Glyph(Glyphs.Archive, 17.dp, c) }) {
+                        model.archive(chatId)
+                        model.back()
+                    },
+                ),
+                above = false,
+            ) { menu = false }
+        }
         chipMenu?.let { (chip, anchor) ->
             ChipMenu(chip, anchor, row, chrome, client, chatId, colors, model) { chipMenu = null }
         }
@@ -441,6 +500,9 @@ fun SessionScreen(model: ZeronModel, chatId: String) {
         }
     }
 }
+
+/** Gap between the last message and the composer; the fade edge lives in it. */
+private val ComposerGap = 18.dp
 
 /** The chip menus the iOS session composer shows (CoreSessionSource.chipMenu). */
 @Composable
@@ -802,10 +864,12 @@ private fun SendButton(
     onMenu: (Boolean) -> Unit,
     onSend: (Delivery) -> Unit,
 ) {
+    var anchor by remember { mutableStateOf(Rect.Zero) }
     Box {
         Box(
             Modifier
                 .size(34.dp)
+                .onGloballyPositioned { anchor = it.boundsInWindow() }
                 .clip(RoundedCornerShape(17.dp))
                 .background(if (stop) colors.text else if (has) colors.accent else colors.text.copy(alpha = 0.10f))
                 .combinedClickable(
@@ -816,12 +880,18 @@ private fun SendButton(
         ) {
             if (stop) StopMark(colors.background, Modifier.size(16.dp)) else ArrowUpMark(if (has) Color.White else colors.tertiary, Modifier.size(16.dp))
         }
-        if (running && has) {
-            DropdownMenu(expanded = deliveryMenu, onDismissRequest = { onMenu(false) }) {
-                DropdownMenuItem(text = { Text("Queue for next turn") }, onClick = { onMenu(false); onSend(Delivery.Queue) })
-                if (canSteer) DropdownMenuItem(text = { Text("Steer now") }, onClick = { onMenu(false); onSend(Delivery.Steer) })
-                DropdownMenuItem(text = { Text("Stop and send") }, onClick = { onMenu(false); onSend(Delivery.Interrupt) })
-            }
+        if (running && has && deliveryMenu) {
+            PopupAnchoredMenu(
+                colors,
+                anchor,
+                title = null,
+                entries = listOfNotNull(
+                    MenuEntry("Queue for next turn") { onSend(Delivery.Queue) },
+                    if (canSteer) MenuEntry("Steer now") { onSend(Delivery.Steer) } else null,
+                    MenuEntry("Stop and send", destructive = true) { onSend(Delivery.Interrupt) },
+                ),
+                above = true,
+            ) { onMenu(false) }
         }
     }
 }
