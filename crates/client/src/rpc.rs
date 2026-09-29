@@ -140,4 +140,46 @@ mod usage_tests {
         assert_eq!(list[1].harness, "some-future-agent");
         assert_eq!(list[1].error.as_deref(), Some("Sign in again"));
     }
+
+    /// Devin reports a weekly quota only (the desktop's "DEVIN ACCOUNTS"
+    /// card: Devin Pro, In use, Week 50%). Serialized from the engine's own
+    /// `AgentAccount`, so the wire shape (`"harness": "devin"`, RFC 3339
+    /// `resetsAt`) is the one the engine sends.
+    #[test]
+    fn parses_a_devin_weekly_quota() {
+        let account = zeron_proto::AgentAccount {
+            id: "devin-1".into(),
+            harness: zeron_proto::HarnessId::Devin,
+            email: Some("dev@example.com".into()),
+            plan_label: Some("Devin Pro".into()),
+            active: true,
+            usage_windows: vec![zeron_proto::AgentUsageWindow {
+                label: "Week".into(),
+                used_fraction: 0.5,
+                resets_at: chrono::DateTime::parse_from_rfc3339("2026-10-05T00:00:00Z")
+                    .ok()
+                    .map(|t| t.with_timezone(&chrono::Utc)),
+            }],
+            usage_fetched_at: Some(1790650000000),
+            usage_error: None,
+            display_name: None,
+            organization: None,
+            auth_kind: None,
+            switchable: true,
+            saved_at: None,
+            provider: None,
+        };
+        let v = serde_json::json!({ "accounts": [account], "warnings": [] });
+        let list = parse_agent_usage(&v);
+        assert_eq!(list.len(), 1);
+        let devin = &list[0];
+        assert_eq!(devin.harness, "devin");
+        assert_eq!(devin.plan_label.as_deref(), Some("Devin Pro"));
+        assert!(devin.active);
+        assert_eq!(devin.windows.len(), 1);
+        assert_eq!(devin.windows[0].label, "Week");
+        assert!((devin.windows[0].used_fraction - 0.5).abs() < 1e-6);
+        assert_eq!(devin.windows[0].resets_at_ms, Some(1791158400000));
+        assert_eq!(devin.fetched_at_ms, Some(1790650000000));
+    }
 }
