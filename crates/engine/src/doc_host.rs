@@ -4025,8 +4025,11 @@ impl DocHost {
     }
 
     /// Stop the active turn without treating the resulting Idle transition as
-    /// permission to release the next queued message. The same lock used by
-    /// drains closes the race between clicking Cancel and the status watcher.
+    /// permission to release the next queued message — or to let held child
+    /// updates wake the chat. Both freezes are one transaction with the stop:
+    /// the interrupt settles the parent Idle, and the very next notifier flush
+    /// would otherwise deliver a new hidden turn. The same lock used by drains
+    /// closes the race between clicking Cancel and the status watcher.
     async fn interrupt_and_pause_queue(
         &self,
         sessions: &SessionsEngine,
@@ -4037,14 +4040,17 @@ impl DocHost {
             return Ok(false);
         }
         handle.queue_paused.store(true, Ordering::Release);
+        sessions.pause_child_notifications(&handle.chat_id);
         match sessions.interrupt(&handle.chat_id).await {
             Ok(true) => Ok(true),
             Ok(false) => {
                 handle.queue_paused.store(false, Ordering::Release);
+                sessions.resume_child_notifications(&handle.chat_id);
                 Ok(false)
             }
             Err(err) => {
                 handle.queue_paused.store(false, Ordering::Release);
+                sessions.resume_child_notifications(&handle.chat_id);
                 Err(err)
             }
         }
