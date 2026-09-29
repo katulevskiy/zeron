@@ -182,6 +182,19 @@ fun SessionScreen(model: ZeronModel, chatId: String) {
     val drafts = remember { context.getSharedPreferences("drafts", android.content.Context.MODE_PRIVATE) }
     var draft by remember(chatId) { mutableStateOf(drafts.getString(chatId, "") ?: "") }
     var usageOpen by remember { mutableStateOf(false) }
+    // Plan usage for the composer's ring (desktop AccountUsage): the engine's
+    // cached probe paints at once, a forced probe follows, then every 5 min.
+    var planAccounts by remember(chatId) { mutableStateOf<List<uniffi.zeron_core.AgentUsage>?>(null) }
+    val usageDevice = row?.deviceId ?: chrome.host.deviceId
+    val usageHarness = row?.harness
+    LaunchedEffect(usageDevice, usageHarness) {
+        if (!reportsPlanUsage(usageHarness)) return@LaunchedEffect
+        runCatching { client.listAgentUsage(usageDevice, false) }.onSuccess { planAccounts = it }
+        while (true) {
+            runCatching { client.listAgentUsage(usageDevice, true) }.onSuccess { planAccounts = it }
+            kotlinx.coroutines.delay(5 * 60_000L)
+        }
+    }
     var sendFailure by remember(chatId) { mutableStateOf<String?>(null) }
     var focused by remember { mutableStateOf(false) }
     var staged by remember { mutableStateOf(listOf<Staged>()) }
@@ -367,7 +380,10 @@ fun SessionScreen(model: ZeronModel, chatId: String) {
                     focused = focused,
                     onFocus = { focused = it },
                     chips = chipsFor(row, chrome),
-                    onChip = { chip, rect -> if (chip.id == "context") { focusManager.clearFocus(); usageOpen = true } else chipMenu = chip to rect },
+                    onChip = { chip, rect -> chipMenu = chip to rect },
+                    rings = {
+                        UsageRings(colors, planFraction(planAccounts, row?.harness), chrome.contextUsage, onTap = { focusManager.clearFocus(); usageOpen = true })
+                    },
                     images = staged,
                     onRemoveImage = { staged = staged.filterNot { s -> s === it } },
                     onAttach = { picker.launch("image/*") },
@@ -482,7 +498,7 @@ fun SessionScreen(model: ZeronModel, chatId: String) {
             ) { menu = false }
         }
         if (usageOpen) {
-            UsageSheet(colors, client, row?.deviceId ?: chrome.host.deviceId, row?.harness, chrome.contextUsage) { usageOpen = false }
+            UsageSheet(colors, client, row?.deviceId ?: chrome.host.deviceId, row?.harness, chrome.contextUsage, onAccounts = { planAccounts = it }) { usageOpen = false }
         }
         chipMenu?.let { (chip, anchor) ->
             ChipMenu(chip, anchor, row, chrome, client, chatId, colors, model) { chipMenu = null }
@@ -742,12 +758,7 @@ private fun chipsFor(row: uniffi.zeron_core.SessionRow?, chrome: uniffi.zeron_co
     } else {
         row?.branch?.takeIf { it.isNotEmpty() }?.let { chips.add(Chip("branch", it)) }
     }
-    val tokens = chrome.contextUsage?.tokens
-    val window = chrome.contextUsage?.window
-    if (tokens != null && window != null && window > 0uL) {
-        val fraction = tokens.toDouble() / window.toDouble()
-        if (fraction >= 0.5) chips.add(Chip("context", "${Math.round(fraction * 100)}% context", warn = fraction >= 0.85))
-    }
+    // Context (and plan) usage live in the ring cluster beside the send button.
     return chips
 }
 
@@ -778,10 +789,9 @@ private fun ChipView(chip: Chip, colors: ZeronColors, onTap: (Rect) -> Unit) {
             "effort" -> GaugeGlyph(fg, Modifier.size(13.dp))
             "pr" -> PrGlyph(fg, Modifier.size(12.dp))
             "branch" -> AssetIcon("tool-git-branch", 12.dp, fg)
-            "context" -> ContextGlyph(fg, warn = chip.warn, Modifier.size(13.dp))
             else -> Unit
         }
-        if (chip.id in setOf("project", "host", "model", "effort", "pr", "branch", "context")) Spacer(Modifier.width(if (chip.id == "pr") 5.dp else 6.dp))
+        if (chip.id in setOf("project", "host", "model", "effort", "pr", "branch")) Spacer(Modifier.width(if (chip.id == "pr") 5.dp else 6.dp))
         Text(
             chip.title,
             color = fg,
@@ -811,7 +821,11 @@ internal fun ComposerBar(
     onSend: (Delivery) -> Unit,
     mentionSearch: suspend (String) -> List<uniffi.zeron_core.FileMatch>,
     onMention: (String, Boolean) -> Unit,
+    /** Usage rings (desktop footer ring cluster), just before the send button. */
+    rings: (@Composable () -> Unit)? = null,
 ) {
+    var trailingPx by remember { mutableIntStateOf(0) }
+    val trailingDp = with(androidx.compose.ui.platform.LocalDensity.current) { trailingPx.toDp() }
     val resting = !focused && text.isEmpty() && images.isEmpty()
     val has = text.isNotBlank() || images.isNotEmpty()
     val stop = running && !has
@@ -881,7 +895,7 @@ internal fun ComposerBar(
                     .fillMaxWidth()
                     .padding(
                         start = 8.dp,
-                        end = if (card) 8.dp else 42.dp,
+                        end = if (card) 8.dp else maxOf(42.dp, trailingDp + 8.dp),
                         top = if (card) 6.dp else 0.dp,
                         bottom = if (card) 48.dp else 0.dp,
                     )
@@ -918,10 +932,15 @@ internal fun ComposerBar(
                             ChipView(chip, colors) { rect -> onChip(chip, rect) }
                         }
                     }
+                    rings?.let { Box(Modifier.padding(end = 4.dp)) { it() } }
                     SendButton(colors, stop, has, running, canSteer, deliveryMenu, { deliveryMenu = it }, onSend)
                 }
             } else {
-                Box(Modifier.align(Alignment.CenterEnd)) {
+                Row(
+                    Modifier.align(Alignment.CenterEnd).onSizeChanged { trailingPx = it.width },
+                    verticalAlignment = Alignment.CenterVertically,
+                ) {
+                    rings?.let { Box(Modifier.padding(end = 4.dp)) { it() } }
                     SendButton(colors, stop, has, running, canSteer, deliveryMenu, { deliveryMenu = it }, onSend)
                 }
             }
@@ -1060,20 +1079,3 @@ internal fun Modifier.fadeEdges(state: androidx.compose.foundation.ScrollState, 
                 )
             }
         }
-
-/** iOS `circle.lefthalf.filled` / `exclamationmark.circle` for the context chip. */
-@Composable
-private fun ContextGlyph(color: Color, warn: Boolean, modifier: Modifier) {
-    androidx.compose.foundation.Canvas(modifier) {
-        val r = size.minDimension / 2f
-        val stroke = size.minDimension * 0.11f
-        drawCircle(color, radius = r - stroke / 2f, style = androidx.compose.ui.graphics.drawscope.Stroke(stroke))
-        if (warn) {
-            val cx = size.width / 2f
-            drawLine(color, androidx.compose.ui.geometry.Offset(cx, size.height * 0.27f), androidx.compose.ui.geometry.Offset(cx, size.height * 0.58f), strokeWidth = stroke * 1.2f, cap = androidx.compose.ui.graphics.StrokeCap.Round)
-            drawCircle(color, radius = stroke * 0.75f, center = androidx.compose.ui.geometry.Offset(cx, size.height * 0.74f))
-        } else {
-            drawArc(color, startAngle = 90f, sweepAngle = 180f, useCenter = true, topLeft = androidx.compose.ui.geometry.Offset(stroke, stroke), size = androidx.compose.ui.geometry.Size(size.width - 2 * stroke, size.height - 2 * stroke))
-        }
-    }
-}

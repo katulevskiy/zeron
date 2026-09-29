@@ -69,6 +69,7 @@ internal fun UsageSheet(
     deviceId: String,
     harness: String?,
     context: ContextUsage?,
+    onAccounts: (List<AgentUsage>) -> Unit = {},
     onClose: () -> Unit,
 ) {
     BackHandler(onBack = onClose)
@@ -80,11 +81,11 @@ internal fun UsageSheet(
     LaunchedEffect(deviceId) {
         // Cached probe first (instant), then a forced one so it's current.
         runCatching { client.listAgentUsage(deviceId, false) }
-            .onSuccess { accounts = it }
+            .onSuccess { accounts = it; onAccounts(it) }
             .onFailure { failure = it.message }
         refreshing = true
         runCatching { client.listAgentUsage(deviceId, true) }
-            .onSuccess { accounts = it; failure = null }
+            .onSuccess { accounts = it; failure = null; onAccounts(it) }
         refreshing = false
     }
     val none = remember { MutableInteractionSource() }
@@ -134,7 +135,7 @@ internal fun UsageSheet(
                         scope.launch {
                             refreshing = true
                             runCatching { client.listAgentUsage(deviceId, true) }
-                                .onSuccess { accounts = it; failure = null }
+                                .onSuccess { accounts = it; failure = null; onAccounts(it) }
                                 .onFailure { failure = it.message }
                             refreshing = false
                         }
@@ -168,7 +169,7 @@ private fun AccountUsage(colors: ZeronColors, a: AgentUsage) {
     if (a.windows.isEmpty() && a.error == null) Line(colors, "No usage reported yet.")
     Column(verticalArrangement = Arrangement.spacedBy(10.dp)) {
         a.windows.forEach { w ->
-            Meter(colors, "${w.label} · ${Math.round(w.usedFraction * 100)}%", w.resetsAtMs?.let { resets(it) } ?: "", w.usedFraction)
+            Meter(colors, "${w.label} · ${Math.round(w.usedFraction * 100)}%", w.resetsAtMs?.let { resets(it) } ?: "", w.usedFraction, planTone(colors, w.usedFraction))
         }
     }
     a.error?.let {
@@ -191,14 +192,22 @@ private fun Line(colors: ZeronColors, text: String) {
     Text(text, color = colors.tertiary, fontFamily = ZeronType.Sans, fontSize = 14.sp)
 }
 
-/** A labelled bar; colours step up like the desktop rings (75% / 90%). */
+/**
+ * A labelled bar. Context steps up like the desktop context ring (75% /
+ * 90%); plan windows pass the desktop meter tone (80% / 95%).
+ */
 @Composable
-private fun Meter(colors: ZeronColors, label: String, detail: String, fraction: Float) {
-    val tone = when {
+private fun Meter(
+    colors: ZeronColors,
+    label: String,
+    detail: String,
+    fraction: Float,
+    tone: Color = when {
         fraction >= 0.9f -> colors.danger
         fraction >= 0.75f -> colors.warning
         else -> colors.accent
-    }
+    },
+) {
     Column {
         Row {
             Text(label, color = colors.text, fontFamily = ZeronType.Sans, fontSize = 14.sp, modifier = Modifier.weight(1f))
