@@ -398,3 +398,29 @@ fn newer_minor_engines_get_a_notice_patches_do_not() {
     assert!(engine_notice(Some("garbage")).is_none());
     assert!(engine_notice(None).is_none());
 }
+
+#[tokio::test(flavor = "multi_thread")]
+async fn direct_pins_are_phone_only_and_start_empty() {
+    start_engine("pins.test", Mode::Real).await;
+    let dir = tempfile::tempdir().unwrap();
+    let client = direct_client("pins.test", dir.path());
+    wait_for(&client, "rows", |c| {
+        let ws = c.workspace();
+        ws.pins_ready && !ws.front.recent.is_empty()
+    })
+    .await;
+    let ws = client.workspace();
+    assert!(ws.front.pinned.is_empty(), "fresh direct link has no pins");
+    let id = ws.front.recent[0].id.clone();
+    assert!(!ws.session(&id).unwrap().pinned);
+    client.pin_session(&id).unwrap();
+    wait_for(&client, "pinned", |c| c.workspace().session(&id).is_some_and(|r| r.pinned)).await;
+    let other = client.workspace().front.recent.first().map(|r| r.id.clone());
+    if let Some(other) = other {
+        assert!(!client.workspace().session(&other).unwrap().pinned);
+    }
+    client.unpin_session(&id).unwrap();
+    wait_for(&client, "unpinned", |c| c.workspace().session(&id).is_some_and(|r| !r.pinned)).await;
+    assert!(client.workspace().front.pinned.is_empty());
+    client.shutdown();
+}
