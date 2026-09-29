@@ -440,6 +440,15 @@ class ZeronModel(app: Application) : AndroidViewModel(app) {
         }
     }
 
+    private var dismissedNotice by mutableStateOf(prefs.getString("dismissedNotice", null))
+
+    fun noticeDismissed(notice: String) = dismissedNotice == notice
+
+    fun dismissNotice(notice: String) {
+        dismissedNotice = notice
+        prefs.edit().putString("dismissedNotice", notice).apply()
+    }
+
     /** Drop the current SSH link (even a stalled one) and dial again. */
     fun retryDirect() {
         val c = client ?: return
@@ -458,9 +467,11 @@ class ZeronModel(app: Application) : AndroidViewModel(app) {
             appendLine("Phase: ${s.phase}")
             appendLine("Engine: ${s.engineVersion ?: "?"} (device ${s.engineDeviceId?.take(8) ?: "?"})")
             s.lastError?.let { appendLine("Last error: $it") }
+            s.notice?.let { appendLine("Note: $it") }
             for (st in s.streams) {
                 append("${st.name}: ${st.frames} frames, ${st.rows} rows")
                 if (st.skippedRows > 0u) append(", ${st.skippedRows} skipped")
+                if (st.repairedRows > 0u) append(", ${st.repairedRows} repaired")
                 st.error?.let { append(" — $it") }
                 appendLine()
             }

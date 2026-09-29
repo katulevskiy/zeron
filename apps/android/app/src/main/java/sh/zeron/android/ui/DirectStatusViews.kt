@@ -62,6 +62,19 @@ internal fun DirectBanner(model: ZeronModel, colors: ZeronColors, modifier: Modi
     val status = model.directStatus
     val machine = model.activeTitle()
     val skipped = status?.streams?.sumOf { it.skippedRows.toInt() } ?: 0
+    val notice = status?.notice?.takeIf { status.phase == DirectPhase.LIVE && !model.noticeDismissed(it) }
+    if (notice != null && skipped == 0) {
+        // Newer engine: informational only, never blocks anything.
+        Row(
+            modifier.fillMaxWidth().padding(horizontal = 16.dp, vertical = 6.dp).clip(RoundedCornerShape(14.dp)).background(colors.elevated).padding(horizontal = 14.dp, vertical = 10.dp),
+            verticalAlignment = Alignment.CenterVertically,
+        ) {
+            Text(notice, color = colors.secondary, fontFamily = ZeronType.Sans, fontSize = 13.sp, modifier = Modifier.weight(1f))
+            Spacer(Modifier.width(8.dp))
+            Pill(colors, "OK") { model.dismissNotice(notice) }
+        }
+        return
+    }
     val (title, detail, danger) = when {
         status == null || status.phase == DirectPhase.CONNECTING ->
             Triple("Connecting to $machine…", status?.log?.lastOrNull()?.message, false)
@@ -137,11 +150,13 @@ internal fun LinkDetailsScreen(model: ZeronModel) {
             SettingRow(colors, "State", state)
             SettingRow(colors, "Zeron engine", listOfNotNull(status.engineVersion, status.engineDeviceId?.let { "device ${it.take(8)}" }).joinToString(" · ").ifEmpty { "not reached yet" })
             status.lastError?.let { SettingRow(colors, "Last error", it) }
+            status.notice?.let { SettingRow(colors, "Note", it) }
             GroupLabel(colors, "Streams")
             for (st in status.streams) {
                 val line = buildString {
                     append("${st.frames} frames · ${st.rows} rows")
                     if (st.skippedRows > 0u) append(" · ${st.skippedRows} skipped")
+                    if (st.repairedRows > 0u) append(" · ${st.repairedRows} read with unknown values ignored")
                     st.lastFrameMs?.let { append(" · last ${fmt.format(java.util.Date(it))}") }
                     st.error?.let { append("\n$it") }
                 }
