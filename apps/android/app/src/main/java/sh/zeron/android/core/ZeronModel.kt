@@ -7,6 +7,7 @@ import android.net.ConnectivityManager
 import android.net.Network
 import android.os.Handler
 import android.os.Looper
+import android.os.SystemClock
 import androidx.appcompat.app.AppCompatDelegate
 import androidx.compose.runtime.getValue
 import androidx.compose.runtime.mutableIntStateOf
@@ -17,6 +18,7 @@ import androidx.compose.runtime.snapshots.SnapshotStateList
 import androidx.lifecycle.AndroidViewModel
 import androidx.lifecycle.viewModelScope
 import kotlinx.coroutines.Dispatchers
+import kotlinx.coroutines.delay
 import kotlinx.coroutines.launch
 import kotlinx.coroutines.withContext
 import sh.zeron.android.BuildConfig
@@ -399,21 +401,91 @@ class ZeronModel(app: Application) : AndroidViewModel(app) {
     private fun handleEvent(event: ClientEvent) {
         val c = client ?: return
         when (event) {
-            is ClientEvent.WorkspaceChanged -> workspace = c.workspace()
-            is ClientEvent.ConnectivityChanged -> connectivity = c.connectivity()
+            is ClientEvent.WorkspaceChanged -> requestRefresh()
+            // A streaming turn fires these many times a second; one UI pass per
+            // quarter second is plenty for the chat chrome and the list.
+            is ClientEvent.SessionChanged, is ClientEvent.ComposerChanged -> bumpEpochSoon()
+            is ClientEvent.ConnectivityChanged -> {
+                connectivity = c.connectivity()
+                epoch++
+            }
             is ClientEvent.AuthExpired -> {
                 showToast(event.reason)
                 signOut()
-                return
             }
-            else -> Unit
+            else -> epoch++
         }
-        epoch++
+    }
+
+    /**
+     * True while the sessions list or a chat is being dragged or flung.
+     * Workspace refreshes wait for it (at most [SCROLL_DEFER_MS]) so the list
+     * does not rebuild under the finger.
+     */
+    @Volatile
+    var scrolling = false
+
+    private var refreshJob: Job? = null
+    private var refreshAgain = false
+    private var lastRefreshAt = 0L
+    private var epochJob: Job? = null
+
+    /**
+     * Coalesced workspace refresh. A busy engine (a streaming turn touches its
+     * session several times a second) used to re-read the whole workspace
+     * and rebuild the list on every event, on the main thread, which made
+     * scrolling stutter and let drags turn into taps. Now there is at most
+     * one read every [REFRESH_GAP_MS], done off the main thread, and it waits
+     * while a list is moving. The list only recomposes when the snapshot
+     * actually changed.
+     */
+    private fun requestRefresh() {
+        val c = client ?: return
+        if (refreshJob?.isActive == true) {
+            refreshAgain = true
+            return
+        }
+        refreshJob = viewModelScope.launch {
+            do {
+                refreshAgain = false
+                val wait = lastRefreshAt + REFRESH_GAP_MS - SystemClock.uptimeMillis()
+                if (wait > 0) delay(wait)
+                val deadline = SystemClock.uptimeMillis() + SCROLL_DEFER_MS
+                while (scrolling && SystemClock.uptimeMillis() < deadline) delay(50)
+                if (client !== c) return@launch
+                val current = workspace
+                val read = withContext(Dispatchers.Default) {
+                    runCatching {
+                        val next = c.workspace()
+                        Triple(next, next != current, c.connectivity())
+                    }.getOrNull()
+                }
+                if (client !== c) return@launch
+                lastRefreshAt = SystemClock.uptimeMillis()
+                if (read != null) {
+                    if (read.second) workspace = read.first
+                    if (read.third != connectivity) connectivity = read.third
+                    epoch++
+                }
+            } while (refreshAgain)
+        }
+    }
+
+    private fun bumpEpochSoon() {
+        if (epochJob?.isActive == true) return
+        epochJob = viewModelScope.launch {
+            delay(EPOCH_GAP_MS)
+            epoch++
+        }
     }
 
     private fun shutdownClient() {
         directJob?.cancel()
         directJob = null
+        refreshJob?.cancel()
+        refreshJob = null
+        epochJob?.cancel()
+        epochJob = null
         directStatus = null
         runCatching { client?.shutdown() }
         runCatching { client?.close() }
@@ -421,8 +493,9 @@ class ZeronModel(app: Application) : AndroidViewModel(app) {
     }
 
     /**
-     * Poll the direct link once a second: the sessions page shows its phase
-     * and errors instead of a blank list, and a stalled workspace is re-read
+     * Poll the direct link once a second (off the main thread): the sessions
+     * page shows its phase and errors instead of a blank list. If frames keep
+     * arriving but no refresh happened for a while, re-read the workspace
      * (belt and braces if an event was missed).
      */
     private fun watchDirect(created: CoreClient) {
@@ -430,27 +503,17 @@ class ZeronModel(app: Application) : AndroidViewModel(app) {
         directJob = viewModelScope.launch {
             var lastFrames = -1L
             while (client === created) {
-                val status = runCatching { created.directStatus() }.getOrNull()
+                val status = withContext(Dispatchers.Default) { runCatching { created.directStatus() }.getOrNull() }
+                if (client !== created) break
                 if (status != directStatus) directStatus = status
                 val frames = status?.streams?.sumOf { it.frames.toLong() } ?: 0L
                 if (frames != lastFrames) {
                     lastFrames = frames
-                    workspace = created.workspace()
-                    connectivity = created.connectivity()
-                    epoch++
+                    if (SystemClock.uptimeMillis() - lastRefreshAt > STALE_REFRESH_MS) requestRefresh()
                 }
-                kotlinx.coroutines.delay(1000)
+                delay(1000)
             }
         }
-    }
-
-    private var dismissedNotice by mutableStateOf(prefs.getString("dismissedNotice", null))
-
-    fun noticeDismissed(notice: String) = dismissedNotice == notice
-
-    fun dismissNotice(notice: String) {
-        dismissedNotice = notice
-        prefs.edit().putString("dismissedNotice", notice).apply()
     }
 
     private var dismissedNotice by mutableStateOf(prefs.getString("dismissedNotice", null))
@@ -481,11 +544,9 @@ class ZeronModel(app: Application) : AndroidViewModel(app) {
             appendLine("Engine: ${s.engineVersion ?: "?"} (device ${s.engineDeviceId?.take(8) ?: "?"})")
             s.lastError?.let { appendLine("Last error: $it") }
             s.notice?.let { appendLine("Note: $it") }
-            s.notice?.let { appendLine("Note: $it") }
             for (st in s.streams) {
                 append("${st.name}: ${st.frames} frames, ${st.rows} rows")
                 if (st.skippedRows > 0u) append(", ${st.skippedRows} skipped")
-                if (st.repairedRows > 0u) append(", ${st.repairedRows} repaired")
                 if (st.repairedRows > 0u) append(", ${st.repairedRows} repaired")
                 st.error?.let { append(" — $it") }
                 appendLine()
@@ -558,6 +619,7 @@ class ZeronModel(app: Application) : AndroidViewModel(app) {
         } catch (t: Throwable) {
             showToast(t.message ?: "Couldn't update")
         }
+        requestRefresh()
     }
 
     fun homeColorIndex(): Int = projectColorIndex("home").toInt()
@@ -782,6 +844,10 @@ class ZeronModel(app: Application) : AndroidViewModel(app) {
     }
 
     companion object {
+        const val REFRESH_GAP_MS = 350L
+        const val SCROLL_DEFER_MS = 1200L
+        const val EPOCH_GAP_MS = 250L
+        const val STALE_REFRESH_MS = 4000L
         val FACE_FILES: Map<FaceRole, String> get() = sh.zeron.android.design.FontChain.files
 
         fun loadFaces(app: Application): Map<FaceRole, Typeface> = sh.zeron.android.design.FontChain.faces(app)

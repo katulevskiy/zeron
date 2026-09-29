@@ -74,7 +74,9 @@ import androidx.compose.ui.unit.sp
 import androidx.compose.ui.viewinterop.AndroidView
 import androidx.activity.compose.rememberLauncherForActivityResult
 import androidx.activity.result.contract.ActivityResultContracts
+import kotlinx.coroutines.Dispatchers
 import kotlinx.coroutines.launch
+import kotlinx.coroutines.withContext
 import sh.zeron.android.core.ZeronModel
 import sh.zeron.android.design.AnchoredMenu
 import sh.zeron.android.design.ArrowUpMark
@@ -135,7 +137,11 @@ fun SessionScreen(model: ZeronModel, chatId: String) {
     val handle = remember(chatId) { client.openSession(chatId) }
     var chrome by remember(chatId) { mutableStateOf(handle.composer()) }
     val row = client.sessionRow(chatId)
-    LaunchedEffect(model.epoch) { chrome = handle.composer() }
+    LaunchedEffect(model.epoch) {
+        // Decoding the composer (queue, questions) is not free; keep it off the
+        // main thread so a busy turn does not stall scrolling.
+        withContext(Dispatchers.Default) { runCatching { handle.composer() }.getOrNull() }?.let { chrome = it }
+    }
     val relay = remember { FrameRelay() }
     val engine = remember(chatId) {
         TranscriptView(text, relay).also {

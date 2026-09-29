@@ -275,13 +275,15 @@ private fun SessionsScreen(model: ZeronModel, colors: ZeronColors, onNewSpace: (
     // activity first (the frame lists zeron, then edge). A space with no
     // live sessions (all archived, or never used) is left out; the selected
     // space always stays so the checkmark has a row.
-    val menuProjects = remember(projects, model.epoch, spaceId) {
+    val menuProjects = remember(projects, spaceId) {
         projects
             .filter { it.sessions.isNotEmpty() || it.id == spaceId }
             .sortedByDescending { project -> project.sessions.maxOfOrNull { it.lastActivityMs } ?: 0L }
     }
     val space = projects.firstOrNull { it.id == spaceId }
-    val rows = remember(model.epoch, front, spaceId, projects) {
+    // Keyed on the snapshot itself: ZeronModel only swaps `workspace` when its
+    // content changed, so streaming updates elsewhere do not rebuild the list.
+    val rows = remember(front, spaceId, projects) {
         val seen = LinkedHashSet<String>()
         val out = ArrayList<SessionRow>()
         fun take(list: List<SessionRow>) {
@@ -296,7 +298,7 @@ private fun SessionsScreen(model: ZeronModel, colors: ZeronColors, onNewSpace: (
         }
         out
     }
-    val archived = remember(model.epoch, workspace, spaceId) {
+    val archived = remember(workspace, spaceId) {
         workspace?.archived.orEmpty().filter { spaceId == null || it.project?.id == spaceId }
     }
     Box(Modifier.fillMaxSize()) {
