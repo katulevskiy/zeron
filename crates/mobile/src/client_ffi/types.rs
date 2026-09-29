@@ -1040,6 +1040,44 @@ impl From<zc::rpc::DriveEntry> for DriveEntry {
     }
 }
 
+/// One agent login's plan usage on a host (ListAgentAccounts), meters only.
+#[derive(Debug, Clone, PartialEq, uniffi::Record)]
+pub struct AgentUsage {
+    pub harness: String,
+    pub email: Option<String>,
+    pub plan_label: Option<String>,
+    pub active: bool,
+    pub windows: Vec<UsageWindow>,
+    pub fetched_at_ms: Option<i64>,
+    pub error: Option<String>,
+}
+
+/// A rate-limit window ("5-hour", "Weekly", …); `used_fraction` is 0…1.
+#[derive(Debug, Clone, PartialEq, uniffi::Record)]
+pub struct UsageWindow {
+    pub label: String,
+    pub used_fraction: f32,
+    pub resets_at_ms: Option<i64>,
+}
+
+impl From<zc::rpc::AgentUsage> for AgentUsage {
+    fn from(a: zc::rpc::AgentUsage) -> Self {
+        Self {
+            harness: a.harness,
+            email: a.email,
+            plan_label: a.plan_label,
+            active: a.active,
+            windows: a
+                .windows
+                .into_iter()
+                .map(|w| UsageWindow { label: w.label, used_fraction: w.used_fraction, resets_at_ms: w.resets_at_ms })
+                .collect(),
+            fetched_at_ms: a.fetched_at_ms,
+            error: a.error,
+        }
+    }
+}
+
 // ── attachments ───────────────────────────────────────────────────────────
 
 #[derive(Debug, Clone, PartialEq, Eq, uniffi::Record)]

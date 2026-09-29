@@ -456,6 +456,19 @@ impl CoreClient {
         )
     }
 
+    /// Plan / rate-limit usage of the agent logins on a device. `force`
+    /// re-probes the providers; otherwise the host's last probe is served.
+    pub async fn list_agent_usage(&self, device_id: String, force: bool) -> CoreResult<Vec<AgentUsage>> {
+        let client = self.client.clone();
+        Ok(
+            on_runtime(async move { client.list_agent_usage(&device_id, force).await })
+                .await?
+                .into_iter()
+                .map(Into::into)
+                .collect(),
+        )
+    }
+
     /// `git checkout <ref>` in `repo_path` on the device.
     pub async fn switch_ref(
         &self,
