@@ -157,6 +157,9 @@ zeron/
     localedge/    zeron-localedge # single-tenant port of edge/ (SQLite-backed; embedded by
                                  # `zeron headless` for the signed-out Android phone,
                                  # standalone as `zeron local-edge` for development)
+    transfer/     zeron-transfer # device-to-device file transfer: manifests, verified
+                                 # resumable blocks, relay pipe (docs/file-transfer.md);
+                                 # P2P lanes ride the preview WebRTC mux
   apps/
     zeron/                       # the binary (headed default, `headless` subcommand)
   edge/                          # TypeScript Worker + DOs (ported from zeron/apps/edge,

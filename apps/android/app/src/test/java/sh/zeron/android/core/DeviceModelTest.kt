@@ -8,6 +8,7 @@ import org.junit.Assert.assertNull
 import org.junit.Assert.assertTrue
 import org.junit.Test
 import sh.zeron.android.design.ZIcons
+import sh.zeron.runtime.CustomServer
 import sh.zeron.runtime.RuntimeState
 import uniffi.zeron_core.ChatIndicator
 import uniffi.zeron_core.DeviceView
@@ -197,3 +198,15 @@ class DeviceModelTest {
     }
 }
 
+class CustomServerTest {
+    @Test fun validatesLikeTheEdge() {
+        val token = "xferdev0123456789abcdef"
+        assertNull(CustomServer.problem("http://10.0.2.2:27720", token))
+        assertNull(CustomServer.problem(" https://edge.example.dev/ ", token))
+        assertTrue(CustomServer.problem("10.0.2.2:27720", token) != null)
+        assertTrue(CustomServer.problem("http://", token) != null)
+        assertTrue(CustomServer.problem("http://10.0.2.2:27720", "short") != null)
+        assertTrue(CustomServer.problem("http://10.0.2.2:27720", "has spaces in the token") != null)
+        assertEquals(CustomServer("http://10.0.2.2:27720", token), CustomServer.of(" http://10.0.2.2:27720/ ", " $token "))
+    }
+}

@@ -18,6 +18,7 @@ members = [
     "crates/mcp",
     "crates/text",
     "crates/localedge",
+    "crates/transfer",
     "apps/zeron",
 ]
 
@@ -45,6 +46,7 @@ zeron-theme = { path = "crates/theme" }
 zeron-mcp = { path = "crates/mcp" }
 zeron-text = { path = "crates/text" }
 zeron-localedge = { path = "crates/localedge" }
+zeron-transfer = { path = "crates/transfer" }
 
 # CRDT
 loro = "1.13"

@@ -245,8 +245,9 @@ data class ExecResult(val exitCode: Int, val output: String)
   running the Sessions screen shows the same strip.
 - **Settings**: the account (sign in / sign out, or the custom server),
   **This phone** (engine state → the engine page: Start/Stop, Reset, battery
-  and notifications, Coding agents, the log), Devices (the phone is "This
-  device"), and — after seven taps on Version — Developer → Custom server
+  and notifications, Coding agents, the log), **Files → Transfers** (see
+  [File transfers](#file-transfers)), Devices (the phone is "This device"),
+  and — after seven taps on Version — Developer → Custom server
   (edge URL + token; the engine restarts against it).
 - **New session**: projects grouped by machine — this phone first, then your
   computers — each with "No project" (its home folder); "New project" clones
@@ -266,6 +267,44 @@ data class ExecResult(val exitCode: Int, val output: String)
   failed) for the device's sessions while the app is in the background.
 
 JVM unit tests: `./gradlew :app:testDebugUnitTest`.
+
+### File transfers
+
+(docs/file-transfer.md.) The phone is a regular device, so it sends and
+receives through its own engine like any computer: `core/TransferCenter.kt`
+calls the file-transfer methods on this phone's engine over `host_call`
+whenever the app has a client for it (signed in, local-only or on a custom
+server; not the demo). It polls `ListFileTransfers` every second while the
+Transfers screen or the share sheet is open or a transfer is live, every five
+seconds otherwise (RuntimeService keeps the process alive while the engine
+runs), so incoming notifications work whenever the engine runs. The target
+device id is the engine's own (`Identity` over IPC, `AppModel.engineDeviceId`
+— the id the app's client shares), so it follows a custom server's separate
+data dir. Guest paths map to host paths through the rootfs (`/tmp` →
+`runtime/tmp`), `Transfers.GuestPaths`.
+- **Settings → Files → Transfers** (`ui/TransfersScreen.kt`): live rows with
+  progress, throughput and transport (Direct/Relayed), Cancel,
+  Accept/Decline, received items with Open/Show, Clear, and the
+  "Ask before accepting" setting (`requireConfirmation`).
+- **Notifications** (`Notifier`, channel `transfers`, always posted): progress
+  per incoming transfer, an ask with Accept/Decline actions
+  (`TransferActionReceiver`), and "Received …" whose tap opens the file.
+- **Downloads**: a completed incoming transfer is copied once into
+  `Download/Zeron` through `MediaStore.Downloads` (IS_PENDING insert, no
+  storage permission; folders keep their structure under
+  `Download/Zeron/<folder>/…`, symlinks skipped). Exported transfer ids and
+  content URIs are remembered in the `transfers` preferences. Opening uses
+  ACTION_VIEW on the content URI with MimeTypeMap's type (APKs:
+  `application/vnd.android.package-archive` → the package installer; the app
+  holds `REQUEST_INSTALL_PACKAGES`, the user still allows the source once).
+  minSdk is 29, so there is no pre-MediaStore path.
+- **Share to Zeron** (`ShareActivity`, ACTION_SEND / SEND_MULTIPLE `*/*`):
+  copies the shared URIs (or shared text) into
+  `/home/zeron/.zeron/outbox/<uuid>/`, lists devices whose row advertises
+  `file-transfer-v1` (not this phone), calls `SendFiles`, and shows progress.
+  The batch is deleted when the transfer ends, when the sheet is left before
+  sending, and (as a sweep) after a day. Before the first run is finished it
+  asks to open Zeron.
 
 ## Development: several devices without WorkOS
 
@@ -293,10 +332,25 @@ Custom server `http://10.0.2.2:27700` (the emulator's host) + the token, or
   real phantom-process kill (simulated SIGKILL only); release builds (per-ABI
   splits, Play's 16 KB alignment for `libproot-loader32.so`).
 
+- File transfer on the Android 16 x86_64 emulator (2026-09-29), against a
+  computer's `zeron local-edge` through Custom server: a folder + an APK and a
+  142 MB APK computer → phone over P2P (~50 MB/s live), notifications, the
+  copies in `Download/Zeron` (sha256 equal), the APK opening the package
+  installer, Ask before accepting → Accept, and Share to Zeron phone →
+  computer (142 MB, P2P, sha256 equal). Custom server on/off restarts the
+  engine onto the other edge.
+
 Emulator note: boot with `-feature -ReadColorBufferDma -feature -GLDMA2`
 (swiftshader); otherwise `system_server` aborts on
 `hasReadColorBufferDma`. `adb exec-out screencap` still hits the assertion in
-its own process; use `adb emu screenrecord screenshot <file>`.
+its own process; use `adb emu screenrecord screenshot <file>`. Emulator
+36.2.12 rejects `ReadColorBufferDma` as a feature name, and with any flags
+`system_server` aborts in `TaskSnapshotConvertUtil` whenever a task is hidden
+(an app backgrounding, another app's activity closing): drive such flows from
+a freshly restarted system, and switch to three-button navigation
+(`cmd overlay enable-exclusive --category
+com.android.internal.systemui.navbar.threebutton`) so SurfaceFlinger's region
+sampling doesn't hit the same assertion.
 
 ## Build
 

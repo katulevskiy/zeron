@@ -90,6 +90,7 @@ class AppModel(private val app: Application) {
     val wallpaper = WallpaperStore(app)
     val phone by lazy { PhoneEngine(app) }
     val notifier by lazy { Notifier(app) }
+    val transfers by lazy { TransferCenter(app, this) }
 
     private val settings = app.getSharedPreferences("settings", 0)
 
@@ -112,6 +113,13 @@ class AppModel(private val app: Application) {
     /** Chat ids whose session or composer changed. */
     private val _sessionEvents = MutableSharedFlow<String>(extraBufferCapacity = 256)
     val sessionEvents: SharedFlow<String> = _sessionEvents
+
+    /**
+     * This phone's device id — its engine's (`Identity`), which the app's
+     * client shares. Null until the running engine has answered.
+     */
+    private val _engineDeviceId = MutableStateFlow<String?>(null)
+    val engineDeviceId: StateFlow<String?> = _engineDeviceId.asStateFlow()
 
     /** Who this device is signed in as, per its engine. */
     private val _account = MutableStateFlow<Account>(Account.Unknown)
@@ -189,6 +197,11 @@ class AppModel(private val app: Application) {
         }
     }
 
+    /** Entry points other than MainActivity (the share sheet): boot once with defaults. */
+    fun ensureBooted() {
+        if (!booted) boot(LaunchOptions())
+    }
+
     fun boot(options: LaunchOptions) {
         launch = options
         if (booted) return
@@ -197,13 +210,16 @@ class AppModel(private val app: Application) {
         if (options.signedOut) setOnboarded(false)
         if (options.local) setOnboarded(true)
         options.server?.let { url ->
-            val next = if (url == "none") null else CustomServer(url.trim(), options.serverToken.orEmpty().trim())
+            val next = if (url == "none") null else CustomServer.of(url, options.serverToken.orEmpty())
             if (next != phone.customServer) {
                 phone.customServer = next
                 phone.restart()
             }
         }
         watchNetwork()
+        // Incoming-transfer notifications and Downloads export, whenever this
+        // phone's engine runs (docs/android.md § File transfers).
+        transfers.start()
         // `wallpaper <path>` / `wallpaper none` and `wallpaper-effect <name>`:
         // set the wallpaper at launch (screenshots, tests).
         options.wallpaper?.let { path ->
@@ -269,6 +285,7 @@ class AppModel(private val app: Application) {
             delay(500L * attempt)
         }
         val (identity, edge) = answer ?: return
+        _engineDeviceId.value = identity.deviceId
         if (edge.signedOut) {
             // A synced engine whose session ended stops itself; bring it back local-only.
             phone.restart()
@@ -333,6 +350,7 @@ class AppModel(private val app: Application) {
     fun resetEngine() {
         dropClient()
         engineKey = null
+        _engineDeviceId.value = null
         _account.value = Account.Unknown
         scope.launch {
             phone.reset()
@@ -346,6 +364,8 @@ class AppModel(private val app: Application) {
         phone.customServer = server
         dropClient()
         engineKey = null
+        // A custom server's engine has its own data dir, hence device id.
+        _engineDeviceId.value = null
         phone.restart()
     }
 

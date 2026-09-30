@@ -53,6 +53,9 @@ internal class GuestRuntime(private val app: Context) : RuntimeController {
     private val _state = MutableStateFlow(idleState())
     override val state: StateFlow<RuntimeState> = _state.asStateFlow()
 
+    override val guestRootDir: File get() = paths.rootfs
+    override val guestTmpDir: File get() = paths.tmp
+
     override val isSupportedAbi: Boolean
         get() = paths.abi != null && paths.proot.exists() && paths.engine.exists() && hasRootfsAsset()
 

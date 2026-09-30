@@ -55,14 +55,17 @@ core/        AppModel (the device's CoreClient built from its engine via
              AndroidMeasurer (Minikin fallback measurement for glyphs Geist
              lacks), PhoneEngine (the :runtime engine as the UI sees it),
              Agents (harness install and agent sign-in over host_call),
-             Notifier (local session notifications)
+             Notifier (local session and file-transfer notifications),
+             Transfers + TransferCenter (device file transfer: polling,
+             Downloads copies, the share outbox)
 design/      ZeronTheme (Material 3 Expressive), transcript palette
 transcript/  TranscriptState (layout engine + viewport: anchoring, follow the
              tail), Transcript (virtualized rows over LayoutFrame), RowModel
              (canvas painter for Rust display lists, streaming veil, fades),
              Widgets (copy, disclosures, tool rail, shimmer, images…)
 ui/          First run, sessions, session + composer, new session, search,
-             settings, This phone (engine page), coding agents
+             settings, This phone (engine page), coding agents, transfers,
+             the Share to Zeron sheet (ShareActivity)
 ```
 
 `../runtime` (`sh.zeron.runtime`) is the on-device engine: guest bootstrap,
@@ -84,7 +87,7 @@ adb shell am start -n sh.zeron.android/.MainActivity \
 | `--ez big true` / `--ez huge true` | Demo transcripts with 120 / 600 turns |
 | `--ez local true` | Skip the first-run screen: continue without an account |
 | `--es server <url> --es server-token <t>` | Developer custom server (`zeron local-edge`); `--es server none` clears it |
-| `--es route chat:<id>` / `new` / `search` / `settings` / `engine` / `agents` | Open a screen at launch |
+| `--es route chat:<id>` / `new` / `search` / `settings` / `engine` / `agents` / `transfers` | Open a screen at launch |
 | `--ez signedout true` | Back to the first-run screen (the engine keeps its sign-in) |
 | `--es wallpaper <path>` / `none` | Set (or clear) the wallpaper from a file the app can read, e.g. `adb push art.jpg /data/local/tmp/ && adb shell run-as sh.zeron.android cp /data/local/tmp/art.jpg files/` then `--es wallpaper /data/user/0/sh.zeron.android/files/art.jpg` |
 | `--es wallpaper-effect <none\|dither\|ascii\|halftone\|scanlines>` | Wallpaper effect |

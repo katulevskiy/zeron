@@ -2,6 +2,7 @@ package sh.zeron.runtime
 
 import android.content.Context
 import kotlinx.coroutines.flow.StateFlow
+import java.io.File
 
 /** Entry point to the on-device engine runtime (docs/android.md § Runtime API). */
 object ZeronRuntime {
@@ -47,6 +48,16 @@ interface RuntimeController {
         asRoot: Boolean = false,
         timeoutMs: Long = 600_000,
     ): ExecResult
+
+    /**
+     * Host directory holding the guest's `/` (app-private). Guest paths the
+     * engine reports map onto it, except `/tmp`, which is [guestTmpDir].
+     */
+    val guestRootDir: File
+
+    /** Host directory bound at the guest's `/tmp` (and `/dev/shm`). */
+    val guestTmpDir: File
+
 }
 
 sealed interface RuntimeState {
@@ -67,5 +78,29 @@ sealed interface RuntimeState {
 
 data class ExecResult(val exitCode: Int, val output: String)
 
-/** A development edge: its URL (e.g. `http://10.0.2.2:27700`) and shared secret. */
-data class CustomServer(val edgeUrl: String, val token: String)
+/**
+ * A development edge (`zeron local-edge`): its URL (e.g.
+ * `http://10.0.2.2:27700`) and shared secret. The engine joins it in
+ * Development scope (`ZERON_EDGE_URL`/`ZERON_EDGE_TOKEN`, docs/android.md
+ * § Custom server).
+ */
+data class CustomServer(val edgeUrl: String, val token: String) {
+    companion object {
+        /** Why [url] / [token] can't be used, or null when they can (the edge's own checks). */
+        fun problem(url: String, token: String): String? {
+            val u = url.trim()
+            val t = token.trim()
+            return when {
+                !(u.startsWith("http://") || u.startsWith("https://")) -> "The server URL must start with http:// or https://"
+                runCatching { java.net.URI(u).host }.getOrNull().isNullOrEmpty() -> "That URL has no host."
+                t.length < 16 -> "The token must be at least 16 characters."
+                !t.all { it.isLetterOrDigit() && it.code < 128 || it in "._~-" } ->
+                    "The token may only use letters, digits and . _ ~ -"
+                else -> null
+            }
+        }
+
+        /** Trimmed, without a trailing slash. */
+        fun of(url: String, token: String) = CustomServer(url.trim().trimEnd('/'), token.trim())
+    }
+}

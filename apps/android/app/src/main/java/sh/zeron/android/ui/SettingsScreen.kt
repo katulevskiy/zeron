@@ -149,6 +149,24 @@ fun SettingsScreen(model: AppModel, onOpen: (String) -> Unit) {
                     ) { Text("Coding agents") }
                 }
             }
+            section("Files")
+            item {
+                // Transfers go through this phone's engine (docs/android.md § File transfers).
+                val transfers by model.transfers.list.collectAsState()
+                val live = transfers.count { it.state.live }
+                Column(Modifier.padding(horizontal = 16.dp)) {
+                    SegmentedListItem(
+                        onClick = { onOpen(Routes.TRANSFERS) },
+                        shapes = segmentedShapes(0, 1),
+                        colors = ListItemDefaults.segmentedColors(containerColor = cardColor()),
+                        leadingContent = { IconTile(ZIcons.ArrowDown) },
+                        supportingContent = {
+                            Text(if (live > 0) "$live in progress" else "Send and receive files with your other devices")
+                        },
+                        trailingContent = { ZIcon(ZIcons.ChevronRight, null, Modifier.size(20.dp)) },
+                    ) { Text("Transfers") }
+                }
+            }
         }
         section("Appearance")
         item {
@@ -324,7 +342,7 @@ private fun AccountRows(model: AppModel, account: Account, signIn: SignIn, onSig
 private fun CustomServerDialog(current: CustomServer?, onDismiss: () -> Unit, onSave: (CustomServer?) -> Unit) {
     var url by remember { mutableStateOf(current?.edgeUrl ?: "http://10.0.2.2:27700") }
     var token by remember { mutableStateOf(current?.token.orEmpty()) }
-    val valid = (url.startsWith("http://") || url.startsWith("https://")) && token.trim().length >= 16
+    val problem = CustomServer.problem(url, token)
     androidx.compose.material3.AlertDialog(
         onDismissRequest = onDismiss,
         icon = { ZIcon(ZIcons.Server, null) },
@@ -351,10 +369,13 @@ private fun CustomServerDialog(current: CustomServer?, onDismiss: () -> Unit, on
                     textStyle = MaterialTheme.typography.bodyLarge.copy(fontFamily = sh.zeron.android.design.GeistMono),
                     modifier = Modifier.fillMaxWidth(),
                 )
+                if (problem != null && token.isNotEmpty()) {
+                    Text(problem, style = MaterialTheme.typography.bodySmall, color = MaterialTheme.colorScheme.error)
+                }
             }
         },
         confirmButton = {
-            androidx.compose.material3.TextButton(onClick = { onSave(CustomServer(url.trim(), token.trim())) }, enabled = valid) { Text("Use server") }
+            androidx.compose.material3.TextButton(onClick = { onSave(CustomServer.of(url, token)) }, enabled = problem == null) { Text("Use server") }
         },
         dismissButton = {
             androidx.compose.material3.TextButton(onClick = { if (current != null) onSave(null) else onDismiss() }) {
