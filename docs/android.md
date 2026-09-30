@@ -306,6 +306,104 @@ data dir. Guest paths map to host paths through the rootfs (`/tmp` →
   sending, and (as a sweep) after a day. Before the first run is finished it
   asks to open Zeron.
 
+### Developer tools
+
+The desktop's files panel, editor, terminal and browser, on the phone
+(`app/…/tools/`). Every tool addresses a workspace — a chat's folder
+(`chatId`) or a project's (`spaceId`) on its device, `WorkspaceRef` — and
+speaks that device's engine over host RPC, so the same screens work on the
+phone's own projects (IPC to its engine) and a computer's (the device relay).
+They open from the session screen: the file-tree button in its header, and
+Files / Terminal / Browser & previews in its menu. Launch routes
+`files:<chat>`, `terminal:<chat>`, `file:<chat>|<path>` and
+`browser:<chat>|<url>` open them directly.
+
+- **Streaming host RPC** (`zeron-mobile` `CoreClient.host_watch(device,
+  method, params, listener) → HostStream`): acknowledged by the host before it
+  returns (an unknown method or rejected params fail the call), items as JSON
+  on a client thread; `cancel()` or releasing the object cancels the host's
+  stream. `zeron-client` routes this device's own id to its engine's IPC port
+  (`Credentials::Engine`) and everything else through the relay
+  (`Client::host_watch`). Used for `WatchWorkspaceFiles`,
+  `WatchWorkspaceGitStatus`, `WatchPreviews` and `SubscribeTerminal`.
+- **Files** (`FilesScreen`): the tree from `ListWorkspaceDirectory` (folders
+  load when opened; the tree survives opening a file), the desktop's file and
+  folder icons (`file_icon_name` / `folder_icon_name`, same manifest), git
+  markers from `WatchWorkspaceGitStatus` (letters on files, the strongest
+  descendant's dot on folders), live reloads from `WatchWorkspaceFiles`, fuzzy
+  find (`SearchWorkspaceFiles`), show/hide ignored files. Long-press: open,
+  open in the browser (HTML), save to Downloads, copy path.
+- **Viewer / editor** (`FileScreen`): `ReadWorkspaceFile`; tree-sitter
+  highlighting over FFI (`highlight_source`: the desktop editor's grammars,
+  spans in UTF-16), line numbers, wrap or sideways scroll. Edit → Save uses
+  `WriteWorkspaceFile`, whose content-hash check turns a concurrent change
+  into a dialog (Overwrite / Reload / Keep editing); a change on disk reloads
+  a clean buffer and flags a dirty one. Markdown previews as GFM
+  (`markdown_html`) in a script-less WebView whose relative images load from
+  the workspace; images decode natively with pinch zoom; PDFs render with
+  `PdfRenderer` (lazy pages, pinch / double-tap layout zoom, page counter and
+  jumps); anything else offers Save to Downloads and Open with… (a cached
+  copy through the app's FileProvider).
+- **Raw bytes**: `ReadWorkspaceBytes` (new engine method, relay-forwardable)
+  reads any regular workspace file in ≤ 512 KiB chunks by offset; a
+  continuation names the revision (size, mtime, inode) of the first chunk and
+  fails if the file changed. PDFs, images, Open with…, workspace pages and
+  Save to Downloads all stream through it.
+- **Terminal** (`TerminalScreen`, `TerminalView`, `Terminals`): engine
+  terminals (`OpenTerminal` in the chat's folder) rendered through the FFI
+  `TerminalScreen` — the desktop's emulator (`zeron-vt`: `alacritty_terminal`
+  + vte, moved out of `crates/ui` and shared) fed by `SubscribeTerminal`
+  (a replay of the engine's ~1 MiB scrollback, then live output; resumed with
+  `afterSeq` when the stream drops), input as ordered `WriteTerminal` calls,
+  `ResizeTerminal` debounced as the view resizes (rotation, keyboard). Kotlin
+  paints the styled runs on a Canvas in Geist Mono. Soft keyboard through a
+  raw `InputConnection` (visible-password, no suggestions) plus hardware keys;
+  an extra-keys row (Esc, Tab, sticky Ctrl / Alt, arrows with repeat,
+  `| ~ / -`, Home/End, PgUp/PgDn, paste); drag to scroll back, long-press to
+  select a word and drag, Copy / Copy all / Paste. Tabs per workspace survive
+  navigation; shells keep running on the engine (reattaching replays them),
+  Close kills one. *Why not Termux's terminal-view:* its emulator is tied to
+  a local subprocess (`TerminalSession` owns the PTY over JNI) while ours are
+  remote PTYs on any device, and `alacritty_terminal` is what the desktop
+  already runs — escape handling, selection and colours match it exactly and
+  are unit-tested in Rust.
+- **Browser** (`BrowserScreen`): a WebView with an address bar (a port →
+  `localhost:<port>`, loopback over http, hosts over https, anything else a
+  search), back / forward / reload-stop, open in another app, print or save
+  as PDF (`PrintManager`). *Workspace pages*:
+  `https://<token>.workspace.zeron.invalid/<path>` is served by
+  `shouldInterceptRequest` from `ReadWorkspaceBytes`, so an agent's
+  `index.html` loads its CSS, scripts and images from whichever device owns
+  it (the token is stable per workspace, and so is its origin). *Previews*:
+  the session's dev servers from `WatchPreviews` (asked of the phone's
+  engine, which also knows remote devices' services) open as
+  `http://<device>.<project>.localhost:7331` through the phone engine's
+  preview proxy — Chromium resolves `*.localhost` to loopback, and the proxy
+  carries a computer's preview over its peer connection. On the phone's own
+  projects a `localhost` shortcut goes straight to the port (the guest shares
+  the app's network). A PDF a page opens (WebView can't show PDFs) renders
+  in the native viewer. Cleartext HTTP is allowed app-wide
+  (`network_security_config.xml`) for dev servers on the LAN.
+- **Preview discovery on Android**: the sandbox denies `/proc/net/tcp`, so the
+  engine attributes a guest process's listener from the ports its command
+  line names (`--port 3000`, `http.server 8000`, `host:port`) or its
+  framework's default (Vite 5173, Next 3000, Astro 4321), confirmed by a
+  loopback connect (`zeron-preview` `inferred_ports`). A server on a port no
+  argument names still opens in the browser by its port.
+- **Save to Downloads** (`Downloads`): a file as itself; a folder or the whole
+  project as `<name>.zip` (git-ignored files left out unless shown), written
+  by `ZipOutputStream` straight into a `MediaStore.Downloads` stream in
+  `Download/Zeron` as `ReadWorkspaceBytes` chunks arrive — never whole in
+  memory — with progress on screen and in a notification. An engine without
+  `ReadWorkspaceBytes` (an older computer) falls back to `SendFiles` to this
+  phone, which lands in `Download/Zeron` through file transfer.
+- **Transcript**: links and file paths open in the app — http(s) and
+  localhost in the browser, workspace files in the viewer (absolute paths
+  under the chat's folder, relative ones, `file://`, editor `:line` suffixes).
+  Inline-code paths (`out/report.pdf`) are links too (underlined chips). A
+  tool line's file badge (Read / Write / Edit) opens its file on tap and
+  offers Open / Open in browser / Save to Downloads / Copy path on long-press.
+
 ## Development: several devices without WorkOS
 
 ```
@@ -320,6 +418,11 @@ Custom server `http://10.0.2.2:27700` (the emulator's host) + the token, or
 --es server http://10.0.2.2:27700 --es server-token <token>`.
 
 ## Known issues and gaps
+
+- Developer tools: in full-screen terminal programs (vim, less, htop) a drag
+  scrolls the client's scrollback rather than sending wheel/arrow input;
+  `WriteWorkspaceFile` can't create files, so the editor edits existing ones
+  only; preview discovery on the phone is the command-line heuristic above.
 
 - `opencode upgrade` on an **npm** OpenCode leaves a dangling
   `bin/opencode.exe` in the guest — proot's `--link2symlink` emulates npm's

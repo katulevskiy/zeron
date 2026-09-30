@@ -15,6 +15,13 @@ devices start sessions on the phone and the phone on them; see
 Continue without an account (the phone's local workspace), and an offline
 demo.
 
+Sessions come with the desktop's developer tools, on any device's
+workspace: a file tree with git markers and fuzzy find, a highlighting
+editor with conflict-checked saves, Markdown / image / PDF previews, engine
+terminals (the desktop's emulator, an extra-keys row), an in-app browser for
+workspace HTML and dev-server previews, and Save to Downloads for a file, a
+folder or a whole project — see docs/android.md § Developer tools.
+
 The UI is Material 3 Expressive (`MaterialExpressiveTheme`, expressive motion,
 flexible app bars, shape-morphing loading indicators, connected button groups,
 segmented lists) themed with Zeron's own palette and Geist type.
@@ -66,6 +73,11 @@ transcript/  TranscriptState (layout engine + viewport: anchoring, follow the
 ui/          First run, sessions, session + composer, new session, search,
              settings, This phone (engine page), coding agents, transfers,
              the Share to Zeron sheet (ShareActivity)
+tools/       Developer tools: Workspace (host-RPC file API, streams),
+             FilesScreen, FileScreen (editor, Markdown, images, PDF),
+             TerminalScreen/TerminalView/Terminals, BrowserScreen + Browser
+             (workspace pages, previews), Downloads (Save to Downloads),
+             Links (transcript link routing)
 ```
 
 `../runtime` (`sh.zeron.runtime`) is the on-device engine: guest bootstrap,
@@ -88,6 +100,7 @@ adb shell am start -n sh.zeron.android/.MainActivity \
 | `--ez local true` | Skip the first-run screen: continue without an account |
 | `--es server <url> --es server-token <t>` | Developer custom server (`zeron local-edge`); `--es server none` clears it |
 | `--es route chat:<id>` / `new` / `search` / `settings` / `engine` / `agents` / `transfers` | Open a screen at launch |
+| `--es route files:<chat>` / `terminal:<chat>` / `file:<chat>\|<path>` / `browser:<chat>\|<url>` | Open a developer tool at launch (`space:<id>` instead of a chat id for a project) |
 | `--ez signedout true` | Back to the first-run screen (the engine keeps its sign-in) |
 | `--es wallpaper <path>` / `none` | Set (or clear) the wallpaper from a file the app can read, e.g. `adb push art.jpg /data/local/tmp/ && adb shell run-as sh.zeron.android cp /data/local/tmp/art.jpg files/` then `--es wallpaper /data/user/0/sh.zeron.android/files/art.jpg` |
 | `--es wallpaper-effect <none\|dither\|ascii\|halftone\|scanlines>` | Wallpaper effect |
