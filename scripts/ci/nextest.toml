@@ -1,18 +1,17 @@
 # nextest settings for the Linux lab workflow (passed with --config-file so the
 # tested branch does not need to carry it).
 #
-# `state::tests::*` in zeron-ui bootstrap embedded engines on a "free" localhost
-# port obtained by bind(:0)+drop and then assert that nothing listens there
-# after a failed bootstrap.  The original workflow ran with --test-threads=1, so
-# the port could never be claimed by a concurrent test.  nextest runs every test
-# in its own process in parallel, which reopens that race (observed once:
-# bootstrap_reports_local_assembly_failure_before_returning_a_handle, run
-# 36764470875).  Serialise the group and allow a retry for the residual
-# cross-process port reuse (shell.rs tests also bind :0).
-[test-groups.ui-ipc-ports]
-max-threads = 1
-
+# `state::tests::*` in zeron-ui bootstrap embedded engines on a localhost port
+# obtained by bind(:0)+drop and then assert that nothing listens there after a
+# failed bootstrap (`bootstrap_reports_local_assembly_failure_before_returning_a_handle`).
+# The original workflow ran with --test-threads=1.  Under nextest (one process
+# per test, all cores busy with the heavy transcript tests) that assertion failed
+# once per ~2 runs (36764470875, and again 36770059041 even with a serial test
+# group, so it is load/timing sensitive rather than only a port collision).
+#   - threads-required = "num-test-threads": each state test runs with the whole
+#     machine to itself (they take ~15 ms each, so this costs ~1-2 s in total);
+#   - retries = 2: absorbs the residual timing race (nextest reports it as FLAKY).
 [[profile.default.overrides]]
 filter = 'package(zeron-ui) & test(/^state::tests::/)'
-test-group = 'ui-ipc-ports'
+threads-required = "num-test-threads"
 retries = 2
