@@ -4,6 +4,8 @@ on:
     inputs:
       target: {description: "ref/sha of zeron source to test", type: string, default: main}
       save_cache: {description: "save rust caches (seed run)", type: boolean, default: false}
+      variant: {description: "cache prefix suffix (experiments, e.g. -cold1)", type: string, default: ''}
+      dep_opt: {description: "experiment: opt-level for dependencies (empty = repo default 2)", type: string, default: ''}
       select: {description: "affected-crates job selection (else run everything)", type: boolean, default: false}
 
 permissions:
@@ -75,6 +77,14 @@ jobs:
         with: {ref: "${{ inputs.target }}"}
       - uses: actions/checkout@v4
         with: {path: .lab-ci, sparse-checkout: scripts/ci}
+      - name: Dependency opt-level override (experiment only)
+        if: ${{ inputs.dep_opt != '' }}
+        env:
+          DEP_OPT: ${{ inputs.dep_opt }}
+        run: |
+          mkdir -p ~/.cargo
+          printf '[profile.dev.package."*"]\nopt-level = %s\n' "$DEP_OPT" >> ~/.cargo/config.toml
+          cat ~/.cargo/config.toml
       - name: Rust toolchain
         run: rustup show active-toolchain || rustup toolchain install
       - uses: rui314/setup-mold@v1
@@ -83,7 +93,7 @@ jobs:
         with: {node-version: '22'}
       - uses: Swatinem/rust-cache@v2
         with:
-          prefix-key: lab-linux-v2
+          prefix-key: lab-linux-v2${{ inputs.variant }}
           shared-key: core
           add-job-id-key: false
           save-if: ${{ inputs.save_cache }}
@@ -136,13 +146,21 @@ jobs:
         with:
           path: ~/apt-debs/*.deb
           key: lab-linux-apt-v1-gpui-${{ hashFiles('.lab-ci/scripts/ci/apt-install.sh') }}
+      - name: Dependency opt-level override (experiment only)
+        if: ${{ inputs.dep_opt != '' }}
+        env:
+          DEP_OPT: ${{ inputs.dep_opt }}
+        run: |
+          mkdir -p ~/.cargo
+          printf '[profile.dev.package."*"]\nopt-level = %s\n' "$DEP_OPT" >> ~/.cargo/config.toml
+          cat ~/.cargo/config.toml
       - name: Rust toolchain
         run: rustup show active-toolchain || rustup toolchain install
       - uses: rui314/setup-mold@v1
       - uses: taiki-e/install-action@nextest
       - uses: Swatinem/rust-cache@v2
         with:
-          prefix-key: lab-linux-v2
+          prefix-key: lab-linux-v2${{ inputs.variant }}
           shared-key: ui
           add-job-id-key: false
           save-if: ${{ inputs.save_cache }}
@@ -182,12 +200,20 @@ jobs:
           rm -f "$RUNNER_TEMP/apt-extras.rc"
           setsid nohup bash -c 'APT_RECOMMENDS=1 bash .lab-ci/scripts/ci/apt-install.sh $BROWSER_TOOLS; echo $? > "$RUNNER_TEMP/apt-extras.rc"' \
             > "$RUNNER_TEMP/apt-extras.log" 2>&1 < /dev/null &
+      - name: Dependency opt-level override (experiment only)
+        if: ${{ inputs.dep_opt != '' }}
+        env:
+          DEP_OPT: ${{ inputs.dep_opt }}
+        run: |
+          mkdir -p ~/.cargo
+          printf '[profile.dev.package."*"]\nopt-level = %s\n' "$DEP_OPT" >> ~/.cargo/config.toml
+          cat ~/.cargo/config.toml
       - name: Rust toolchain
         run: rustup show active-toolchain || rustup toolchain install
       - uses: rui314/setup-mold@v1
       - uses: Swatinem/rust-cache@v2
         with:
-          prefix-key: lab-linux-v2
+          prefix-key: lab-linux-v2${{ inputs.variant }}
           shared-key: ui
           add-job-id-key: false
           save-if: false
