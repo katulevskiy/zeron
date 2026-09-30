@@ -6,7 +6,7 @@
 #  2. Bounded retries (each attempt has its own timeout) instead of one 3 minute hang.
 # usage: run-preview-fixture-macos.sh <fixture-binary> <capture-dir>
 set -uo pipefail
-ROOT="$(cd "$(dirname "$0")/../.." && pwd)"
+ROOT="${ZERON_ROOT:-$(cd "$(dirname "$0")/../.." && pwd)}"
 BINARY="$1"
 OUT="$2"
 ATTEMPTS="${PREVIEW_FIXTURE_ATTEMPTS:-3}"

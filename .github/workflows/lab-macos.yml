@@ -41,6 +41,12 @@ jobs:
     steps:
       - uses: actions/checkout@v4
         with: {ref: "${{ inputs.target }}"}
+      # CI helper scripts live on the lab branch (the source under test may predate them).
+      - uses: actions/checkout@v4
+        with:
+          ref: ${{ github.sha }}
+          path: lab-ci
+          sparse-checkout: scripts/ci
       - name: Rust toolchain
         run: rustup update stable --no-self-update && (rustup show active-toolchain || rustup toolchain install) && rustc -vV
       - uses: Swatinem/rust-cache@v2
@@ -90,8 +96,9 @@ jobs:
         timeout-minutes: 5
         env:
           ZERON_PREVIEW_AUTO_OPEN: 1
+          ZERON_ROOT: ${{ github.workspace }}
         run: |
-          VITE_BINARY="$GITHUB_WORKSPACE/edge/node_modules/vite/bin/vite.js" bash scripts/ci/run-preview-fixture-macos.sh target/$PROFILE_DIR/examples/preview-fixture "$RUNNER_TEMP/preview-captures"
+          VITE_BINARY="$GITHUB_WORKSPACE/edge/node_modules/vite/bin/vite.js" bash lab-ci/scripts/ci/run-preview-fixture-macos.sh target/$PROFILE_DIR/examples/preview-fixture "$RUNNER_TEMP/preview-captures"
           test -f "$RUNNER_TEMP/preview-captures/result.txt"
       - name: Upload preview screenshots
         if: always()
