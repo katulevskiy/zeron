@@ -241,14 +241,6 @@ jobs:
           # Only the simulator slice is built (device target not needed). Tried overlapping this with the cache
           # restore in the background: no gain (rust-cache's `rustc -vV` blocks on the toolchain lock).
           rustup target add aarch64-apple-ios-sim
-      - name: Timing probe (why is the rust-cache step slow on this image?)
-        run: |
-          date; uptime
-          time rustc -vV
-          time cargo -V
-          time cargo metadata --format-version 1 --no-deps > /dev/null
-          xcrun simctl list devices | grep -i booted || true
-          top -l 1 -n 8 -o cpu | head -20
       - uses: Swatinem/rust-cache@v2
         with:
           prefix-key: lab-macos-${{ inputs.cache_ver }}-ios
