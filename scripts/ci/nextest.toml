@@ -1,17 +1,14 @@
 # nextest settings for the Linux lab workflow (passed with --config-file so the
 # tested branch does not need to carry it).
 #
-# `state::tests::*` in zeron-ui bootstrap embedded engines on a localhost port
-# obtained by bind(:0)+drop and then assert that nothing listens there after a
-# failed bootstrap (`bootstrap_reports_local_assembly_failure_before_returning_a_handle`).
-# The original workflow ran with --test-threads=1.  Under nextest (one process
-# per test, all cores busy with the heavy transcript tests) that assertion failed
-# once per ~2 runs (36764470875, and again 36770059041 even with a serial test
-# group, so it is load/timing sensitive rather than only a port collision).
-#   - threads-required = "num-test-threads": each state test runs with the whole
-#     machine to itself (they take ~15 ms each, so this costs ~1-2 s in total);
-#   - retries = 2: absorbs the residual timing race (nextest reports it as FLAKY).
+# zeron-ui `state::tests::bootstrap_reports_local_assembly_failure_before_returning_a_handle`
+# bootstraps an engine on a "free" port (bind(:0)+drop), makes the bootstrap fail,
+# then asserts nothing accepts connections on that port ("failed bootstrap must
+# release the IPC listener").  In the dev profile it fails on the first attempt in
+# ~1 of 2 runs and passes on the retry, even when run alone (runs 36764470875,
+# 36770059041, 36771839200), so it is a timing race in teardown/port handling that
+# the original release-profile + --test-threads=1 run does not hit.  Not a CI
+# regression; a retry is the honest mitigation (nextest reports it as FLAKY).
 [[profile.default.overrides]]
 filter = 'package(zeron-ui) & test(/^state::tests::/)'
-threads-required = "num-test-threads"
 retries = 2
