@@ -21,6 +21,7 @@ import androidx.compose.material3.ShortNavigationBarItem
 import androidx.compose.material3.Surface
 import androidx.compose.material3.Text
 import androidx.compose.runtime.Composable
+import androidx.compose.runtime.DisposableEffect
 import androidx.compose.runtime.LaunchedEffect
 import androidx.compose.runtime.collectAsState
 import androidx.compose.runtime.getValue
@@ -39,6 +40,9 @@ import androidx.compose.foundation.layout.fillMaxWidth
 import androidx.compose.foundation.layout.navigationBarsPadding
 import androidx.compose.runtime.remember
 import sh.zeron.android.design.ZIcons
+import androidx.compose.ui.platform.LocalFocusManager
+import androidx.compose.ui.platform.LocalSoftwareKeyboardController
+import androidx.navigation.NavController
 import androidx.navigation.NavHostController
 import androidx.navigation.compose.NavHost
 import androidx.navigation.compose.composable
@@ -71,6 +75,20 @@ object Routes {
 @Composable
 private fun MainNav(model: AppModel) {
     val nav = rememberNavController()
+    val focus = LocalFocusManager.current
+    val keyboard = LocalSoftwareKeyboardController.current
+    // A screen stays composed through NavHost's exit fade (700 ms), and so
+    // does its focused text field — the IME only went away once the field was
+    // disposed, a second after leaving the chat. Drop focus and the keyboard
+    // the moment the destination changes instead.
+    DisposableEffect(nav, focus, keyboard) {
+        val listener = NavController.OnDestinationChangedListener { _, _, _ ->
+            focus.clearFocus(force = true)
+            keyboard?.hide()
+        }
+        nav.addOnDestinationChangedListener(listener)
+        onDispose { nav.removeOnDestinationChangedListener(listener) }
+    }
     LaunchedEffect(Unit) {
         when (val route = model.launch.route) {
             null -> Unit
