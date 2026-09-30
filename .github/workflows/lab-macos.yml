@@ -66,7 +66,9 @@ jobs:
         run: |
           cargo build $PROFILE_FLAG --locked -p zeron-update -p zeron-preview -p zeron-ui \
             --features zeron-ui/browser-fixture --examples
-      - name: Check macOS application
+      - name: Check macOS application (release cfg: debug_assertions off, like the original --release check)
+        env:
+          CARGO_PROFILE_DEV_DEBUG_ASSERTIONS: ${{ inputs.release && 'true' || 'false' }}
         run: cargo check $PROFILE_FLAG --locked -p zeron
       - name: Run updater + preview + native UI regressions
         run: |
@@ -229,7 +231,10 @@ jobs:
         run: |
           rustup update stable --no-self-update
           rustup show active-toolchain || rustup toolchain install
-          rustup target add aarch64-apple-ios-sim  # device target not needed: only the simulator slice is built
+          # Only the simulator slice is built (device target not needed). Downloading + unpacking rust-std is
+          # ~90s on these runners, so overlap it with the cache restore and join before the cargo build.
+          nohup rustup target add aarch64-apple-ios-sim > "$RUNNER_TEMP/target-add.log" 2>&1 &
+          echo $! > "$RUNNER_TEMP/target-add.pid"
       - uses: Swatinem/rust-cache@v2
         with:
           prefix-key: lab-macos-${{ inputs.cache_ver }}-ios
@@ -244,6 +249,9 @@ jobs:
           done
       - name: Build Rust core for the simulator (bindings come from the Linux job)
         run: |
+          while kill -0 "$(cat "$RUNNER_TEMP/target-add.pid")" 2>/dev/null; do sleep 1; done
+          cat "$RUNNER_TEMP/target-add.log"
+          rustup target list --installed | grep -x aarch64-apple-ios-sim
           IPHONEOS_DEPLOYMENT_TARGET=26.0 cargo build --locked -p zeron-mobile --lib --profile mobile --target aarch64-apple-ios-sim
           out=target/ios-core/iphonesimulator
           mkdir -p "$out/include"
