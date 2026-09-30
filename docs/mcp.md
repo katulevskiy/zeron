@@ -57,7 +57,16 @@ Two independent fields carry the links:
   created the chat, for both kinds. It never hides anything. The desktop
   sidebar marks such rows ("Spawned by <chat>", click opens the spawner), the
   spawner's transcript links the chats it created, and mobile session rows
-  carry `spawnedByChatId`/`spawnedByTitle`. `list_chats { spawned_by }` returns
+  carry `spawnedByChatId`/`spawnedByTitle`.
+- **Created ids on the call** — tool outputs never enter the session doc, so
+  the fold keeps only the chat ids a successful Zeron `create_chat` /
+  `create_chats` result named, on that tool part (`createdChatIds`,
+  additive; detection and parsing live in `zeron_proto::created_chats` and
+  tolerate every harness's naming: `mcp__zeron__create_chat`,
+  `zeron_create_chat`, `Mcp { server: "zeron" }`, ACP titles). The desktop
+  card links exactly those chats (older transcripts fall back to matching
+  `spawnedByChatId` by creation time), and `read_chat` prints them as
+  `mcp: zeron/create_chats [created: <id>, …]`. `list_chats { spawned_by }` returns
   every chat a chat spawned, side or top-level.
 
 `Mutate createChat { parentChatId?, spawnedByChatId? }` →
