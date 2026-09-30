@@ -99,12 +99,14 @@ impl Credentials {
         matches!(self, Credentials::Engine { .. })
     }
 
-    /// The writer id this client's chat-room sockets and row pushes carry.
-    /// Normally the device id; a viewer sharing its engine's device id writes
-    /// as `{device_id}-viewer`, because a reconnect's backfill skips the rows
-    /// its own writer id pushed (`excludeOwn`) — the engine's rows must still
-    /// reach the viewer and the viewer's (a sent message) the engine.
-    pub fn chat_writer_id(&self, device_id: &str) -> String {
+    /// The writer id this client syncs as: its chat-room sockets and row
+    /// pushes, and its registry HLCs' tiebreaker. Normally the device id; a
+    /// viewer sharing its engine's device id writes as `{device_id}-viewer`,
+    /// because a reconnect's backfill skips the rows its own writer id pushed
+    /// (`excludeOwn`) — the engine's rows must still reach the viewer and the
+    /// viewer's (a sent message) the engine — and two replicas clocking as
+    /// one device could mint identical HLCs.
+    pub fn writer_id(&self, device_id: &str) -> String {
         if self.shares_engine_device() {
             format!("{device_id}-viewer")
         } else {
@@ -210,10 +212,10 @@ mod tests {
             user_id: "user_1".into(),
             org_id: "org_1".into(),
         };
-        assert_eq!(engine.chat_writer_id("dev-1"), "dev-1-viewer");
+        assert_eq!(engine.writer_id("dev-1"), "dev-1-viewer");
         let local = Credentials::Local {
             token: "secret".into(),
         };
-        assert_eq!(local.chat_writer_id("dev-1"), "dev-1");
+        assert_eq!(local.writer_id("dev-1"), "dev-1");
     }
 }

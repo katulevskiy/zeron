@@ -570,12 +570,13 @@ impl Client {
         let tokens = TokenProvider::new(&credentials, config.edge_base(), events.clone());
         // Live: restore the registry replica + open the docs store first, so
         // the very first snapshot renders the cached workspace (instant).
-        let (registry, store) = if credentials.is_demo() {
+        let (mut registry, store) = if credentials.is_demo() {
             (RegistryDoc::new(config.device_id.clone()), None)
         } else {
             let (store, registry) = LiveBackend::open(&config.data_dir, &config.device_id)?;
             (registry, Some(store))
         };
+        registry.set_clock_writer(credentials.writer_id(&config.device_id));
         let inner = Arc::new(ClientInner {
             workspace: WorkspaceStore::new(registry),
             events: events.clone(),
