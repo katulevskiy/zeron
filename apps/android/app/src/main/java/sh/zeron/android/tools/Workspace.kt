@@ -14,8 +14,9 @@ import uniffi.zeron_core.HostStreamListener
 
 /**
  * One workspace the developer tools work on: a chat's folder (or a
- * project's) on a device. Every call is a host RPC to [deviceId] over the
- * device relay (docs/android.md § Developer tools).
+ * project's) on a device — this phone's engine or any other. Every call is a
+ * host RPC to [deviceId], so the tools work the same for the phone's own
+ * projects and a computer's (docs/android.md § Developer tools).
  */
 data class WorkspaceRef(
     val deviceId: String,

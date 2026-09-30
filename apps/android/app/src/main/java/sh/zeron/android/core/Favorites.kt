@@ -37,8 +37,8 @@ object FavoritesCodec {
 
 /**
  * Starred models, device-local (the desktop keeps them in its local
- * composer defaults too) and shared by every mode and device: a model
- * starred while driving one computer stays starred on the others.
+ * composer defaults too) and shared by every mode: a model starred while
+ * driving a laptop stays starred on the phone's own engine.
  */
 class FavoritesStore(private val prefs: SharedPreferences) {
     private val _favorites = MutableStateFlow(FavoritesCodec.decode(prefs.getString(KEY, null)))

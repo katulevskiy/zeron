@@ -73,8 +73,9 @@ import uniffi.zeron_core.CoreException
  * Settings → Coding agents: the harnesses on an engine device with their
  * install state (Install / progress / Cancel), updates (per agent and
  * Update all), uninstall, and agent accounts (browser or paste-code sign-in,
- * sign out). Everything goes over `host_call` to that device's engine — one
- * of the account's computers; Demo answers from a simulated engine.
+ * sign out). Everything goes over `host_call` to that device's engine — this
+ * phone's, or a computer's in account mode; Demo answers from a simulated
+ * engine.
  */
 @Composable
 fun AgentsScreen(model: AppModel, onBack: () -> Unit) {
@@ -82,8 +83,8 @@ fun AgentsScreen(model: AppModel, onBack: () -> Unit) {
     val workspace by model.workspace.collectAsState()
     val devices = remember(client, workspace?.devices) { model.executionDevices() }
     var deviceId by remember { mutableStateOf<String?>(null) }
-    // An online device first: its engine can answer.
-    val device = devices.firstOrNull { it.id == deviceId }
+    // This phone first: it's the device whose agents are managed from here most.
+    val device = devices.firstOrNull { it.id == deviceId } ?: devices.firstOrNull { it.isSelf }
         ?: devices.firstOrNull { it.online } ?: devices.firstOrNull()
     var harnesses by remember { mutableStateOf<List<Agents.Harness>?>(null) }
     var accounts by remember { mutableStateOf(Agents.Accounts(emptyList(), emptyMap())) }
@@ -300,7 +301,7 @@ fun AgentsScreen(model: AppModel, onBack: () -> Unit) {
         },
     ) {
         if (device == null) {
-            item { EmptyNote(ZIcons.Bot, "No engine to manage", "Agents install on a device running Zeron — one of your computers.") }
+            item { EmptyNote(ZIcons.Bot, "No engine to manage", "Agents install on a device running Zeron — this phone's engine or one of your computers.") }
             return@SubPage
         }
         // The update state under the header (the Update all button takes the
@@ -327,7 +328,7 @@ fun AgentsScreen(model: AppModel, onBack: () -> Unit) {
                 Row(Modifier.padding(horizontal = 16.dp, vertical = 4.dp)) {
                     ContextChip(device.name, leading = { ZIcon(sh.zeron.android.core.DeviceIdentity.icon(device.platform), null, Modifier.size(16.dp)) }, onClick = { pickDevice = true }) {
                         ChoiceMenu(pickDevice, { pickDevice = false }, listOf(MenuSection("Device", devices.map { d ->
-                            MenuChoice(d.name, d.id == device.id, if (d.online) "Online" else "Offline") {
+                            MenuChoice(d.name, d.id == device.id, if (d.isSelf) "This phone" else if (d.online) "Online" else "Offline") {
                                 deviceId = d.id
                                 harnesses = null
                                 versions = emptyMap()

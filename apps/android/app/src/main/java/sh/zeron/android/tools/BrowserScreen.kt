@@ -42,7 +42,6 @@ import androidx.compose.material3.HorizontalFloatingToolbar
 import androidx.compose.material3.IconButton
 import androidx.compose.material3.LinearWavyProgressIndicator
 import androidx.compose.material3.MaterialTheme
-import androidx.compose.material3.OutlinedTextField
 import androidx.compose.material3.ModalBottomSheet
 import androidx.compose.material3.Surface
 import androidx.compose.material3.Text
@@ -180,14 +179,14 @@ fun BrowserScreen(model: AppModel, ref: WorkspaceRef?, initialUrl: String?, onBa
         }
     }
 
-    // Previews: the dev servers the session's own device discovered.
+    // Previews: the phone engine's view of the session's dev servers.
     DisposableEffect(ref?.chatId) {
         var stream: HostStream? = null
         val chat = ref?.chatId
-        val device = ref?.deviceId
-        val job = if (chat != null && device != null) scope.launch {
+        val phone = model.engineDeviceId.value
+        val job = if (chat != null && phone != null) scope.launch {
             stream = runCatching {
-                model.workspaceApi.watch(device, WorkspaceApi.WATCH_PREVIEWS, JSONObject().put("chatId", chat), scope, { previews = Browser.previews(it) })
+                model.workspaceApi.watch(phone, WorkspaceApi.WATCH_PREVIEWS, JSONObject().put("chatId", chat), scope, { previews = Browser.previews(it) })
             }.onFailure { previews = Browser.Previews(emptyList(), 7331, it.message) }.getOrNull()
         } else null
         onDispose {
@@ -306,7 +305,7 @@ fun BrowserScreen(model: AppModel, ref: WorkspaceRef?, initialUrl: String?, onBa
 
     if (showPreviews) {
         ModalBottomSheet(onDismissRequest = { showPreviews = false }) {
-            PreviewsSheet(previews, ref) { target ->
+            PreviewsSheet(previews, ref, model) { target ->
                 showPreviews = false
                 go(target)
             }
@@ -345,20 +344,8 @@ private fun AddressBar(value: String, editing: Boolean, onEdit: () -> Unit, onCh
     }
 }
 
-/**
- * The session's dev servers, as its device reports them. This app has no
- * preview proxy of its own, so a server opens straight from the device over
- * the network: its address is asked for once per device and remembered
- * (`10.0.2.2` is the emulator's host). The server must listen beyond
- * localhost.
- */
 @Composable
-private fun PreviewsSheet(previews: Browser.Previews?, ref: WorkspaceRef?, open: (String) -> Unit) {
-    val context = LocalContext.current
-    val prefs = remember { context.getSharedPreferences("browser", 0) }
-    val key = "address.${ref?.deviceId.orEmpty()}"
-    var address by remember(key) { mutableStateOf(prefs.getString(key, null).orEmpty()) }
-    val host = Browser.previewHost(address)
+private fun PreviewsSheet(previews: Browser.Previews?, ref: WorkspaceRef?, model: AppModel, open: (String) -> Unit) {
     Column(Modifier.fillMaxWidth().padding(horizontal = 20.dp).padding(bottom = 28.dp)) {
         Text("Previews", style = MaterialTheme.typography.titleLargeEmphasized)
         Spacer(Modifier.height(4.dp))
@@ -367,21 +354,7 @@ private fun PreviewsSheet(previews: Browser.Previews?, ref: WorkspaceRef?, open:
             style = MaterialTheme.typography.bodyMedium,
             color = MaterialTheme.colorScheme.onSurfaceVariant,
         )
-        Spacer(Modifier.height(12.dp))
-        OutlinedTextField(
-            address,
-            {
-                address = it
-                prefs.edit().putString(key, it.trim()).apply()
-            },
-            label = { Text("${ref?.deviceName ?: "The device"}'s address on your network") },
-            placeholder = { Text("192.168.1.20") },
-            supportingText = { Text("Servers open from it directly and must listen beyond localhost.") },
-            singleLine = true,
-            keyboardOptions = KeyboardOptions(keyboardType = KeyboardType.Uri, imeAction = ImeAction.Done, autoCorrectEnabled = false),
-            modifier = Modifier.fillMaxWidth(),
-        )
-        Spacer(Modifier.height(12.dp))
+        Spacer(Modifier.height(16.dp))
         val services = previews?.services.orEmpty()
         if (previews == null) Text("Looking for servers…", style = MaterialTheme.typography.bodyMedium)
         else if (services.isEmpty()) {
@@ -391,21 +364,28 @@ private fun PreviewsSheet(previews: Browser.Previews?, ref: WorkspaceRef?, open:
                 color = MaterialTheme.colorScheme.onSurfaceVariant,
             )
         }
+        val onPhone = ref != null && ref.deviceId == model.engineDeviceId.value
         services.forEachIndexed { i, s ->
-            val url = host?.takeIf { s.port > 0 }?.let { "http://$it:${s.port}" }
             Surface(
-                onClick = { url?.let(open) },
-                enabled = url != null,
+                onClick = { open(s.url(previews!!.proxyPort)) },
                 shape = sh.zeron.android.ui.segmentShape(i, services.size),
                 color = MaterialTheme.colorScheme.surfaceContainerHigh,
                 modifier = Modifier.fillMaxWidth().padding(vertical = 1.dp),
             ) {
                 Row(Modifier.padding(horizontal = 16.dp, vertical = 14.dp), verticalAlignment = Alignment.CenterVertically) {
-                    ZIcon(ZIcons.Globe, null, Modifier.size(22.dp), tint = if (url != null) MaterialTheme.colorScheme.primary else MaterialTheme.colorScheme.outline)
+                    ZIcon(ZIcons.Globe, null, Modifier.size(22.dp), tint = MaterialTheme.colorScheme.primary)
                     Spacer(Modifier.width(14.dp))
                     Column(Modifier.weight(1f)) {
                         Text(s.name, style = MaterialTheme.typography.titleMedium, maxLines = 1, overflow = TextOverflow.Ellipsis)
-                        Text(url?.removePrefix("http://") ?: "port ${s.port}", style = MaterialTheme.typography.bodySmall, color = MaterialTheme.colorScheme.onSurfaceVariant, maxLines = 1, overflow = TextOverflow.Ellipsis)
+                        Text("${s.hostname}:${previews!!.proxyPort} · port ${s.port}", style = MaterialTheme.typography.bodySmall, color = MaterialTheme.colorScheme.onSurfaceVariant, maxLines = 1, overflow = TextOverflow.Ellipsis)
+                    }
+                    if (onPhone && s.port > 0) {
+                        Text(
+                            "localhost",
+                            style = MaterialTheme.typography.labelLarge,
+                            color = MaterialTheme.colorScheme.primary,
+                            modifier = Modifier.clickable { open("http://localhost:${s.port}") }.padding(8.dp),
+                        )
                     }
                 }
             }

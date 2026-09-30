@@ -98,6 +98,8 @@ private fun liveCounts(ws: WorkspaceSnapshot): Pair<Int, Int> {
 fun SessionsScreen(model: AppModel, onOpen: (String) -> Unit) {
     val workspace by model.workspace.collectAsState()
     val connectivity by model.connectivity.collectAsState()
+    val engine by model.phone.state.collectAsState()
+    val client by model.client.collectAsState()
     var filter by rememberSaveable { mutableStateOf(Filter.All) }
     val snackbar = remember { SnackbarHostState() }
     val scope = rememberCoroutineScope()
@@ -184,6 +186,10 @@ fun SessionsScreen(model: AppModel, onOpen: (String) -> Unit) {
                             )
                         }
                     }
+                }
+                // This phone's engine, while it isn't ready (first launch sets it up).
+                if (client?.isDemo() != true && engine !is sh.zeron.runtime.RuntimeState.Running) {
+                    item("engine") { EngineStatusStrip(model, engine, Modifier.padding(horizontal = 16.dp, vertical = 8.dp)) }
                 }
                 if (ws == null) return@LazyColumn
                 val front = ws.front

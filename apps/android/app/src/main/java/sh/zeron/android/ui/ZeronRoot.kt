@@ -63,12 +63,21 @@ fun ZeronRoot(model: AppModel) {
     ZeronTheme(appearance) {
         Surface(Modifier.fillMaxSize(), color = MaterialTheme.colorScheme.background) {
             val client by model.client.collectAsState()
-            AnimatedContent(client != null, transitionSpec = { fadeIn() togetherWith fadeOut() }, label = "root") { signedIn ->
-                if (signedIn) MainNav(model) else SignInScreen(model)
+            val onboarded by model.onboarded.collectAsState()
+            // First run: sign in, continue without an account, or the demo.
+            // Past it, the main UI shows while this phone's engine comes up.
+            val gate = if (onboarded || client?.isDemo() == true) Gate.Main else Gate.FirstRun
+            AnimatedContent(gate, transitionSpec = { fadeIn() togetherWith fadeOut() }, label = "root") {
+                when (it) {
+                    Gate.Main -> MainNav(model)
+                    Gate.FirstRun -> SignInScreen(model)
+                }
             }
         }
     }
 }
+
+private enum class Gate { Main, FirstRun }
 
 object Routes {
     const val HOME = "home"
@@ -76,6 +85,7 @@ object Routes {
     const val SUBAGENT = "subagent/{chat}/{doc}"
     const val NEW = "new"
     const val SEARCH = "search"
+    const val ENGINE = "engine"
     const val AGENTS = "agents"
     const val FILES = "files/{ws}"
     const val FILE = "file/{ws}?path={path}"
@@ -116,11 +126,13 @@ private fun MainNav(model: AppModel) {
         nav.addOnDestinationChangedListener(listener)
         onDispose { nav.removeOnDestinationChangedListener(listener) }
     }
-    LaunchedEffect(Unit) {
-        when (val route = model.launch.route) {
+    val pending by model.pendingRoute.collectAsState()
+    LaunchedEffect(pending) {
+        when (val route = pending) {
             null -> Unit
             "new" -> nav.navigate(Routes.NEW)
             "search" -> nav.navigate(Routes.SEARCH)
+            "engine" -> nav.navigate(Routes.ENGINE)
             "agents" -> nav.navigate(Routes.AGENTS)
             else -> when {
                 route.startsWith("chat:") -> nav.navigate(Routes.chat(route.removePrefix("chat:")))
@@ -136,6 +148,7 @@ private fun MainNav(model: AppModel) {
                 route.startsWith("browser:") -> route.removePrefix("browser:").split('|', limit = 2).let { nav.navigate(Routes.browser(it[0], it.getOrNull(1))) }
             }
         }
+        model.pendingRoute.value = null
     }
     NavHost(nav, startDestination = Routes.HOME) {
         composable(Routes.HOME) { Home(model, nav) }
@@ -190,6 +203,7 @@ private fun MainNav(model: AppModel) {
         composable(Routes.SEARCH) {
             SearchScreen(model, onBack = { nav.popBackStack() }, onOpen = { nav.navigate(Routes.chat(it)) })
         }
+        composable(Routes.ENGINE) { EngineScreen(model, onBack = { nav.popBackStack() }, onAgents = { nav.navigate(Routes.AGENTS) }) }
         composable(Routes.AGENTS) { AgentsScreen(model, onBack = { nav.popBackStack() }) }
     }
 }

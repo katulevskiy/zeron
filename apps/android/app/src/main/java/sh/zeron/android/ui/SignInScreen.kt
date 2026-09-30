@@ -2,11 +2,11 @@ package sh.zeron.android.ui
 
 import android.net.Uri
 import androidx.browser.customtabs.CustomTabsIntent
+import androidx.compose.animation.AnimatedVisibility
 import androidx.compose.foundation.Image
-import androidx.compose.foundation.clickable
-import androidx.compose.foundation.interaction.MutableInteractionSource
 import androidx.compose.foundation.layout.Arrangement
 import androidx.compose.foundation.layout.Column
+import androidx.compose.foundation.layout.Row
 import androidx.compose.foundation.layout.Spacer
 import androidx.compose.foundation.layout.fillMaxSize
 import androidx.compose.foundation.layout.fillMaxWidth
@@ -15,25 +15,26 @@ import androidx.compose.foundation.layout.heightIn
 import androidx.compose.foundation.layout.padding
 import androidx.compose.foundation.layout.safeDrawingPadding
 import androidx.compose.foundation.layout.size
+import androidx.compose.foundation.layout.width
+import androidx.compose.foundation.shape.RoundedCornerShape
 import androidx.compose.material3.AlertDialog
 import androidx.compose.material3.Button
 import androidx.compose.material3.ButtonDefaults
 import androidx.compose.material3.ExperimentalMaterial3ExpressiveApi
+import androidx.compose.material3.FilledTonalButton
+import androidx.compose.material3.LinearWavyProgressIndicator
 import androidx.compose.material3.ListItem
+import androidx.compose.material3.LoadingIndicator
 import androidx.compose.material3.MaterialShapes
 import androidx.compose.material3.MaterialTheme
 import androidx.compose.material3.OutlinedButton
-import androidx.compose.material3.OutlinedTextField
+import androidx.compose.material3.Surface
 import androidx.compose.material3.Text
 import androidx.compose.material3.TextButton
 import androidx.compose.material3.toShape
 import androidx.compose.runtime.Composable
 import androidx.compose.runtime.collectAsState
 import androidx.compose.runtime.getValue
-import androidx.compose.runtime.mutableIntStateOf
-import androidx.compose.runtime.mutableStateOf
-import androidx.compose.runtime.remember
-import androidx.compose.runtime.setValue
 import androidx.compose.ui.Alignment
 import androidx.compose.ui.Modifier
 import androidx.compose.ui.draw.clip
@@ -43,16 +44,29 @@ import androidx.compose.ui.text.style.TextAlign
 import androidx.compose.ui.unit.dp
 import sh.zeron.android.R
 import sh.zeron.android.core.AppModel
+import sh.zeron.android.core.PhoneEngine
+import sh.zeron.android.core.SignIn
+import sh.zeron.android.design.ZIcon
+import sh.zeron.android.design.ZIcons
+import sh.zeron.runtime.RuntimeState
 
+/**
+ * First run: sign in (through this phone's engine), continue without an
+ * account (this phone's local workspace), or look around the demo. The
+ * engine sets itself up meanwhile; its progress sits under the buttons.
+ */
 @OptIn(ExperimentalMaterial3ExpressiveApi::class)
 @Composable
 fun SignInScreen(model: AppModel) {
     val context = LocalContext.current
-    val error by model.signInError.collectAsState()
+    val signIn by model.signIn.collectAsState()
     val orgs by model.orgChoice.collectAsState()
-    // Developer sign-in (debuggable builds): seven taps on the mark.
-    var taps by remember { mutableIntStateOf(0) }
-    var developer by remember { mutableStateOf(false) }
+    val engine by model.phone.state.collectAsState()
+    val ask = rememberPermissionAsk()
+    val openBrowser: (String) -> Unit = { url ->
+        CustomTabsIntent.Builder().setShowTitle(true).build().launchUrl(context, Uri.parse(url))
+    }
+    val busy = signIn is SignIn.Busy
     Column(
         Modifier.fillMaxSize().safeDrawingPadding().padding(horizontal = 28.dp),
         horizontalAlignment = Alignment.CenterHorizontally,
@@ -61,97 +75,151 @@ fun SignInScreen(model: AppModel) {
         Image(
             painterResource(R.mipmap.ic_launcher_foreground),
             null,
-            Modifier.size(148.dp).clip(MaterialShapes.Cookie12Sided.toShape()).clickable(
-                interactionSource = remember { MutableInteractionSource() },
-                indication = null,
-            ) { if (model.isDebuggable && ++taps >= 7) developer = true },
+            Modifier.size(148.dp).clip(MaterialShapes.Cookie12Sided.toShape()),
         )
         Spacer(Modifier.height(32.dp))
         Text("Zeron", style = MaterialTheme.typography.displayMedium)
         Spacer(Modifier.height(10.dp))
         Text(
-            "Follow and steer your coding agents from anywhere.",
+            "Run and steer coding agents on this phone and your computers.",
             style = MaterialTheme.typography.bodyLarge,
             color = MaterialTheme.colorScheme.onSurfaceVariant,
             textAlign = TextAlign.Center,
         )
         Spacer(Modifier.height(48.dp))
+        val tall = ButtonDefaults.MediumContainerHeight
         Button(
-            onClick = {
-                val url = model.beginSignIn()
-                CustomTabsIntent.Builder().setShowTitle(true).build().launchUrl(context, Uri.parse(url))
-            },
-            modifier = Modifier.fillMaxWidth().heightIn(min = ButtonDefaults.MediumContainerHeight),
+            onClick = { ask(false) { model.signIn(openBrowser) } },
+            enabled = !busy,
+            modifier = Modifier.fillMaxWidth().heightIn(min = tall),
             shapes = ButtonDefaults.shapes(),
-            contentPadding = ButtonDefaults.contentPaddingFor(ButtonDefaults.MediumContainerHeight),
+            contentPadding = ButtonDefaults.contentPaddingFor(tall),
         ) {
-            Text("Sign in", style = ButtonDefaults.textStyleFor(ButtonDefaults.MediumContainerHeight))
+            if (busy) {
+                LoadingIndicator(Modifier.size(ButtonDefaults.iconSizeFor(tall)))
+                Spacer(Modifier.size(ButtonDefaults.iconSpacingFor(tall)))
+            }
+            Text(
+                when (signIn) {
+                    SignIn.Preparing -> "Preparing this phone…"
+                    SignIn.Completing, SignIn.Restarting -> "Signing in…"
+                    else -> "Sign in"
+                },
+                style = ButtonDefaults.textStyleFor(tall),
+            )
+        }
+        Spacer(Modifier.height(12.dp))
+        // No account: this phone's own workspace, like the desktop's local profile.
+        FilledTonalButton(
+            onClick = { ask(true) { model.continueLocally() } },
+            enabled = !busy && model.phone.isSupportedAbi,
+            modifier = Modifier.fillMaxWidth().heightIn(min = tall),
+            shapes = ButtonDefaults.shapes(),
+            contentPadding = ButtonDefaults.contentPaddingFor(tall),
+        ) {
+            Text("Continue without an account", style = ButtonDefaults.textStyleFor(tall))
         }
         Spacer(Modifier.height(12.dp))
         OutlinedButton(
             onClick = { model.startDemo() },
-            modifier = Modifier.fillMaxWidth().heightIn(min = ButtonDefaults.MediumContainerHeight),
+            enabled = !busy,
+            modifier = Modifier.fillMaxWidth().heightIn(min = tall),
             shapes = ButtonDefaults.shapes(),
         ) {
-            Text("Explore the demo", style = ButtonDefaults.textStyleFor(ButtonDefaults.MediumContainerHeight))
+            Text("Explore the demo", style = ButtonDefaults.textStyleFor(tall))
         }
-        error?.let {
+        (signIn as? SignIn.Failed)?.let {
             Spacer(Modifier.height(20.dp))
-            Text(it, color = MaterialTheme.colorScheme.error, style = MaterialTheme.typography.bodyMedium, textAlign = TextAlign.Center)
+            Text(it.message, color = MaterialTheme.colorScheme.error, style = MaterialTheme.typography.bodyMedium, textAlign = TextAlign.Center)
         }
+        Spacer(Modifier.height(32.dp))
+        EngineStatusStrip(model, engine)
     }
-    if (developer) DevSignInDialog(onDismiss = { developer = false }) { edge, user, org ->
-        developer = false
-        model.devSignIn(edge, user, org)
-    }
-    orgs?.let { (list, choice) ->
-        AlertDialog(
-            onDismissRequest = { choice.complete(null) },
-            title = { Text("Choose an organization") },
-            text = {
-                Column {
-                    for (org in list) {
-                        ListItem(
-                            headlineContent = { Text(org.name) },
-                            trailingContent = {
-                                TextButton(onClick = { choice.complete(org) }) { Text("Open") }
-                            },
-                        )
-                    }
-                }
-            },
-            confirmButton = {},
-            dismissButton = { TextButton(onClick = { choice.complete(null) }) { Text("Cancel") } },
-        )
-    }
+    orgs?.let { (list, choice) -> OrgDialog(list, onPick = { choice.complete(it) }) }
 }
 
 /**
- * Developer: an `AUTH_MODE=dev` edge (e.g. `wrangler dev --var AUTH_MODE:dev`
- * in edge/) and the `user@org` to be — the bearer such an edge accepts.
+ * This phone's engine in one line: setting up (with progress), starting,
+ * ready, or stopped with a way back. Compact: it never blocks the screen.
  */
+@OptIn(ExperimentalMaterial3ExpressiveApi::class)
 @Composable
-private fun DevSignInDialog(onDismiss: () -> Unit, onSignIn: (String, String, String) -> Unit) {
-    var edge by remember { mutableStateOf("http://10.0.2.2:27740") }
-    var user by remember { mutableStateOf("dev-user") }
-    var org by remember { mutableStateOf("dev-org") }
+fun EngineStatusStrip(model: AppModel, state: RuntimeState, modifier: Modifier = Modifier) {
+    if (!model.phone.isSupportedAbi) return
+    val busy = state is RuntimeState.Bootstrapping || state == RuntimeState.Starting
+    val failed = state is RuntimeState.Failed
+    Surface(
+        shape = RoundedCornerShape(20.dp),
+        color = if (failed) MaterialTheme.colorScheme.errorContainer else MaterialTheme.colorScheme.surfaceContainerHigh,
+        modifier = modifier.fillMaxWidth(),
+    ) {
+        Column(Modifier.padding(horizontal = 16.dp, vertical = 12.dp)) {
+            Row(verticalAlignment = Alignment.CenterVertically) {
+                if (busy) {
+                    LoadingIndicator(Modifier.size(24.dp))
+                } else {
+                    ZIcon(
+                        if (failed) ZIcons.Warning else ZIcons.Phone,
+                        null,
+                        Modifier.size(20.dp),
+                        tint = if (failed) MaterialTheme.colorScheme.onErrorContainer else MaterialTheme.colorScheme.onSurfaceVariant,
+                    )
+                }
+                Spacer(Modifier.width(12.dp))
+                Text(
+                    engineStatusLine(state),
+                    style = MaterialTheme.typography.bodyMedium,
+                    color = if (failed) MaterialTheme.colorScheme.onErrorContainer else MaterialTheme.colorScheme.onSurfaceVariant,
+                    modifier = Modifier.weight(1f),
+                    maxLines = 2,
+                )
+                if (failed || state == RuntimeState.Stopped) {
+                    TextButton(onClick = { model.startEngine() }) { Text(if (failed) "Try again" else "Start") }
+                }
+            }
+            AnimatedVisibility(state is RuntimeState.Bootstrapping) {
+                val progress = (state as? RuntimeState.Bootstrapping)?.progress
+                Column {
+                    Spacer(Modifier.height(10.dp))
+                    if (progress != null) {
+                        LinearWavyProgressIndicator(progress = { progress }, modifier = Modifier.fillMaxWidth())
+                    } else {
+                        LinearWavyProgressIndicator(Modifier.fillMaxWidth())
+                    }
+                }
+            }
+        }
+    }
+}
+
+fun engineStatusLine(state: RuntimeState): String = when (state) {
+    RuntimeState.NotInstalled -> "This phone will run agents too"
+    is RuntimeState.Bootstrapping ->
+        "Setting up this phone · ${state.step}" + (state.progress?.let { " · ${(it * 100).toInt()}%" } ?: "")
+    RuntimeState.Starting -> "Starting this phone's engine…"
+    is RuntimeState.Running -> "This phone is ready to run agents"
+    RuntimeState.Stopped -> "This phone's engine is stopped"
+    is RuntimeState.Failed -> "${PhoneEngine.stateLabel(state)}: ${state.reason}"
+}
+
+@Composable
+fun OrgDialog(list: List<uniffi.zeron_core.AuthOrg>, onPick: (uniffi.zeron_core.AuthOrg?) -> Unit) {
     AlertDialog(
-        onDismissRequest = onDismiss,
-        title = { Text("Developer sign-in") },
+        onDismissRequest = { onPick(null) },
+        title = { Text("Choose an organization") },
         text = {
             Column {
-                Text(
-                    "Join a development edge (AUTH_MODE=dev) without WorkOS.",
-                    style = MaterialTheme.typography.bodyMedium,
-                    color = MaterialTheme.colorScheme.onSurfaceVariant,
-                )
-                Spacer(Modifier.height(12.dp))
-                OutlinedTextField(edge, { edge = it }, label = { Text("Edge URL") }, singleLine = true, modifier = Modifier.fillMaxWidth())
-                OutlinedTextField(user, { user = it }, label = { Text("User id") }, singleLine = true, modifier = Modifier.fillMaxWidth())
-                OutlinedTextField(org, { org = it }, label = { Text("Organization id") }, singleLine = true, modifier = Modifier.fillMaxWidth())
+                for (org in list) {
+                    ListItem(
+                        headlineContent = { Text(org.name) },
+                        trailingContent = {
+                            TextButton(onClick = { onPick(org) }) { Text("Open") }
+                        },
+                    )
+                }
             }
         },
-        confirmButton = { TextButton(onClick = { onSignIn(edge, user, org) }) { Text("Sign in") } },
-        dismissButton = { TextButton(onClick = onDismiss) { Text("Cancel") } },
+        confirmButton = {},
+        dismissButton = { TextButton(onClick = { onPick(null) }) { Text("Cancel") } },
     )
 }

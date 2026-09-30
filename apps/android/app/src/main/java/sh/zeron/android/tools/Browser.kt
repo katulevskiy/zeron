@@ -17,11 +17,12 @@ import java.util.concurrent.ConcurrentHashMap
  * - **Workspace pages**: `https://<token>.workspace.zeron.invalid/<path>`
  *   serves a workspace's files straight from its device (`ReadWorkspaceBytes`,
  *   streamed), so an agent's `index.html` opens with its CSS, scripts and
- *   images — from whichever computer owns it. The token is stable per
- *   workspace, so its origin (and localStorage) is too.
- * - **Previews**: dev servers the session's device discovered
- *   (`WatchPreviews`). The app has no preview proxy, so they open straight
- *   from the device over the network (`http://<its address>:<port>`).
+ *   images — on the phone's own projects and a computer's alike. The token is
+ *   stable per workspace, so its origin (and localStorage) is too.
+ * - **Previews**: dev servers the engine discovered (`WatchPreviews`) open as
+ *   `http://<device>.<project>.localhost:7331` through this phone engine's
+ *   preview proxy (docs/preview-networking.md); `localhost:<port>` reaches the
+ *   phone's own guest directly (it shares the app's network).
  */
 object Browser {
     const val WORKSPACE_DOMAIN = "workspace.zeron.invalid"
@@ -32,12 +33,6 @@ object Browser {
         val token = "w" + Integer.toHexString(key.hashCode()).padStart(8, '0')
         refs[token] = ref
         return token
-    }
-
-    /** A host (or `host:port`-less address) typed for previews, or null. */
-    fun previewHost(address: String): String? {
-        val host = address.trim().removePrefix("http://").removePrefix("https://").trimEnd('/').substringBefore('/')
-        return host.takeIf { it.isNotEmpty() && it.all { c -> c.isLetterOrDigit() || c in ".-:[]" } }
     }
 
     fun workspaceUrl(ref: WorkspaceRef, path: String): String =
