@@ -251,6 +251,22 @@ dialog shows the engine's `dryRun` list; accounts stay), `ListAgentAccounts` (pl
   Reset and re-setup; Demo (sessions, agent sign-in) and the account sign-in
   screen.
 
+- Agent maintenance on the same emulator: Claude Code (vendor script) and
+  OpenCode (vendor script, and npm `opencode-ai`) installed, downgraded, then
+  Update all (Claude Code and vendor OpenCode updated with per-agent
+  progress); Uninstall of each (the dialog lists the dry run; binaries gone,
+  `~/.claude` and OpenCode config kept); a hand-placed CLI refused with its
+  `rm` command; reinstall.
+
+Known issue: `opencode upgrade` on an **npm** OpenCode leaves a dangling
+`bin/opencode.exe` in the guest — proot's `--link2symlink` emulates npm's
+hard link with a hidden `.l2s.*` file the upgrade does not carry over — so
+the engine reports "post-update verification failed" (shown inline). Vendor
+OpenCode updates fine. Related: those `.l2s` links store the rootfs's host
+path, which differs between `/data/user/0/…` and `/data/data/…` depending on
+the process that launched proot, so a hard link made under one spelling does
+not resolve under the other.
+
 Not yet verified:
 - **The combined app on arm64 hardware**, and account-mode WorkOS sign-in and
   agent browser sign-in end to end: the emulator's `system_server` aborts on a
