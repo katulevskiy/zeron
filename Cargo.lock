@@ -12293,17 +12293,24 @@ dependencies = [
 name = "zeron-mobile"
 version = "0.2.97"
 dependencies = [
+ "async-trait",
+ "base64 0.22.1",
+ "futures",
  "serde",
  "serde_json",
  "similar",
+ "tempfile",
  "thiserror 2.0.20",
+ "tokio",
  "uniffi",
  "zeron-client",
  "zeron-doc",
  "zeron-markdown",
  "zeron-proto",
+ "zeron-rpc",
  "zeron-syntax",
  "zeron-text",
+ "zeron-vt",
 ]
 
 [[package]]

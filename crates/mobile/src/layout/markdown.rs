@@ -283,7 +283,7 @@ pub(crate) fn prepare_block(ctx: &mut Ctx, block: &Block, depth: usize, muted: b
     }
 }
 
-fn syntax_color(kind: zeron_syntax::HighlightKind) -> ColorRole {
+pub(crate) fn syntax_color(kind: zeron_syntax::HighlightKind) -> ColorRole {
     use zeron_syntax::HighlightKind as K;
     match kind {
         K::Comment => ColorRole::SyntaxComment,
