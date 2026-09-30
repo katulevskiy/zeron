@@ -1,11 +1,207 @@
 name: lab-macos
+# Dispatch-only lab version of every macOS CI job (ui-tests.yml macos-frame-recovery + ios-tests,
+# preview-tests.yml macOS leg). See /tmp/ci-lab/macos.md for the rationale and numbers.
 on:
   workflow_dispatch:
     inputs:
       target: {description: "ref/sha of zeron source to test", type: string, default: main}
       save_cache: {description: "save rust caches (seed run)", type: boolean, default: false}
+      run_ios: {description: "run the iOS simulator tests (PR path filter would decide this)", type: boolean, default: false}
+      only: {description: "all | main | gpui | ios | linux (subset for experiments)", type: string, default: all}
+      runner: {description: "runner label for the main macOS job", type: string, default: macos-14}
+      gpui_runner: {description: "runner label for gpui/frame-source job", type: string, default: macos-14}
+      ios_runner: {description: "runner label for the iOS job", type: string, default: macos-15}
+      release: {description: "use --release (original) instead of the dev profile", type: boolean, default: false}
+      cache_ver: {description: "cache key version (change for a cold run)", type: string, default: v1}
+
+permissions:
+  contents: read
+
+env:
+  CARGO_TERM_COLOR: always
+  CARGO_INCREMENTAL: 0
+  # Keep the same env-only "CI profile" for both dev and release so nothing is committed to Cargo.toml.
+  CARGO_PROFILE_DEV_DEBUG: 0
+  CARGO_PROFILE_RELEASE_DEBUG: 0
+  CARGO_PROFILE_RELEASE_LTO: ${{ inputs.release && 'off' || 'thin' }}
+  CARGO_PROFILE_RELEASE_STRIP: none
+  PROFILE_FLAG: ${{ inputs.release && '--release' || '' }}
+  PROFILE_DIR: ${{ inputs.release && 'release' || 'debug' }}
+
 jobs:
-  stub:
-    runs-on: ubuntu-24.04
+  # ---------------------------------------------------------------------------------------------
+  # Everything from macos-frame-recovery that builds the zeron workspace, plus the preview-tests
+  # macOS leg. ONE cargo compile (nextest --no-run) then filtered runs.
+  # ---------------------------------------------------------------------------------------------
+  mac-main:
+    if: inputs.only == 'all' || inputs.only == 'main'
+    runs-on: ${{ inputs.runner }}
+    timeout-minutes: 40
     steps:
-      - run: echo "stub on $GITHUB_REF"
+      - uses: actions/checkout@v4
+        with: {ref: "${{ inputs.target }}"}
+      - name: Rust toolchain
+        run: rustup show active-toolchain || rustup toolchain install
+      - uses: Swatinem/rust-cache@v2
+        with:
+          prefix-key: lab-macos-${{ inputs.cache_ver }}-${{ inputs.release && 'rel' || 'dev' }}
+          save-if: ${{ inputs.save_cache }}
+          cache-on-failure: true
+      - uses: taiki-e/install-action@v2
+        with: {tool: nextest}
+      - name: Compile everything once (tests + fixture examples)
+        run: |
+          cargo nextest run --no-run $PROFILE_FLAG --locked \
+            -p zeron-update -p zeron-preview -p zeron-ui \
+            --features zeron-ui/browser-fixture --lib --tests --examples
+      - name: Check macOS application
+        run: cargo check $PROFILE_FLAG --locked -p zeron
+      - name: Run updater + preview + native UI regressions
+        run: |
+          cargo nextest run $PROFILE_FLAG --locked --no-fail-fast \
+            -p zeron-update -p zeron-preview -p zeron-ui \
+            --features zeron-ui/browser-fixture --lib --tests --examples \
+            -E 'package(zeron-update) | package(zeron-preview) | (binary_id(zeron-ui) & (test(native_diff_font_geometry) | test(/notify::tests::/)))'
+      - name: Native browser regression and screenshots
+        timeout-minutes: 3
+        env:
+          RUST_BACKTRACE: 1
+        run: |
+          bash scripts/run-macos-browser-fixture.sh target/$PROFILE_DIR/examples/browser-fixture "$RUNNER_TEMP/browser-captures"
+          test -f "$RUNNER_TEMP/browser-captures/result.txt"
+      - name: Upload browser screenshots
+        if: always()
+        uses: actions/upload-artifact@v4
+        with:
+          name: browser-macos-captures
+          path: ${{ runner.temp }}/browser-captures
+          if-no-files-found: ignore
+      - uses: actions/setup-node@v4
+        with:
+          node-version: 24
+      - name: Install preview fixture server
+        run: npm ci --prefix edge
+      - name: Project discovery, stable URLs and HMR in native WebKit
+        timeout-minutes: 3
+        env:
+          ZERON_PREVIEW_AUTO_OPEN: 1
+        run: |
+          VITE_BINARY="$GITHUB_WORKSPACE/edge/node_modules/vite/bin/vite.js" bash scripts/run-macos-browser-fixture.sh target/$PROFILE_DIR/examples/preview-fixture "$RUNNER_TEMP/preview-captures"
+          test -f "$RUNNER_TEMP/preview-captures/result.txt"
+      - name: Upload preview screenshots
+        if: always()
+        uses: actions/upload-artifact@v4
+        with:
+          name: preview-macos-captures
+          path: ${{ runner.temp }}/preview-captures
+          if-no-files-found: ignore
+
+  # ---------------------------------------------------------------------------------------------
+  # gpui_macos frame-source recovery (separate workspace, pinned zui checkout)
+  # ---------------------------------------------------------------------------------------------
+  mac-gpui:
+    if: inputs.only == 'all' || inputs.only == 'gpui'
+    runs-on: ${{ inputs.gpui_runner }}
+    timeout-minutes: 40
+    steps:
+      - uses: actions/checkout@v4
+        with: {ref: "${{ inputs.target }}"}
+      - name: Rust toolchain
+        run: rustup show active-toolchain || rustup toolchain install
+      - name: Check out pinned GPUI for native frame-source tests
+        shell: bash
+        run: |
+          rev=$(python3 -c 'import tomllib; print(tomllib.load(open("Cargo.toml", "rb"))["workspace"]["dependencies"]["gpui"]["rev"])')
+          git init frame-source-tests
+          git -C frame-source-tests remote add origin https://github.com/zeronsh/zui
+          git -C frame-source-tests fetch --depth=1 origin "$rev"
+          git -C frame-source-tests checkout --detach FETCH_HEAD
+      - uses: Swatinem/rust-cache@v2
+        with:
+          prefix-key: lab-macos-${{ inputs.cache_ver }}-gpui-${{ inputs.release && 'rel' || 'dev' }}
+          workspaces: frame-source-tests
+          save-if: ${{ inputs.save_cache }}
+          cache-on-failure: true
+      - name: Native frame-source recovery regression
+        working-directory: frame-source-tests
+        run: cargo test $PROFILE_FLAG --locked -p gpui_macos --test frame_source_recovery
+
+  # ---------------------------------------------------------------------------------------------
+  # Moved off macOS: Rust mobile core tests + "Swift bindings are current" (UniFFI bindgen on Linux)
+  # ---------------------------------------------------------------------------------------------
+  linux-mobile:
+    if: inputs.only == 'all' || inputs.only == 'linux' || (inputs.only == 'ios' && false)
+    runs-on: ubuntu-24.04
+    timeout-minutes: 30
+    steps:
+      - uses: actions/checkout@v4
+        with: {ref: "${{ inputs.target }}"}
+      - name: Rust toolchain
+        run: rustup show active-toolchain || rustup toolchain install
+      - uses: Swatinem/rust-cache@v2
+        with:
+          prefix-key: lab-macos-${{ inputs.cache_ver }}-linux-mobile
+          save-if: ${{ inputs.save_cache }}
+          cache-on-failure: true
+      - name: Rust mobile core tests
+        run: cargo test --locked -p zeron-text -p zeron-markdown -p zeron-client -p zeron-mobile
+      - name: Generated Swift bindings are current (host build of the UniFFI library)
+        run: |
+          cargo build --locked -p zeron-mobile --lib
+          cargo build --locked -p zeron-mobile --bin uniffi-bindgen --features bindgen
+          target/debug/uniffi-bindgen generate --library target/debug/libzeron_mobile.so \
+            --language swift --out-dir "$RUNNER_TEMP/gen" >/dev/null
+          diff -u apps/ios/Zeron/Core/Generated/zeron_core.swift "$RUNNER_TEMP/gen/zeron_core.swift"
+
+  # ---------------------------------------------------------------------------------------------
+  # iOS unit tests (simulator). Path filter (PR-only, not wired here): run when any file under
+  #   apps/ios/ crates/{mobile,client,text,markdown,doc,sync,proto,rpc,syntax}/ scripts/ios/
+  #   Cargo.lock Cargo.toml rust-toolchain.toml or this workflow changes (same as `changes` job).
+  # ---------------------------------------------------------------------------------------------
+  mac-ios:
+    if: inputs.run_ios && (inputs.only == 'all' || inputs.only == 'ios')
+    # Serialise behind mac-gpui so this lab never holds more than 2 macOS runners at once.
+    needs: [mac-gpui]
+    runs-on: ${{ inputs.ios_runner }}
+    timeout-minutes: 40
+    steps:
+      - uses: actions/checkout@v4
+        with: {ref: "${{ inputs.target }}"}
+      - name: Select an available iPhone simulator and boot it in the background
+        run: |
+          python3 - <<'PYTHON'
+          import json, os, subprocess
+          devices = json.loads(subprocess.check_output(["xcrun", "simctl", "list", "devices", "available", "--json"]))["devices"]
+          iphones = [device for runtime, group in devices.items() if "iOS" in runtime
+                     for device in group if device["name"].startswith("iPhone")]
+          if not iphones:
+              raise SystemExit("No iPhone simulator is installed")
+          with open(os.environ["GITHUB_ENV"], "a") as env:
+              env.write("IOS_SIMULATOR_ID=" + iphones[0]["udid"] + "\n")
+          subprocess.Popen(["xcrun", "simctl", "boot", iphones[0]["udid"]])
+          PYTHON
+      - name: Rust toolchain + iOS targets
+        run: |
+          rustup show active-toolchain || rustup toolchain install
+          rustup target add aarch64-apple-ios aarch64-apple-ios-sim
+      - uses: Swatinem/rust-cache@v2
+        with:
+          prefix-key: lab-macos-${{ inputs.cache_ver }}-ios
+          save-if: ${{ inputs.save_cache }}
+          cache-on-failure: true
+      - name: Build Rust core for the simulator
+        run: scripts/ios/build-core.sh iphonesimulator
+      - name: Run iOS unit tests
+        working-directory: apps/ios
+        run: |
+          xcodebuild -project Zeron.xcodeproj -scheme Zeron \
+            -destination "platform=iOS Simulator,id=$IOS_SIMULATOR_ID" \
+            -resultBundlePath "$RUNNER_TEMP/ios-tests.xcresult" \
+            -only-testing:ZeronTests CODE_SIGNING_ALLOWED=NO test
+      - name: Upload iOS test results
+        if: always()
+        uses: actions/upload-artifact@v4
+        with:
+          name: ios-test-results
+          path: ${{ runner.temp }}/ios-tests.xcresult
+          if-no-files-found: ignore
