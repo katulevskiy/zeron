@@ -1343,7 +1343,11 @@ impl Client {
             Backend::Demo(_) => Err(ClientError::Unsupported(method.to_owned())),
             Backend::Live(live) => {
                 let stream = live.relay.subscribe(device_id, method, params).await?;
-                Ok(crate::rpc::HostWatch::spawn(stream, sink, &self.inner.cancel))
+                Ok(crate::rpc::HostWatch::spawn(
+                    stream,
+                    sink,
+                    &self.inner.cancel,
+                ))
             }
         }
     }
