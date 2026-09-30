@@ -12115,6 +12115,7 @@ dependencies = [
  "tracing-subscriber",
  "windows-sys 0.61.2",
  "zeron-engine",
+ "zeron-localedge",
  "zeron-mcp",
  "zeron-rpc",
  "zeron-ui",
@@ -12189,6 +12190,7 @@ dependencies = [
  "tracing",
  "uuid",
  "windows-sys 0.61.2",
+ "zeron-client",
  "zeron-doc",
  "zeron-harness",
  "zeron-preview",
@@ -12227,6 +12229,41 @@ dependencies = [
 ]
 
 [[package]]
+name = "zeron-localedge"
+version = "0.2.97"
+dependencies = [
+ "async-trait",
+ "base64 0.22.1",
+ "bytes",
+ "chrono",
+ "futures",
+ "http-body-util",
+ "hyper",
+ "hyper-util",
+ "loro",
+ "reqwest",
+ "rusqlite",
+ "serde",
+ "serde_json",
+ "sha2",
+ "subtle",
+ "tempfile",
+ "thiserror 2.0.20",
+ "tokio",
+ "tokio-tungstenite",
+ "tokio-util",
+ "tracing",
+ "tracing-subscriber",
+ "uuid",
+ "zeron-client",
+ "zeron-doc",
+ "zeron-engine",
+ "zeron-proto",
+ "zeron-rpc",
+ "zeron-sync",
+]
+
+[[package]]
 name = "zeron-markdown"
 version = "0.2.97"
 dependencies = [
@@ -12255,11 +12292,14 @@ dependencies = [
 name = "zeron-mobile"
 version = "0.2.97"
 dependencies = [
+ "async-trait",
  "base64 0.22.1",
+ "futures",
  "pulldown-cmark",
  "serde",
  "serde_json",
  "similar",
+ "tempfile",
  "thiserror 2.0.20",
  "tokio",
  "uniffi",
@@ -12267,6 +12307,7 @@ dependencies = [
  "zeron-doc",
  "zeron-markdown",
  "zeron-proto",
+ "zeron-rpc",
  "zeron-syntax",
  "zeron-text",
  "zeron-vt",

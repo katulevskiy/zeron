@@ -100,6 +100,19 @@ impl Device {
     pub fn supports(&self, capability: &str) -> bool {
         self.capabilities.iter().any(|value| value == capability)
     }
+
+    /// Whether this device runs an engine that can host sessions.
+    ///
+    /// Engines write their own row at boot and advertise their protocol
+    /// capabilities on it; a viewer app never does. That — not the platform —
+    /// is what makes a phone running its own engine (Android on-device mode,
+    /// docs/android.md) a host. Rows without capabilities (engines that
+    /// predate advertising them, viewer rows) fall back to the platform:
+    /// phones and tablets only view.
+    pub fn is_execution_host(&self) -> bool {
+        !self.capabilities.is_empty()
+            || !matches!(self.platform.as_str(), "ios" | "android" | "ipados")
+    }
 }
 
 /// A synced (device, folder) pair — the unit of organization in the sidebar.
@@ -1229,6 +1242,30 @@ pub struct ChatConnectivity {
 mod tests {
     use super::*;
     use chrono::TimeZone;
+
+    #[test]
+    fn engine_rows_host_sessions_whatever_the_platform() {
+        let device = |platform: &str, capabilities: &[&str]| Device {
+            id: "d".into(),
+            name: "d".into(),
+            platform: platform.into(),
+            last_seen_at: None,
+            created_at: None,
+            version: None,
+            cursor_sdk_version: None,
+            capabilities: capabilities.iter().map(|c| (*c).to_owned()).collect(),
+        };
+        let current: Vec<&str> = crate::capabilities::CURRENT.to_vec();
+        // An engine on a phone (Android on-device mode) advertises capabilities.
+        assert!(device("android", &current).is_execution_host());
+        assert!(device("macos", &current).is_execution_host());
+        // Engines from before capability advertisement stay hosts…
+        assert!(device("linux", &[]).is_execution_host());
+        // …and capability-less phone rows stay viewers, exactly as before.
+        for viewer in ["ios", "android", "ipados"] {
+            assert!(!device(viewer, &[]).is_execution_host());
+        }
+    }
 
     #[test]
     fn legacy_chat_connectivity_has_no_live_delivery_proof() {

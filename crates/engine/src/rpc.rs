@@ -1713,7 +1713,23 @@ impl RpcService for AuthRpc {
                 RpcReply::value(&serde_json::json!({ "url": url }))
             }
             methods::SIGN_IN_HEADLESS => {
-                let url = self.auth.start_headless_sign_in();
+                // `redirectUri`: an app's own deep link instead of the edge's
+                // paste-code page; the app completes with `state.code` too.
+                #[derive(Deserialize, Default)]
+                #[serde(rename_all = "camelCase")]
+                struct P {
+                    #[serde(default)]
+                    redirect_uri: Option<String>,
+                }
+                let p: P = if params.is_null() {
+                    P::default()
+                } else {
+                    parse_params(params)?
+                };
+                let url = match p.redirect_uri.as_deref().map(str::trim) {
+                    Some(uri) if !uri.is_empty() => self.auth.start_redirect_sign_in(uri),
+                    _ => self.auth.start_headless_sign_in(),
+                };
                 RpcReply::value(&serde_json::json!({ "url": url }))
             }
             methods::COMPLETE_SIGN_IN => {

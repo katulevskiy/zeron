@@ -588,6 +588,10 @@ impl zeron_rpc::RpcService for HostService {
                     .push(params["spaceId"].as_str().unwrap_or_default().to_owned());
                 json!({ "ok": true })
             }
+            m::EDGE_BEARER => json!({
+                "edgeUrl": params["edgeUrl"], "userId": "user-1", "orgId": "org-1",
+                "bearer": "user-1@org-1",
+            }),
             m::SUBSCRIBE_TERMINAL => {
                 let after = params["afterSeq"].as_u64().unwrap_or(0);
                 let items: Vec<serde_json::Value> = (after + 1..=3)
@@ -1019,5 +1023,53 @@ async fn host_streams_ride_the_device_relay() {
         tokio::time::sleep(Duration::from_millis(50)).await;
     }
     exercise_streams(&client, HOST, &service).await;
+    client.shutdown();
+}
+
+/// A viewer sharing its device's engine (`Credentials::Engine`, the Android
+/// app) reaches that engine over its IPC port — no device room involved:
+/// nothing here serves one for the phone's id.
+#[tokio::test(flavor = "multi_thread", worker_threads = 2)]
+async fn own_engine_calls_and_streams_use_its_ipc_port() {
+    const PHONE: &str = "phone-engine";
+    let edge = MockEdge::start().await;
+    let service = Arc::new(HostService::default());
+    let listener = tokio::net::TcpListener::bind("127.0.0.1:0").await.unwrap();
+    let port = listener.local_addr().unwrap().port();
+    tokio::spawn(zeron_rpc::serve_ws_listener_with_token(
+        listener,
+        service.clone(),
+        Some("ipc-secret-token".into()),
+    ));
+    let dir = tempfile::tempdir().unwrap();
+    let mut config = ClientConfig::new(edge.edge_url(), dir.path());
+    config.device_id = PHONE.into();
+    config.device_name = "Phone".into();
+    let client = Client::new(
+        config,
+        Credentials::Engine {
+            ipc_url: format!("ws://127.0.0.1:{port}"),
+            ipc_token: Some("ipc-secret-token".into()),
+            user_id: "user-1".into(),
+            org_id: "org-1".into(),
+        },
+        Arc::new(NullListener),
+    )
+    .unwrap();
+
+    let c = client.clone();
+    let folders = zeron_client::runtime::run(async move {
+        c.host_call(
+            PHONE,
+            zeron_rpc::methods::LIST_FOLDERS,
+            serde_json::json!({ "path": "/home/zeron" }),
+        )
+        .await
+    })
+    .await
+    .unwrap();
+    assert_eq!(folders["path"], "/home/zeron");
+    assert!(!edge.relay_host_connected(PHONE));
+    exercise_streams(&client, PHONE, &service).await;
     client.shutdown();
 }

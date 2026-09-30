@@ -17,6 +17,8 @@ use zeron_proto::{
     Space, UserInputAnswer,
 };
 
+use zeron_rpc::methods;
+
 use crate::transcript::{RenderOptions, RenderedMessage, render_entries};
 use crate::zeron::{HarnessInfo, TurnOutcome, Zeron, session_for, short};
 
@@ -603,7 +605,21 @@ impl Tools {
                 "Side chats cannot create chats. Ask your parent chat to create another side chat."
             );
         }
-        let harnesses = self.zeron.harnesses().await?;
+        let (space, device_id) = match args.project.as_deref() {
+            Some(project) => {
+                let space = self.zeron.resolve_space(project).await?;
+                let device_id = space.device_id.clone();
+                (Some(space), device_id)
+            }
+            None => (
+                None,
+                self.zeron.resolve_device_id(args.device.as_deref()).await?,
+            ),
+        };
+
+        // The host's catalog: a chat on another device (a phone running its
+        // own engine) runs that device's harnesses, not this one's.
+        let harnesses = self.zeron.harnesses_on(Some(&device_id)).await?;
         let harness = match args.harness.as_deref() {
             Some(raw) => {
                 let id: HarnessId = parse_enum("harness", raw).map_err(anyhow::Error::msg)?;
@@ -611,7 +627,7 @@ impl Tools {
                     && !info.available()
                 {
                     anyhow::bail!(
-                        "harness {raw} is not available on this device (see list_harnesses)"
+                        "harness {raw} is not available on the chat's device (see list_harnesses)"
                     );
                 }
                 id
@@ -619,7 +635,7 @@ impl Tools {
             None => default_harness(&harnesses)?,
         };
         if let Some(model) = args.model.as_deref()
-            && let Ok(models) = self.zeron.models(harness).await
+            && let Ok(models) = self.zeron.models_on(harness, Some(&device_id)).await
             && !models.is_empty()
             && !models.iter().any(|m| m.id == model)
         {
@@ -646,18 +662,6 @@ impl Tools {
             reasoning,
             model_options: Default::default(),
             sandbox,
-        };
-
-        let (space, device_id) = match args.project.as_deref() {
-            Some(project) => {
-                let space = self.zeron.resolve_space(project).await?;
-                let device_id = space.device_id.clone();
-                (Some(space), device_id)
-            }
-            None => (
-                None,
-                self.zeron.resolve_device_id(args.device.as_deref()).await?,
-            ),
         };
 
         // Parent: the explicit `parent` argument, else the chat this server

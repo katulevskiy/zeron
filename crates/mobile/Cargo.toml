@@ -36,3 +36,9 @@ zeron-vt.workspace = true
 base64 = "0.22"
 pulldown-cmark.workspace = true
 tokio.workspace = true
+
+[dev-dependencies]
+zeron-rpc.workspace = true
+async-trait.workspace = true
+futures.workspace = true
+tempfile.workspace = true

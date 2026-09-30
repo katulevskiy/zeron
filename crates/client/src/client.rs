@@ -570,12 +570,13 @@ impl Client {
         let tokens = TokenProvider::new(&credentials, config.edge_base(), events.clone());
         // Live: restore the registry replica + open the docs store first, so
         // the very first snapshot renders the cached workspace (instant).
-        let (registry, store) = if credentials.is_demo() {
+        let (mut registry, store) = if credentials.is_demo() {
             (RegistryDoc::new(config.device_id.clone()), None)
         } else {
             let (store, registry) = LiveBackend::open(&config.data_dir, &config.device_id)?;
             (registry, Some(store))
         };
+        registry.set_clock_writer(credentials.writer_id(&config.device_id));
         let inner = Arc::new(ClientInner {
             workspace: WorkspaceStore::new(registry),
             events: events.clone(),
@@ -731,7 +732,7 @@ impl Client {
                     .iter()
                     .find(|d| &d.id == device_id)
                     .ok_or_else(|| ClientError::NotFound(device_id.clone()))?;
-                if matches!(host.platform.as_str(), "ios" | "android" | "ipados") {
+                if !host.is_execution_host() {
                     return Err(ClientError::InvalidArgument(
                         "that device can't host sessions".into(),
                     ));
@@ -1381,7 +1382,8 @@ impl Client {
     /// Untyped host stream from `device_id`'s engine (`SubscribeTerminal`,
     /// `WatchWorkspaceFiles`, `WatchPreviews`…): returns once the host has
     /// accepted it (an unknown method or bad params fail here), then pumps
-    /// items into `sink` until the host ends it or the handle is dropped, over
+    /// items into `sink` until the host ends it or the handle is dropped. The
+    /// engine this viewer shares is reached over its IPC port, others over
     /// the device relay. Demo mode has no generic host: `Unsupported`.
     pub async fn host_watch(
         &self,

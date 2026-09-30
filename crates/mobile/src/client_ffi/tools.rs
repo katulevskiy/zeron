@@ -2,8 +2,9 @@
 //! engine terminals rendered by the shared emulator ([`TerminalScreen`]),
 //! source highlighting and file icons for the file tree and editor.
 //!
-//! Streams and terminals ride [`zc::Client::host_watch`] over the device
-//! relay, exactly like `host_call`.
+//! Streams and terminals ride [`zc::Client::host_watch`], so they reach the
+//! phone's own engine over its IPC port and any other device over the relay,
+//! exactly like `host_call`.
 
 use std::sync::atomic::{AtomicBool, AtomicU64, Ordering};
 use std::sync::{Arc, Mutex, Weak};
@@ -902,7 +903,191 @@ pub fn folder_icon_name(name: String) -> String {
 
 #[cfg(test)]
 mod tests {
+    use std::sync::atomic::AtomicI64;
+    use std::time::Instant;
+
+    use serde_json::{Value, json};
+    use zeron_rpc::methods as m;
+    use zeron_rpc::{RpcError, RpcReply};
+
     use super::*;
+    use crate::client_ffi::{ClientEvent, ClientListener, CoreConfig, Credentials};
+
+    const PHONE: &str = "phone-engine";
+    const TOKEN: &str = "ipc-secret-token";
+
+    fn b64(bytes: &[u8]) -> String {
+        base64::engine::general_purpose::STANDARD.encode(bytes)
+    }
+
+    /// The phone's engine as the FFI sees it: a finite terminal replay that
+    /// asks for a cursor report, a silent file watch counted while it lives,
+    /// and the terminal input/resize/close calls recorded.
+    #[derive(Default)]
+    struct Engine {
+        writes: Mutex<Vec<u8>>,
+        resizes: Mutex<Vec<(u64, u64)>>,
+        closed: Mutex<Vec<String>>,
+        watches: Arc<AtomicI64>,
+    }
+
+    struct Live(Arc<AtomicI64>);
+
+    impl Drop for Live {
+        fn drop(&mut self) {
+            self.0.fetch_sub(1, Ordering::SeqCst);
+        }
+    }
+
+    #[async_trait::async_trait]
+    impl zeron_rpc::RpcService for Engine {
+        async fn handle(&self, method: &str, params: Value) -> Result<RpcReply, RpcError> {
+            Ok(RpcReply::Value(match method {
+                m::EDGE_BEARER => json!({
+                    "edgeUrl": "http://127.0.0.1:9", "userId": "local", "orgId": "local",
+                    "bearer": "local@local",
+                }),
+                m::SUBSCRIBE_TERMINAL => {
+                    if params["terminalId"] != "t1" {
+                        return Err(RpcError::Failed("Terminal not found".into()));
+                    }
+                    let after = params["afterSeq"].as_u64().unwrap_or(0);
+                    let frames = [
+                        json!({ "type": "data", "seq": 1, "data": b64(b"$ echo hi\r\nhi\r\n") }),
+                        // DSR: the emulator must answer with the cursor position.
+                        json!({ "type": "data", "seq": 2, "data": b64(b"\x1b[6n$ ") }),
+                    ];
+                    let items: Vec<Value> = frames
+                        .into_iter()
+                        .filter(|f| f["seq"].as_u64().unwrap() > after)
+                        .collect();
+                    let stream = futures::StreamExt::chain(
+                        futures::stream::iter(items),
+                        futures::stream::pending(),
+                    );
+                    return Ok(RpcReply::Stream(Box::pin(stream)));
+                }
+                m::WRITE_TERMINAL => {
+                    let data = params["data"].as_str().unwrap_or_default();
+                    let bytes = base64::engine::general_purpose::STANDARD
+                        .decode(data)
+                        .unwrap();
+                    lock(&self.writes).extend(bytes);
+                    json!({ "ok": true })
+                }
+                m::RESIZE_TERMINAL => {
+                    lock(&self.resizes).push((
+                        params["cols"].as_u64().unwrap(),
+                        params["rows"].as_u64().unwrap(),
+                    ));
+                    json!({ "ok": true })
+                }
+                m::CLOSE_TERMINAL => {
+                    lock(&self.closed).push(params["terminalId"].as_str().unwrap().into());
+                    json!({ "ok": true })
+                }
+                m::WATCH_WORKSPACE_FILES => {
+                    if params["spaceId"] != "space-1" {
+                        return Err(RpcError::Failed("unknown project".into()));
+                    }
+                    self.watches.fetch_add(1, Ordering::SeqCst);
+                    let live = Live(self.watches.clone());
+                    let first = json!({ "sequence": 1, "resyncRequired": true, "changes": [] });
+                    let stream = futures::StreamExt::chain(
+                        futures::stream::once(async move { first }),
+                        futures::stream::unfold(live, |live| async move {
+                            std::future::pending::<()>().await;
+                            Some((Value::Null, live))
+                        }),
+                    );
+                    return Ok(RpcReply::Stream(Box::pin(stream)));
+                }
+                other => return Err(RpcError::UnknownMethod(other.into())),
+            }))
+        }
+    }
+
+    struct NullListener;
+
+    impl ClientListener for NullListener {
+        fn on_event(&self, _event: ClientEvent) {}
+    }
+
+    fn wait_for(what: &str, mut done: impl FnMut() -> bool) {
+        let start = Instant::now();
+        while !done() {
+            assert!(
+                start.elapsed() < Duration::from_secs(10),
+                "timed out: {what}"
+            );
+            std::thread::sleep(Duration::from_millis(20));
+        }
+    }
+
+    fn block<T: Send + 'static>(fut: impl std::future::Future<Output = T> + Send + 'static) -> T {
+        zc::runtime::shared().block_on(fut)
+    }
+
+    /// A `CoreClient` sharing its device with `engine` (the Android app).
+    fn phone(engine: Arc<Engine>, dir: &std::path::Path) -> Arc<CoreClient> {
+        let listener = std::net::TcpListener::bind("127.0.0.1:0").unwrap();
+        listener.set_nonblocking(true).unwrap();
+        let port = listener.local_addr().unwrap().port();
+        zc::runtime::shared().spawn(async move {
+            let listener = tokio::net::TcpListener::from_std(listener).unwrap();
+            zeron_rpc::serve_ws_listener_with_token(listener, engine, Some(TOKEN.into())).await;
+        });
+        CoreClient::new(
+            CoreConfig {
+                edge_url: "http://127.0.0.1:9".into(),
+                data_dir: dir.to_string_lossy().into_owned(),
+                device_id: PHONE.into(),
+                device_name: "Phone".into(),
+                platform: "android".into(),
+                app_version: "test".into(),
+            },
+            Credentials::Engine {
+                ipc_url: format!("ws://127.0.0.1:{port}"),
+                ipc_token: Some(TOKEN.into()),
+                user_id: "local".into(),
+                org_id: "local".into(),
+            },
+            Arc::new(NullListener),
+        )
+        .unwrap()
+    }
+
+    #[derive(Default)]
+    struct Items {
+        items: Mutex<Vec<Value>>,
+        ended: AtomicBool,
+    }
+
+    impl HostStreamListener for Items {
+        fn on_item(&self, json: String) {
+            lock(&self.items).push(serde_json::from_str(&json).unwrap());
+        }
+
+        fn on_end(&self) {
+            self.ended.store(true, Ordering::SeqCst);
+        }
+    }
+
+    #[derive(Default)]
+    struct Frames {
+        frames: AtomicU64,
+        exit: Mutex<Option<i32>>,
+    }
+
+    impl TerminalListener for Frames {
+        fn on_frame(&self) {
+            self.frames.fetch_add(1, Ordering::SeqCst);
+        }
+
+        fn on_exit(&self, code: i32) {
+            *lock(&self.exit) = Some(code);
+        }
+    }
 
     fn palette() -> TerminalPalette {
         TerminalPalette {
@@ -913,6 +1098,171 @@ mod tests {
             selection: 0x40FFFFFF,
             light: false,
         }
+    }
+
+    fn row_text(line: &TerminalLine) -> String {
+        let mut text = String::new();
+        for run in &line.runs {
+            while text.chars().count() < run.col as usize {
+                text.push(' ');
+            }
+            text.push_str(&run.text);
+        }
+        text.trim_end().to_owned()
+    }
+
+    #[test]
+    fn host_watch_streams_until_cancelled_and_rejects_bad_requests() {
+        let engine = Arc::new(Engine::default());
+        let dir = tempfile::tempdir().unwrap();
+        let core = phone(engine.clone(), dir.path());
+
+        let items = Arc::new(Items::default());
+        let c = core.clone();
+        let listener: Arc<dyn HostStreamListener> = items.clone();
+        let stream = block(async move {
+            c.host_watch(
+                PHONE.into(),
+                m::WATCH_WORKSPACE_FILES.into(),
+                r#"{"spaceId":"space-1"}"#.into(),
+                listener,
+            )
+            .await
+        })
+        .unwrap();
+        wait_for("baseline frame", || lock(&items.items).len() == 1);
+        assert_eq!(lock(&items.items)[0]["resyncRequired"], true);
+        assert_eq!(engine.watches.load(Ordering::SeqCst), 1);
+        assert!(stream.is_active());
+        drop(stream); // releasing the object cancels the host's stream
+        wait_for("host stream cancelled", || {
+            engine.watches.load(Ordering::SeqCst) == 0
+        });
+        assert!(
+            !items.ended.load(Ordering::SeqCst),
+            "a cancelled stream is silent"
+        );
+
+        let c = core.clone();
+        let err = block(async move {
+            c.host_watch(
+                PHONE.into(),
+                m::WATCH_WORKSPACE_FILES.into(),
+                r#"{"spaceId":"nope"}"#.into(),
+                Arc::new(Items::default()),
+            )
+            .await
+        })
+        .err()
+        .unwrap();
+        assert!(err.to_string().contains("unknown project"), "{err}");
+        let c = core.clone();
+        let err = block(async move {
+            c.host_watch(
+                PHONE.into(),
+                "FutureWatch".into(),
+                String::new(),
+                Arc::new(Items::default()),
+            )
+            .await
+        })
+        .err()
+        .unwrap();
+        assert!(matches!(err, CoreError::Unsupported { .. }), "{err:?}");
+        let c = core.clone();
+        let err = block(async move {
+            c.host_watch(
+                PHONE.into(),
+                "X".into(),
+                "{nope".into(),
+                Arc::new(Items::default()),
+            )
+            .await
+        })
+        .err()
+        .unwrap();
+        assert!(matches!(err, CoreError::InvalidArgument { .. }), "{err:?}");
+        core.shutdown();
+    }
+
+    #[test]
+    fn terminal_screen_replays_answers_types_resizes_and_closes() {
+        let engine = Arc::new(Engine::default());
+        let dir = tempfile::tempdir().unwrap();
+        let core = phone(engine.clone(), dir.path());
+        let frames = Arc::new(Frames::default());
+        let screen =
+            core.terminal_screen(PHONE.into(), "t1".into(), 40, 6, palette(), frames.clone());
+
+        wait_for("replay painted", || {
+            frames.frames.load(Ordering::SeqCst) > 0 && row_text(&screen.frame().lines[2]) == "$"
+        });
+        let frame = screen.frame();
+        assert!(!frame.connecting);
+        assert_eq!((frame.cols, frame.rows), (40, 6));
+        assert_eq!(row_text(&frame.lines[0]), "$ echo hi");
+        assert_eq!(row_text(&frame.lines[1]), "hi");
+        assert_eq!((frame.cursor_row, frame.cursor_col), (2, 2));
+        // The DSR query was answered before any typing.
+        wait_for("cursor report", || {
+            lock(&engine.writes).starts_with(b"\x1b[3;1R")
+        });
+
+        screen.write_text("ls\n".into(), false, false);
+        screen.write_text("c".into(), true, false);
+        screen.write_key(TerminalKey::Up, false, false, false);
+        screen.paste("a\nb".into());
+        wait_for("typed input", || {
+            lock(&engine.writes).len() >= 6 + 3 + 1 + 3 + 3
+        });
+        assert_eq!(&lock(&engine.writes)[6..], b"ls\r\x03\x1b[Aa\rb".as_slice());
+
+        // Resizes debounce to the last size.
+        screen.resize(50, 10);
+        screen.resize(60, 12);
+        assert_eq!((screen.frame().cols, screen.frame().rows), (60, 12));
+        wait_for("resize sent", || !lock(&engine.resizes).is_empty());
+        std::thread::sleep(Duration::from_millis(250));
+        assert_eq!(*lock(&engine.resizes), vec![(60, 12)]);
+
+        // Selection and copy.
+        screen.select_start(1, 0, false, TerminalSelection::Word);
+        assert_eq!(screen.selection_text().as_deref(), Some("hi"));
+        assert!(screen.frame().has_selection);
+        screen.clear_selection();
+        assert!(screen.all_text().starts_with("$ echo hi\nhi"));
+
+        let s = screen.clone();
+        block(async move { s.kill().await }).unwrap();
+        assert_eq!(*lock(&engine.closed), vec!["t1".to_string()]);
+        core.shutdown();
+    }
+
+    #[test]
+    fn unknown_terminals_end_instead_of_retrying() {
+        let engine = Arc::new(Engine::default());
+        let dir = tempfile::tempdir().unwrap();
+        let core = phone(engine, dir.path());
+        let frames = Arc::new(Frames::default());
+        let screen = core.terminal_screen(
+            PHONE.into(),
+            "gone".into(),
+            40,
+            4,
+            palette(),
+            frames.clone(),
+        );
+        wait_for("gone", || lock(&frames.exit).is_some());
+        let frame = screen.frame();
+        assert_eq!(frame.exit_code, Some(-1));
+        assert_eq!(frame.cursor_row, -1);
+        assert!(
+            frame
+                .lines
+                .iter()
+                .any(|l| row_text(l).contains("no longer running"))
+        );
+        core.shutdown();
     }
 
     #[test]

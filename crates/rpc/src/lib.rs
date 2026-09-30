@@ -22,13 +22,13 @@ mod client;
 pub mod device_room;
 mod server;
 
-pub use client::{RpcClient, RpcSubscription, connect_ws};
+pub use client::{RpcClient, RpcSubscription, connect_ws, connect_ws_with_token};
 pub use device_room::{
     DeviceFrameHeader, DeviceLink, HostRelay, HostRelayConfig, LinkCache, LinkCacheConfig,
     NudgeHandler, PeerLiveness, PeerLivenessProbe, StaticToken, TokenError, TokenSource,
     decode_device_frame, device_room_ws_url, encode_device_frame,
 };
-pub use server::{serve_connection, serve_ws_listener};
+pub use server::{ipc_token, serve_connection, serve_ws_listener, serve_ws_listener_with_token};
 
 /// RPC method names — single source of truth for both ends.
 /// Full surface: docs/research/feature-inventory.md §2.
@@ -138,6 +138,12 @@ pub mod methods {
     pub const LIST_ORGS: &str = "ListOrgs";
     pub const CREATE_ORG: &str = "CreateOrg";
     pub const SELECT_ORG: &str = "SelectOrg";
+    /// The bearer this engine presents to its edge, for a viewer on the same
+    /// device that shares the engine's account (the Android app): `{edgeUrl,
+    /// bearer, expiresAtMs?, userId, orgId}`. The engine stays the only
+    /// refresher — WorkOS refresh tokens rotate, so a second one would race it.
+    /// Served only on a token-gated `zeron headless` IPC port; never relayed.
+    pub const EDGE_BEARER: &str = "EdgeBearer";
     /// One-time local→synced profile import: what's importable (unary).
     pub const LOCAL_IMPORT_STATUS: &str = "LocalImportStatus";
     /// One-time local→synced profile import: run it (stream of progress items).
@@ -574,6 +580,41 @@ mod tests {
         let client = connect_ws(&format!("ws://127.0.0.1:{port}")).await.unwrap();
         let echoed = client.call("Echo", serde_json::json!("ok")).await.unwrap();
         assert_eq!(echoed, serde_json::json!("ok"));
+    }
+
+    #[tokio::test]
+    async fn ipc_token_gates_the_handshake() {
+        let listener = tokio::net::TcpListener::bind("127.0.0.1:0").await.unwrap();
+        let port = listener.local_addr().unwrap().port();
+        tokio::spawn(serve_ws_listener_with_token(
+            listener,
+            Arc::new(TestService),
+            Some("s3cret-token".into()),
+        ));
+        let url = format!("ws://127.0.0.1:{port}");
+
+        // No token, a wrong token, and a same-length wrong token all fail
+        // the handshake itself — no RPC is ever served.
+        for token in [None, Some("nope"), Some("s3cret-tokex")] {
+            assert!(
+                connect_ws_with_token(&url, token).await.is_err(),
+                "{token:?} must be rejected"
+            );
+        }
+
+        // The bearer header (what `connect_ws` sends) is accepted …
+        let client = connect_ws_with_token(&url, Some("s3cret-token"))
+            .await
+            .unwrap();
+        let echoed = client.call("Echo", serde_json::json!("in")).await.unwrap();
+        assert_eq!(echoed, serde_json::json!("in"));
+
+        // … and so is `?token=` for dialers that cannot set headers.
+        let client = connect_ws_with_token(&format!("{url}/?token=s3cret-token"), None)
+            .await
+            .unwrap();
+        let echoed = client.call("Echo", serde_json::json!("q")).await.unwrap();
+        assert_eq!(echoed, serde_json::json!("q"));
     }
 
     #[tokio::test]

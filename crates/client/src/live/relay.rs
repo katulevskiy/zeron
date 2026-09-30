@@ -61,10 +61,20 @@ fn map_rpc(device_id: &str, method: &str, err: RpcError) -> ClientError {
 
 pub(crate) struct Relay {
     links: Arc<LinkCache>,
+    /// The engine on this same device (`Credentials::Engine`): host RPCs
+    /// addressed to our own device id go straight to its IPC port instead of
+    /// a round trip through the edge's device room — the phone's terminal
+    /// keystrokes and file reads stay on the phone.
+    local: Option<LocalEngine>,
     watches: Mutex<HashMap<WatchKey, CancellationToken>>,
     /// Devices whose engine lacks WatchCheckoutChangeRequest (cleared on
     /// registry reconnect).
     unsupported: Mutex<HashSet<String>>,
+}
+
+struct LocalEngine {
+    device_id: String,
+    link: Arc<crate::engine::EngineLink>,
 }
 
 /// Deadline for a stream's acknowledgement (the host answers `{stream:true}`
@@ -108,11 +118,29 @@ impl Relay {
             let _runtime = crate::runtime::handle().enter();
             LinkCache::new(config)
         };
+        let local = match &inner.credentials {
+            crate::config::Credentials::Engine {
+                ipc_url, ipc_token, ..
+            } => Some(LocalEngine {
+                device_id: inner.config.device_id.clone(),
+                link: crate::engine::EngineLink::new(ipc_url.clone(), ipc_token.clone()),
+            }),
+            _ => None,
+        };
         Self {
             links,
+            local,
             watches: Mutex::new(HashMap::new()),
             unsupported: Mutex::new(HashSet::new()),
         }
+    }
+
+    /// The IPC link when `device_id` is the engine this viewer shares.
+    fn local_link(&self, device_id: &str) -> Option<&Arc<crate::engine::EngineLink>> {
+        self.local
+            .as_ref()
+            .filter(|local| local.device_id == device_id)
+            .map(|local| &local.link)
     }
 
     pub(crate) fn shutdown(&self) {
@@ -131,6 +159,14 @@ impl Relay {
     /// on a fresh dial.
     pub(crate) async fn call(&self, device_id: &str, method: &str, params: Value) -> Result<Value> {
         let timeout = deadline(method);
+        if let Some(link) = self.local_link(device_id) {
+            return match tokio::time::timeout(timeout, link.call_rpc(method, params)).await {
+                Ok(result) => result.map_err(|e| map_rpc(device_id, method, e)),
+                Err(_) => Err(ClientError::HostUnavailable(format!(
+                    "{method} on {device_id} timed out"
+                ))),
+            };
+        }
         for attempt in 0..2 {
             let client = self
                 .links
@@ -170,6 +206,14 @@ impl Relay {
     ) -> Result<zeron_rpc::RpcSubscription> {
         let timed_out =
             || ClientError::HostUnavailable(format!("{method} on {device_id} timed out"));
+        if let Some(link) = self.local_link(device_id) {
+            return match tokio::time::timeout(SUBSCRIBE_TIMEOUT, link.subscribe_rpc(method, params))
+                .await
+            {
+                Ok(result) => result.map_err(|e| map_rpc(device_id, method, e)),
+                Err(_) => Err(timed_out()),
+            };
+        }
         for attempt in 0..2 {
             let client = self
                 .links
