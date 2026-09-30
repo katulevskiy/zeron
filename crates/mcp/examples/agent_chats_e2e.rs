@@ -11,7 +11,9 @@
 //! 3. it spawns a SIDE chat on B the same way;
 //! 4. `list_chats { spawned_by }` and `read_chat` agree from BOTH engines;
 //! 5. follow-up `send_message … wait`, `interrupt_chat`, validation errors;
-//! 6. the top-level chat on B spawns further chats until the depth guard.
+//! 6. the top-level chat on B spawns further chats until the depth guard;
+//! 7. optionally (`ZERON_E2E_AGENT_MODEL`), a real harness in a chat on A
+//!    makes the create_chat call itself through the engine-injected server.
 //!
 //! Usage: agent_chats_e2e <zeron-bin> <a-ipc-port> <b-ipc-port> [evidence.json]
 //! Prints `PASS`/`FAIL` lines; exits nonzero on failure.
@@ -420,6 +422,59 @@ async fn main() {
     .await;
     evidence.insert("depth_guard_error".into(), json!(err));
     pass("spawned top-level chats spawn further chats across devices until depth 3");
+
+    // ── 9. Optional: a real agent does the spawning ───────────────────────────
+    // ZERON_E2E_AGENT_MODEL (e.g. opencode/big-pickle) runs a real harness in a
+    // chat on A; the engine injects its Zeron MCP server into that run, and the
+    // model itself must call create_chat to start a top-level chat on B.
+    if let Ok(model) = std::env::var("ZERON_E2E_AGENT_MODEL") {
+        let harness =
+            std::env::var("ZERON_E2E_AGENT_HARNESS").unwrap_or_else(|_| "opencode".into());
+        let prompt = format!(
+            "You are testing Zeron orchestration. Call the Zeron MCP tool create_chat \
+             (it may be exposed as zeron_create_chat) exactly once with these arguments: \
+             kind \"chat\", device \"{b_dev}\", harness \"mock\", \
+             title \"Spawned by a real agent\", prompt \"Say hello from device B\", \
+             wait true. Then reply with only the chatId it returned."
+        );
+        let real = a
+            .ok(
+                "create_chat",
+                json!({ "kind": "chat", "harness": harness, "model": model,
+                        "title": "Real agent on A", "prompt": prompt,
+                        "wait": true, "timeout_secs": 600 }),
+            )
+            .await;
+        let real_id = real["chatId"].as_str().unwrap().to_owned();
+        let args = json!({ "spawned_by": real_id.as_str() });
+        let spawned = poll(&mut b, "the real agent's chat on B", "list_chats", args, |r| {
+            let listed = r.ok()?;
+            listed["chats"]
+                .as_array()?
+                .iter()
+                .find(|c| c["kind"] == "chat" && c["deviceId"] == b_dev.as_str())
+                .cloned()
+        })
+        .await;
+        let spawned_id = spawned["id"].as_str().unwrap().to_owned();
+        let args = json!({ "chat": spawned_id.as_str() });
+        poll(&mut b, "the spawned chat's reply on B", "read_chat", args, |r| {
+            r.ok()?.to_string().contains(MOCK_TEXT).then_some(())
+        })
+        .await;
+        let agent_transcript = a
+            .ok("read_chat", json!({ "chat": real_id.as_str(), "include_tools": true }))
+            .await;
+        evidence.insert("real_agent_turn".into(), real["turn"].clone());
+        evidence.insert("real_agent_transcript".into(), agent_transcript);
+        evidence.insert("real_agent_spawned_chat_on_B".into(), spawned);
+        pass(&format!(
+            "a real {harness} agent ({model}) on A spawned a top-level chat on B that ran"
+        ));
+        for id in [&real_id, &spawned_id] {
+            a.call("archive_chat", json!({ "chat": id.as_str() })).await.ok();
+        }
+    }
 
     // Tidy: archive what we spawned (the side chats go with the listing).
     for id in [&worker_id, &side_id, &depth2, &depth3_id] {

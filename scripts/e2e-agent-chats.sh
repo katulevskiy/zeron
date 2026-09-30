@@ -9,7 +9,9 @@
 #   the spawn-depth guard are exercised across the two devices.
 #
 # Usage: scripts/e2e-agent-chats.sh [evidence.json]
-# Env:   ZERON_E2E_EDGE_PORT (default 27740), ZERON_E2E_KEEP_LOGS=1 to keep logs.
+# Env:   ZERON_E2E_EDGE_PORT (default 27740), ZERON_E2E_KEEP_LOGS=1 to keep logs,
+#        ZERON_E2E_AGENT_MODEL=opencode/<model> (+ ZERON_E2E_AGENT_HARNESS, default
+#        opencode) to also have a real agent on A make the create_chat call.
 # Ports/dirs differ from e2e-smoke.sh so both can run side by side.
 
 set -euo pipefail
