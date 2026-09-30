@@ -462,9 +462,17 @@ async fn main() {
             r.ok()?.to_string().contains(MOCK_TEXT).then_some(())
         })
         .await;
-        let agent_transcript = a
-            .ok("read_chat", json!({ "chat": real_id.as_str(), "include_tools": true }))
-            .await;
+        // The spawner's doc keeps the ids its create call made (the fold's
+        // `created_chat_ids`), so its transcript links to the chat exactly.
+        let args = json!({ "chat": real_id.as_str(), "include_tools": true });
+        let agent_transcript = poll(&mut a, "created ids in the transcript", "read_chat", args, |r| {
+            let read = r.ok()?;
+            read["messages"]
+                .to_string()
+                .contains(&format!("[created: {spawned_id}]"))
+                .then_some(read)
+        })
+        .await;
         evidence.insert("real_agent_turn".into(), real["turn"].clone());
         evidence.insert("real_agent_transcript".into(), agent_transcript);
         evidence.insert("real_agent_spawned_chat_on_B".into(), spawned);

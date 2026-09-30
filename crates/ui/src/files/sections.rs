@@ -1109,6 +1109,7 @@ mod tests {
             subagent_ref: doc.map(str::to_owned),
             subagent_status: status,
             subagent_tail: None,
+            created_chat_ids: Vec::new(),
         }
     }
 

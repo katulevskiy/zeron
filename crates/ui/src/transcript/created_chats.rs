@@ -9,174 +9,42 @@
 //! detection keys on the tool token plus a mention of the Zeron server,
 //! never on one spelling.
 //!
-//! The created chat ids come from the tool result JSON (`chatId`, or
-//! `results[].result.chatId` for the batch) when a result is on hand. The
-//! doc fold keeps tool OUTPUTS out of the doc (the text lives only in the
-//! host's run journal), so a synced transcript usually has none; then the
-//! chats' own provenance (`spawnedByChatId`) is matched back to the calls by
-//! time: [`attribute_spawned_chats`].
+//! The created chat ids come from the tool part itself: the doc fold keeps
+//! a create call's `created_chat_ids` (read from its result, whose text
+//! never enters the doc). A result still on the part (pre-strip docs, local
+//! journals) is parsed as well. Transcripts written before the fold kept ids
+//! fall back to the chats' own provenance (`spawnedByChatId`), matched back
+//! to the calls by time: [`attribute_spawned_chats`].
 
 use std::collections::{HashMap, HashSet};
 
 use zeron_doc::{MessagePart, SessionMessageEntry};
 use zeron_proto::ToolCall;
 
-/// Which chat-creation tool a call is.
-#[derive(Debug, Clone, Copy, PartialEq, Eq)]
-pub(crate) enum CreateChatOp {
-    /// `create_chat`: one chat.
-    Single,
-    /// `create_chats`: a batch, any number of chats.
-    Batch,
-}
+pub(crate) use zeron_proto::created_chats::{
+    CreateChatOp, CreatedChat, create_chat_op, parse_created_chats,
+};
 
-/// `Some` when `call` is the Zeron MCP server's `create_chat`/`create_chats`
-/// under any harness's naming scheme.
-pub(crate) fn create_chat_op(call: &ToolCall) -> Option<CreateChatOp> {
-    let (server, name) = match call {
-        ToolCall::Mcp { server, tool, .. } => (Some(server.as_str()), tool.as_str()),
-        ToolCall::Unknown { name, .. } => (None, name.as_str()),
-        _ => return None,
-    };
-    let name = name.trim().to_ascii_lowercase().replace('-', "_");
-    let (op, bare) = find_op(&name)?;
-    let zeron = name.contains("zeron")
-        || server.is_some_and(|server| server.to_ascii_lowercase().contains("zeron"));
-    // A bare `create_chat` with no server at all (an ACP title that dropped
-    // it) is still ours; another MCP server's `create_chat` is not.
-    (zeron || (bare && server.is_none())).then_some(op)
-}
-
-/// The op token inside a normalized tool name, and whether the name is
-/// nothing but the token. The token must stand alone: `create_chat` inside
-/// `create_chats` or `create_chat_room` does not count.
-fn find_op(name: &str) -> Option<(CreateChatOp, bool)> {
-    for (token, op) in [
-        ("create_chats", CreateChatOp::Batch),
-        ("create_chat", CreateChatOp::Single),
-    ] {
-        let mut from = 0;
-        while let Some(pos) = name[from..].find(token) {
-            let start = from + pos;
-            let end = start + token.len();
-            let before = name[..start]
-                .chars()
-                .next_back()
-                .is_none_or(|c| !c.is_ascii_alphanumeric());
-            let after = name[end..]
-                .chars()
-                .next()
-                .is_none_or(|c| !(c.is_ascii_alphanumeric() || c == '_'));
-            if before && after {
-                return Some((op, name == token));
-            }
-            from = start + 1;
-        }
+/// The chats a create call's part names: the fold's `created_chat_ids`,
+/// else whatever an inline result says (richer: kind, host, title).
+pub(crate) fn named_chats(created_chat_ids: &[String], output: Option<&str>) -> Vec<CreatedChat> {
+    let parsed = output.map(parse_created_chats).unwrap_or_default();
+    if created_chat_ids.is_empty() {
+        return parsed;
     }
-    None
-}
-
-/// One chat a create call reported in its result.
-#[derive(Debug, Clone, PartialEq, Eq, Default)]
-pub(crate) struct CreatedChat {
-    pub chat_id: String,
-    /// `kind: "side"` (or a parent id) → `Some(true)`; `kind: "chat"` →
-    /// `Some(false)`; unknown when the result predates `kind`.
-    pub side: Option<bool>,
-    pub device_id: Option<String>,
-    pub device_name: Option<String>,
-    pub title: Option<String>,
-}
-
-/// The chats a `create_chat`/`create_chats` result names, in result order.
-/// Accepts the bare result object, the batch's `{results: [{isError,
-/// result}]}`, an MCP `CallToolResult` wrapper (`structuredContent`, or
-/// `content[].text` holding the JSON), and fenced or double-encoded text.
-/// Failed batch entries are skipped; anything unparseable yields nothing.
-pub(crate) fn parse_created_chats(output: &str) -> Vec<CreatedChat> {
-    let text: String = output
-        .lines()
-        .filter(|line| !line.trim_start().starts_with("```"))
-        .collect::<Vec<_>>()
-        .join("\n");
-    let mut out = Vec::new();
-    if let Ok(value) = serde_json::from_str::<serde_json::Value>(text.trim()) {
-        collect(&value, &mut out, 0);
-    }
-    let mut seen = HashSet::new();
-    out.retain(|chat: &CreatedChat| seen.insert(chat.chat_id.clone()));
-    out
-}
-
-fn collect(value: &serde_json::Value, out: &mut Vec<CreatedChat>, depth: usize) {
-    use serde_json::Value;
-    if depth > 6 {
-        return;
-    }
-    match value {
-        Value::Object(map) => {
-            if map.get("isError").and_then(Value::as_bool) == Some(true) {
-                return;
-            }
-            if let Some(chat_id) = map
-                .get("chatId")
-                .and_then(Value::as_str)
-                .map(str::trim)
-                .filter(|id| !id.is_empty())
-            {
-                let text = |key: &str| {
-                    map.get(key)
-                        .and_then(Value::as_str)
-                        .map(str::trim)
-                        .filter(|s| !s.is_empty())
-                        .map(str::to_owned)
-                };
-                let side = match map.get("kind").and_then(Value::as_str) {
-                    Some("side") => Some(true),
-                    Some("chat") => Some(false),
-                    _ => map
-                        .get("parentChatId")
-                        .map(|parent| !parent.is_null())
-                        .filter(|side| *side),
-                };
-                out.push(CreatedChat {
-                    chat_id: chat_id.to_owned(),
-                    side,
-                    device_id: text("deviceId"),
-                    device_name: text("deviceName"),
-                    title: text("title"),
-                });
-                return;
-            }
-            for key in ["structuredContent", "results", "result"] {
-                if let Some(inner) = map.get(key) {
-                    let before = out.len();
-                    collect(inner, out, depth + 1);
-                    if out.len() > before {
-                        return;
-                    }
-                }
-            }
-            if let Some(Value::Array(content)) = map.get("content") {
-                for part in content {
-                    if let Some(text) = part.get("text").and_then(Value::as_str) {
-                        collect(&Value::String(text.to_owned()), out, depth + 1);
-                    }
-                }
-            }
-        }
-        Value::Array(items) => {
-            for item in items {
-                collect(item, out, depth + 1);
-            }
-        }
-        Value::String(text) => {
-            if let Ok(inner) = serde_json::from_str::<Value>(text.trim()) {
-                collect(&inner, out, depth + 1);
-            }
-        }
-        _ => {}
-    }
+    created_chat_ids
+        .iter()
+        .map(|id| {
+            parsed
+                .iter()
+                .find(|chat| &chat.chat_id == id)
+                .cloned()
+                .unwrap_or_else(|| CreatedChat {
+                    chat_id: id.clone(),
+                    ..Default::default()
+                })
+        })
+        .collect()
 }
 
 /// A settled, successful create call in a transcript.
@@ -205,6 +73,7 @@ pub(crate) fn create_call_sites(
                 is_error,
                 resolved,
                 output,
+                created_chat_ids,
                 ..
             } = part
             else {
@@ -216,7 +85,7 @@ pub(crate) fn create_call_sites(
             if !*resolved || *is_error {
                 continue;
             }
-            let named = output.as_deref().map(parse_created_chats).unwrap_or_default();
+            let named = named_chats(created_chat_ids, output.as_deref());
             if named.is_empty() {
                 sites.push(CreateCallSite {
                     part_id: id.clone(),
@@ -324,113 +193,6 @@ mod tests {
         }
     }
 
-    fn unknown(name: &str) -> ToolCall {
-        ToolCall::Unknown {
-            name: name.into(),
-            input: None,
-        }
-    }
-
-    #[test]
-    fn create_chat_calls_are_recognized_under_every_naming_scheme() {
-        use CreateChatOp::{Batch, Single};
-        // Claude (`mcp__zeron__create_chat`), Pi (`zeron_create_chat`),
-        // Codex and Cursor all decode to `Mcp { server, tool }`.
-        assert_eq!(create_chat_op(&mcp("zeron", "create_chat")), Some(Single));
-        assert_eq!(create_chat_op(&mcp("zeron", "create_chats")), Some(Batch));
-        assert_eq!(create_chat_op(&mcp("Zeron", "create_chat")), Some(Single));
-        // OpenCode and ACP titles stay `Unknown`.
-        for name in [
-            "zeron_create_chat",
-            "mcp__zeron__create_chat",
-            "zeron/create_chat",
-            "zeron.create_chat",
-            "create_chat (zeron MCP Server)",
-            "Zeron: create-chat",
-            "create_chat",
-        ] {
-            assert_eq!(create_chat_op(&unknown(name)), Some(Single), "{name}");
-        }
-        for name in ["zeron_create_chats", "mcp__zeron__create_chats", "create_chats"] {
-            assert_eq!(create_chat_op(&unknown(name)), Some(Batch), "{name}");
-        }
-        // Not ours: other servers, other zeron tools, lookalike tokens, and
-        // ordinary tool kinds.
-        assert_eq!(create_chat_op(&mcp("github", "create_chat")), None);
-        assert_eq!(create_chat_op(&mcp("zeron", "list_chats")), None);
-        assert_eq!(create_chat_op(&mcp("zeron", "create_chat_room")), None);
-        assert_eq!(create_chat_op(&unknown("slack_create_chat")), None);
-        assert_eq!(create_chat_op(&unknown("zeron_recreate_chat")), None);
-        assert_eq!(create_chat_op(&unknown("Agent: create_chat")), None);
-        assert_eq!(
-            create_chat_op(&ToolCall::Exec {
-                command: "zeron create_chat".into()
-            }),
-            None
-        );
-    }
-
-    #[test]
-    fn single_results_name_their_chat() {
-        let output = serde_json::to_string_pretty(&serde_json::json!({
-            "chatId": "c-1",
-            "kind": "chat",
-            "deviceId": "gpu",
-            "deviceName": "GPU box",
-            "title": "Train the tokenizer",
-            "parentChatId": null,
-            "spawnedByChatId": "coordinator",
-        }))
-        .unwrap();
-        assert_eq!(
-            parse_created_chats(&output),
-            [CreatedChat {
-                chat_id: "c-1".into(),
-                side: Some(false),
-                device_id: Some("gpu".into()),
-                device_name: Some("GPU box".into()),
-                title: Some("Train the tokenizer".into()),
-            }]
-        );
-        // A side chat without `kind` (older server) reads its parent.
-        let side = parse_created_chats(r#"{"chatId":"s-1","parentChatId":"coordinator"}"#);
-        assert_eq!(side[0].side, Some(true));
-        // Fenced text and a CallToolResult wrapper resolve the same way.
-        let fenced = format!("```json\n{output}\n```");
-        assert_eq!(parse_created_chats(&fenced)[0].chat_id, "c-1");
-        let wrapped = serde_json::json!({
-            "content": [{ "type": "text", "text": output }],
-        })
-        .to_string();
-        assert_eq!(parse_created_chats(&wrapped)[0].chat_id, "c-1");
-    }
-
-    #[test]
-    fn batch_results_name_every_created_chat_and_skip_failures() {
-        let output = serde_json::json!({
-            "results": [
-                { "index": 0, "isError": false, "result": { "chatId": "a", "kind": "chat", "deviceName": "GPU box" } },
-                { "index": 1, "isError": true, "result": "device offline" },
-                { "index": 2, "isError": false, "result": { "chatId": "b", "kind": "side" } },
-            ]
-        })
-        .to_string();
-        let chats = parse_created_chats(&output);
-        assert_eq!(
-            chats.iter().map(|c| c.chat_id.as_str()).collect::<Vec<_>>(),
-            ["a", "b"]
-        );
-        assert_eq!(chats[0].side, Some(false));
-        assert_eq!(chats[1].side, Some(true));
-        // structuredContent carries the same batch.
-        let structured = serde_json::json!({ "structuredContent": serde_json::from_str::<serde_json::Value>(&output).unwrap() }).to_string();
-        assert_eq!(parse_created_chats(&structured).len(), 2);
-        // Error text and truncated summaries name nothing.
-        assert!(parse_created_chats("device gpu is offline").is_empty());
-        assert!(parse_created_chats("{…").is_empty());
-        assert!(parse_created_chats(r#"{"isError":true,"chatId":"x"}"#).is_empty());
-    }
-
     fn site(part: &str, entry: &str, at: i64, op: CreateChatOp) -> CreateCallSite {
         CreateCallSite {
             part_id: part.into(),
@@ -525,6 +287,7 @@ mod tests {
                 subagent_ref: None,
                 subagent_status: None,
                 subagent_tail: None,
+                created_chat_ids: Vec::new(),
             }
         };
         let entry = SessionMessageEntry {
@@ -546,5 +309,23 @@ mod tests {
         let (sites, claimed) = create_call_sites(std::slice::from_ref(&entry));
         assert_eq!(sites, [site("bare", "e", 42, CreateChatOp::Batch)]);
         assert_eq!(claimed, HashSet::from(["known".to_owned()]));
+
+        // The doc fold's ids name the call's chats exactly: no timing guess.
+        let mut kept = tool("kept", "create_chats", true, false, None);
+        if let MessagePart::Tool {
+            created_chat_ids, ..
+        } = &mut kept
+        {
+            *created_chat_ids = vec!["w1".into(), "w2".into()];
+        }
+        let entry = SessionMessageEntry {
+            parts: vec![kept],
+            ..entry
+        };
+        let (sites, claimed) = create_call_sites(std::slice::from_ref(&entry));
+        assert!(sites.is_empty());
+        assert_eq!(claimed, HashSet::from(["w1".to_owned(), "w2".to_owned()]));
+        let named = named_chats(&["w1".into()], Some(r#"{"chatId":"w1","kind":"side"}"#));
+        assert_eq!(named[0].side, Some(true), "inline detail enriches kept ids");
     }
 }

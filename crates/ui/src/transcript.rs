@@ -1430,6 +1430,7 @@ pub fn rows_for_entry(
                 subagent_ref,
                 subagent_status,
                 subagent_tail,
+                created_chat_ids,
                 ..
             } => {
                 let item = ToolItem {
@@ -1447,8 +1448,7 @@ pub fn rows_for_entry(
                     subagent_status: *subagent_status,
                     subagent_tail: subagent_tail.clone().map(SharedString::from),
                     created_chats: created_chats::create_chat_op(call)
-                        .and(output.as_deref())
-                        .map(created_chats::parse_created_chats)
+                        .map(|_| created_chats::named_chats(created_chat_ids, output.as_deref()))
                         .filter(|chats| !chats.is_empty())
                         .map(Arc::new),
                     kind: ToolItemKind::Call,
@@ -11751,6 +11751,7 @@ mod tests {
             subagent_ref: None,
             subagent_status: None,
             subagent_tail: None,
+            created_chat_ids: Vec::new(),
         }
     }
 
@@ -11873,6 +11874,7 @@ mod tests {
             subagent_ref: Some(format!("chat--sub--{id}")),
             subagent_status: Some(SubagentStatus::Running),
             subagent_tail: None,
+            created_chat_ids: Vec::new(),
         }
     }
 
@@ -11896,6 +11898,7 @@ mod tests {
             subagent_ref: None,
             subagent_status: None,
             subagent_tail: None,
+            created_chat_ids: Vec::new(),
         };
         let batch = r#"{"results":[{"index":0,"isError":false,"result":{"chatId":"w1","kind":"chat"}},{"index":1,"isError":false,"result":{"chatId":"s1","kind":"side"}}]}"#;
         let entry = assistant(
