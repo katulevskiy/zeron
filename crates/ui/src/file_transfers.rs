@@ -158,6 +158,15 @@ pub fn headline(transfer: &FileTransfer) -> String {
     }
 }
 
+/// The toast's detail line: like [`status_line`], minus what its headline
+/// already says.
+pub fn toast_detail(transfer: &FileTransfer) -> String {
+    match (transfer.direction, transfer.state) {
+        (Direction::Incoming, State::AwaitingAcceptance) => size_summary(transfer),
+        _ => status_line(transfer),
+    }
+}
+
 /// The row's detail line: progress while live, the outcome once finished.
 pub fn status_line(transfer: &FileTransfer) -> String {
     let peer = &transfer.peer_device_name;
@@ -218,7 +227,7 @@ pub fn peer_line(transfer: &FileTransfer) -> String {
         Direction::Incoming => format!("From {peer}"),
         Direction::Outgoing => format!("To {peer}"),
     };
-    match (transfer.transport, transfer.is_live()) {
+    match (transfer.transport, shows_progress(transfer)) {
         (Some(Transport::P2p), true) => format!("{base} · direct"),
         (Some(Transport::Relay), true) => format!("{base} · relay"),
         _ => base,
@@ -596,6 +605,9 @@ mod tests {
         let mut t = transfer("a", Direction::Incoming, State::AwaitingAcceptance);
         assert_eq!(headline(&t), "Pixel 8 wants to send app-release.apk");
         assert_eq!(status_line(&t), "48.3 MB · waiting for you");
+        assert_eq!(toast_detail(&t), "48.3 MB");
+        // Nothing moves yet, so no transport is named.
+        assert_eq!(peer_line(&t), "From Pixel 8");
         t.state = State::Transferring;
         t.done_bytes = 12_000_000;
         t.bytes_per_sec = 6_000_000;

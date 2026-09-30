@@ -18,7 +18,7 @@ use zeron_proto::{FileTransfer, FileTransferDirection, FileTransferState};
 const PANEL_WIDTH: f32 = 380.0;
 const PANEL_LIST_MAX_HEIGHT: f32 = 420.0;
 const SEND_MENU_WIDTH: f32 = 264.0;
-const TOAST_WIDTH: f32 = 340.0;
+const TOAST_WIDTH: f32 = 400.0;
 const PILL_HEIGHT: f32 = 24.0;
 const TOAST_SCOPE: &str = "transfer-toast";
 
@@ -172,7 +172,7 @@ impl Shell {
         let (ready, local) = {
             let state = self.state.read(cx);
             (
-                matches!(state.connection, ConnectionStatus::Ready) && state.engine().is_some(),
+                matches!(state.connection, ConnectionStatus::Ready),
                 state.file_transfers.clone(),
             )
         };
@@ -545,6 +545,7 @@ impl Shell {
     ) -> AnyElement {
         let transfer = &row.transfer;
         let failed = transfer.state == FileTransferState::Failed;
+        let status = ft::status_line(transfer);
         let actions = self.render_transfer_actions(row, "transfer-row", theme, cx);
         let host_note = row.host.as_ref().map(|host| {
             let name = self
@@ -620,10 +621,15 @@ impl Shell {
                                 theme.text_faint
                             })
                             .truncate()
-                            .child(ft::status_line(transfer)),
+                            .child(status.clone()),
                     ),
             )
             .child(actions)
+            // A failure's full message rarely fits one line.
+            .when(failed, |el| {
+                let text: SharedString = status.into();
+                el.tooltip(move |_, cx| cx.new(|_| SurfaceTabTooltip { text: text.clone() }).into())
+            })
             .into_any_element()
     }
 
@@ -822,7 +828,7 @@ impl Shell {
                                         theme.text_muted
                                     })
                                     .truncate()
-                                    .child(ft::status_line(transfer)),
+                                    .child(ft::toast_detail(transfer)),
                             ),
                     )
                     .child(actions)
@@ -1064,6 +1070,45 @@ impl Shell {
             card,
             closing,
         ))
+    }
+}
+
+/// Review-fixture hooks (`examples/file-transfer-fixture.rs`).
+#[doc(hidden)]
+impl Shell {
+    pub fn fixture_file_transfers_panel(&mut self, cx: &mut Context<Self>) {
+        self.open_file_transfers_panel(cx);
+    }
+
+    pub fn fixture_file_transfer_toast(&mut self, id: &str, cx: &mut Context<Self>) {
+        self.file_transfers.toast = Some(id.to_string());
+        cx.notify();
+    }
+
+    pub fn fixture_send_menu(
+        &mut self,
+        chat_id: &str,
+        path: &str,
+        position: Point<Pixels>,
+        cx: &mut Context<Self>,
+    ) {
+        self.open_send_menu_for_path(chat_id, path, position, cx);
+    }
+
+    pub fn fixture_devices_settings(
+        &mut self,
+        settings: zeron_proto::FileTransferSettings,
+        cx: &mut Context<Self>,
+    ) {
+        self.open_settings(SettingsSection::Devices, cx);
+        if self.devices_page.is_none() {
+            let state = self.state.clone();
+            self.devices_page = Some(cx.new(|cx| DevicesPage::new(state, cx)));
+        }
+        if let Some(page) = &self.devices_page {
+            page.update(cx, |page, cx| page.set_transfer_settings(settings, cx));
+        }
+        cx.notify();
     }
 }
 

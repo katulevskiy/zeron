@@ -115,11 +115,19 @@ impl DevicesPage {
     fn transfers_available(&self, cx: &gpui::App) -> bool {
         let state = self.state.read(cx);
         state.workspace_scope != Some(WorkspaceScope::Local)
-            && state.engine().is_some_and(|engine| {
-                engine
-                    .engine_info()
-                    .supports(zeron_proto::capabilities::FILE_TRANSFER_V1)
+            && state.local_device_id.as_deref().is_some_and(|id| {
+                state.device_supports(id, zeron_proto::capabilities::FILE_TRANSFER_V1)
             })
+    }
+
+    #[doc(hidden)]
+    pub fn set_transfer_settings(
+        &mut self,
+        settings: zeron_proto::FileTransferSettings,
+        cx: &mut Context<Self>,
+    ) {
+        self.transfer_settings = Some(settings);
+        cx.notify();
     }
 
     fn load_transfer_settings(&mut self, cx: &mut Context<Self>) {
