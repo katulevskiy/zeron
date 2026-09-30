@@ -4,8 +4,124 @@ on:
     inputs:
       target: {description: "ref/sha of zeron source to test", type: string, default: main}
       save_cache: {description: "save rust caches (seed run)", type: boolean, default: false}
+
+permissions:
+  contents: read
+
+env:
+  CARGO_INCREMENTAL: 0
+  CARGO_PROFILE_DEV_DEBUG: 0
+  CARGO_TERM_COLOR: always
+  CARGO_NET_RETRY: 5
+  RUST_BACKTRACE: 1
+  RUSTFLAGS: "-C link-arg=-fuse-ld=mold"
+  GPUI_DEPS: >-
+    libxkbcommon-dev libxkbcommon-x11-dev libwayland-dev
+    libx11-dev libxcb1-dev libx11-xcb-dev libfontconfig1-dev libfreetype-dev
+    libasound2-dev libvulkan-dev pkg-config cmake libwebkit2gtk-4.1-dev libjson-glib-dev
+
 jobs:
-  stub:
+  # ---------------------------------------------------------------- build core
+  build-core:
     runs-on: ubuntu-24.04
+    timeout-minutes: 30
     steps:
-      - run: echo "stub on $GITHUB_REF"
+      - uses: actions/checkout@v4
+        with: {ref: "${{ inputs.target }}"}
+      - name: Rust toolchain
+        run: rustup show active-toolchain || rustup toolchain install
+      - uses: rui314/setup-mold@v1
+      - uses: taiki-e/install-action@nextest
+      - uses: Swatinem/rust-cache@v2
+        with:
+          prefix-key: lab-linux-v1
+          shared-key: core
+          save-if: ${{ inputs.save_cache }}
+      - name: Build nextest archive (harness, engine, sync, update, doc, preview)
+        run: |
+          tests=""
+          for f in crates/harness/tests/*.rs; do tests="$tests --test $(basename "$f" .rs)"; done
+          cargo nextest archive --locked --archive-file core.tar.zst \
+            -p zeron-harness -p zeron-engine -p zeron-sync -p zeron-update -p zeron-doc -p zeron-preview \
+            --features zeron-harness/native-fixture \
+            --lib --bins $tests \
+            --test session_publication --test restart_resume --test codex_subagents \
+            --test local_profiles --test message_queue --test pi_resume \
+            --test attachments_roundtrip --test coordinator --test discovery --test leak
+      - uses: actions/upload-artifact@v4
+        with:
+          name: core-archive
+          path: core.tar.zst
+          compression-level: 0
+          retention-days: 1
+
+  test-core:
+    needs: build-core
+    runs-on: ubuntu-24.04
+    timeout-minutes: 20
+    strategy:
+      fail-fast: false
+      matrix:
+        shard: [1, 2, 3]
+    steps:
+      - uses: actions/checkout@v4
+        with: {ref: "${{ inputs.target }}"}
+      - name: Rust toolchain
+        run: rustup show active-toolchain || rustup toolchain install
+      - uses: actions/setup-node@v4
+        with: {node-version: '22'}
+      - uses: taiki-e/install-action@nextest
+      - uses: actions/download-artifact@v4
+        with: {name: core-archive}
+      - name: Run tests (shard ${{ matrix.shard }}/3)
+        run: |
+          cargo nextest run --archive-file core.tar.zst --workspace-remap . \
+            --no-fail-fast --partition hash:${{ matrix.shard }}/3
+
+  # ------------------------------------------------------------------ build ui
+  build-ui:
+    runs-on: ubuntu-24.04
+    timeout-minutes: 30
+    steps:
+      - uses: actions/checkout@v4
+        with: {ref: "${{ inputs.target }}"}
+      - name: GPUI system dependencies
+        run: |
+          sudo apt-get update -qq -o Dir::Etc::sourcelist="sources.list.d/ubuntu.sources" -o Dir::Etc::sourceparts="-"
+          sudo apt-get install -y -qq $GPUI_DEPS
+      - name: Rust toolchain
+        run: rustup show active-toolchain || rustup toolchain install
+      - uses: rui314/setup-mold@v1
+      - uses: taiki-e/install-action@nextest
+      - uses: Swatinem/rust-cache@v2
+        with:
+          prefix-key: lab-linux-v1
+          shared-key: ui
+          save-if: ${{ inputs.save_cache }}
+      - name: Build ui test archive
+        run: cargo nextest archive --locked --archive-file ui.tar.zst -p zeron-ui --lib
+      - uses: actions/upload-artifact@v4
+        with:
+          name: ui-archive
+          path: ui.tar.zst
+          compression-level: 0
+          retention-days: 1
+
+  test-ui:
+    needs: build-ui
+    runs-on: ubuntu-24.04
+    timeout-minutes: 20
+    steps:
+      - uses: actions/checkout@v4
+        with: {ref: "${{ inputs.target }}"}
+      - name: GPUI system dependencies
+        run: |
+          sudo apt-get update -qq -o Dir::Etc::sourcelist="sources.list.d/ubuntu.sources" -o Dir::Etc::sourceparts="-"
+          sudo apt-get install -y -qq $GPUI_DEPS
+      - name: Rust toolchain
+        run: rustup show active-toolchain || rustup toolchain install
+      - uses: taiki-e/install-action@nextest
+      - uses: actions/download-artifact@v4
+        with: {name: ui-archive}
+      - name: UI and headless layout regressions
+        run: cargo nextest run --archive-file ui.tar.zst --workspace-remap . --no-fail-fast
