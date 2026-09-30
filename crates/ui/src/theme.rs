@@ -1092,14 +1092,6 @@ impl Theme {
         ))
     }
 
-    /// Fully opaque variant of [`Self::input_glass_bg`] for input panels that
-    /// sit over transcript content and are not backed by a blur (the question
-    /// panel). The glass tint lets the text underneath bleed through, so this
-    /// resolves the input tone onto the page in every material.
-    pub fn input_solid_bg(&self) -> Hsla {
-        flatten(self.input_bg, self.bg)
-    }
-
     /// Section-card fill (settings cards and similar in-panel cards). The
     /// opaque `surface` tone read as a harsh solid slab floating on the
     /// frosted blur (user report), so glass thins it to a translucent tint;
@@ -2979,23 +2971,6 @@ mod tests {
                 "{} input text on app canvas",
                 variant.id
             );
-        }
-    }
-
-    #[test]
-    fn input_solid_bg_is_opaque_on_every_material() {
-        let registry = ThemeRegistry::builtin();
-        for variant in registry.families.iter().flat_map(|family| &family.variants) {
-            for preference in [SurfacePreference::Frosted, SurfacePreference::Opaque] {
-                let theme =
-                    Theme::from_variant(variant, AccentSelection::ThemeDefault, preference);
-                assert_eq!(theme.input_solid_bg().a, 1.0, "{}", variant.id);
-                assert!(
-                    painted_contrast(theme.text, theme.input_solid_bg()) >= 4.5,
-                    "{} input text on solid input fill",
-                    variant.id
-                );
-            }
         }
     }
 
