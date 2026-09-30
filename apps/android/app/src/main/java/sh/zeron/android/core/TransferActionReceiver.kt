@@ -10,6 +10,7 @@ class TransferActionReceiver : BroadcastReceiver() {
     override fun onReceive(context: Context, intent: Intent) {
         val id = intent.getStringExtra(EXTRA_ID) ?: return
         val model = (context.applicationContext as ZeronApplication).model
+        model.ensureBooted()
         model.notifier.cancelTransfer(id)
         val pending = goAsync()
         model.transfers.respond(id, accept = intent.action == ACCEPT) { pending.finish() }

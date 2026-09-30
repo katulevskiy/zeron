@@ -45,6 +45,9 @@ class MainActivity : ComponentActivity() {
                 wallpaperEffect = extras?.getString("wallpaper-effect"),
             ),
         )
+        // boot() runs once per process: a process kept alive by the engine
+        // (or the share sheet) still has to honour a notification's route.
+        if (savedInstanceState == null) extras?.getString("route")?.let { model.pendingRoute.value = it }
         handleCallback(intent)
         ProcessLifecycleOwner.get().lifecycle.addObserver(object : DefaultLifecycleObserver {
             override fun onStart(owner: LifecycleOwner) = model.onForeground()

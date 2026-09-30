@@ -19,6 +19,7 @@ import kotlinx.coroutines.flow.asStateFlow
 import kotlinx.coroutines.flow.collectLatest
 import kotlinx.coroutines.flow.combine
 import kotlinx.coroutines.flow.distinctUntilChanged
+import kotlinx.coroutines.flow.first
 import kotlinx.coroutines.launch
 import kotlinx.coroutines.withContext
 import kotlinx.coroutines.withTimeoutOrNull
@@ -113,7 +114,10 @@ class TransferCenter(private val app: Application, private val model: AppModel) 
     fun engineId(): String? = model.engineDeviceId.value
 
     private suspend fun call(method: String, params: JSONObject = JSONObject()): Any {
-        val id = engineId() ?: throw IllegalStateException("The on-device engine hasn't started yet.")
+        // A notification action can arrive while the app (re)connects to its engine.
+        val id = engineId()
+            ?: withTimeoutOrNull(8_000L) { model.engineDeviceId.first { it != null } }
+            ?: throw IllegalStateException("The on-device engine hasn't started yet.")
         return model.hostCall(id, method, params)
     }
 
