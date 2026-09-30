@@ -100,7 +100,7 @@ impl CoreClient {
     /// Attach a view to engine terminal `terminal_id` on `device_id` (opened
     /// with `OpenTerminal`): replays its scrollback, then follows live output,
     /// re-subscribing from the last seen `seq` if the stream drops. Releasing
-    /// the screen detaches (the shell keeps running); `close()` ends it.
+    /// the screen detaches (the shell keeps running); `kill()` ends it.
     pub fn terminal_screen(
         &self,
         device_id: String,
@@ -779,8 +779,9 @@ impl TerminalScreen {
         text.trim_end().to_owned()
     }
 
-    /// End the shell (`CloseTerminal`) and stop following it.
-    pub async fn close(&self) -> CoreResult<()> {
+    /// End the shell (`CloseTerminal`) and stop following it. (Releasing the
+    /// object only detaches; the shell keeps running.)
+    pub async fn kill(&self) -> CoreResult<()> {
         self.inner.closed.store(true, Ordering::Release);
         if let Some(watch) = lock(&self.inner.watch).take() {
             watch.cancel();

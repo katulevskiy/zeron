@@ -153,7 +153,10 @@ pub fn paste_bytes(text: &str, bracketed: bool) -> Vec<u8> {
         out.extend_from_slice(b"\x1b[201~");
         out
     } else {
-        sanitized.replace("\r\n", "\r").replace('\n', "\r").into_bytes()
+        sanitized
+            .replace("\r\n", "\r")
+            .replace('\n', "\r")
+            .into_bytes()
     }
 }
 
