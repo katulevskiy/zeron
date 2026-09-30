@@ -1,0 +1,11 @@
+name: lab-full
+on:
+  workflow_dispatch:
+    inputs:
+      target: {description: "ref/sha of zeron source to test", type: string, default: main}
+      save_cache: {description: "save rust caches (seed run)", type: boolean, default: false}
+jobs:
+  stub:
+    runs-on: ubuntu-24.04
+    steps:
+      - run: echo "stub on $GITHUB_REF"
