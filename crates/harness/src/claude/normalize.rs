@@ -225,8 +225,18 @@ impl Normalizer {
     /// does not replay task_started when --resume starts a new process.
     /// Session ids are global; search project directories rather than
     /// duplicating the CLI's cwd encoding (including long-path hashing).
+    /// Long sessions' histories run to hundreds of MB: the scan runs off the
+    /// runtime and only parses lines that can name a spawn or its agent.
     pub async fn for_resume(config_root: &std::path::Path, session_id: &str) -> Self {
-        use tokio::io::{AsyncBufReadExt as _, BufReader};
+        let config_root = config_root.to_owned();
+        let session_id = session_id.to_owned();
+        tokio::task::spawn_blocking(move || Self::restore_spawns(&config_root, &session_id))
+            .await
+            .unwrap_or_else(|_| Self::new())
+    }
+
+    fn restore_spawns(config_root: &std::path::Path, session_id: &str) -> Self {
+        use std::io::BufRead as _;
         let mut norm = Self::new();
         if session_id.is_empty()
             || !session_id
@@ -235,66 +245,81 @@ impl Normalizer {
         {
             return norm;
         }
-        let Ok(mut projects) = tokio::fs::read_dir(config_root.join("projects")).await else {
+        let Ok(projects) = std::fs::read_dir(config_root.join("projects")) else {
             return norm;
         };
-        while let Ok(Some(project)) = projects.next_entry().await {
-            let path = project.path().join(format!("{session_id}.jsonl"));
-            let Ok(file) = tokio::fs::File::open(path).await else {
+        let Some(file) = projects.flatten().find_map(|project| {
+            std::fs::File::open(project.path().join(format!("{session_id}.jsonl"))).ok()
+        }) else {
+            return norm;
+        };
+        let mut reader = std::io::BufReader::with_capacity(1 << 16, file);
+        let mut line = Vec::new();
+        loop {
+            line.clear();
+            match reader.read_until(b'\n', &mut line) {
+                Ok(0) | Err(_) => break,
+                Ok(_) => {}
+            }
+            // Torn lines and older/newer unknown shapes are harmless.
+            let Ok(text) = std::str::from_utf8(&line) else {
                 continue;
             };
-            let mut lines = BufReader::new(file).lines();
-            while let Ok(Some(line)) = lines.next_line().await {
-                // Torn lines and older/newer unknown shapes are harmless.
-                let Ok(record) = serde_json::from_str::<Value>(&line) else {
-                    continue;
-                };
-                if !record.get("parent_tool_use_id").is_none_or(Value::is_null) {
-                    continue;
-                }
-                let Some(blocks) = record.pointer("/message/content").and_then(Value::as_array)
-                else {
-                    continue;
-                };
-                match record.get("type").and_then(Value::as_str) {
-                    Some("assistant") => {
-                        for block in blocks {
-                            if block.get("type").and_then(Value::as_str) == Some("tool_use")
-                                && matches!(
-                                    block.get("name").and_then(Value::as_str),
-                                    Some("Agent" | "Task")
-                                )
-                                && let Some(id) = block
-                                    .get("id")
-                                    .and_then(Value::as_str)
-                                    .filter(|id| !id.is_empty())
-                            {
-                                norm.agent_spawn_tools.insert(id.to_owned());
-                            }
-                        }
-                    }
-                    Some("user") => {
-                        if let Some(agent) = record
-                            .pointer("/toolUseResult/agentId")
-                            .and_then(Value::as_str)
-                            .filter(|id| !id.is_empty())
-                            && let Some(spawn) = blocks
-                                .iter()
-                                .filter(|b| {
-                                    b.get("type").and_then(Value::as_str) == Some("tool_result")
-                                })
-                                .filter_map(|b| b.get("tool_use_id").and_then(Value::as_str))
-                                .find(|id| norm.agent_spawn_tools.contains(*id))
-                        {
-                            norm.agent_tasks
-                                .entry(agent.to_owned())
-                                .or_insert_with(|| spawn.to_owned());
-                        }
-                    }
-                    _ => {}
-                }
+            if !(text.contains("\"Agent\"")
+                || text.contains("\"Task\"")
+                || text.contains("agentId"))
+            {
+                continue;
             }
-            break;
+            let Ok(record) = serde_json::from_str::<Value>(text) else {
+                continue;
+            };
+            // A subagent's own nested spawns are not chips on this chat.
+            if record.get("isSidechain").and_then(Value::as_bool) == Some(true)
+                || !record.get("parent_tool_use_id").is_none_or(Value::is_null)
+            {
+                continue;
+            }
+            let Some(blocks) = record.pointer("/message/content").and_then(Value::as_array) else {
+                continue;
+            };
+            match record.get("type").and_then(Value::as_str) {
+                Some("assistant") => {
+                    for block in blocks {
+                        if block.get("type").and_then(Value::as_str) == Some("tool_use")
+                            && matches!(
+                                block.get("name").and_then(Value::as_str),
+                                Some("Agent" | "Task")
+                            )
+                            && let Some(id) = block
+                                .get("id")
+                                .and_then(Value::as_str)
+                                .filter(|id| !id.is_empty())
+                        {
+                            norm.agent_spawn_tools.insert(id.to_owned());
+                        }
+                    }
+                }
+                Some("user") => {
+                    if let Some(agent) = record
+                        .pointer("/toolUseResult/agentId")
+                        .and_then(Value::as_str)
+                        .filter(|id| !id.is_empty())
+                        && let Some(spawn) = blocks
+                            .iter()
+                            .filter(|b| {
+                                b.get("type").and_then(Value::as_str) == Some("tool_result")
+                            })
+                            .filter_map(|b| b.get("tool_use_id").and_then(Value::as_str))
+                            .find(|id| norm.agent_spawn_tools.contains(*id))
+                    {
+                        norm.agent_tasks
+                            .entry(agent.to_owned())
+                            .or_insert_with(|| spawn.to_owned());
+                    }
+                }
+                _ => {}
+            }
         }
         norm
     }
@@ -1206,9 +1231,16 @@ mod tests {
             r#"{"type":"assistant","message":{"content":[{"type":"tool_use","id":"toolu_send","name":"SendMessage","input":{"to":"a1","message":"continue"}}]}}"#,
             "\n",
             r#"{"type":"user","toolUseResult":{"agentId":"a1"},"message":{"content":[{"type":"tool_result","tool_use_id":"toolu_send"}]}}"#,
+            "\n",
+            // A subagent's own nested spawn is not a chip on this chat.
+            r#"{"type":"assistant","isSidechain":true,"message":{"content":[{"type":"tool_use","id":"toolu_nested","name":"Agent","input":{"description":"deeper"}}]}}"#,
+            "\n",
+            r#"{"type":"user","isSidechain":true,"toolUseResult":{"agentId":"a2"},"message":{"content":[{"type":"tool_result","tool_use_id":"toolu_nested"}]}}"#,
             "\n{torn tail"
         )).unwrap();
         let mut norm = Normalizer::for_resume(root.path(), "session-1").await;
+        assert!(!norm.agent_spawn_tools.contains("toolu_nested"));
+        assert!(!norm.agent_tasks.contains_key("a2"));
         // The revived process has no original spawn frame on its wire.
         norm.normalize(crate::claude::wire::parse_frame(
             r#"{"type":"system","subtype":"task_started","task_id":"a1","tool_use_id":"toolu_send","subagent_type":"general-purpose"}"#,
