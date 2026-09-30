@@ -906,8 +906,10 @@ impl Tools {
             .paths
             .iter()
             .map(|path| {
+                // `~/…` stays as is: the sending engine expands it to its home.
+                let home_relative = path == "~" || path.starts_with("~/");
                 let path = std::path::Path::new(path);
-                match (&base, path.is_absolute()) {
+                match (&base, path.is_absolute() || home_relative) {
                     (Some(base), false) => base.join(path),
                     _ => path.to_path_buf(),
                 }
@@ -1377,11 +1379,14 @@ mod tests {
         tools
             .call(
                 "send_files",
-                json!({ "paths": ["/tmp/x"], "device": "laptop" }),
+                json!({ "paths": ["/tmp/x", "~/out/app.apk"], "device": "laptop" }),
             )
             .await
             .unwrap();
-        assert_eq!(world.writes.lock().unwrap()[1].1["toDeviceId"], "dev-local");
+        let params = world.writes.lock().unwrap()[1].1.clone();
+        assert_eq!(params["toDeviceId"], "dev-local");
+        // `~/…` is left for the sending engine to expand to its home.
+        assert_eq!(params["paths"][1], "~/out/app.apk");
         // Outside a chat a device is required.
         let lost = super::Tools::new(Arc::new(Zeron::with_client(
             memory_client(world),

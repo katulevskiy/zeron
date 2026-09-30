@@ -912,3 +912,67 @@ async fn an_explicit_destination_must_be_inside_home() {
     .await;
     assert!(failed.error.unwrap().contains("home folder"));
 }
+
+/// `~` means the sending engine's home for sources and the receiving
+/// engine's home for a destination (a remote viewer or an agent in `~`
+/// can't know either absolute path).
+#[tokio::test(flavor = "multi_thread", worker_threads = 4)]
+async fn tilde_paths_resolve_against_each_engines_home() {
+    let pair = pair(0, 0);
+    // The phone engine has a home; `~/notes.txt` is its file.
+    std::fs::write(pair.home.join("notes.txt"), b"from home").unwrap();
+    let sent = pair
+        .receiver
+        .send(SendRequest {
+            to: "laptop".into(),
+            paths: vec!["~/notes.txt".into()],
+            destination: None,
+            policy: TransportPolicy::Auto,
+        })
+        .await
+        .unwrap();
+    let done = wait_for(
+        &pair.sender,
+        &sent.transfer_id,
+        state_is(FileTransferState::Completed),
+    )
+    .await;
+    let landed = PathBuf::from(done.items[0].path.as_deref().unwrap());
+    assert_eq!(std::fs::read(landed).unwrap(), b"from home");
+
+    // A `~/…` destination is the receiving engine's home.
+    let project = pair.home.join("projects/app");
+    std::fs::create_dir_all(&project).unwrap();
+    let file = pair._dir.path().join("b.txt");
+    std::fs::write(&file, b"b").unwrap();
+    let into = pair
+        .sender
+        .send(SendRequest {
+            to: "phone".into(),
+            paths: vec![file],
+            destination: Some("~/projects/app".into()),
+            policy: TransportPolicy::Auto,
+        })
+        .await
+        .unwrap();
+    wait_for(
+        &pair.receiver,
+        &into.transfer_id,
+        state_is(FileTransferState::Completed),
+    )
+    .await;
+    assert_eq!(std::fs::read(project.join("b.txt")).unwrap(), b"b");
+
+    // Without a home, `~` is a clear error rather than a relative path.
+    let error = pair
+        .sender
+        .send(SendRequest {
+            to: "phone".into(),
+            paths: vec!["~/x".into()],
+            destination: None,
+            policy: TransportPolicy::Auto,
+        })
+        .await
+        .unwrap_err();
+    assert!(error.to_string().contains("home folder"), "{error}");
+}

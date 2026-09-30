@@ -166,6 +166,10 @@ edge; engines join it with `ZERON_LOCAL_EDGE_URL=http://ADDR:P
 ZERON_LOCAL_EDGE_TOKEN=T zeron headless` (docs/android.md; the Android
 emulator reaches host loopback as `10.0.2.2`).
 
+Paths and a `destination` may start with `~/`: the sending engine expands
+sources against its home, the receiving engine the destination against its
+own (a viewer or an agent whose chat runs in `~` can't know either).
+
 Tests: `cargo test -p zeron-transfer` (manifest validation and traversal
 refusal, chunking, block and whole-file verification, resume, cancel,
 confirmation, a hostile sender) and `cargo test -p zeron-localedge --test

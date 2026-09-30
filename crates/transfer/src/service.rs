@@ -194,7 +194,14 @@ impl Transfers {
             "Pick another device — this one already has these files."
         );
         anyhow::ensure!(!request.to.is_empty(), "No device to send to");
-        let paths = request.paths.clone();
+        // `~` is this engine's home: a remote viewer or an agent whose
+        // chat runs in `~` can't know the absolute path.
+        let home = self.0.config.home_dir.clone();
+        let paths: Vec<PathBuf> = request
+            .paths
+            .iter()
+            .map(|path| expand_home(path, home.as_deref()))
+            .collect::<anyhow::Result<_>>()?;
         let built = tokio::task::spawn_blocking(move || crate::manifest::build(&paths)).await??;
         let to_name = self
             .0
@@ -639,7 +646,7 @@ impl Transfers {
         let Some(destination) = destination.map(str::trim).filter(|d| !d.is_empty()) else {
             return Ok(self.inbox_root().join(folder_name(sender_name)));
         };
-        let path = PathBuf::from(destination);
+        let path = expand_home(Path::new(destination), self.0.config.home_dir.as_deref())?;
         anyhow::ensure!(
             path.is_absolute(),
             "The destination must be an absolute folder on the receiving device"
@@ -672,6 +679,26 @@ impl Transfers {
     pub(crate) fn incoming_dir(&self, id: &str) -> PathBuf {
         self.0.config.state_dir.join("incoming").join(id)
     }
+}
+
+/// `~` or `~/…` (either separator) → under `home`; anything else as is.
+/// `~user` forms are not expanded.
+pub fn expand_home(path: &Path, home: Option<&Path>) -> anyhow::Result<PathBuf> {
+    let Some(text) = path.to_str() else {
+        return Ok(path.to_path_buf());
+    };
+    let rest = match text.strip_prefix('~') {
+        Some("") => "",
+        Some(rest) if rest.starts_with(['/', '\\']) => &rest[1..],
+        _ => return Ok(path.to_path_buf()),
+    };
+    let home =
+        home.ok_or_else(|| anyhow::anyhow!("This device has no home folder to resolve {text}"))?;
+    Ok(if rest.is_empty() {
+        home.to_path_buf()
+    } else {
+        home.join(rest)
+    })
 }
 
 /// Transfer and session ids: UUIDs (or anything as tame).
@@ -715,6 +742,21 @@ pub(crate) fn write_atomic(path: &Path, bytes: &[u8]) -> anyhow::Result<()> {
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    #[test]
+    fn a_leading_tilde_is_this_engines_home() {
+        let home = Path::new("/home/zeron");
+        let expand = |p: &str| expand_home(Path::new(p), Some(home)).unwrap();
+        assert_eq!(expand("~"), home);
+        assert_eq!(expand("~/out/app.apk"), home.join("out/app.apk"));
+        assert_eq!(expand("/abs/~/x"), Path::new("/abs/~/x"));
+        assert_eq!(
+            expand("~other/x"),
+            Path::new("~other/x"),
+            "~user is not expanded"
+        );
+        assert!(expand_home(Path::new("~/x"), None).is_err());
+    }
 
     #[test]
     fn device_names_become_single_folder_names() {

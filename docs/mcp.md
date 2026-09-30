@@ -121,7 +121,8 @@ name (default: the local engine's device).
 `send_files {paths[], device?, destination?, wait?}` sends files or folders
 from the chat's host device straight to another of the user's devices
 (`docs/file-transfer.md`) — "send me the apk" from a remote thread puts it on
-the phone. Relative paths resolve against the chat's working directory.
+the phone. Relative paths resolve against the chat's working directory; `~/…` is the
+host engine's home.
 Without `device` the engine picks the device that typed the chat's latest
 user message (agent-to-agent messages don't count); if that was the host
 itself, a viewer without an engine, or there is no such message, the tool

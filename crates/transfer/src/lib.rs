@@ -22,7 +22,9 @@ use tokio::io::{AsyncRead, AsyncWrite};
 use zeron_proto::FileTransferTransport;
 
 pub use relay::{RelayPipes, RelayTunnel};
-pub use service::{SendRequest, Transfers, TransfersConfig, TransportPolicy, WeakTransfers};
+pub use service::{
+    SendRequest, Transfers, TransfersConfig, TransportPolicy, WeakTransfers, expand_home,
+};
 
 /// Mux service id of the P2P lanes.
 pub const P2P_SERVICE: &str = "file-transfer:v1";
