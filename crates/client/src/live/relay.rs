@@ -30,7 +30,17 @@ const DARK_AFTER_MS: i64 = 5 * 60_000;
 const LIVENESS_WARMUP_MS: i64 = 60_000;
 
 pub(crate) fn deadline(method: &str) -> Duration {
+    // Mirrors the engine's forward_deadline tiers: a vendor installer or a
+    // clone legitimately runs for minutes, and timing out here only hides a
+    // result the host still delivers.
     match method {
+        methods::INSTALL_HARNESS | methods::CLONE_REPO | methods::FETCH_ALL => {
+            Duration::from_secs(15 * 60)
+        }
+        methods::APPLY_HARNESS_UPDATE => Duration::from_secs(20 * 60),
+        methods::APPLY_ALL_HARNESS_UPDATES => Duration::from_secs(60 * 60),
+        methods::UNINSTALL_HARNESS => Duration::from_secs(6 * 60),
+        methods::CHECK_HARNESS_UPDATES => Duration::from_secs(4 * 60),
         methods::CREATE_WORKTREE => Duration::from_secs(120),
         methods::LIST_MODELS => Duration::from_secs(100),
         methods::UPLOAD_COMMIT => Duration::from_secs(150),
@@ -363,4 +373,43 @@ fn spawn_watch(weak: Weak<ClientInner>, key: WatchKey, cancel: CancellationToken
             backoff = (backoff * 2).min(Duration::from_secs(5));
         }
     });
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    /// A vendor installer runs for minutes; a 30s client deadline reported
+    /// failure while the host was still installing (Android Agents panel).
+    #[test]
+    fn long_host_operations_outlive_the_default_deadline() {
+        for method in [
+            methods::INSTALL_HARNESS,
+            methods::CLONE_REPO,
+            methods::FETCH_ALL,
+        ] {
+            assert_eq!(deadline(method), Duration::from_secs(15 * 60), "{method}");
+        }
+        assert_eq!(deadline(methods::LIST_REFS), CALL_TIMEOUT);
+    }
+
+    /// Harness maintenance mirrors the engine's forward deadlines: an
+    /// update-all pass or an npm uninstall must not read as a failure while
+    /// the host is still working.
+    #[test]
+    fn harness_maintenance_deadlines_match_the_engine_tiers() {
+        assert_eq!(
+            deadline(methods::APPLY_ALL_HARNESS_UPDATES),
+            Duration::from_secs(60 * 60)
+        );
+        assert_eq!(
+            deadline(methods::UNINSTALL_HARNESS),
+            Duration::from_secs(6 * 60)
+        );
+        assert_eq!(
+            deadline(methods::CHECK_HARNESS_UPDATES),
+            Duration::from_secs(4 * 60)
+        );
+        assert_eq!(deadline(methods::LIST_HARNESS_UPDATES), CALL_TIMEOUT);
+    }
 }
