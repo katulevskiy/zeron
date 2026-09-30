@@ -12196,6 +12196,7 @@ dependencies = [
  "zeron-proto",
  "zeron-rpc",
  "zeron-sync",
+ "zeron-transfer",
  "zeron-update",
  "zip",
 ]
@@ -12242,6 +12243,7 @@ dependencies = [
  "rusqlite",
  "serde",
  "serde_json",
+ "sha2",
  "subtle",
  "tempfile",
  "thiserror 2.0.20",
@@ -12249,8 +12251,11 @@ dependencies = [
  "tokio-tungstenite",
  "tokio-util",
  "tracing",
+ "tracing-subscriber",
  "uuid",
  "zeron-doc",
+ "zeron-engine",
+ "zeron-proto",
  "zeron-rpc",
  "zeron-sync",
 ]
