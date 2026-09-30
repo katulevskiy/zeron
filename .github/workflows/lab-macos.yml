@@ -13,6 +13,7 @@ on:
       ios_runner: {description: "runner label for the iOS job", type: string, default: macos-15}
       release: {description: "use --release (original) instead of the dev profile", type: boolean, default: false}
       ios_fast_core: {description: "opt-level 1 for workspace crates in the iOS core", type: boolean, default: true}
+      ios_preboot: {description: "boot the simulator in the background at job start (experiment)", type: boolean, default: false}
       cache_ver: {description: "cache key version (change for a cold run)", type: string, default: v1}
       parity: {description: "also list the tests the ORIGINAL cargo-test commands would run and diff them against nextest", type: boolean, default: false}
 
@@ -92,18 +93,20 @@ jobs:
           # Doctests (nextest cannot run them); these crates should have none
           cargo test $PROFILE_FLAG --locked --doc -p zeron-update -p zeron-preview -p zeron-ui --features zeron-ui/browser-fixture 2>&1 | grep -E "^test result|running" || true
       - name: Native browser regression and screenshots
-        timeout-minutes: 3
+        timeout-minutes: 7
         env:
           RUST_BACKTRACE: 1
+          ZERON_ROOT: ${{ github.workspace }}
+          FIXTURE_ATTEMPT_TIMEOUT: 110
         run: |
-          bash scripts/run-macos-browser-fixture.sh target/$PROFILE_DIR/examples/browser-fixture "$RUNNER_TEMP/browser-captures"
+          bash lab-ci/scripts/ci/run-macos-fixture.sh target/$PROFILE_DIR/examples/browser-fixture "$RUNNER_TEMP/browser-captures"
           test -f "$RUNNER_TEMP/browser-captures/result.txt"
       - name: Upload browser screenshots
         if: always()
         uses: actions/upload-artifact@v4
         with:
           name: browser-macos-captures
-          path: ${{ runner.temp }}/browser-captures
+          path: ${{ runner.temp }}/browser-captures*
           if-no-files-found: ignore
       - uses: actions/setup-node@v4
         with:
@@ -115,8 +118,9 @@ jobs:
         env:
           ZERON_PREVIEW_AUTO_OPEN: 1
           ZERON_ROOT: ${{ github.workspace }}
+          PREVIEW_HOSTS: 1
         run: |
-          VITE_BINARY="$GITHUB_WORKSPACE/edge/node_modules/vite/bin/vite.js" bash lab-ci/scripts/ci/run-preview-fixture-macos.sh target/$PROFILE_DIR/examples/preview-fixture "$RUNNER_TEMP/preview-captures"
+          VITE_BINARY="$GITHUB_WORKSPACE/edge/node_modules/vite/bin/vite.js" bash lab-ci/scripts/ci/run-macos-fixture.sh target/$PROFILE_DIR/examples/preview-fixture "$RUNNER_TEMP/preview-captures"
           test -f "$RUNNER_TEMP/preview-captures/result.txt"
       - name: Upload preview screenshots
         if: always()
@@ -206,7 +210,9 @@ jobs:
     steps:
       - uses: actions/checkout@v4
         with: {ref: "${{ inputs.target }}"}
-      - name: Select an available iPhone simulator and boot it in the background
+      - name: Select an available iPhone simulator (optionally boot it in the background)
+        env:
+          IOS_PREBOOT: ${{ inputs.ios_preboot && '1' || '' }}
         run: |
           ls -d /Applications/Xcode*
           newest=$(ls -d /Applications/Xcode_26*.app 2>/dev/null | sort -V | tail -1 || true)
@@ -225,7 +231,8 @@ jobs:
           print(iphones[0])
           with open(os.environ["GITHUB_ENV"], "a") as env:
               env.write("IOS_SIMULATOR_ID=" + iphones[0]["udid"] + "\n")
-          subprocess.Popen(["xcrun", "simctl", "boot", iphones[0]["udid"]])
+          if os.environ.get("IOS_PREBOOT"):
+              subprocess.Popen(["xcrun", "simctl", "boot", iphones[0]["udid"]])
           PYTHON
       - name: Rust toolchain + iOS targets
         run: |
