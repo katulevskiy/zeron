@@ -208,7 +208,7 @@ impl DemoHost {
                         matches!(
                             s.status,
                             SessionStatus::Working | SessionStatus::AwaitingInput
-                        )
+                        ) || s.running_subagents > 0
                     })
                     .cloned()
                     .collect();
@@ -270,6 +270,20 @@ impl DemoHost {
             }
             _ => transcripts::fixture(chat_id, &host, last),
         };
+        for entry in &entries {
+            doc.push_message(entry).map_err(doc_err)?;
+        }
+        Ok(doc)
+    }
+
+    /// The fixture doc of one of a demo chat's subagents.
+    pub(crate) fn subagent_doc(&self, parent_chat_id: &str, doc_id: &str) -> Result<SessionDoc> {
+        let client = self.client()?;
+        let host = self.host_of(&client, parent_chat_id);
+        let source = crate::subagents::subagent_source_chat(doc_id).unwrap_or(parent_chat_id);
+        let entries = transcripts::subagent(source, doc_id, &host)
+            .ok_or_else(|| ClientError::NotFound(doc_id.to_owned()))?;
+        let doc = SessionDoc::init(doc_id).map_err(doc_err)?;
         for entry in &entries {
             doc.push_message(entry).map_err(doc_err)?;
         }
