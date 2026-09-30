@@ -19,6 +19,8 @@ use zeron_proto::{FileTransferItem, FileTransferItemKind};
 pub const MAX_ENTRIES: usize = 1_000_000;
 const MAX_PATH_BYTES: usize = 4096;
 const MAX_NAME_BYTES: usize = 255;
+/// macOS and Windows file systems are case-insensitive by default.
+const CASE_INSENSITIVE_FS: bool = cfg!(any(windows, target_os = "macos"));
 
 #[derive(Debug, Clone, Copy, PartialEq, Eq, Serialize, Deserialize)]
 #[serde(rename_all = "camelCase")]
@@ -117,12 +119,17 @@ impl Manifest {
 
     /// Refuse anything that could escape the destination or confuse it.
     pub fn validate(&self) -> anyhow::Result<()> {
+        self.validate_for(CASE_INSENSITIVE_FS)
+    }
+
+    fn validate_for(&self, case_insensitive: bool) -> anyhow::Result<()> {
         anyhow::ensure!(!self.entries.is_empty(), "the transfer lists no files");
         anyhow::ensure!(
             self.entries.len() <= MAX_ENTRIES,
             "the transfer lists more than {MAX_ENTRIES} entries"
         );
         let mut seen: HashSet<&str> = HashSet::with_capacity(self.entries.len());
+        let mut folded: HashSet<String> = HashSet::new();
         let mut dirs: HashSet<&str> = HashSet::new();
         let mut total: u64 = 0;
         for entry in &self.entries {
@@ -132,6 +139,15 @@ impl Manifest {
                 "duplicate path in transfer: {}",
                 entry.path
             );
+            // Two names differing only in case would share one file (and
+            // one `.part`) on this device's case-insensitive file system.
+            if case_insensitive {
+                anyhow::ensure!(
+                    folded.insert(entry.path.to_lowercase()),
+                    "{} differs from another name only in letter case, which this device's file system can't keep apart",
+                    entry.path
+                );
+            }
             if let Some((parent, _)) = entry.path.rsplit_once('/') {
                 // Pre-order: a parent is a directory listed earlier. This
                 // also rules out writing beneath a symlink or a file.
@@ -414,6 +430,18 @@ mod tests {
         }
         assert!(validate_relative("folder/sub/file.txt").is_ok());
         assert!(validate_relative("..hidden").is_ok());
+    }
+
+    #[test]
+    fn names_differing_only_in_case_are_refused_on_case_insensitive_receivers() {
+        let clash = manifest(vec![
+            entry("app", EntryKind::Dir),
+            entry("app/Makefile", EntryKind::File),
+            entry("app/makefile", EntryKind::File),
+        ]);
+        clash.validate_for(false).unwrap();
+        let error = clash.validate_for(true).unwrap_err().to_string();
+        assert!(error.contains("letter case"), "{error}");
     }
 
     #[test]

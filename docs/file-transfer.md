@@ -149,6 +149,8 @@ Agents use the `send_files` MCP tool (`docs/mcp.md`).
 - The sender must keep its files unchanged while sending; a file that
   shrinks or changes fails that transfer with a clear error.
 - Symlinks are not recreated on Windows receivers.
+- macOS and Windows receivers refuse a transfer holding two names that
+  differ only in letter case (their file systems can't keep them apart).
 - Both engines need the edge (a signed-in account or a development/local
   edge); local-only profiles can't transfer.
 
