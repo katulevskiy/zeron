@@ -182,6 +182,24 @@ fn catalog() -> Vec<ToolDef> {
             })),
         },
         ToolDef {
+            name: "send_files",
+            description: "Send files or folders from this device straight to another of the user's devices (their phone, another computer) over a direct tunnel — any size, folders recursively. Use it when the user asks for something you made (\"send me the apk\", \"put the PDF on my phone\"). Without `device`, it goes to the device the user's latest message in this chat came from. It lands in that device's Zeron Transfers inbox (the phone also shows a notification and a copy in Downloads/Zeron). Returns once the transfer starts; wait=true blocks until it finishes.",
+            input_schema: json!({
+                "type": "object",
+                "properties": {
+                    "paths": {
+                        "type": "array", "items": { "type": "string" }, "minItems": 1,
+                        "description": "Files or folders on this device: absolute, or relative to the chat's working directory."
+                    },
+                    "device": { "type": "string", "description": "Receiving device (id or name, see list_devices). Defaults to the device of the user's latest message." },
+                    "destination": { "type": "string", "description": "Absolute folder on the receiving device (inside its home or a project). Defaults to its inbox." },
+                    "wait": { "type": "boolean", "default": false, "description": "Block until the transfer completes, fails or is declined." },
+                    "timeout_secs": { "type": "integer", "minimum": 1, "maximum": 3600, "default": 600 }
+                },
+                "required": ["paths"]
+            }),
+        },
+        ToolDef {
             name: "archive_chat",
             description: "Archive a chat (hide it from the active sidebar list); pass archived=false to restore. Use it to tidy up chats you created.",
             input_schema: chat_key_schema(json!({
@@ -295,6 +313,16 @@ struct WaitArgs {
 struct ArchiveArgs {
     chat: String,
     archived: Option<bool>,
+}
+
+#[derive(Deserialize)]
+struct SendFilesArgs {
+    paths: Vec<String>,
+    device: Option<String>,
+    destination: Option<String>,
+    #[serde(default)]
+    wait: bool,
+    timeout_secs: Option<u64>,
 }
 
 #[derive(Deserialize)]
@@ -422,6 +450,7 @@ impl Tools {
             "interrupt_chat" => self.interrupt_chat(parse(args)?).await,
             "respond_to_input" => self.respond_to_input(parse(args)?).await,
             "archive_chat" => self.archive_chat(parse(args)?).await,
+            "send_files" => self.send_files(parse(args)?).await,
             other => return Err(format!("unknown tool: {other}")),
         };
         result.map_err(|e| e.to_string())
@@ -498,6 +527,7 @@ impl Tools {
                 "local": d.id == local,
                 "lastSeenAt": d.last_seen_at,
                 "version": d.version,
+                "canReceiveFiles": d.supports(zeron_proto::capabilities::FILE_TRANSFER_V1),
             })).collect::<Vec<_>>()
         }))
     }
@@ -861,6 +891,101 @@ impl Tools {
         Ok(json!({ "chatId": chat.id, "title": chat.title, "archived": archived }))
     }
 
+    async fn send_files(&self, args: SendFilesArgs) -> anyhow::Result<Value> {
+        anyhow::ensure!(
+            !args.paths.is_empty(),
+            "paths must list at least one file or folder"
+        );
+        // Relative paths are the agent's: resolve them against its chat's
+        // working directory (this process's cwd when the chat has none).
+        let base = match self.zeron.origin().chat_id.as_deref() {
+            Some(id) => self.zeron.resolve_chat(id).await.ok().and_then(|c| c.cwd),
+            None => None,
+        }
+        .map(std::path::PathBuf::from)
+        .or_else(|| std::env::current_dir().ok());
+        let paths: Vec<String> = args
+            .paths
+            .iter()
+            .map(|path| {
+                // `~/…` stays as is: the sending engine expands it to its home.
+                let home_relative = path == "~" || path.starts_with("~/");
+                let path = std::path::Path::new(path);
+                match (&base, path.is_absolute() || home_relative) {
+                    (Some(base), false) => base.join(path),
+                    _ => path.to_path_buf(),
+                }
+                .to_string_lossy()
+                .into_owned()
+            })
+            .collect();
+        let mut params = json!({ "paths": paths });
+        match args
+            .device
+            .as_deref()
+            .map(str::trim)
+            .filter(|d| !d.is_empty())
+        {
+            Some(device) => {
+                params["toDeviceId"] = self.zeron.resolve_device_id(Some(device)).await?.into()
+            }
+            None => match self.zeron.origin().chat_id.clone() {
+                Some(chat) => params["chatId"] = chat.into(),
+                None => anyhow::bail!(
+                    "Not running inside a chat: say which device to send to (see list_devices)"
+                ),
+            },
+        }
+        if let Some(destination) = args.destination {
+            params["destination"] = destination.into();
+        }
+        let reply = self.zeron.call(methods::SEND_FILES, params).await?;
+        let transfer_id = reply["transferId"].as_str().unwrap_or_default().to_owned();
+        let mut result = json!({
+            "transferId": transfer_id,
+            "device": { "id": reply["toDeviceId"], "name": reply["toDeviceName"] },
+            "paths": paths,
+        });
+        if !args.wait {
+            result["state"] = "started".into();
+            return Ok(result);
+        }
+        let timeout = Duration::from_secs(args.timeout_secs.unwrap_or(600).min(3600));
+        let deadline = tokio::time::Instant::now() + timeout;
+        loop {
+            let rows = self
+                .zeron
+                .call(methods::LIST_FILE_TRANSFERS, json!({}))
+                .await?;
+            let row: Option<zeron_proto::FileTransfer> = rows
+                .as_array()
+                .and_then(|rows| rows.iter().find(|r| r["id"] == transfer_id.as_str()))
+                .and_then(|row| serde_json::from_value(row.clone()).ok());
+            if let Some(row) = row {
+                result["state"] = serde_json::to_value(row.state)?;
+                result["bytes"] = row.total_bytes.into();
+                result["files"] = row.file_count.into();
+                // Only the latest row's note: a transient "Reconnecting…"
+                // must not outlive the reconnect.
+                match &row.error {
+                    Some(error) => result["error"] = error.clone().into(),
+                    None => {
+                        result.as_object_mut().map(|r| r.remove("error"));
+                    }
+                }
+                if row.state.is_terminal() {
+                    return Ok(result);
+                }
+                result["doneBytes"] = row.done_bytes.into();
+            }
+            if tokio::time::Instant::now() >= deadline {
+                result["note"] = "Still transferring; it continues in the background.".into();
+                return Ok(result);
+            }
+            tokio::time::sleep(Duration::from_millis(500)).await;
+        }
+    }
+
     async fn interrupt_chat(&self, args: ChatArgs) -> anyhow::Result<Value> {
         let chat = self.zeron.resolve_chat(&args.chat).await?;
         let command_id = self
@@ -1106,6 +1231,8 @@ mod tests {
         writes: Mutex<Vec<(String, Value)>>,
         dispatch_barrier: Option<tokio::sync::Barrier>,
         beta_parent: Option<String>,
+        /// `ListFileTransfers` calls so far (the first reports a reconnect).
+        transfer_polls: std::sync::atomic::AtomicUsize,
     }
 
     fn stream(item: Value) -> RpcReply {
@@ -1159,6 +1286,32 @@ mod tests {
                       "status": "complete",
                       "parts": [{ "kind": "text", "id": "t", "text": "hello back" }] }
                 ]})),
+                methods::SEND_FILES => {
+                    self.writes
+                        .lock()
+                        .unwrap()
+                        .push((method.to_owned(), params));
+                    RpcReply::Value(json!({
+                        "transferId": "xfer-1", "toDeviceId": "dev-phone", "toDeviceName": "Pixel"
+                    }))
+                }
+                methods::LIST_FILE_TRANSFERS => {
+                    let first = self
+                        .transfer_polls
+                        .fetch_add(1, std::sync::atomic::Ordering::SeqCst)
+                        == 0;
+                    let (state, error) = if first {
+                        ("reconnecting", json!("Reconnecting to Pixel…"))
+                    } else {
+                        ("completed", Value::Null)
+                    };
+                    RpcReply::Value(json!([{
+                        "id": "xfer-1", "direction": "outgoing", "peerDeviceId": "dev-phone",
+                        "peerDeviceName": "Pixel", "state": state, "items": [],
+                        "fileCount": 1, "totalBytes": 42, "doneBytes": 42, "bytesPerSec": 0,
+                        "error": error, "createdAt": 1, "updatedAt": 2
+                    }]))
+                }
                 methods::MUTATE | methods::QUEUE_COMMAND | methods::QUEUE_MESSAGE => {
                     self.writes
                         .lock()
@@ -1194,6 +1347,58 @@ mod tests {
             assert_eq!(def.input_schema["type"], "object", "{}", def.name);
             assert!(!def.description.is_empty());
         }
+    }
+
+    #[tokio::test]
+    async fn send_files_defaults_to_the_chats_last_sender_and_waits() {
+        let world = Arc::new(World::default());
+        let origin = Origin {
+            chat_id: Some("chat-alpha-1".into()),
+            ..Default::default()
+        };
+        let tools = tools(world.clone(), origin);
+        let sent = tools
+            .call(
+                "send_files",
+                json!({ "paths": ["/repo/comet/app.apk"], "wait": true }),
+            )
+            .await
+            .unwrap();
+        assert_eq!(sent["state"], "completed");
+        assert!(
+            sent.get("error").is_none(),
+            "a finished reconnect leaves no note: {sent}"
+        );
+        assert_eq!(sent["device"]["name"], "Pixel");
+        let (method, params) = world.writes.lock().unwrap()[0].clone();
+        assert_eq!(method, methods::SEND_FILES);
+        assert_eq!(
+            params["chatId"], "chat-alpha-1",
+            "no device → the chat decides"
+        );
+        assert!(params.get("toDeviceId").is_none());
+        // An explicit device (by name) is resolved to its id.
+        tools
+            .call(
+                "send_files",
+                json!({ "paths": ["/tmp/x", "~/out/app.apk"], "device": "laptop" }),
+            )
+            .await
+            .unwrap();
+        let params = world.writes.lock().unwrap()[1].1.clone();
+        assert_eq!(params["toDeviceId"], "dev-local");
+        // `~/…` is left for the sending engine to expand to its home.
+        assert_eq!(params["paths"][1], "~/out/app.apk");
+        // Outside a chat a device is required.
+        let lost = super::Tools::new(Arc::new(Zeron::with_client(
+            memory_client(world),
+            Origin::default(),
+        )));
+        let error = lost
+            .call("send_files", json!({ "paths": ["/tmp/x"] }))
+            .await
+            .unwrap_err();
+        assert!(error.contains("say which device"), "{error}");
     }
 
     #[tokio::test]
