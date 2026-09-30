@@ -1321,6 +1321,10 @@ impl DraftHost {
     /// Post a checkpoint once the row log has grown, so a cold device loads fast. Small and
     /// bounded: one in flight, only from a fully acknowledged state, oversize drafts skipped.
     fn maybe_checkpoint(&self, handle: &Arc<DraftHandle>, client: &Arc<ChatClient>, epoch: u64) {
+        // Read BEFORE the snapshot: rows are imported into the doc before the cursor advances, so
+        // a cursor read first is always covered by the snapshot taken after it. The other order
+        // could claim a row the snapshot lacks, and the room prunes every row up to the cursor.
+        let seq_covered = client.stats().cursor;
         let (snapshot, frontier) = {
             let mut st = lock(&handle.state);
             if st.checkpointing
@@ -1338,9 +1342,6 @@ impl DraftHost {
             st.checkpointing = true;
             (snapshot, st.doc.version().encode())
         };
-        // Captured BEFORE the export above would be ideal, but the doc only ever grows, so a
-        // cursor read now is covered by the snapshot taken a moment ago.
-        let seq_covered = client.stats().cursor;
         let host = self.clone();
         let handle = handle.clone();
         let client = client.clone();

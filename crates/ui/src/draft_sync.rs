@@ -176,16 +176,21 @@ impl DraftSync {
                     self.seed(&bytes, epoch, local, &current);
                     true
                 }
-                (true, true) if self.epoch == Some(epoch) => {
-                    // Same discard generation: a resubscribe, so merge and keep unsent edits.
-                    self.import(&bytes, offsets);
-                    if let Ok(snapshot) = DraftDoc::from_snapshot(&bytes) {
-                        self.sent = snapshot.version();
-                    }
-                    false
-                }
                 (true, true) => match DraftDoc::from_snapshot(&bytes) {
+                    // A snapshot that still contains everything this window has seen from the
+                    // engine is a resubscribe (lag, reconnect): merge, keeping unsent edits.
+                    // Anything else — the engine started a fresh doc because the draft was sent
+                    // from any device or window — replaces the replica. Comparing histories
+                    // rather than epochs is what makes a same-engine clear (whose epoch only
+                    // moves once the room confirms the discard) replace instead of merge.
+                    Ok(snapshot) if snapshot.version().includes_vv(&self.sent) => {
+                        self.import(&bytes, offsets);
+                        self.sent = snapshot.version();
+                        self.epoch = Some(epoch);
+                        false
+                    }
                     Ok(doc) => {
+                        tracing::debug!(from = ?self.epoch, to = epoch, "draft: replaced by a fresh snapshot");
                         let sent = doc.version();
                         self.install(doc, sent, Some(epoch));
                         true
@@ -776,6 +781,46 @@ mod tests {
         assert_eq!(text.as_deref(), Some(""));
         assert_eq!(caret, [0]);
         assert_eq!(sync.text().as_deref(), Some(""));
+    }
+
+    /// The engine's own clear starts a fresh doc but keeps the OLD epoch until the room confirms
+    /// the discard, so another window on the same engine sees a same-epoch, empty reset. It must
+    /// replace (not merge into) its replica: otherwise its next keystroke would export the whole
+    /// old history and resurrect the sent draft everywhere.
+    #[test]
+    fn a_same_epoch_clear_from_another_window_replaces_and_does_not_resurrect() {
+        let engine = DraftDoc::new();
+        engine.set_text("sent prompt").unwrap();
+        let mut sync = sync();
+        sync.push_frame(frame(true, 1, &engine));
+        sync.take_remote(&LocalDraft { text: "", base: "" }, &mut []);
+        assert_eq!(sync.text().as_deref(), Some("sent prompt"));
+
+        // Another window sends: the engine swaps in a fresh doc, still at epoch 1.
+        sync.push_frame(frame(true, 1, &DraftDoc::new()));
+        let mut caret = [11usize];
+        let text = sync.take_remote(
+            &LocalDraft {
+                text: "sent prompt",
+                base: "",
+            },
+            &mut caret,
+        );
+        assert_eq!(text.as_deref(), Some(""));
+        assert_eq!(caret, [0]);
+
+        // The next keystroke carries only new history.
+        sync.local_edit("n");
+        let Some(Outgoing::Edit { update, .. }) = sync.next_outgoing() else {
+            panic!("the keystroke is pushed");
+        };
+        let receiver = DraftDoc::new();
+        receiver.import(&update).unwrap();
+        assert_eq!(
+            receiver.text(),
+            "n",
+            "the sent draft's history is not re-exported"
+        );
     }
 
     #[test]

@@ -3,6 +3,7 @@ import { AUTH_USER_HEADER, ROOM_KIND_HEADER, type Env } from "./env";
 import {
   DRAFT_ID_RE,
   DRAFT_ROUTES,
+  MAX_CHECKPOINT_BYTES,
   draftRoomName,
   parseDraftPath
 } from "./draft-protocol";
@@ -48,7 +49,11 @@ export async function draftRoute(
     const device = url.searchParams.get("device") ?? "";
     if (DRAFT_ID_RE.test(device)) params.set("device", device);
     search = `?${params.toString()}`;
-  } else if (!DRAFT_ROUTES[path.action]?.includes(request.method)) {
+  } else if (
+    !Object.hasOwn(DRAFT_ROUTES, path.action) ||
+    !DRAFT_ROUTES[path.action]?.includes(request.method)
+  ) {
+    // `hasOwn`: an action like "constructor" must 404, not resolve to an Object.prototype member.
     return json({ error: "not found" }, 404);
   }
 
@@ -62,6 +67,13 @@ export async function draftRoute(
   headers.set(AUTH_USER_HEADER, auth.userId);
   // Draft bodies are tiny (row <= 64 KiB, checkpoint <= 256 KiB): buffer so
   // the DO can reject early (409/413) without erroring a half-read stream.
+  if (request.method === "POST") {
+    // Refuse oversized bodies before buffering them (the DO enforces the exact per-route caps).
+    const declared = Number(request.headers.get("content-length") ?? "0");
+    if (Number.isFinite(declared) && declared > MAX_CHECKPOINT_BYTES + 1024) {
+      return json({ error: "too_large" }, 413);
+    }
+  }
   const body = request.method === "POST" ? await request.arrayBuffer() : undefined;
   return stub.fetch(new Request(target.toString(), { method: request.method, headers, body }));
 }

@@ -387,6 +387,14 @@ describe("DraftRoom privacy and routing", () => {
 });
 
 describe("DraftRoom idle expiry", () => {
+  it("arms the alarm on first contact, so a merely opened chat still expires", async () => {
+    const chat = "alarm-first-contact";
+    await call("alice", chat, "epoch");
+    const at = await runInDurableObject(stubFor("alice", chat), (_i, s) => s.storage.getAlarm());
+    expect(at).not.toBeNull();
+    expect(Math.abs(at! - (Date.now() + DRAFT_IDLE_TTL_MS))).toBeLessThan(60_000);
+  });
+
   it("arms an alarm ~30 days out on writes", async () => {
     const chat = "alarm-arm";
     await push("alice", chat, 1, "b1", bytes(10));
@@ -531,4 +539,24 @@ describe("DraftRoom limits", () => {
     expect(err.header).toMatchObject({ code: "quota", batchId: "ws-q" });
     sock.ws.close(1000, "done");
   }, 30_000);
+});
+
+describe("draft route hardening", () => {
+  it("404s actions that name Object.prototype members instead of throwing", async () => {
+    for (const action of ["constructor", "toString", "__proto__", "hasOwnProperty"]) {
+      const res = await call("alice", "proto-actions", action, "", { method: "POST", body: "x" });
+      expect(res.status, action).toBe(404);
+      await res.arrayBuffer();
+    }
+  });
+
+  it("rejects a POST that declares an oversized body before buffering it", async () => {
+    const res = await call("alice", "declared-big", "checkpoint", "?epoch=1&seqCovered=1", {
+      method: "POST",
+      headers: { "content-length": String(50 * 1024 * 1024) },
+      body: new Uint8Array(4)
+    });
+    expect(res.status).toBe(413);
+    await res.arrayBuffer();
+  });
 });

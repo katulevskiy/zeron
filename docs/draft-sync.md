@@ -153,6 +153,7 @@ device runs its own room client). Updates are opaque base64 Loro bytes:
 | Device offline during send, reconnects later | Epoch mismatch → drops its old copy; never resurrects the sent text. |
 | Discard races with a remote keystroke | The few ms of text typed after the sender's discard is lost (accepted). |
 | Rate limit / oversize | Client backs off (existing quota retry); oversized drafts are rejected, the local text is kept. |
+| Old device offline for the whole 30-day idle expiry | The room is recreated at epoch 1, so a device that still holds unsent text from epoch 1 can push it back. Accepted: needs 30+ days offline *and* a draft sent elsewhere in between. |
 | Old daemon without the capability | Falls back to today's local-only drafts. |
 
 ## Testing

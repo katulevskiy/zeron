@@ -108,6 +108,9 @@ export class DraftRoom implements DurableObject {
     const userId = request.headers.get(AUTH_USER_HEADER);
     if (!userId) return json({ error: "unauthenticated" }, 401);
     const sql = this.ctx.storage.sql;
+    // First contact arms the idle-expiry alarm, so a chat that is only ever opened (never typed
+    // into) does not leave an empty room behind forever.
+    if (getMeta(sql, "lastWriteAt") == null) this.touch();
     const path = url.pathname;
     const method = request.method;
 
