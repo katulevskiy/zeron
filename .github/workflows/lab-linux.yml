@@ -95,14 +95,19 @@ jobs:
           # Engine integration tests: the original workflows' explicit list (session-sync +
           # cursor-compat).  `local_first` and `handoff_core` (+ `zeron-rpc --lib`) are what the
           # live-updates PR appends to ui-tests.yml; they are listed here unconditionally
-          # (handoff_core only when present) so that PR's extra steps keep running.
+          # (handoff_core is run separately below) so that PR's extra steps keep running.
           engine="--test session_publication --test restart_resume --test codex_subagents --test local_profiles --test message_queue --test pi_resume --test local_first"
-          [ -f crates/engine/tests/handoff_core.rs ] && engine="$engine --test handoff_core"
           cargo nextest run --locked --no-fail-fast \
             -p zeron-harness -p zeron-engine -p zeron-sync -p zeron-update -p zeron-doc -p zeron-preview -p zeron-rpc \
             --features zeron-harness/native-fixture \
             --lib --bins $tests $engine \
             --test attachments_roundtrip
+          # handoff_core re-execs itself and asserts which file descriptors its grandchildren
+          # inherit (`ls /proc/self/fd`); nextest's own pipes show up there and fail it
+          # (fds 142,145 in run 36766349221), so run it with libtest like the original job does.
+          if [ -f crates/engine/tests/handoff_core.rs ]; then
+            cargo test --locked -p zeron-engine --test handoff_core
+          fi
 
   # -------------------------------------------------------------------------- ui
   ui:
@@ -145,7 +150,7 @@ jobs:
       - name: Live update end to end (real engine, shell and agent processes)
         run: |
           if [ -f apps/zeron/tests/live_handoff.rs ]; then
-            cargo nextest run --locked --no-fail-fast -p zeron --test live_handoff
+            cargo test --locked -p zeron --test live_handoff
           else
             echo "target has no apps/zeron/tests/live_handoff.rs; skipped"
           fi
