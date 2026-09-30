@@ -15,7 +15,11 @@ object Agents {
     const val LIST_HARNESSES = "ListHarnesses"
     const val INSTALL_HARNESS = "InstallHarness"
     const val CANCEL_INSTALL = "CancelInstall"
+    const val UNINSTALL_HARNESS = "UninstallHarness"
     const val CHECK_UPDATES = "CheckHarnessUpdates"
+    const val LIST_UPDATES = "ListHarnessUpdates"
+    const val APPLY_UPDATE = "ApplyHarnessUpdate"
+    const val APPLY_ALL_UPDATES = "ApplyAllHarnessUpdates"
     const val LIST_ACCOUNTS = "ListAgentAccounts"
     const val START_LOGIN = "StartAgentLogin"
     const val POLL_LOGIN = "PollAgentLogin"
@@ -60,7 +64,46 @@ object Agents {
         data class Failed(val message: String) : LoginPoll
     }
 
-    data class Version(val harness: String, val installed: String?, val latest: String?)
+    /**
+     * One `HarnessUpdateStatus`. [phase] is the engine's kebab-case state
+     * machine (`current`, `available`, `waiting-for-idle`, `installing`,
+     * `updated`, `manual-action-required`, `failed`, …).
+     */
+    data class Version(
+        val harness: String,
+        val installed: String?,
+        val latest: String?,
+        val phase: String = "dormant",
+        /** The engine can apply it; otherwise [manualCommand] says how. */
+        val canApply: Boolean = false,
+        val manualCommand: String? = null,
+        val error: String? = null,
+        val progress: String? = null,
+    ) {
+        /** A newer release the device can install itself. */
+        val updatable: Boolean get() = phase == "available" && canApply
+        val available: Boolean get() = phase == "available"
+        /** The engine is mutating the CLI right now. */
+        val busy: Boolean get() = phase in busyPhases
+    }
+
+    private val busyPhases = setOf("waiting-for-idle", "preparing", "downloading", "installing", "verifying")
+
+    /** `UninstallHarness`: what went (or, for a dry run, would go), and the fresh catalog. */
+    data class Uninstall(
+        val removed: List<String>,
+        /** Another copy outside Zeron that is still installed, with how to remove it. */
+        val remaining: String?,
+        val harnesses: List<Harness>?,
+    )
+
+    /** `ApplyAllHarnessUpdates`: harness ids updated/failed/manual, and the final statuses. */
+    data class UpdateAll(
+        val updated: List<String>,
+        val failed: Map<String, String>,
+        val manual: List<String>,
+        val statuses: Map<String, Version>,
+    )
 
     fun harnesses(json: Any?): List<Harness> {
         val arr = json as? JSONArray ?: return emptyList()
@@ -121,8 +164,42 @@ object Agents {
         return (0 until arr.length()).mapNotNull { i ->
             val o = arr.optJSONObject(i) ?: return@mapNotNull null
             val h = o.optString("harness").ifEmpty { return@mapNotNull null }
-            h to Version(h, o.str("installedVersion"), o.str("latestVersion"))
+            h to Version(
+                harness = h,
+                installed = o.str("installedVersion"),
+                latest = o.str("latestVersion"),
+                phase = o.optString("phase").ifEmpty { "dormant" },
+                canApply = o.optBoolean("canApply", false),
+                manualCommand = o.str("manualCommand"),
+                error = o.optJSONObject("error")?.str("message"),
+                progress = o.optJSONObject("progress")?.str("message"),
+            )
         }.toMap()
+    }
+
+    fun uninstall(json: Any?): Uninstall {
+        val o = json as? JSONObject ?: return Uninstall(emptyList(), null, null)
+        val removed = o.optJSONArray("removed") ?: JSONArray()
+        return Uninstall(
+            removed = (0 until removed.length()).map { removed.optString(it) },
+            remaining = o.str("remaining"),
+            harnesses = o.optJSONArray("harnesses")?.let { harnesses(it) },
+        )
+    }
+
+    fun updateAll(json: Any?): UpdateAll {
+        val o = json as? JSONObject ?: return UpdateAll(emptyList(), emptyMap(), emptyList(), emptyMap())
+        fun ids(key: String): List<JSONObject> {
+            val arr = o.optJSONArray(key) ?: return emptyList()
+            return (0 until arr.length()).mapNotNull { arr.optJSONObject(it) }
+        }
+        val manual = o.optJSONArray("manual") ?: JSONArray()
+        return UpdateAll(
+            updated = ids("updated").map { it.optString("harness") },
+            failed = ids("failed").associate { it.optString("harness") to (it.str("error") ?: "Update failed") },
+            manual = (0 until manual.length()).map { manual.optString(it) },
+            statuses = versions(o.optJSONArray("statuses")),
+        )
     }
 
     /** A host_call reply as org.json (object, array, or the raw text). */

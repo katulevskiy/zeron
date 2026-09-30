@@ -38,6 +38,9 @@ pub(crate) fn deadline(method: &str) -> Duration {
             Duration::from_secs(15 * 60)
         }
         methods::APPLY_HARNESS_UPDATE => Duration::from_secs(20 * 60),
+        methods::APPLY_ALL_HARNESS_UPDATES => Duration::from_secs(60 * 60),
+        methods::UNINSTALL_HARNESS => Duration::from_secs(6 * 60),
+        methods::CHECK_HARNESS_UPDATES => Duration::from_secs(4 * 60),
         methods::CREATE_WORKTREE => Duration::from_secs(120),
         methods::LIST_MODELS => Duration::from_secs(100),
         methods::UPLOAD_COMMIT => Duration::from_secs(150),
@@ -388,5 +391,25 @@ mod tests {
             assert_eq!(deadline(method), Duration::from_secs(15 * 60), "{method}");
         }
         assert_eq!(deadline(methods::LIST_REFS), CALL_TIMEOUT);
+    }
+
+    /// Harness maintenance mirrors the engine's forward deadlines: an
+    /// update-all pass or an npm uninstall must not read as a failure while
+    /// the host is still working.
+    #[test]
+    fn harness_maintenance_deadlines_match_the_engine_tiers() {
+        assert_eq!(
+            deadline(methods::APPLY_ALL_HARNESS_UPDATES),
+            Duration::from_secs(60 * 60)
+        );
+        assert_eq!(
+            deadline(methods::UNINSTALL_HARNESS),
+            Duration::from_secs(6 * 60)
+        );
+        assert_eq!(
+            deadline(methods::CHECK_HARNESS_UPDATES),
+            Duration::from_secs(4 * 60)
+        );
+        assert_eq!(deadline(methods::LIST_HARNESS_UPDATES), CALL_TIMEOUT);
     }
 }

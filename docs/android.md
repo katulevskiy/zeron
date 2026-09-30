@@ -254,9 +254,14 @@ data class ExecResult(val exitCode: Int, val output: String)
   `CreateRepo`; on the phone into `/home/zeron/projects`). Harnesses and
   models come from the chosen device.
 - **Coding agents** (any engine device, this phone first) speaks `host_call`:
-  `ListHarnesses`, `InstallHarness` / `CancelInstall`, `CheckHarnessUpdates`,
-  `ListAgentAccounts`, `StartAgentLogin` → Custom Tab → `PollAgentLogin`, or
-  paste-code `CompleteAgentLogin`, and `ForgetAgentAccount` (`core/Agents.kt`).
+  `ListHarnesses`, `InstallHarness` / `CancelInstall` (a relay timeout falls
+  back to polling the catalog), `CheckHarnessUpdates` on open and
+  pull-to-refresh, per-agent `ApplyHarnessUpdate` and the header's Update all
+  (`ApplyAllHarnessUpdates`, progress by polling `ListHarnessUpdates`),
+  `UninstallHarness` (the confirmation lists the engine's `dryRun`; accounts
+  stay), `ListAgentAccounts` (plan label), `StartAgentLogin` → Custom Tab →
+  `PollAgentLogin`, or paste-code `CompleteAgentLogin`, and
+  `ForgetAgentAccount`. Reply parsing is in `core/Agents.kt`.
 - `core/Notifier.kt` posts local notifications (finished / needs input /
   failed) for the device's sessions while the app is in the background.
 
@@ -274,6 +279,19 @@ On the phone: Settings → About → tap Version seven times → Developer →
 Custom server `http://10.0.2.2:27700` (the emulator's host) + the token, or
 `adb shell am start -n sh.zeron.android/.MainActivity --ez local true
 --es server http://10.0.2.2:27700 --es server-token <token>`.
+
+## Known issues and gaps
+
+- `opencode upgrade` on an **npm** OpenCode leaves a dangling
+  `bin/opencode.exe` in the guest — proot's `--link2symlink` emulates npm's
+  hard link with a hidden `.l2s.*` file the upgrade does not carry over — so
+  the engine reports "post-update verification failed" (shown inline).
+  OpenCode from its vendor installer (the default) updates fine.
+- Not yet verified: arm64 hardware for this build; WorkOS sign-in and agent
+  browser sign-in end to end (the emulator's `system_server` aborts whenever a
+  Custom Tab opens, which also leaves background notifications unverified); a
+  real phantom-process kill (simulated SIGKILL only); release builds (per-ABI
+  splits, Play's 16 KB alignment for `libproot-loader32.so`).
 
 Emulator note: boot with `-feature -ReadColorBufferDma -feature -GLDMA2`
 (swiftshader); otherwise `system_server` aborts on
