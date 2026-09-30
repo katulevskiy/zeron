@@ -68,7 +68,8 @@ sealed interface SaveResult {
 
 /** One `WatchWorkspaceGitStatus` file: index + worktree states. */
 data class GitMark(val letter: Char, val kind: Kind) {
-    enum class Kind { Added, Modified, Deleted, Renamed, Conflict, Untracked }
+    /** Ascending strength: a folder shows its strongest descendant. */
+    enum class Kind { Added, Untracked, Modified, Renamed, Deleted, Conflict }
 }
 
 /** The engine's workspace file methods over host RPC. */
