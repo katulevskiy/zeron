@@ -46,6 +46,10 @@ internal class GuestRuntime(private val app: Context) : RuntimeController {
     @Volatile private var stopping = false
     @Volatile private var serviceActive = false
 
+    /** The running engine (proot) process, for [restart]. */
+    @Volatile private var engine: Pair<Process, Int>? = null
+    @Volatile private var restarting = false
+
     private val _state = MutableStateFlow(idleState())
     override val state: StateFlow<RuntimeState> = _state.asStateFlow()
 
@@ -74,6 +78,23 @@ internal class GuestRuntime(private val app: Context) : RuntimeController {
             if (_state.value is RuntimeState.Failed) _state.value = idleState()
         }
     }
+
+    override fun restart() {
+        val running = engine
+        if (running == null || supervisor?.isActive != true) {
+            start()
+            return
+        }
+        restarting = true
+        log.note("restart requested")
+        scope.launch(Dispatchers.IO) { terminate(running.first, running.second) }
+    }
+
+    override var customServer: CustomServer?
+        get() = store.read().customServer
+        set(value) {
+            store.update { it.copy(customServer = value) }
+        }
 
     override suspend fun reset() {
         stop()
@@ -165,6 +186,12 @@ internal class GuestRuntime(private val app: Context) : RuntimeController {
             if (stopping) return
             val ranMs = SystemClock.elapsedRealtime() - startedAt
             log.note("engine exited ($exit) after ${ranMs / 1000}s")
+            if (restarting) {
+                // Asked for (sign-in/out): straight back up, no failure counted.
+                restarting = false
+                failures = 0
+                continue
+            }
 
             // The phantom process killer (and lmkd) SIGKILL children of a
             // foregrounded app; restarting would just be killed again.
@@ -199,10 +226,12 @@ internal class GuestRuntime(private val app: Context) : RuntimeController {
 
     private suspend fun runEngineOnce(): EngineExit = withContext(Dispatchers.IO) {
         val secrets = store.secrets()
-        val command = guest.command(listOf("/opt/zeron/lib/libzeron.so", "headless"), guest.env(secrets))
+        val server = store.read().customServer
+        val command = guest.command(listOf("/opt/zeron/lib/libzeron.so", "headless"), guest.env(secrets, server))
         val (process, pid) = guest.start(command)
         paths.enginePidFile.writeText("$pid")
-        log.note("engine starting (proot pid $pid)")
+        engine = process to pid
+        log.note("engine starting (proot pid $pid${server?.let { ", server ${it.edgeUrl}" }.orEmpty()})")
         var signal: Int? = null
         val reader = Thread({
             try {
@@ -221,6 +250,7 @@ internal class GuestRuntime(private val app: Context) : RuntimeController {
             EngineExit(code, signal)
         } finally {
             health.cancel()
+            engine = null
             withContext(NonCancellable) {
                 if (process.isAlive) terminate(process, pid)
                 paths.enginePidFile.delete()
@@ -256,57 +286,35 @@ internal class GuestRuntime(private val app: Context) : RuntimeController {
     }
 
     /**
-     * Running only once the IPC server accepts our token and the local edge
-     * answers /health. An engine that predates local-edge support never gets
-     * the second, so it stays Starting with one clear log line instead of
-     * flapping.
+     * Running once the IPC server accepts our token (it binds only after the
+     * engine has opened its workspace — and, signed out, its local edge).
+     * Which edge the engine syncs through is the engine's to say
+     * (`EdgeBearer`): the app asks it, not the runtime.
      */
     private suspend fun watchHealth(secrets: Secrets) {
-        val startedAt = SystemClock.elapsedRealtime()
-        var warned = false
         var misses = 0
-        var ipc = false
         var ipcRejected = false
         while (true) {
-            // One successful handshake is enough: the IPC server lives and
-            // dies with the engine process, whose liveness the edge's cheap
-            // /health (and waitFor()) already track.
-            if (!ipc) {
-                when (Health.ipcStatus(IPC_PORT, secrets.ipcToken)) {
-                    101 -> ipc = true
-                    401, 403 -> if (!ipcRejected) {
-                        ipcRejected = true
-                        log.note("engine IPC :$IPC_PORT rejected ZERON_IPC_TOKEN; is another engine on the port?")
-                    }
-                    // A pre-token engine ignores the header and upgrades.
-                    else -> {}
-                }
-            }
-            val edge = ipc && Health.edgeHealthy(EDGE_PORT, secrets.edgeToken)
-            when {
-                ipc && edge -> {
+            when (Health.ipcStatus(IPC_PORT, secrets.ipcToken)) {
+                101 -> {
                     misses = 0
                     if (_state.value !is RuntimeState.Running) {
-                        log.note("engine healthy (ipc :$IPC_PORT, edge :$EDGE_PORT)")
+                        log.note("engine healthy (ipc :$IPC_PORT)")
                         _state.value = RuntimeState.Running(
-                            edgeUrl = "http://127.0.0.1:$EDGE_PORT",
-                            edgeToken = secrets.edgeToken,
                             ipcPort = IPC_PORT,
                             ipcToken = secrets.ipcToken,
                             deviceName = guest.deviceName,
                         )
                     }
                 }
-                _state.value is RuntimeState.Running -> if (++misses >= 6) {
+                401, 403 -> if (!ipcRejected) {
+                    ipcRejected = true
+                    log.note("engine IPC :$IPC_PORT rejected ZERON_IPC_TOKEN; is another engine on the port?")
+                }
+                else -> if (_state.value is RuntimeState.Running && ++misses >= 6) {
                     log.note("engine stopped answering health checks")
                     _state.value = RuntimeState.Starting
                     misses = 0
-                }
-                ipc && !warned && SystemClock.elapsedRealtime() - startedAt > EDGE_GRACE_MS -> {
-                    warned = true
-                    log.note("engine IPC :$IPC_PORT is up but the local edge (GET :$EDGE_PORT/health) " +
-                        "isn't answering — this engine build probably predates ZERON_LOCAL_EDGE_* " +
-                        "support. Staying in Starting.")
                 }
             }
             delay(if (_state.value is RuntimeState.Running) 5_000 else 1_000)
@@ -331,7 +339,6 @@ internal class GuestRuntime(private val app: Context) : RuntimeController {
 
     companion object {
         private const val STOP_GRACE_MS = 8_000L
-        private const val EDGE_GRACE_MS = 20_000L
         private const val MAX_QUICK_FAILURES = 5
         private val ENGINE_SIGNALLED = Regex("""proot info: vpid 1: terminated with signal (\d+)""")
 

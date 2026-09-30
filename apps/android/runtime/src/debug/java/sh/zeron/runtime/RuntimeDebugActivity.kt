@@ -232,7 +232,7 @@ class RuntimeDebugActivity : Activity() {
             "Bootstrapping: ${state.step}" + (state.progress?.let { " (${(it * 100).toInt()}%)" } ?: "")
         RuntimeState.Starting -> "Starting…"
         is RuntimeState.Running ->
-            "Running · ${state.deviceName}\nedge ${state.edgeUrl} · ipc :${state.ipcPort}"
+            "Running · ${state.deviceName}\nipc :${state.ipcPort}"
         RuntimeState.Stopped -> "Stopped"
         is RuntimeState.Failed -> "Failed: ${state.reason}"
     } + "\nABI supported: ${runtime.isSupportedAbi}"

@@ -81,7 +81,9 @@ fun AgentsScreen(model: AppModel, onBack: () -> Unit) {
     val workspace by model.workspace.collectAsState()
     val devices = remember(client, workspace?.devices) { model.executionDevices() }
     var deviceId by remember { mutableStateOf<String?>(null) }
-    val device = devices.firstOrNull { it.id == deviceId } ?: devices.firstOrNull { it.online } ?: devices.firstOrNull()
+    // This phone first: it's the device whose agents are managed from here most.
+    val device = devices.firstOrNull { it.id == deviceId } ?: devices.firstOrNull { it.isSelf }
+        ?: devices.firstOrNull { it.online } ?: devices.firstOrNull()
     var harnesses by remember { mutableStateOf<List<Agents.Harness>?>(null) }
     var accounts by remember { mutableStateOf(Agents.Accounts(emptyList(), emptyMap())) }
     var versions by remember { mutableStateOf<Map<String, Agents.Version>>(emptyMap()) }
@@ -149,9 +151,9 @@ fun AgentsScreen(model: AppModel, onBack: () -> Unit) {
         if (devices.size > 1) {
             item {
                 Row(Modifier.padding(horizontal = 16.dp, vertical = 4.dp)) {
-                    ContextChip(device.name, leading = { ZIcon(ZIcons.Laptop, null, Modifier.size(16.dp)) }, onClick = { pickDevice = true }) {
+                    ContextChip(device.name, leading = { ZIcon(sh.zeron.android.core.DeviceIdentity.icon(device.platform), null, Modifier.size(16.dp)) }, onClick = { pickDevice = true }) {
                         ChoiceMenu(pickDevice, { pickDevice = false }, listOf(MenuSection("Device", devices.map { d ->
-                            MenuChoice(d.name, d.id == device.id, if (d.online) "Online" else "Offline") {
+                            MenuChoice(d.name, d.id == device.id, if (d.isSelf) "This phone" else if (d.online) "Online" else "Offline") {
                                 deviceId = d.id
                                 harnesses = null
                             }

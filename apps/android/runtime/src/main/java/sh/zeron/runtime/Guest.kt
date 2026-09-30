@@ -12,6 +12,9 @@ internal const val EDGE_PORT = 27655
 internal const val IPC_PORT = 27654
 internal const val GUEST_HOME = "/home/zeron"
 
+/** Where the engine clones and creates projects (`ZERON_PROJECTS_DIR`). */
+const val PROJECTS_ROOT = "$GUEST_HOME/projects"
+
 /** Host-side layout of the runtime (docs/android.md § Runtime contract). */
 internal class RuntimePaths(context: Context) {
     val nativeLibDir = File(context.applicationInfo.nativeLibraryDir)
@@ -54,7 +57,13 @@ internal class Guest(private val context: Context, private val paths: RuntimePat
             ?.takeIf { it.isNotBlank() } ?: Build.MODEL
     }
 
-    fun env(secrets: Secrets): List<String> = listOf(
+    /**
+     * The engine's environment. By default it embeds the local edge (serving
+     * the signed-out workspace to the app; a saved sign-in makes it a synced
+     * device and leaves the edge off); a [CustomServer] joins that edge in
+     * development scope as the single-tenant `local` identity instead.
+     */
+    fun env(secrets: Secrets, server: CustomServer? = null): List<String> = listOf(
         "HOME=$GUEST_HOME",
         "USER=zeron",
         "LOGNAME=zeron",
@@ -67,8 +76,7 @@ internal class Guest(private val context: Context, private val paths: RuntimePat
         "ZERON_DEVICE_NAME=$deviceName",
         "ZERON_DEVICE_PLATFORM=android",
         "ZERON_NO_LOGIN_SHELL=1",
-        "ZERON_LOCAL_EDGE_PORT=$EDGE_PORT",
-        "ZERON_LOCAL_EDGE_TOKEN=${secrets.edgeToken}",
+        "ZERON_PROJECTS_DIR=$PROJECTS_ROOT",
         "ZERON_IPC_PORT=$IPC_PORT",
         "ZERON_IPC_TOKEN=${secrets.ipcToken}",
         // Claude Code's documented setting for musl distros: use Alpine's
@@ -77,7 +85,16 @@ internal class Guest(private val context: Context, private val paths: RuntimePat
         // The log is a file shown in the app, not a terminal: without this
         // tracing (and the CLIs it spawns) write ANSI colour escapes into it.
         "NO_COLOR=1",
-    )
+    ) + if (server == null) {
+        listOf("ZERON_LOCAL_EDGE_PORT=$EDGE_PORT", "ZERON_LOCAL_EDGE_TOKEN=${secrets.edgeToken}")
+    } else {
+        listOf(
+            "ZERON_EDGE_URL=${server.edgeUrl}",
+            "ZERON_EDGE_TOKEN=${server.token}",
+            "ZERON_USER_ID=local",
+            "ZERON_ORG_ID=local",
+        )
+    }
 
     /**
      * The full host argv. `-0` (fake root) is for bootstrap package installs

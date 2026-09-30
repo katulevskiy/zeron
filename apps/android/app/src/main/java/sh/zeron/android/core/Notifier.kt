@@ -18,10 +18,10 @@ import uniffi.zeron_core.SessionRow
 import uniffi.zeron_core.WorkspaceSnapshot
 
 /**
- * Local session notifications for the on-device engine (there is no push in
- * phone mode — the engine is right here): the desktop's rule — a run
- * finished, needs your input, or failed — posted only while Zeron is in the
- * background. Tapping one opens the session.
+ * Local session notifications (Android has no push; the device's client keeps
+ * syncing while its engine runs): the desktop's rule — a run finished, needs
+ * your input, or failed — posted only while Zeron is in the background.
+ * Tapping one opens the session.
  */
 class Notifier(private val context: Context) {
     enum class Kind { Done, Input, Failed }

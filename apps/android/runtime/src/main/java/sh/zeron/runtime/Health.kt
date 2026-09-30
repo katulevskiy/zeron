@@ -46,21 +46,6 @@ internal object Health {
         null
     }
 
-    /** GET /health with the edge bearer; any 2xx is healthy. */
-    fun edgeHealthy(port: Int, token: String): Boolean = try {
-        Socket().use { socket ->
-            socket.connect(InetSocketAddress("127.0.0.1", port), TIMEOUT_MS)
-            socket.soTimeout = TIMEOUT_MS
-            socket.getOutputStream().write(
-                ("GET /health HTTP/1.1\r\nHost: 127.0.0.1:$port\r\n" +
-                    "Authorization: Bearer $token\r\nConnection: close\r\n\r\n").toByteArray(),
-            )
-            readLine(socket).split(' ').getOrNull(1)?.toIntOrNull() in 200..299
-        }
-    } catch (_: Exception) {
-        false
-    }
-
     // The status line only; unbuffered so nothing else is consumed.
     private fun readLine(socket: Socket): String {
         val input = socket.getInputStream()

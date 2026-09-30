@@ -43,7 +43,6 @@ import androidx.navigation.NavHostController
 import androidx.navigation.compose.NavHost
 import androidx.navigation.compose.composable
 import androidx.navigation.compose.rememberNavController
-import sh.zeron.android.core.AppMode
 import sh.zeron.android.core.AppModel
 import sh.zeron.android.design.ZeronTheme
 
@@ -53,25 +52,21 @@ fun ZeronRoot(model: AppModel) {
     ZeronTheme(appearance) {
         Surface(Modifier.fillMaxSize(), color = MaterialTheme.colorScheme.background) {
             val client by model.client.collectAsState()
-            val mode by model.mode.collectAsState()
-            // Phone mode without a client yet: set up / start the on-device engine.
-            val gate = when {
-                client != null -> Gate.Main
-                mode == AppMode.Phone -> Gate.PhoneSetup
-                else -> Gate.SignIn
-            }
+            val onboarded by model.onboarded.collectAsState()
+            // First run: sign in, continue without an account, or the demo.
+            // Past it, the main UI shows while this phone's engine comes up.
+            val gate = if (onboarded || client?.isDemo() == true) Gate.Main else Gate.FirstRun
             AnimatedContent(gate, transitionSpec = { fadeIn() togetherWith fadeOut() }, label = "root") {
                 when (it) {
                     Gate.Main -> MainNav(model)
-                    Gate.PhoneSetup -> PhoneSetupScreen(model)
-                    Gate.SignIn -> SignInScreen(model)
+                    Gate.FirstRun -> SignInScreen(model)
                 }
             }
         }
     }
 }
 
-private enum class Gate { Main, PhoneSetup, SignIn }
+private enum class Gate { Main, FirstRun }
 
 object Routes {
     const val HOME = "home"
@@ -113,7 +108,7 @@ private fun MainNav(model: AppModel) {
         composable(Routes.SEARCH) {
             SearchScreen(model, onBack = { nav.popBackStack() }, onOpen = { nav.navigate(Routes.chat(it)) })
         }
-        composable(Routes.ENGINE) { EngineScreen(model, onBack = { nav.popBackStack() }) }
+        composable(Routes.ENGINE) { EngineScreen(model, onBack = { nav.popBackStack() }, onAgents = { nav.navigate(Routes.AGENTS) }) }
         composable(Routes.AGENTS) { AgentsScreen(model, onBack = { nav.popBackStack() }) }
     }
 }
