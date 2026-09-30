@@ -1527,6 +1527,8 @@ impl Composer {
             self.attachments
                 .insert(self.current_key.clone(), attachments);
         }
+        // Remote draft frames were held back while the row occupied the box.
+        self.reconcile_draft(cx);
         self.focus_pending = true;
         cx.notify();
     }
