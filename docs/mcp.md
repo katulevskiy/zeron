@@ -116,6 +116,18 @@ name (default: the local engine's device).
 | `interrupt_chat`   | `QueueCommand` Interrupt                                  |
 | `respond_to_input` | `QueueCommand` RespondInput                               |
 | `archive_chat`     | `Mutate setChatArchived`                                  |
+| `send_files`       | `SendFiles` (+ `ListFileTransfers` with `wait`)           |
+
+`send_files {paths[], device?, destination?, wait?}` sends files or folders
+from the chat's host device straight to another of the user's devices
+(`docs/file-transfer.md`) — "send me the apk" from a remote thread puts it on
+the phone. Relative paths resolve against the chat's working directory.
+Without `device` the engine picks the device that typed the chat's latest
+user message (agent-to-agent messages don't count); if that was the host
+itself, a viewer without an engine, or there is no such message, the tool
+fails with the list of devices that can receive. `list_devices` flags them
+with `canReceiveFiles`. It returns once the transfer starts; `wait: true`
+blocks until it completes, fails or is declined (`timeout_secs`, default 600).
 
 Watch streams are the engine's only read surface (there is no one-shot "get
 transcript" RPC); a snapshot is "subscribe, take the first item, drop" — drop
