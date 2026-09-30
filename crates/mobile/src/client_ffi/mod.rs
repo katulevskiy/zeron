@@ -13,6 +13,7 @@
 
 mod demo_host;
 mod session;
+mod tools;
 mod types;
 
 use std::sync::Arc;
@@ -20,6 +21,7 @@ use std::sync::Arc;
 use zeron_client as zc;
 
 pub use session::*;
+pub use tools::*;
 pub use types::*;
 
 /// Receives coalesced change events (at most one burst per display frame).
