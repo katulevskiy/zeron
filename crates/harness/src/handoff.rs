@@ -100,6 +100,26 @@ pub struct HarnessHandoff {
     pub undrained_steers: Vec<SteerRecord>,
 }
 
+impl HarnessHandoff {
+    /// The `stdin_fd` / `stdout_fd` of a child that has no such pipe: an
+    /// OpenCode server runs with stdin and stdout on `/dev/null` and is
+    /// reached over loopback HTTP. The engine carries, validates and
+    /// duplicates only real descriptors (see [`Self::fds`]).
+    pub const NO_PIPE: i32 = -1;
+
+    /// Every descriptor this handoff carries across the exec — stdin, stdout,
+    /// stderr, then [`Self::extra_fds`] — without the [`Self::NO_PIPE`]
+    /// placeholders.
+    pub fn fds(&self) -> Vec<i32> {
+        [self.stdin_fd, self.stdout_fd]
+            .into_iter()
+            .filter(|fd| *fd != Self::NO_PIPE)
+            .chain(self.stderr_fd)
+            .chain(self.extra_fds.iter().copied())
+            .collect()
+    }
+}
+
 // `state` will carry secrets (an OpenCode server's password), so `Debug` — which
 // ends up in logs and panic messages — shows sizes, not contents.
 impl std::fmt::Debug for HarnessHandoff {
@@ -1307,6 +1327,16 @@ mod tests {
         let mut bad: serde_json::Value = serde_json::from_str(&text).unwrap();
         bad["stdout_leftover"] = serde_json::json!("not base64 !!");
         assert!(serde_json::from_value::<HarnessHandoff>(bad).is_err());
+    }
+
+    #[test]
+    fn fds_lists_every_carried_descriptor_but_no_pipe_placeholders() {
+        let mut handoff = handoff_for_tests();
+        handoff.extra_fds = vec![9];
+        assert_eq!(handoff.fds(), [5, 6, 7, 9]);
+        handoff.stdin_fd = HarnessHandoff::NO_PIPE;
+        handoff.stdout_fd = HarnessHandoff::NO_PIPE;
+        assert_eq!(handoff.fds(), [7, 9]);
     }
 
     #[test]

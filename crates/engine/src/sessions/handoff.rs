@@ -74,12 +74,10 @@ pub struct PendingInputRecord {
 }
 
 impl RunHandoff {
-    /// The inherited descriptors this run's adoption is responsible for.
+    /// The inherited descriptors this run's adoption is responsible for
+    /// (never a [`HarnessHandoff::NO_PIPE`] placeholder).
     pub fn fds(&self) -> Vec<RawFd> {
-        let mut fds = vec![self.harness.stdin_fd, self.harness.stdout_fd];
-        fds.extend(self.harness.stderr_fd);
-        fds.extend(self.harness.extra_fds.iter().copied());
-        fds
+        self.harness.fds()
     }
 }
 
@@ -516,7 +514,8 @@ impl SessionsEngine {
 
 /// Replace every descriptor number `handoff` names with an engine-owned
 /// close-on-exec duplicate (returned so the caller keeps them open), refusing
-/// standard streams and anything not open.
+/// standard streams and anything not open. A [`HarnessHandoff::NO_PIPE`]
+/// stdin/stdout (a child without such a pipe) stays as it is.
 fn dup_harness_fds(
     handoff: &mut zeron_harness::HarnessHandoff,
 ) -> Result<Vec<std::os::fd::OwnedFd>, EngineError> {
@@ -538,8 +537,11 @@ fn dup_harness_fds(
         owned.push(unsafe { OwnedFd::from_raw_fd(copy) });
         Ok(copy)
     };
-    handoff.stdin_fd = dup(handoff.stdin_fd)?;
-    handoff.stdout_fd = dup(handoff.stdout_fd)?;
+    for fd in [&mut handoff.stdin_fd, &mut handoff.stdout_fd] {
+        if *fd != HarnessHandoff::NO_PIPE {
+            *fd = dup(*fd)?;
+        }
+    }
     if let Some(fd) = handoff.stderr_fd {
         handoff.stderr_fd = Some(dup(fd)?);
     }
@@ -689,6 +691,53 @@ mod tests {
 
     fn rig() -> Rig {
         rig_with(Arc::new(FreezableMock))
+    }
+
+    /// An OpenCode run: its server's stdin and stdout are /dev/null, so only
+    /// stderr is a pipe to carry.
+    #[test]
+    fn a_run_without_stdio_pipes_carries_and_duplicates_only_its_real_descriptors() {
+        let mut pipe = [0; 2];
+        assert_eq!(unsafe { libc::pipe(pipe.as_mut_ptr()) }, 0);
+        let request = request("x");
+        let run = RunHandoff {
+            chat_id: "c1".into(),
+            run_id: "r1".into(),
+            runtime_config: RuntimeConfig::from_request(HarnessId::Opencode, &request),
+            request,
+            routed_steers: Vec::new(),
+            undrained_steers: Vec::new(),
+            pending_inputs: Vec::new(),
+            fork_history_sent: false,
+            session: None,
+            fold: FoldSnapshot::default(),
+            harness: HarnessHandoff {
+                harness: HarnessId::Opencode,
+                state_version: 1,
+                pid: 4242,
+                stdin_fd: HarnessHandoff::NO_PIPE,
+                stdout_fd: HarnessHandoff::NO_PIPE,
+                stderr_fd: Some(pipe[0]),
+                extra_fds: Vec::new(),
+                stdout_leftover: Vec::new(),
+                stderr_tail: Vec::new(),
+                state: serde_json::Value::Null,
+                undrained_steers: Vec::new(),
+            },
+        };
+        // Flagged inheritable, validated and closed: the real pipe only.
+        assert_eq!(run.fds(), vec![pipe[0]]);
+        let mut harness = run.harness.clone();
+        let owned = dup_harness_fds(&mut harness).expect("a placeholder is not refused");
+        assert_eq!(owned.len(), 1);
+        assert_eq!(harness.stdin_fd, HarnessHandoff::NO_PIPE);
+        assert_eq!(harness.stdout_fd, HarnessHandoff::NO_PIPE);
+        assert_eq!(harness.stderr_fd, Some(owned[0].as_raw_fd()));
+        drop(owned);
+        unsafe {
+            libc::close(pipe[0]);
+            libc::close(pipe[1]);
+        }
     }
 
     impl Rig {

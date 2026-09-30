@@ -1300,7 +1300,9 @@ fn questions_map_to_input_panel_shape() {
     });
     let questions = map_questions(&props);
     assert_eq!(questions.len(), 1);
-    assert_eq!(questions[0].id, "q0");
+    // Unique across requests: after a live update the engine re-attaches a
+    // parked question by one of its ids.
+    assert_eq!(questions[0].id, "que_1/q0");
     assert_eq!(questions[0].header, "Color");
     assert_eq!(questions[0].question, "Which color?");
     assert_eq!(questions[0].options, vec!["Red", "Blue"]);
