@@ -961,8 +961,13 @@ impl Tools {
                 result["state"] = serde_json::to_value(row.state)?;
                 result["bytes"] = row.total_bytes.into();
                 result["files"] = row.file_count.into();
-                if let Some(error) = &row.error {
-                    result["error"] = error.clone().into();
+                // Only the latest row's note: a transient "Reconnecting…"
+                // must not outlive the reconnect.
+                match &row.error {
+                    Some(error) => result["error"] = error.clone().into(),
+                    None => {
+                        result.as_object_mut().map(|r| r.remove("error"));
+                    }
                 }
                 if row.state.is_terminal() {
                     return Ok(result);
@@ -1222,6 +1227,8 @@ mod tests {
         writes: Mutex<Vec<(String, Value)>>,
         dispatch_barrier: Option<tokio::sync::Barrier>,
         beta_parent: Option<String>,
+        /// `ListFileTransfers` calls so far (the first reports a reconnect).
+        transfer_polls: std::sync::atomic::AtomicUsize,
     }
 
     fn stream(item: Value) -> RpcReply {
@@ -1284,12 +1291,23 @@ mod tests {
                         "transferId": "xfer-1", "toDeviceId": "dev-phone", "toDeviceName": "Pixel"
                     }))
                 }
-                methods::LIST_FILE_TRANSFERS => RpcReply::Value(json!([{
-                    "id": "xfer-1", "direction": "outgoing", "peerDeviceId": "dev-phone",
-                    "peerDeviceName": "Pixel", "state": "completed", "items": [],
-                    "fileCount": 1, "totalBytes": 42, "doneBytes": 42, "bytesPerSec": 0,
-                    "createdAt": 1, "updatedAt": 2
-                }])),
+                methods::LIST_FILE_TRANSFERS => {
+                    let first = self
+                        .transfer_polls
+                        .fetch_add(1, std::sync::atomic::Ordering::SeqCst)
+                        == 0;
+                    let (state, error) = if first {
+                        ("reconnecting", json!("Reconnecting to Pixel…"))
+                    } else {
+                        ("completed", Value::Null)
+                    };
+                    RpcReply::Value(json!([{
+                        "id": "xfer-1", "direction": "outgoing", "peerDeviceId": "dev-phone",
+                        "peerDeviceName": "Pixel", "state": state, "items": [],
+                        "fileCount": 1, "totalBytes": 42, "doneBytes": 42, "bytesPerSec": 0,
+                        "error": error, "createdAt": 1, "updatedAt": 2
+                    }]))
+                }
                 methods::MUTATE | methods::QUEUE_COMMAND | methods::QUEUE_MESSAGE => {
                     self.writes
                         .lock()
@@ -1343,6 +1361,10 @@ mod tests {
             .await
             .unwrap();
         assert_eq!(sent["state"], "completed");
+        assert!(
+            sent.get("error").is_none(),
+            "a finished reconnect leaves no note: {sent}"
+        );
         assert_eq!(sent["device"]["name"], "Pixel");
         let (method, params) = world.writes.lock().unwrap()[0].clone();
         assert_eq!(method, methods::SEND_FILES);
