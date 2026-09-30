@@ -12115,6 +12115,7 @@ dependencies = [
  "tracing-subscriber",
  "windows-sys 0.61.2",
  "zeron-engine",
+ "zeron-localedge",
  "zeron-mcp",
  "zeron-rpc",
  "zeron-ui",
@@ -12224,6 +12225,34 @@ dependencies = [
  "windows-sys 0.61.2",
  "zeron-proto",
  "zip",
+]
+
+[[package]]
+name = "zeron-localedge"
+version = "0.2.99"
+dependencies = [
+ "async-trait",
+ "base64 0.22.1",
+ "bytes",
+ "futures",
+ "http-body-util",
+ "hyper",
+ "hyper-util",
+ "reqwest",
+ "rusqlite",
+ "serde",
+ "serde_json",
+ "subtle",
+ "tempfile",
+ "thiserror 2.0.20",
+ "tokio",
+ "tokio-tungstenite",
+ "tokio-util",
+ "tracing",
+ "uuid",
+ "zeron-doc",
+ "zeron-rpc",
+ "zeron-sync",
 ]
 
 [[package]]
