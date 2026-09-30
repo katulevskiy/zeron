@@ -71,6 +71,12 @@ struct RecvState {
     completing: bool,
 }
 
+enum Decision {
+    Decided(bool),
+    Cancelled,
+    Lost(anyhow::Error),
+}
+
 pub(crate) struct Live {
     session_id: String,
     stop: CancellationToken,
@@ -339,35 +345,24 @@ impl Transfers {
                 row.destination = Some(dest_root.to_string_lossy().into_owned());
                 if self.require_confirmation() {
                     row.state = FileTransferState::AwaitingAcceptance;
-                    let (decision, mut decided) = watch::channel(None);
+                    let (decision, decided) = watch::channel(None);
                     self.0.pending.lock().unwrap().insert(id.clone(), decision);
                     self.insert(row);
-                    wire::write_msg(&mut write, &Msg::Pending).await?;
-                    let mut ping = tokio::time::interval(PENDING_PING);
-                    let accepted = loop {
-                        tokio::select! {
-                            _ = decided.changed() => {
-                                if let Some(accepted) = *decided.borrow() { break accepted; }
-                            }
-                            _ = ping.tick() => wire::write_msg(&mut write, &Msg::Pending).await?,
-                            msg = rx.recv() => match msg {
-                                Some(Ok(Msg::Cancel { .. })) => {
-                                    self.finish(&id, FileTransferState::Cancelled, None);
-                                    return Ok(());
-                                }
-                                Some(Ok(_)) => {}
-                                Some(Err(error)) => {
-                                    // The sender reconnects and asks again.
-                                    self.0.pending.lock().unwrap().remove(&id);
-                                    self.set_note(
-                                        &id,
-                                        FileTransferState::Reconnecting,
-                                        Some("Waiting for the sender to reconnect".into()),
-                                    );
-                                    return Err(error);
-                                }
-                                None => anyhow::bail!("the sender went away"),
-                            },
+                    let accepted = match self.await_decision(&mut write, &mut rx, decided).await {
+                        Decision::Decided(accepted) => accepted,
+                        Decision::Cancelled => {
+                            self.finish(&id, FileTransferState::Cancelled, None);
+                            return Ok(());
+                        }
+                        Decision::Lost(error) => {
+                            // The sender reconnects and asks again.
+                            self.0.pending.lock().unwrap().remove(&id);
+                            self.set_note(
+                                &id,
+                                FileTransferState::Reconnecting,
+                                Some("Waiting for the sender to reconnect".into()),
+                            );
+                            return Err(error);
                         }
                     };
                     self.0.pending.lock().unwrap().remove(&id);
@@ -420,6 +415,46 @@ impl Transfers {
         };
         self.run_receive_session(incoming, session_id, transport, write, rx)
             .await
+    }
+
+    /// Tell the sender to wait (every [`PENDING_PING`]) until this device's
+    /// user decides, the sender cancels, or the lane drops. A lane that
+    /// fails while writing is drained first: a `Cancel` the sender sent
+    /// just before closing must not be mistaken for a lost connection.
+    async fn await_decision<W: tokio::io::AsyncWrite + Unpin>(
+        &self,
+        write: &mut W,
+        rx: &mut mpsc::Receiver<anyhow::Result<Msg>>,
+        mut decided: watch::Receiver<Option<bool>>,
+    ) -> Decision {
+        let mut ping = tokio::time::interval(PENDING_PING);
+        let lost = loop {
+            tokio::select! {
+                _ = decided.changed() => {
+                    if let Some(accepted) = *decided.borrow() {
+                        return Decision::Decided(accepted);
+                    }
+                }
+                _ = ping.tick() => {
+                    if let Err(error) = wire::write_msg(write, &Msg::Pending).await {
+                        break error;
+                    }
+                }
+                msg = rx.recv() => match msg {
+                    Some(Ok(Msg::Cancel { .. })) => return Decision::Cancelled,
+                    Some(Ok(_)) => {}
+                    Some(Err(error)) => return Decision::Lost(error),
+                    None => return Decision::Lost(anyhow::anyhow!("the sender went away")),
+                },
+            }
+        };
+        loop {
+            match tokio::time::timeout(Duration::from_secs(2), rx.recv()).await {
+                Ok(Some(Ok(Msg::Cancel { .. }))) => return Decision::Cancelled,
+                Ok(Some(Ok(_))) => {}
+                _ => return Decision::Lost(lost),
+            }
+        }
     }
 
     async fn lay_out(

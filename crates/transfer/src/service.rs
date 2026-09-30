@@ -140,6 +140,7 @@ impl Transfers {
             stop: CancellationToken::new(),
         }));
         transfers.load_incoming();
+        transfers.forget_unaccepted();
         transfers.publish();
         if let Ok(handle) = tokio::runtime::Handle::try_current() {
             let weak = Arc::downgrade(&transfers.0);
@@ -159,6 +160,18 @@ impl Transfers {
             });
         }
         transfers
+    }
+
+    /// Incoming rows that were never accepted wrote nothing and kept no
+    /// resume state, so they can't outlive a restart: the sender, when it
+    /// redials, simply asks again.
+    fn forget_unaccepted(&self) {
+        let incoming = self.0.incoming.lock().unwrap();
+        self.0.rows.lock().unwrap().list.retain(|row| {
+            row.direction != FileTransferDirection::Incoming
+                || !row.is_live()
+                || incoming.contains_key(&row.id)
+        });
     }
 
     pub fn downgrade(&self) -> WeakTransfers {

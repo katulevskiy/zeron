@@ -625,6 +625,65 @@ async fn confirmation_decline_and_cancel_reach_both_sides() {
     );
 }
 
+/// A sender that cancels and hangs up before the receiver even asked its
+/// user: the queued `Cancel` wins over the broken lane.
+#[tokio::test(flavor = "multi_thread", worker_threads = 4)]
+async fn a_cancel_racing_the_confirmation_prompt_is_not_lost() {
+    let pair = pair(0, 0);
+    let mut settings = pair.receiver.settings();
+    settings.require_confirmation = true;
+    pair.receiver.set_settings(settings).unwrap();
+    for _ in 0..20 {
+        let (mut ours, theirs) = tokio::io::duplex(1024 * 1024);
+        pair.receiver.accept_lane(
+            "laptop".into(),
+            FileTransferTransport::P2p,
+            Box::new(theirs),
+        );
+        let manifest = Manifest {
+            entries: vec![Entry {
+                path: "f.txt".into(),
+                kind: EntryKind::File,
+                size: 4,
+                mode: 0o644,
+                target: None,
+            }],
+        };
+        let transfer_id = uuid::Uuid::new_v4().to_string();
+        for msg in [
+            Msg::Hello {
+                v: wire::PROTOCOL_VERSION,
+                transfer_id: transfer_id.clone(),
+                session_id: "s1".into(),
+                lane: Lane::Control,
+                sender_name: "laptop".into(),
+            },
+            Msg::Offer {
+                entry_count: 1,
+                file_count: 1,
+                total_bytes: 4,
+                digest: manifest.digest(),
+                destination: None,
+                skipped: 0,
+            },
+            Msg::Manifest {
+                entries: manifest.entries.clone(),
+            },
+            Msg::ManifestEnd,
+            Msg::Cancel { reason: None },
+        ] {
+            wire::write_msg(&mut ours, &msg).await.unwrap();
+        }
+        drop(ours);
+        wait_for(
+            &pair.receiver,
+            &transfer_id,
+            state_is(FileTransferState::Cancelled),
+        )
+        .await;
+    }
+}
+
 /// Speak the wire protocol by hand, as a hostile or buggy sender would.
 async fn raw_offer(receiver: &Transfers, entries: Vec<Entry>) -> (BoxIo, Msg) {
     let (mut ours, theirs) = tokio::io::duplex(1024 * 1024);
