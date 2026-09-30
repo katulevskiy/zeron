@@ -3793,6 +3793,12 @@ impl Shell {
                     cx,
                 );
             }
+            // The live row decides placement (a side chat docks beside its
+            // parent, a top-level one is selected); `side` is the card's
+            // reading of the same row.
+            TranscriptEvent::OpenChat { chat_id, side: _ } => {
+                self.open_child_chat_tab(chat_id, cx);
+            }
         }
     }
 
