@@ -89,7 +89,7 @@ jobs:
           path: ~/apt-debs/*.deb
           key: lab-linux-apt-v1-gpui-${{ hashFiles('.lab-ci/scripts/ci/apt-install.sh') }}
       - name: GPUI system dependencies
-        run: .lab-ci/scripts/ci/apt-install.sh $GPUI_DEPS
+        run: bash .lab-ci/scripts/ci/apt-install.sh $GPUI_DEPS
       - uses: actions/cache/save@v4
         if: ${{ inputs.save_cache && steps.aptc.outputs.cache-hit != 'true' }}
         with:
@@ -125,11 +125,11 @@ jobs:
           path: ~/apt-debs/*.deb
           key: lab-linux-apt-v1-browser-${{ hashFiles('.lab-ci/scripts/ci/apt-install.sh') }}
       - name: GPUI system dependencies
-        run: .lab-ci/scripts/ci/apt-install.sh $GPUI_DEPS
+        run: bash .lab-ci/scripts/ci/apt-install.sh $GPUI_DEPS
       - name: Start browser test tool install in the background
         run: |
           rm -f "$RUNNER_TEMP/apt-extras.rc"
-          setsid nohup bash -c 'APT_RECOMMENDS=1 .lab-ci/scripts/ci/apt-install.sh $BROWSER_TOOLS; echo $? > "$RUNNER_TEMP/apt-extras.rc"' \
+          setsid nohup bash -c 'APT_RECOMMENDS=1 bash .lab-ci/scripts/ci/apt-install.sh $BROWSER_TOOLS; echo $? > "$RUNNER_TEMP/apt-extras.rc"' \
             > "$RUNNER_TEMP/apt-extras.log" 2>&1 < /dev/null &
       - name: Rust toolchain
         run: rustup show active-toolchain || rustup toolchain install
@@ -215,6 +215,6 @@ jobs:
         with: {path: .lab-ci, sparse-checkout: scripts/ci}
       - name: Desktop entry validator
         run: |
-          command -v desktop-file-validate || .lab-ci/scripts/ci/apt-install.sh desktop-file-utils
+          command -v desktop-file-validate || bash .lab-ci/scripts/ci/apt-install.sh desktop-file-utils
       - name: Installers write a valid launcher entry
         run: scripts/test-linux-desktop-entry.sh
