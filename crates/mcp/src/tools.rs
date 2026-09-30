@@ -475,11 +475,14 @@ impl Tools {
             "list_models" => self.list_models(parse(args)?).await,
             "list_chats" => self.list_chats(parse(args)?).await,
             "get_chat" => self.get_chat(parse(args)?).await,
-            "create_chat" => self.create_chat(parse(args)?).await,
-            "create_chats" => self.batch(parse(args)?, true).await,
-            "send_messages" => self.batch(parse(args)?, false).await,
+            // The create/send futures are large (resolution, host catalog
+            // reads, delivery and an optional wait inline): box them so a
+            // tool call never overflows a worker thread's stack.
+            "create_chat" => Box::pin(self.create_chat(parse(args)?)).await,
+            "create_chats" => Box::pin(self.batch(parse(args)?, true)).await,
+            "send_messages" => Box::pin(self.batch(parse(args)?, false)).await,
             "read_chat" => self.read_chat(parse(args)?).await,
-            "send_message" => self.send_message(parse(args)?).await,
+            "send_message" => Box::pin(self.send_message(parse(args)?)).await,
             "wait_for_turn" => self.wait_for_turn(parse(args)?).await,
             "interrupt_chat" => self.interrupt_chat(parse(args)?).await,
             "respond_to_input" => self.respond_to_input(parse(args)?).await,
@@ -500,12 +503,12 @@ impl Tools {
             |(index, args)| async move {
                 let result = if create {
                     match serde_json::from_value(args) {
-                        Ok(args) => self.create_chat(args).await,
+                        Ok(args) => Box::pin(self.create_chat(args)).await,
                         Err(error) => Err(error.into()),
                     }
                 } else {
                     match serde_json::from_value(args) {
-                        Ok(args) => self.send_message(args).await,
+                        Ok(args) => Box::pin(self.send_message(args)).await,
                         Err(error) => Err(error.into()),
                     }
                 };
