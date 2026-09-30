@@ -121,6 +121,35 @@ pub struct EngineConfig {
     pub org_id: Option<String>,
     /// WorkOS client id — enables real auth; `None` = dev mode (bearer = `edge_token`).
     pub workos_client_id: Option<String>,
+    /// Development identity when `edge_token` is an opaque shared secret rather
+    /// than `user[@org]` (a `zeron local-edge`, see [`Self::with_local_edge`]).
+    /// `None` = the bearer names the user, as a dev edge parses it.
+    pub dev_user_id: Option<String>,
+}
+
+/// The fixed user and org of a runtime joined to a local edge
+/// (`zeron-localedge`): single tenant, so the ids are constants.
+pub const LOCAL_EDGE_IDENTITY: &str = "local";
+
+impl EngineConfig {
+    /// Join a local edge (`zeron local-edge`): its URL and shared-secret
+    /// bearer, in `Development` scope (no WorkOS) under the fixed
+    /// [`LOCAL_EDGE_IDENTITY`]. The identity is not derived from the token, so
+    /// rotating the secret never moves the profile's store. `zeron headless`
+    /// does the same from `ZERON_EDGE_URL` + `ZERON_EDGE_TOKEN` +
+    /// `ZERON_USER_ID=local ZERON_ORG_ID=local`.
+    pub fn with_local_edge(
+        mut self,
+        edge_url: impl Into<String>,
+        token: impl Into<String>,
+    ) -> Self {
+        self.edge_url = edge_url.into();
+        self.edge_token = Some(token.into());
+        self.dev_user_id = Some(LOCAL_EDGE_IDENTITY.into());
+        self.org_id = Some(LOCAL_EDGE_IDENTITY.into());
+        self.workos_client_id = None;
+        self
+    }
 }
 
 /// The assembled engine core — also constructible without the IPC server for tests
@@ -635,7 +664,13 @@ impl Engine {
                 .unwrap_or(27641),
         );
         if let Some(token) = &config.edge_token {
-            auth_config.dev_user_id = token.clone();
+            match &config.dev_user_id {
+                Some(user) => {
+                    auth_config.dev_user_id = user.clone();
+                    auth_config.dev_bearer = Some(token.clone());
+                }
+                None => auth_config.dev_user_id = token.clone(),
+            }
         }
         Auth::new(auth_config)
     }
