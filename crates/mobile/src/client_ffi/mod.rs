@@ -13,6 +13,7 @@
 
 mod demo_host;
 mod session;
+mod subagents;
 mod tools;
 mod types;
 
@@ -21,6 +22,7 @@ use std::sync::Arc;
 use zeron_client as zc;
 
 pub use session::*;
+pub use subagents::*;
 pub use tools::*;
 pub use types::*;
 
@@ -72,8 +74,11 @@ impl CoreClient {
     /// The Rust session handle for `chat_id` — opening it if needed — for the
     /// layout engine: `handle.snapshot()` (an `Arc<SessionSnapshot>`) and
     /// `handle.subscribe()` (a `watch::Receiver`). `None` for an unknown chat.
+    /// A subagent transcript is found once `open_subagent` has opened it.
     pub fn session_handle(&self, chat_id: &str) -> Option<zc::SessionHandle> {
-        self.client.open_session(chat_id).ok()
+        self.client
+            .session(chat_id)
+            .or_else(|| self.client.open_session(chat_id).ok())
     }
 }
 
