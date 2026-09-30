@@ -19,7 +19,12 @@
 //! SUSPENDS the client; it does not end it:
 //!
 //! 1. it refuses ([`FreezeRefusal::Busy`]) while a request of ours awaits its
-//!    response — that response would reach nobody after an exec;
+//!    response — that response would reach nobody after an exec. A protocol
+//!    whose requests are long-lived (ACP's `session/prompt` spans a whole
+//!    turn) uses [`RpcClient::freeze_carrying_requests`] instead: it exports
+//!    them as [`RpcFrozen::in_flight`], and the successor re-registers the
+//!    ones it still waits for with [`RpcClient::resume_request`], so their
+//!    responses reach the adopted loop;
 //! 2. the writer finishes the lines already queued and pauses, keeping stdin
 //!    and its queue ([`WriteMsg::Pause`]);
 //! 3. the reader stops at a line boundary and parks, keeping its
@@ -33,6 +38,10 @@
 //! [`RpcClient::from_parts`] (same pipes, `leftover`, [`RpcFrozen::next_id`])
 //! sees exactly the stream the old loop had not handled yet, in order, and
 //! never reuses a request id (a late response cannot resolve the wrong call).
+//!
+//! A caller that drops its request future gives the id up: the entry leaves
+//! the pending table at once, so an abandoned call never blocks a freeze and
+//! its late response is discarded.
 //!
 //! Dropping the [`RpcFrozen`] THAWS: the taken messages are redelivered first,
 //! in order, then reading resumes with the same buffer and the paused lines
@@ -88,9 +97,39 @@ impl Incoming {
     }
 }
 
-type StdoutObserver = Box<dyn Fn(&str) + Send>;
+pub(crate) type StdoutObserver = Box<dyn Fn(&str) + Send>;
 
-type Pending = Arc<Mutex<HashMap<i64, oneshot::Sender<Result<Value, String>>>>>;
+/// Our requests awaiting a response, by id.
+type Pending = Arc<Mutex<HashMap<i64, PendingCall>>>;
+
+struct PendingCall {
+    method: String,
+    reply: oneshot::Sender<Result<Value, String>>,
+}
+
+/// A request of ours still awaiting its response when a client froze (see
+/// [`RpcClient::freeze_carrying_requests`]).
+#[derive(Debug, Clone, PartialEq, Eq, serde::Serialize, serde::Deserialize)]
+pub(crate) struct InFlight {
+    pub id: i64,
+    pub method: String,
+}
+
+/// Removes a request from the pending table when its caller goes away
+/// without the response (a dropped future), so the id is not "in flight"
+/// forever. A no-op once the reader has resolved it.
+struct ForgetOnDrop {
+    pending: Pending,
+    id: i64,
+}
+
+impl Drop for ForgetOnDrop {
+    fn drop(&mut self) {
+        if let Ok(mut pending) = self.pending.lock() {
+            pending.remove(&self.id);
+        }
+    }
+}
 
 /// How long a freeze waits for the queued stdin lines to be written. A child
 /// that stops reading its input would otherwise wedge the freeze; the freeze
@@ -120,7 +159,8 @@ impl RpcClient {
         stdout: ChildStdout,
         observer: Option<StdoutObserver>,
     ) -> (Self, mpsc::Receiver<Incoming>) {
-        Self::start(stdin, stdout, Vec::new(), 1, observer)
+        let (client, incoming, _) = Self::start(stdin, stdout, Vec::new(), 1, observer, &[]);
+        (client, incoming)
     }
 
     /// Resume a client a previous image froze (see the module docs): `stdin`
@@ -154,16 +194,67 @@ impl RpcClient {
         W: AsyncWrite + WriterFd + Unpin + Send + 'static,
         R: AsyncRead + PipeFd + Unpin + Send + 'static,
     {
-        Self::start(stdin, stdout, leftover, next_id, observer)
+        let (client, incoming, _) = Self::start(stdin, stdout, leftover, next_id, observer, &[]);
+        (client, incoming)
     }
 
+    /// [`Self::from_parts_with_observer`] for a client that carries requests a
+    /// previous image froze in flight ([`RpcFrozen::in_flight`]): they are
+    /// entered in the pending table BEFORE the reader starts, so a response
+    /// already sitting in `leftover` (or in the pipe) cannot be read and
+    /// discarded as unknown before its waiter exists. The returned futures
+    /// correspond to `carried`, in order; each resolves with its response
+    /// whenever it arrives (nothing is written), and is an error for an id this
+    /// client could issue itself or a duplicate.
+    pub(crate) fn from_parts_carrying<W, R>(
+        stdin: W,
+        stdout: R,
+        leftover: Vec<u8>,
+        next_id: i64,
+        observer: Option<StdoutObserver>,
+        carried: &[InFlight],
+    ) -> (
+        Self,
+        mpsc::Receiver<Incoming>,
+        Vec<futures::future::BoxFuture<'static, Result<Value, HarnessError>>>,
+    )
+    where
+        W: AsyncWrite + WriterFd + Unpin + Send + 'static,
+        R: AsyncRead + PipeFd + Unpin + Send + 'static,
+    {
+        let (client, incoming, receivers) =
+            Self::start(stdin, stdout, leftover, next_id, observer, carried);
+        let futures = carried
+            .iter()
+            .zip(receivers)
+            .map(|(call, rx)| match rx {
+                Some(rx) => client.await_response(call.id, call.method.clone(), rx),
+                None => {
+                    let (method, id) = (call.method.clone(), call.id);
+                    Box::pin(async move {
+                        Err(HarnessError::Protocol(format!(
+                            "{method}: request id {id} cannot be resumed here"
+                        )))
+                    }) as futures::future::BoxFuture<'static, _>
+                }
+            })
+            .collect();
+        (client, incoming, futures)
+    }
+
+    #[allow(clippy::type_complexity)]
     fn start<W, R>(
         stdin: W,
         stdout: R,
         leftover: Vec<u8>,
         next_id: i64,
         observer: Option<StdoutObserver>,
-    ) -> (Self, mpsc::Receiver<Incoming>)
+        carried: &[InFlight],
+    ) -> (
+        Self,
+        mpsc::Receiver<Incoming>,
+        Vec<Option<oneshot::Receiver<Result<Value, String>>>>,
+    )
     where
         W: AsyncWrite + WriterFd + Unpin + Send + 'static,
         R: AsyncRead + PipeFd + Unpin + Send + 'static,
@@ -171,6 +262,27 @@ impl RpcClient {
         let (writer_tx, writer_rx) = mpsc::unbounded_channel::<WriteMsg>();
         tokio::spawn(run_writer(stdin, writer_rx, "rpc"));
         let pending: Pending = Arc::default();
+        // Carried requests wait BEFORE the reader can see their responses.
+        let receivers: Vec<_> = {
+            let mut table = pending.lock().expect("pending lock");
+            carried
+                .iter()
+                .map(|call| {
+                    if call.id >= next_id || table.contains_key(&call.id) {
+                        return None;
+                    }
+                    let (tx, rx) = oneshot::channel();
+                    table.insert(
+                        call.id,
+                        PendingCall {
+                            method: call.method.clone(),
+                            reply: tx,
+                        },
+                    );
+                    Some(rx)
+                })
+                .collect()
+        };
         let (incoming_tx, incoming_rx) = mpsc::channel(256);
         let closed = Arc::new(AtomicBool::new(false));
         let (reader_tx, reader_rx) = mpsc::unbounded_channel();
@@ -191,6 +303,7 @@ impl RpcClient {
                 reader: reader_tx,
             },
             incoming_rx,
+            receivers,
         )
     }
 
@@ -221,9 +334,36 @@ impl RpcClient {
         &self,
         incoming: &mut mpsc::Receiver<Incoming>,
     ) -> Result<RpcFrozen, FreezeRefusal> {
+        self.freeze_with(incoming, false).await
+    }
+
+    /// [`Self::freeze`] for a protocol whose requests outlive a safe point
+    /// (ACP's `session/prompt` is in flight for a whole turn): instead of
+    /// refusing while requests of ours await their responses, it lists them
+    /// in [`RpcFrozen::in_flight`] (taken once the reader has stopped, so no
+    /// response can slip between the list and the pipe). A successor
+    /// re-registers the ones it still waits for with
+    /// [`Self::resume_request`]; their responses, still in the pipe or not
+    /// yet written, then reach it.
+    ///
+    /// A request missing from the list was already answered: its caller
+    /// holds the response (the run loop must handle it before a hand-over).
+    /// A thaw leaves every request with its caller, untouched.
+    pub async fn freeze_carrying_requests(
+        &self,
+        incoming: &mut mpsc::Receiver<Incoming>,
+    ) -> Result<RpcFrozen, FreezeRefusal> {
+        self.freeze_with(incoming, true).await
+    }
+
+    async fn freeze_with(
+        &self,
+        incoming: &mut mpsc::Receiver<Incoming>,
+        carry_requests: bool,
+    ) -> Result<RpcFrozen, FreezeRefusal> {
         const IN_FLIGHT: FreezeRefusal = FreezeRefusal::Busy("a JSON-RPC request is in flight");
         const OUTPUT_CLOSED: FreezeRefusal = FreezeRefusal::Busy("the agent's output has closed");
-        if self.has_pending() {
+        if !carry_requests && self.has_pending() {
             return Err(IN_FLIGHT);
         }
         if self.is_closed() {
@@ -259,9 +399,24 @@ impl RpcClient {
             reader.redeliver.push_back(message);
         }
         reader.redeliver.extend(parked.backlog);
-        if self.has_pending() {
+        let in_flight = if carry_requests {
+            let mut calls: Vec<InFlight> = self
+                .pending
+                .lock()
+                .expect("pending lock")
+                .iter()
+                .map(|(id, call)| InFlight {
+                    id: *id,
+                    method: call.method.clone(),
+                })
+                .collect();
+            calls.sort_by_key(|call| call.id);
+            calls
+        } else if self.has_pending() {
             return Err(IN_FLIGHT);
-        }
+        } else {
+            Vec::new()
+        };
         let mut leftover = Vec::new();
         for message in &reader.redeliver {
             // An EOF is never followed by a parked reader; refuse if it were.
@@ -281,6 +436,7 @@ impl RpcClient {
             stdout_fd: parked.stdout_fd,
             leftover,
             next_id: self.next_request_id(),
+            in_flight,
             writer: Some(paused),
             reader,
             closed: self.closed.clone(),
@@ -300,32 +456,109 @@ impl RpcClient {
         method: &str,
         params: Value,
     ) -> futures::future::BoxFuture<'static, Result<Value, HarnessError>> {
+        self.request_with_id(method, params).1
+    }
+
+    /// [`Self::request_now`], also returning the request's id (a run that may
+    /// hand this request to a successor names it by id; see
+    /// [`Self::freeze_carrying_requests`]).
+    pub fn request_with_id(
+        &self,
+        method: &str,
+        params: Value,
+    ) -> (
+        i64,
+        futures::future::BoxFuture<'static, Result<Value, HarnessError>>,
+    ) {
         let method = method.to_owned();
         let id = self.next_id.fetch_add(1, Ordering::Relaxed) + 1;
-        let (tx, rx) = oneshot::channel();
-        {
-            let mut pending = self.pending.lock().expect("pending lock");
-            // Check under the same lock as EOF cleanup: a request racing the
-            // reader exit must either be rejected here or cleared by it.
-            if self.is_closed() {
-                return Box::pin(async move {
+        let Some(rx) = self.register(id, &method) else {
+            return (
+                id,
+                Box::pin(async move {
                     Err(HarnessError::Protocol(format!(
                         "{method}: app-server exited before responding"
                     )))
-                });
-            }
-            pending.insert(id, tx);
-        }
+                }),
+            );
+        };
         let line = json!({ "jsonrpc": "2.0", "id": id, "method": method, "params": params });
         if self.writer.send(WriteMsg::Line(line.to_string())).is_err() {
             self.pending.lock().expect("pending lock").remove(&id);
+            return (
+                id,
+                Box::pin(async move {
+                    Err(HarnessError::Protocol(format!(
+                        "{method}: app-server stdin closed"
+                    )))
+                }),
+            );
+        }
+        (id, self.await_response(id, method, rx))
+    }
+
+    /// Wait again for a request a previous image sent and froze in flight
+    /// ([`RpcFrozen::in_flight`]): its response, whenever it arrives, resolves
+    /// the returned future. Nothing is written. Refused for an id this client
+    /// could still issue itself or already waits for.
+    pub fn resume_request(
+        &self,
+        call: &InFlight,
+    ) -> futures::future::BoxFuture<'static, Result<Value, HarnessError>> {
+        let method = call.method.clone();
+        let id = call.id;
+        if id >= self.next_request_id() || self.is_pending(id) {
             return Box::pin(async move {
                 Err(HarnessError::Protocol(format!(
-                    "{method}: app-server stdin closed"
+                    "{method}: request id {id} cannot be resumed here"
                 )))
             });
         }
+        let Some(rx) = self.register(call.id, &method) else {
+            return Box::pin(async move {
+                Err(HarnessError::Protocol(format!(
+                    "{method}: app-server exited before responding"
+                )))
+            });
+        };
+        self.await_response(call.id, method, rx)
+    }
+
+    fn is_pending(&self, id: i64) -> bool {
+        self.pending.lock().expect("pending lock").contains_key(&id)
+    }
+
+    /// Enter `id` in the pending table; `None` once the output has closed.
+    fn register(&self, id: i64, method: &str) -> Option<oneshot::Receiver<Result<Value, String>>> {
+        let (tx, rx) = oneshot::channel();
+        let mut pending = self.pending.lock().expect("pending lock");
+        // Check under the same lock as EOF cleanup: a request racing the
+        // reader exit must either be rejected here or cleared by it.
+        if self.is_closed() {
+            return None;
+        }
+        pending.insert(
+            id,
+            PendingCall {
+                method: method.to_owned(),
+                reply: tx,
+            },
+        );
+        Some(rx)
+    }
+
+    fn await_response(
+        &self,
+        id: i64,
+        method: String,
+        rx: oneshot::Receiver<Result<Value, String>>,
+    ) -> futures::future::BoxFuture<'static, Result<Value, HarnessError>> {
+        let forget = ForgetOnDrop {
+            pending: Arc::clone(&self.pending),
+            id,
+        };
         Box::pin(async move {
+            let _forget = forget;
             match rx.await {
                 Ok(Ok(result)) => Ok(result),
                 Ok(Err(message)) => Err(HarnessError::Protocol(format!("{method}: {message}"))),
@@ -413,6 +646,9 @@ pub(crate) struct RpcFrozen {
     /// The id the next request must carry; ids already used may still be
     /// answered late and must never be reused.
     pub next_id: i64,
+    /// Requests of ours still awaiting their responses, oldest first (only
+    /// from [`RpcClient::freeze_carrying_requests`]; otherwise empty).
+    pub in_flight: Vec<InFlight>,
     writer: Option<PausedWriter>,
     reader: ReaderGuard,
     closed: Arc<AtomicBool>,
@@ -438,6 +674,7 @@ impl std::fmt::Debug for RpcFrozen {
             .field("stdout_fd", &self.stdout_fd)
             .field("leftover_bytes", &self.leftover.len())
             .field("next_id", &self.next_id)
+            .field("in_flight", &self.in_flight)
             .finish()
     }
 }
@@ -612,7 +849,8 @@ fn parse_line(
             let sender = pending
                 .lock()
                 .expect("pending lock")
-                .remove(&response_id(id)?)?;
+                .remove(&response_id(id)?)?
+                .reply;
             let outcome = match msg.get("error") {
                 Some(err) => Err(response_error(err)),
                 None => Ok(msg
@@ -772,6 +1010,47 @@ mod tests {
             out: server_out,
         };
         (client, incoming, server)
+    }
+
+    /// A carried request's response can already be buffered when the adopter's
+    /// reader starts (the old image read it off the pipe but had not handled it
+    /// yet). The request must be registered BEFORE the reader runs, or the
+    /// response is read and discarded as unknown and the waiter hangs forever.
+    /// (Tokio's scheduling usually hides the ordering bug, so this pins the
+    /// contract — carried ids are waiting before the reader exists — more than
+    /// it reproduces a failure.)
+    #[tokio::test(flavor = "multi_thread", worker_threads = 4)]
+    async fn a_carried_request_whose_response_is_already_buffered_still_resolves() {
+        for round in 0..50 {
+            let leftover = format!(
+                "{}\n",
+                json!({"jsonrpc": "2.0", "id": 4, "result": {"round": round}})
+            )
+            .into_bytes();
+            let (client_in, _server_in) = tokio::io::duplex(1 << 16);
+            let (_server_out, client_out) = tokio::io::duplex(1 << 16);
+            let carried = [
+                InFlight {
+                    id: 4,
+                    method: "session/prompt".into(),
+                },
+                InFlight {
+                    id: 9,
+                    method: "too/new".into(),
+                },
+            ];
+            let (_client, _incoming, mut calls) =
+                RpcClient::from_parts_carrying(client_in, client_out, leftover, 6, None, &carried);
+            let too_new = calls.pop().unwrap();
+            let prompt = calls.pop().unwrap();
+            let result = tokio::time::timeout(Duration::from_secs(5), prompt)
+                .await
+                .expect("the buffered response reaches its waiter")
+                .expect("a result");
+            assert_eq!(result["round"], round);
+            // An id this client could still issue itself cannot be carried.
+            assert!(too_new.await.is_err());
+        }
     }
 
     fn rpc_pair() -> (RpcClient, mpsc::Receiver<Incoming>, Server) {
@@ -946,6 +1225,136 @@ mod tests {
             client.freeze(&mut incoming).await,
             Err(FreezeRefusal::Busy(_))
         ));
+    }
+
+    #[tokio::test]
+    async fn a_dropped_request_future_leaves_nothing_pending() {
+        // A caller that gives up on a request (ACP abandons a steering call
+        // after a bound) must not leave its id behind: `freeze` would refuse
+        // until a response that may never come.
+        let (client, mut incoming, mut server) = rpc_pair();
+        let call = client.request_now("m", json!({}));
+        server.expect_line().await;
+        drop(call);
+        assert!(client.pending.lock().unwrap().is_empty());
+        drop(
+            client
+                .freeze(&mut incoming)
+                .await
+                .expect("nothing in flight"),
+        );
+        // Never polled at all: same.
+        drop(client.request_now("n", json!({})));
+        assert!(client.pending.lock().unwrap().is_empty());
+    }
+
+    #[tokio::test]
+    async fn a_carrying_freeze_exports_in_flight_requests_and_a_successor_resolves_them_by_id() {
+        let (client, mut incoming, mut server) = rpc_pair();
+        let (first, _first_call) = client.request_with_id("session/prompt", json!({}));
+        let (second, _second_call) = client.request_with_id("_session/steering", json!({}));
+        assert_eq!(server.expect_line().await["id"], first);
+        assert_eq!(server.expect_line().await["id"], second);
+        // The plain freeze keeps refusing (Codex relies on it)...
+        assert!(matches!(
+            client.freeze(&mut incoming).await,
+            Err(FreezeRefusal::Busy(_))
+        ));
+        // ...the carrying one exports them, oldest first.
+        let frozen = client
+            .freeze_carrying_requests(&mut incoming)
+            .await
+            .expect("requests in flight are carried");
+        assert_eq!(
+            frozen.in_flight,
+            [
+                InFlight {
+                    id: first,
+                    method: "session/prompt".into()
+                },
+                InFlight {
+                    id: second,
+                    method: "_session/steering".into()
+                },
+            ]
+        );
+        assert_eq!(frozen.next_id, 3);
+
+        // The agent answers while nobody reads; the successor picks the
+        // response up from the pipe and routes it to the re-registered call.
+        let (adopted, _incoming2, mut server2) = pair_from(frozen.leftover.clone(), frozen.next_id);
+        let resumed = adopted.resume_request(&frozen.in_flight[0]);
+        server2
+            .send(json!({"jsonrpc": "2.0", "id": first, "result": {"stopReason": "end_turn"}}))
+            .await;
+        assert_eq!(
+            tokio::time::timeout(Duration::from_secs(5), resumed)
+                .await
+                .expect("the carried request resolves")
+                .unwrap(),
+            json!({"stopReason": "end_turn"})
+        );
+        // A request the successor did not resume is answered to nobody.
+        server2
+            .send(json!({"jsonrpc": "2.0", "id": second, "result": {}}))
+            .await;
+        let call = tokio::spawn({
+            let adopted = adopted.clone();
+            async move { adopted.request("after", json!({})).await }
+        });
+        let request = answer(&mut server2, json!("fresh")).await;
+        assert_eq!(request["id"], 3, "ids continue past the carried ones");
+        assert_eq!(call.await.unwrap().unwrap(), json!("fresh"));
+    }
+
+    #[tokio::test]
+    async fn a_thawed_carrying_freeze_leaves_in_flight_requests_with_their_callers() {
+        let (client, mut incoming, mut server) = rpc_pair();
+        let call = tokio::spawn({
+            let client = client.clone();
+            async move { client.request("session/prompt", json!({})).await }
+        });
+        let request = server.expect_line().await;
+        let frozen = client
+            .freeze_carrying_requests(&mut incoming)
+            .await
+            .expect("carried");
+        assert_eq!(frozen.in_flight.len(), 1);
+        server
+            .send(json!({"jsonrpc": "2.0", "id": request["id"], "result": "late"}))
+            .await;
+        tokio::time::sleep(Duration::from_millis(100)).await;
+        assert!(!call.is_finished(), "the parked reader does not parse");
+        drop(frozen); // thaw
+        assert_eq!(call.await.unwrap().unwrap(), json!("late"));
+    }
+
+    #[tokio::test]
+    async fn resuming_refuses_ids_this_client_could_issue_or_already_waits_for() {
+        let (client, _incoming, _server) = pair_from(Vec::new(), 5);
+        let (id, _call) = client.request_with_id("m", json!({}));
+        assert_eq!(id, 5);
+        for bad in [
+            InFlight {
+                id: 5,
+                method: "m".into(),
+            },
+            InFlight {
+                id: 6,
+                method: "m".into(),
+            },
+        ] {
+            let result =
+                tokio::time::timeout(Duration::from_millis(100), client.resume_request(&bad))
+                    .await
+                    .expect("refused at once");
+            assert!(result.is_err(), "{bad:?}");
+        }
+        let _ok = client.resume_request(&InFlight {
+            id: 4,
+            method: "m".into(),
+        });
+        assert_eq!(client.pending.lock().unwrap().len(), 2);
     }
 
     #[test]

@@ -132,19 +132,22 @@ the parent.
 Common seam, defaulting to "unsupported" so harnesses opt in one at a time:
 
 - `RunControls.freeze`: a channel of `FreezeRequest{ reply }`. The run loop
-  answers `Busy` unless at a safe point, else returns a `FrozenRun` with
-  `commit()`, `thaw()`, `into_handoff()`.
-- `HarnessHandoff { harness, state_version, pid, fds, stdout_leftover,
-  stderr_tail, state: Value }`.
-- `Harness::adopt(handoff, controls)` rebuilds the same run loop from it, and
-  `supports_adoption()` lets the engine fall back per harness.
-- A `ChildHandle` (`Owned` | `Adopted{pid}`) replaces direct `Child` use.
+  answers `Busy` unless at a safe point, else returns a `FrozenRun` whose
+  `commit` sender means "a same-process successor took over" and whose drop
+  means "thaw" (see [Implementation notes](#implementation-notes)).
+- `HarnessHandoff { harness, state_version, pid, stdin_fd, stdout_fd,
+  stderr_fd, extra_fds, stdout_leftover, stderr_tail, state: Value,
+  undrained_steers }`.
+- `Harness::adopt(handoff, controls, request)` rebuilds the same run loop from
+  it, and `supports_adoption()` lets the engine fall back per harness.
+- A `ChildHandle` (`Owned` | `Adopted`) replaces direct `Child` use.
 
 Buffering is the crux. `BufReader` + `Lines` hold an unexportable read-ahead and
 partial line, and the stdin writer issues two non-atomic `write_all` calls. So:
 an owned `LineReader` (exposes leftover bytes, cancel-safe stop) replaces them
-in Claude, `jsonrpc.rs` (Codex, ACP) and Cursor; the writer accepts a `Freeze`
-sentinel, so queued lines finish and are never torn; stderr fds are passed and
+in Claude, `jsonrpc.rs` (Codex, ACP) and Cursor; the writer accepts a `Pause`
+message, so queued lines finish and are never torn and the writer parks with
+its queue; stderr fds are passed and
 kept drained so the agent never gets `EPIPE`. Stdout is raised to a 1 MiB pipe
 before freezing so a chatty agent does not block during the window.
 
@@ -164,8 +167,9 @@ Safe points:
   `InputRequested` (a duplicate broke answering before).
 - **Never:** interrupting or escalating, Claude's 5-second `held_done` window,
   Codex setup (`initialize` through the first `turn/start` response), an
-  in-flight inline JSON-RPC request, an OpenCode native `/command` in flight.
-  These answer `Busy`; the coordinator retries.
+  in-flight inline JSON-RPC request (Codex; ACP instead carries its
+  `session/prompt` request across by id), an OpenCode native `/command` in
+  flight. These answer `Busy`; the coordinator retries.
 
 Engine side: `drive_run` gains a `Frozen` end state that skips `Done`
 publishing, the `aborted` stamp, subagent "failed" stamping, orphan
@@ -181,7 +185,7 @@ Per harness:
 | Harness | Notes |
 |---|---|
 | Claude | State: normalizer (`session_id`, `last_model`, `agent_tasks`, `agent_spawn_tools`, `assistant_message_id`), `pending_steers`, `open_tools`, parked question (control-request id, raw input, question ids). |
-| Codex | State: `thread_id`, `TurnRouter`, reasoning streams, `queued_steers`, `Subagents` (bounded), parked server requests, `RpcClient.next_id`. `read_loop` gets a stop signal and a `Frozen{leftover}` marker. |
+| Codex | State: `thread_id`, `TurnRouter`, reasoning streams, `queued_steers`, `Subagents`, parked server requests, `RpcClient.next_id`. The reader is stopped and the loop's not-yet-handled messages are exported ahead of the raw leftover bytes (a marker in the message stream can deadlock, see notes). |
 | ACP | State: `session_id`, `next_id`, pending ids, steering/preempt/prompt bookkeeping, subagent trackers **with tail offsets**, scratch dir path (ownership moves). |
 | OpenCode | Server is loopback HTTP and already outlives stdio. Adopt reconnects the bus, then **re-reads REST state before resuming** (messages, `/permission`, `/question`, `/session/status`, children): the v1 bus has no replay, so a missed question would block the turn forever. Idle settling runs only after reconcile. |
 | Cursor | Engine state is tiny; turn state lives in the shim, which survives. The store lease fd is inherited (OFD lock stays held). `.zeron-owner.json` `parentPid` is unchanged (same pid). |
@@ -290,3 +294,90 @@ handoff core with manifest, lock/listener inheritance, veto, rollback;
 (4) run-handoff seam, then harnesses one commit each (Claude, Codex, ACP,
 OpenCode, Cursor); (5) update policy and UI swap. Each commit builds and passes
 tests on its own.
+
+## Implementation notes
+
+Where the built version is more specific than, or differs from, the design
+above. The spec is the intent; this is what the code does.
+
+**Freeze is a suspension, not a departure.** The engine holds every frozen
+component (`FrozenTerminals`, `FrozenRuns`) *through* the `execve`; exec runs no
+destructors, so nothing has to be given up beforehand, and if `execve` fails the
+engine drops them and everything resumes where it was. `commit()` exists only for
+a same-process successor (tests). Consequences that shaped the code:
+
+- The stdin writer **pauses** (`WriteMsg::Pause`): queued lines finish, then it
+  parks holding the pipe and its queue; dropping the guard resumes it. There is
+  no `Freeze` sentinel and no new `AgentEvent`; for a same-process commit the
+  run's stream simply ends, which the engine reads as "frozen".
+- A child that exits inside the freeze window must stay a zombie for the next
+  image: waiters use `waitid(WNOWAIT)` and a `ReapGate` (shared by terminals and
+  agent runs) holds the actual reap while a freeze is pending. Owned (tokio)
+  children cannot be gated; one that exits in the window falls back to crash
+  recovery.
+- Steers drained from a run's mailbox at freeze time are kept and re-read first
+  after a thaw, and exported as `undrained_steers` for the adopter.
+- Answers the user gave just before a freeze are written to the agent *before*
+  the pause, and `respond_input` takes its lock in the same order as the freeze
+  barrier, so an accepted answer is never exported as still parked.
+
+**Adoption works on duplicates.** The successor duplicates every inherited
+descriptor (`F_DUPFD_CLOEXEC`); the originals stay open, inheritable and
+untouched until the adoption commits, so a failed boot hands back to the old
+binary with nothing missing. The engine also duplicates each run's descriptors
+when the run is registered, because a harness may adopt later (behind an
+execution lease) than the commit that closes the originals. The adopted
+`InstanceLock` and `Terminals` are "unarmed" until commit: dropping them earlier
+neither unlocks the file nor hangs up a shell.
+
+**Rollback and the loop guard.** A successor that cannot finish booting re-execs
+`from_exe` with the same manifest and tells it which version failed
+(`ZERON_HANDOFF_ROLLED_BACK_FROM`); that image never hands off to the same
+version again. `ZERON_HANDOFF_ATTEMPT` bounds consecutive handoff/rollback
+execs. On macOS the running binary is copied aside at engine start so the
+rollback target survives the bundle swap. Known limitation: an image running
+from that copy no longer looks like a managed install and stops watching for
+newer installs until restarted.
+
+**Preflight** checks that the new binary runs and reads our manifest version. It
+deliberately does not open the new binary's store, which a newer build could
+migrate under the running engine.
+
+**Updater.** `Busy` handoffs are retried every poll and never become a restart;
+a `Failed` one backs off ten minutes (per installed version) and only then does
+the installed service, at a quiet moment and once per version, fall back to a
+restart. `handoff-v1` is advertised only by an engine that serves
+`HandoffEngine` (the headless IPC owner). `ZERON_AUTO_UPDATE` unset means on only
+for such an engine; the desktop app's in-process engine stays opt-in.
+
+**Engine host.** `zeron headless --host` is the engine of a headed app. A captured
+cloud profile that still needs its organization is onboarded by the attached
+window: the host serves identity and sign-in first and keeps that same listener
+for the assembled service. The app starts a host with `systemctl --user start
+zeron.service` when that unit exists, `launchctl kickstart` for the agent, else
+a detached process in its own session (and, where available, its own systemd
+scope). The host reports `app-hosted` (from `ZERON_ENGINE_HOST=app`, which is
+removed from its environment so agents never inherit it); only such a host is
+stopped when its window quits, and only an update swap leaves it running. A
+supervisor restarts an app-hosted host that vanishes (three times at most, never
+after a deliberate stop). `ZERON_EMBED_ENGINE=1` forces the old embedded engine.
+
+**UI swap.** The update is applied only at swap time. The new window starts in
+its own session with `ZERON_UI_SWAP` set (it attaches to the running host and
+never embeds), announces itself with `ui-ready-<pid>`, and only then does the old
+window leave; if it does not come up within 20 s, or the user started something
+in the meantime, the old window stays and the swap is retried later without
+downloading again. The swap waits for an unfocused or 60 s-idle window, no IME
+composition and no unsaved file edits. The new window shows "Updated to vX".
+
+**Per harness** (`supports_adoption`): Claude, Codex, ACP and Cursor are
+implemented with fake-agent tests (real CLIs were not run). ACP carries an
+in-flight `session/prompt` across by request id instead of refusing; Cursor's
+store lease rides in `HarnessHandoff.extra_fds`. OpenCode and Pi: see the
+delivery notes in the PR.
+
+**Known gaps.** Not exercised on macOS or Windows hardware; the GUI swap has not
+been driven end to end; the swap gate does not see question-panel answers,
+side-chat drafts or scroll position; the Appshots global hotkey may be unusable
+after a swap until restart; harnesses without adoption defer a handoff while
+mid-turn (never killed).

@@ -729,6 +729,20 @@ impl StderrDrain {
     where
         R: tokio::io::AsyncRead + PipeFd + Unpin + Send + 'static,
     {
+        Self::spawn_observed(stderr, tail, harness, |_| {})
+    }
+
+    /// [`Self::spawn`], also showing every line to `observe` (ACP watches
+    /// stderr for a sign-in prompt).
+    pub(crate) fn spawn_observed<R>(
+        stderr: R,
+        tail: crate::StderrTail,
+        harness: &'static str,
+        observe: impl Fn(&str) + Send + 'static,
+    ) -> Self
+    where
+        R: tokio::io::AsyncRead + PipeFd + Unpin + Send + 'static,
+    {
         let fd = stderr.pipe_fd();
         let (stop, mut stopped) = oneshot::channel::<oneshot::Sender<()>>();
         tokio::spawn(async move {
@@ -749,6 +763,7 @@ impl StderrDrain {
                         Ok(Some(line)) => {
                             tracing::debug!(target: "zeron_harness::stderr", harness, "stderr: {line}");
                             tail.push(&line);
+                            observe(&line);
                         }
                         Ok(None) | Err(_) => {
                             tail.close();

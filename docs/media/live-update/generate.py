@@ -177,6 +177,47 @@ def architecture():
     chip(d, 40, 460, "Windows: no engine handoff in v1 — install on quit, no prompt", AMBER)
     return im
 
+def terminal_frames(lines, width=960, height=420):
+    """Typewriter-style terminal recording of the REAL demo output."""
+    f = mono(15)
+    frames = []
+    shown = []
+    prompt = "$ scripts/live-update-demo.sh"
+
+    def render(visible, cursor_line=None, typed=None):
+        im = Image.new("RGB", (width, height), (12, 14, 20))
+        d = ImageDraw.Draw(im)
+        d.rounded_rectangle((0, 0, width, 34), 0, fill=(30, 35, 48))
+        for i, c in enumerate([(248, 113, 113), (251, 191, 36), (74, 222, 128)]):
+            d.ellipse((14 + i * 20, 12, 24 + i * 20, 22), fill=c)
+        d.text((width // 2, 17), "zeron - live update demo (real processes)", font=F_S, fill=MUTED, anchor="mm")
+        y = 48
+        d.text((16, y), typed if typed is not None else prompt, font=f, fill=GREEN)
+        y += 26
+        for line in visible:
+            col = TEXT
+            if line.startswith("»"):
+                col = TEXT
+                if "unchanged" in line or "refused during the handoff: 0" in line or "answered" in line:
+                    col = GREEN
+                elif "handing" in line:
+                    col = AMBER
+            elif line.startswith("test result"):
+                col = BLUE
+            d.text((16, y), line, font=f, fill=col)
+            y += 22
+        return im
+
+    for n in range(len(prompt) + 1):
+        frames.append((render([], typed=prompt[:n]), 1))
+    frames.append((render([]), 6))
+    for line in lines:
+        shown.append(line)
+        frames.append((render(shown), 10 if line.startswith("»") else 6))
+    frames.append((render(shown), 40))
+    return frames
+
+
 def main():
     out = os.path.dirname(os.path.abspath(__file__))
     tmp = tempfile.mkdtemp()
@@ -191,6 +232,21 @@ def main():
         subprocess.run(["ffmpeg", "-y", "-loglevel", "error", "-framerate", str(FPS), "-i", os.path.join(tmp, "f%04d.png"),
                         "-i", pal, "-lavfi", "paletteuse=dither=bayer:bayer_scale=4", "-loop", "0",
                         os.path.join(out, "live-update.gif")], check=True)
+        demo = os.path.join(out, "demo-output.txt")
+        if os.path.exists(demo):
+            lines = [l.rstrip("\n") for l in open(demo) if l.strip() and not l.startswith("Live update demo")]
+            frames = terminal_frames(lines)
+            n = 0
+            for im, hold in frames:
+                for _ in range(hold):
+                    im.save(os.path.join(tmp, f"t{n:04d}.png"))
+                    n += 1
+            tpal = os.path.join(tmp, "tpal.png")
+            subprocess.run(["ffmpeg", "-y", "-loglevel", "error", "-framerate", str(FPS), "-i", os.path.join(tmp, "t%04d.png"),
+                            "-vf", "palettegen=max_colors=48", tpal], check=True)
+            subprocess.run(["ffmpeg", "-y", "-loglevel", "error", "-framerate", str(FPS), "-i", os.path.join(tmp, "t%04d.png"),
+                            "-i", tpal, "-lavfi", "paletteuse", "-loop", "0", os.path.join(out, "demo-terminal.gif")], check=True)
+            frames[-1][0].save(os.path.join(out, "demo-terminal.png"))
         frame_scene(7.6).save(os.path.join(out, "after.png"))
         frame_scene(1.0).save(os.path.join(out, "before.png"))
         architecture().save(os.path.join(out, "architecture.png"))
