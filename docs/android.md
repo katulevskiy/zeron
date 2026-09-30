@@ -331,14 +331,20 @@ Custom server `http://10.0.2.2:27700` (the emulator's host) + the token, or
   Custom Tab opens, which also leaves background notifications unverified); a
   real phantom-process kill (simulated SIGKILL only); release builds (per-ABI
   splits, Play's 16 KB alignment for `libproot-loader32.so`).
-
-- File transfer on the Android 16 x86_64 emulator (2026-09-29), against a
-  computer's `zeron local-edge` through Custom server: a folder + an APK and a
-  142 MB APK computer → phone over P2P (~50 MB/s live), notifications, the
-  copies in `Download/Zeron` (sha256 equal), the APK opening the package
-  installer, Ask before accepting → Accept, and Share to Zeron phone →
-  computer (142 MB, P2P, sha256 equal). Custom server on/off restarts the
-  engine onto the other edge.
+- Verified on the Android 16 x86_64 emulator (2026-09-29, combined build),
+  with a computer's `zeron local-edge` + a `zeron headless` joined in
+  Development scope and the phone on Custom server: first run without a
+  mode choice, This phone + the computer in Settings, OpenCode install /
+  Update all / uninstall / reinstall, the Run-on and model pickers, a thread
+  on the computer from the phone and one on the phone from the computer
+  (MCP), and file transfer both ways over P2P — computer → phone (folder +
+  60 MB, notification, `Download/Zeron`, sha256 equal), Ask before accepting
+  → Accept from the notification, Share to Zeron phone → computer (60 MB,
+  sha256 equal; ShareActivity started with a Download item — the Files
+  app's chooser reaches it too, but dismissing the chooser hit the abort
+  below), and an OpenCode agent on the computer calling `send_files`.
+  Not verified there: a notification's route into an already-running
+  process (the emulator's `system_server` aborts on the task switch, below).
 
 Emulator note: boot with `-feature -ReadColorBufferDma -feature -GLDMA2`
 (swiftshader); otherwise `system_server` aborts on
