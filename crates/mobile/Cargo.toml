@@ -34,6 +34,7 @@ zeron-syntax.workspace = true
 thiserror.workspace = true
 zeron-vt.workspace = true
 base64 = "0.22"
+pulldown-cmark.workspace = true
 tokio.workspace = true
 
 [dev-dependencies]
