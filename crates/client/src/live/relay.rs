@@ -67,6 +67,10 @@ pub(crate) struct Relay {
     unsupported: Mutex<HashSet<String>>,
 }
 
+/// Deadline for a stream's acknowledgement (the host answers `{stream:true}`
+/// before its first item, or fails the method).
+const SUBSCRIBE_TIMEOUT: Duration = Duration::from_secs(30);
+
 #[derive(Debug, Clone, PartialEq, Eq, Hash)]
 pub(crate) struct WatchKey {
     pub device_id: String,
@@ -147,6 +151,44 @@ impl Relay {
                     return Err(ClientError::HostUnavailable(format!(
                         "{method} on {device_id} timed out"
                     )));
+                }
+            }
+        }
+        unreachable!("the second attempt always returns")
+    }
+
+    /// A host stream (`SubscribeTerminal`, `WatchWorkspaceFiles`,
+    /// `WatchPreviews`…), acknowledged by the host before it returns: an
+    /// unknown method or a rejected request fails here. Dropping the
+    /// subscription cancels the host's stream. A stale cached link is
+    /// retried once on a fresh dial.
+    pub(crate) async fn subscribe(
+        &self,
+        device_id: &str,
+        method: &str,
+        params: Value,
+    ) -> Result<zeron_rpc::RpcSubscription> {
+        let timed_out =
+            || ClientError::HostUnavailable(format!("{method} on {device_id} timed out"));
+        for attempt in 0..2 {
+            let client = self
+                .links
+                .client(device_id)
+                .await
+                .map_err(|e| map_rpc(device_id, method, e))?;
+            let subscribe = client.subscribe_checked(method, params.clone());
+            match tokio::time::timeout(SUBSCRIBE_TIMEOUT, subscribe).await {
+                Ok(Ok(stream)) => return Ok(stream),
+                Ok(Err(err @ (RpcError::Closed | RpcError::Transport(_)))) => {
+                    self.links.invalidate(device_id);
+                    if attempt == 1 {
+                        return Err(map_rpc(device_id, method, err));
+                    }
+                }
+                Ok(Err(err)) => return Err(map_rpc(device_id, method, err)),
+                Err(_) => {
+                    self.links.invalidate(device_id);
+                    return Err(timed_out());
                 }
             }
         }
