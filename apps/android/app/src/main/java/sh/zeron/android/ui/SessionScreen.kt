@@ -93,7 +93,7 @@ private data class TextSheet(val title: String, val text: String, val mono: Bool
 
 @OptIn(ExperimentalMaterial3Api::class, ExperimentalMaterial3ExpressiveApi::class)
 @Composable
-fun SessionScreen(model: AppModel, chatId: String, onBack: () -> Unit, onNavigate: (String) -> Unit = {}) {
+fun SessionScreen(model: AppModel, chatId: String, onBack: () -> Unit, onNavigate: (String) -> Unit = {}, showSubagents: Boolean = false) {
     val client by model.client.collectAsState()
     val core = client ?: return
     val handle: SessionHandle = remember(chatId) { runCatching { core.openSession(chatId) }.getOrNull() } ?: run {
@@ -115,8 +115,17 @@ fun SessionScreen(model: AppModel, chatId: String, onBack: () -> Unit, onNavigat
     var composer by remember { mutableStateOf(handle.composer()) }
     val workspace by model.workspace.collectAsState()
     val connectivity by model.connectivity.collectAsState()
+    // The chat's subagents, read from its spawn chips (Rust groups them the
+    // desktop's way); re-read with the transcript.
+    var subagents by remember(chatId) { mutableStateOf(groupsOf(core, chatId)) }
+    var subagentsOpen by androidx.compose.runtime.saveable.rememberSaveable(chatId) { mutableStateOf(showSubagents) }
     LaunchedEffect(chatId) {
-        model.sessionEvents.collect { if (it == chatId) composer = handle.composer() }
+        model.sessionEvents.collect {
+            if (it == chatId) {
+                composer = handle.composer()
+                subagents = groupsOf(core, chatId)
+            }
+        }
     }
     // Upload rings on pending thumbnails follow the escort.
     LaunchedEffect(composer.transferProgress) { transcript.uploadProgress = composer.transferProgress }
@@ -129,7 +138,10 @@ fun SessionScreen(model: AppModel, chatId: String, onBack: () -> Unit, onNavigat
         TranscriptActions(
             openUrl = { url ->
                 val uri = Uri.parse(url)
-                when (val target = Links.classify(url, model.workspaceRef(chatId))) {
+                // A spawn card: open that subagent.
+                val subagent = subagentDocOf(url)
+                if (subagent != null) onNavigate(Routes.subagent(chatId, subagent))
+                else when (val target = Links.classify(url, model.workspaceRef(chatId))) {
                     // Pages open in the in-app browser (localhost dev servers too).
                     is Links.Target.Web -> onNavigate(Routes.browser(chatId, target.url))
                     is Links.Target.File -> onNavigate(Routes.file(chatId, target.path))
@@ -199,6 +211,13 @@ fun SessionScreen(model: AppModel, chatId: String, onBack: () -> Unit, onNavigat
                     Text(composer.title, maxLines = 1, overflow = TextOverflow.Ellipsis, style = MaterialTheme.typography.titleMediumEmphasized)
                     Text(subtitle, maxLines = 1, overflow = TextOverflow.Ellipsis, style = MaterialTheme.typography.bodySmall, color = MaterialTheme.colorScheme.onSurfaceVariant)
                 }
+                // Running count comes from the transcript when it has them,
+                // else from the row (a count published before the chips synced).
+                val running = maxOf(subagents.running.toInt(), row?.runningSubagents?.toInt() ?: 0)
+                if (running > 0 || Subagents.total(subagents) > 0) {
+                    SubagentsButton(running, onClick = { subagentsOpen = true })
+                    Spacer(Modifier.width(8.dp))
+                }
                 TonalCircleButton(ZIcons.FileTree, "Files", onClick = { onNavigate(Routes.files(chatId)) }, container = MaterialTheme.colorScheme.surfaceContainerHighest)
                 Spacer(Modifier.width(8.dp))
                 Box {
@@ -208,6 +227,7 @@ fun SessionScreen(model: AppModel, chatId: String, onBack: () -> Unit, onNavigat
                         { overflow = false },
                         listOfNotNull(
                             MenuAction("Files", ZIcons.FileTree) { onNavigate(Routes.files(chatId)) },
+                            if (Subagents.total(subagents) > 0) MenuAction("Subagents", ZIcons.Bot) { subagentsOpen = true } else null,
                             MenuAction("Terminal", ZIcons.Terminal) { onNavigate(Routes.terminal(chatId)) },
                             MenuAction("Browser & previews", ZIcons.Globe) { onNavigate(Routes.browser(chatId, null)) },
                             MenuAction("Copy transcript", ZIcons.Copy) { transcript.frame?.let { clipboard.setText(AnnotatedString(it.plainText())) } },
@@ -240,6 +260,17 @@ fun SessionScreen(model: AppModel, chatId: String, onBack: () -> Unit, onNavigat
             composer.openInput?.let { QuestionPanel(it) { answers -> runCatching { handle.respondInput(it.requestId, answers) } } }
             Composer(model, core, handle, composer, row, transcript)
         }
+    }
+
+    if (subagentsOpen) {
+        SubagentsSheet(
+            subagents,
+            onOpen = { view ->
+                subagentsOpen = false
+                onNavigate(Routes.subagent(chatId, view.docId))
+            },
+            onDismiss = { subagentsOpen = false },
+        )
     }
 
     sheet?.let { s ->
