@@ -46,8 +46,8 @@ pub(crate) struct ToolLine {
     pub icon: String,
     pub label: PText,
     pub detail: Option<PText>,
-    /// File calls show a badge: (file-icon asset, basename).
-    pub badge: Option<(String, PText)>,
+    /// File calls show a badge: (file-icon asset, basename, path as called).
+    pub badge: Option<(String, PText, String)>,
     pub failed: bool,
     pub running: bool,
     pub key: u64,
@@ -373,7 +373,7 @@ impl RowBuilder {
                         let badge = if agents {
                             None
                         } else {
-                            file_path(call).map(|p| (file_icon_asset(p), prepare_plain(ctx, basename(p), st.label, st.lh, if *is_error { ColorRole::Danger } else { ColorRole::TextSoft }, WhiteSpace::Pre)))
+                            file_path(call).map(|p| (file_icon_asset(p), prepare_plain(ctx, basename(p), st.label, st.lh, if *is_error { ColorRole::Danger } else { ColorRole::TextSoft }, WhiteSpace::Pre), p.to_owned()))
                         };
                         let detail_color = if agents && !*is_error { ColorRole::TextSoft } else { color };
                         let detail = (badge.is_none() && !detail.is_empty()).then(|| prepare_plain(ctx, &detail, st.label, st.lh, detail_color, WhiteSpace::Pre));
@@ -495,7 +495,8 @@ fn place_line_header(line: &ToolLine, px: Px, x: f32, ry: f32, cw: f32, o: &mut 
     place_text(&line.label, tx, ry + (row_h - line.label.lh) / 2.0, lw + 1.0, Some(o));
     let dx = tx + lw + d(px, 8.0);
     let avail = (x + cw - dx).max(0.0);
-    if let Some((asset, name)) = &line.badge {
+    let mut badge_hit = None;
+    if let Some((asset, name, path)) = &line.badge {
         let bh = d(px, 22.0);
         let by = ry + (row_h - bh) / 2.0;
         let nw = name.p.max_content_width();
@@ -511,6 +512,7 @@ fn place_line_header(line: &ToolLine, px: Px, x: f32, ry: f32, cw: f32, o: &mut 
                 None,
             );
             place_text_lines(name, dx + d(px, 27.0), ry + (row_h - name.lh) / 2.0, (bw - d(px, 33.0)).max(1.0), 1, px, o);
+            badge_hit = Some((path.clone(), (dx, by, bw, bh)));
         }
     } else if let Some(detail) = &line.detail {
         if avail > 1.0 {
@@ -518,6 +520,10 @@ fn place_line_header(line: &ToolLine, px: Px, x: f32, ry: f32, cw: f32, o: &mut 
         }
     }
     o.widget(WidgetKind::ToolToggle { detail: line.key, open: line.open }, (x, ry, cw, row_h), None);
+    // Above the row toggle: tapping the file badge opens the file.
+    if let Some((path, rect)) = badge_hit {
+        o.widget(WidgetKind::OpenFile { path }, rect, None);
+    }
 }
 
 /// Inline detail under a row: blocks in the text column, each preceded by a
@@ -683,7 +689,7 @@ pub(crate) fn heap_bytes(t: &ToolGroup) -> usize {
             .map(|l| {
                 l.label.p.heap_bytes()
                     + l.detail.as_ref().map_or(0, |d| d.p.heap_bytes())
-                    + l.badge.as_ref().map_or(0, |b| b.1.p.heap_bytes())
+                    + l.badge.as_ref().map_or(0, |b| b.1.p.heap_bytes() + b.2.capacity())
                     + l.body
                         .iter()
                         .map(|b| match b {

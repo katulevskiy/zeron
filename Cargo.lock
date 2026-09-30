@@ -12256,6 +12256,7 @@ name = "zeron-mobile"
 version = "0.2.97"
 dependencies = [
  "base64 0.22.1",
+ "pulldown-cmark",
  "serde",
  "serde_json",
  "similar",

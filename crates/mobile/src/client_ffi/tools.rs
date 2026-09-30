@@ -870,6 +870,22 @@ pub fn highlight_source(path: String, text: String) -> Option<HighlightedSource>
     })
 }
 
+/// GitHub-flavoured Markdown as an HTML fragment for the file viewer's
+/// preview (tables, task lists, strikethrough, footnotes). Raw HTML passes
+/// through; the viewer renders it with scripts off.
+#[uniffi::export]
+pub fn markdown_html(text: String) -> String {
+    use pulldown_cmark::{Options, Parser, html};
+    let options = Options::ENABLE_TABLES
+        | Options::ENABLE_FOOTNOTES
+        | Options::ENABLE_STRIKETHROUGH
+        | Options::ENABLE_TASKLISTS
+        | Options::ENABLE_GFM;
+    let mut out = String::with_capacity(text.len() * 3 / 2);
+    html::push_html(&mut out, Parser::new_ext(&text, options));
+    out
+}
+
 /// Bundled icon asset for a file path (`fileicon-files-rust`), resolved like
 /// the desktop's file tree.
 #[uniffi::export]
