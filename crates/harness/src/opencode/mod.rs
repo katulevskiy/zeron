@@ -296,19 +296,20 @@ impl OpencodeHarness {
         &self,
         cwd: Option<&str>,
         mcp: Option<&zeron_proto::McpServer>,
+        outlives_drop: bool,
     ) -> Result<Server, HarnessError> {
         if let Some(base) = &self.base_url {
             return Ok(Server::attached(base.clone()));
         }
         let exe = self.resolve_executable()?;
-        Server::spawn(&exe, cwd, self.startup_timeout, mcp).await
+        Server::spawn(&exe, cwd, self.startup_timeout, mcp, outlives_drop).await
     }
 
     /// One short-lived server answers both discovery calls. Also primes the
     /// commands cache so concurrent picker/composer fetches share one boot.
     async fn probe_models(&self) -> Result<Vec<Model>, HarnessError> {
         let _guard = self.probe_lock.lock().await;
-        let mut server = self.server(None, None).await?;
+        let mut server = self.server(None, None, false).await?;
         let result = async {
             let providers = server.provider_catalog(None).await?;
             let mut models = models_from_providers(&providers);
@@ -340,7 +341,7 @@ impl OpencodeHarness {
         if let Some(commands) = self.commands_cache.get() {
             return Ok(commands.clone());
         }
-        let mut server = self.server(None, None).await?;
+        let mut server = self.server(None, None, false).await?;
         let result = server
             .commands_wire(None)
             .await
@@ -421,7 +422,7 @@ impl Harness for OpencodeHarness {
         let directory = cwd
             .to_str()
             .ok_or_else(|| HarnessError::Protocol("Project path is not UTF-8".into()))?;
-        let mut server = self.server(Some(directory), None).await?;
+        let mut server = self.server(Some(directory), None, false).await?;
         let result = server.commands_wire(Some(directory)).await;
         server.shutdown(self.kill_grace).await;
         let commands = result?;
@@ -441,7 +442,7 @@ impl Harness for OpencodeHarness {
         let directory = cwd
             .to_str()
             .ok_or_else(|| HarnessError::Protocol("Project path is not UTF-8".into()))?;
-        let mut server = self.server(Some(directory), None).await?;
+        let mut server = self.server(Some(directory), None, false).await?;
         let result = server
             .commands_wire(Some(directory))
             .await
@@ -461,7 +462,9 @@ impl Harness for OpencodeHarness {
         let initial_native_command_selected = selected_native_command(&request.prompt, self.id());
         request.prompt = zeron_proto::invocation::harness_prompt(&request.prompt, self.id());
         let cwd = (!request.cwd.is_empty()).then(|| request.cwd.clone());
-        let server = self.server(cwd.as_deref(), request.mcp.as_ref()).await?;
+        let server = self
+            .server(cwd.as_deref(), request.mcp.as_ref(), true)
+            .await?;
         let (event_tx, event_rx) = mpsc::channel::<Result<AgentEvent, HarnessError>>(256);
         tokio::spawn(run_session(Session {
             server,
@@ -600,6 +603,7 @@ struct Server {
     auth: Option<String>,
     client: reqwest::Client,
     stderr_tail: crate::StderrTail,
+    #[cfg_attr(not(unix), allow(dead_code))]
     /// Drains the owned child's stderr, also while a run is frozen, so the
     /// server never writes into a full (or reader-less) pipe.
     stderr: Option<StderrDrain>,
@@ -741,6 +745,7 @@ impl Server {
         cwd: Option<&str>,
         startup: Duration,
         mcp: Option<&zeron_proto::McpServer>,
+        outlives_drop: bool,
     ) -> Result<Self, HarnessError> {
         let port = free_localhost_port().ok_or_else(|| {
             HarnessError::Protocol("no free localhost port for opencode serve".into())
@@ -784,13 +789,15 @@ impl Server {
         if let Some(cwd) = cwd {
             cmd.current_dir(cwd);
         }
-        // Not killed on drop: a run frozen for a live update is held through
-        // an `execve` and its server must outlive the old image's handles.
-        // Every ending shuts the server down explicitly.
+        // A RUN's server is not killed on drop: a run frozen for a live update
+        // is held through an `execve` and its server must outlive the old
+        // image's handles (every ending shuts it down explicitly). A short-lived
+        // PROBE server keeps kill-on-drop: a cancelled or timed-out probe would
+        // otherwise leak a running `opencode serve` nothing ever stops.
         cmd.stdin(Stdio::null())
             .stdout(Stdio::null())
             .stderr(Stdio::piped())
-            .kill_on_drop(false);
+            .kill_on_drop(!outlives_drop);
         let mut child = cmd.spawn().map_err(|e| {
             if e.kind() == std::io::ErrorKind::NotFound {
                 HarnessError::NotInstalled(crate::executable::binary_hint(exe))
@@ -1974,7 +1981,7 @@ struct OpencodeLoopState {
 /// Schema version of [`OpencodeLoopState`] in a [`HarnessHandoff`]; an
 /// adopter refuses any other, and the engine falls back to crash recovery.
 #[cfg(unix)]
-const STATE_VERSION: u32 = 1;
+pub(crate) const STATE_VERSION: u32 = 1;
 
 /// A `question.asked` surfaced to the user, waiting for the answer.
 #[derive(Clone, Serialize, Deserialize)]
@@ -2651,6 +2658,12 @@ async fn drive(driver: Driver) {
                         && turn.idle_confirmations > 0
                     {
                         Some("the turn is settling")
+                    } else if turn.active && !turn.idle_ready {
+                        // Acknowledged but the server has not turned busy yet: a
+                        // reconcile now would find "not running" and end a turn
+                        // that has not started (the live path guards this with
+                        // `idle_ready`; the adopter's explicit check does not).
+                        Some("the turn has not started yet")
                     } else if protocol == Protocol::V2 && turn.active {
                         // Only 1.x messages can be reconciled from REST.
                         Some("mid-turn on the 2.x wire")
@@ -5369,6 +5382,60 @@ fn mcp_config(
 mod mcp_injection_tests {
     use super::*;
 
+    /// A run's server outlives its handles (it must survive an exec handoff);
+    /// a short-lived probe server must not leak when its future is dropped.
+    /// (Linux only: liveness is read from /proc.)
+    #[cfg(target_os = "linux")]
+    #[tokio::test]
+    async fn only_a_runs_server_outlives_a_dropped_handle_a_probe_server_is_killed() {
+        use std::os::unix::fs::PermissionsExt;
+        let fixture = tempfile::tempdir().unwrap();
+        let exe = fixture.path().join("opencode");
+        std::fs::write(
+            &exe,
+            r#"#!/usr/bin/env node
+const http = require('node:http');
+if (process.argv.includes('--version')) { console.log('1.0.0'); process.exit(0); }
+const port = Number(process.argv[process.argv.indexOf('--port') + 1]);
+http.createServer((req, res) => {
+  res.setHeader('content-type', 'application/json');
+  if (req.url === '/global/health') { res.end(JSON.stringify({version: '1.0.0'})); return; }
+  res.statusCode = 404; res.end('{}');
+}).listen(port, '127.0.0.1');
+"#,
+        )
+        .unwrap();
+        std::fs::set_permissions(&exe, std::fs::Permissions::from_mode(0o700)).unwrap();
+        let alive = |pid: u32| {
+            std::fs::read_to_string(format!("/proc/{pid}/stat"))
+                .map(|stat| {
+                    !stat
+                        .rsplit_once(')')
+                        .is_some_and(|(_, r)| r.trim_start().starts_with('Z'))
+                })
+                .unwrap_or(false)
+        };
+        for (outlives, expect_alive) in [(false, false), (true, true)] {
+            let server = Server::spawn(
+                &exe,
+                fixture.path().to_str(),
+                Duration::from_secs(10),
+                None,
+                outlives,
+            )
+            .await
+            .unwrap();
+            let pid = server.child.as_ref().and_then(ChildHandle::id).unwrap();
+            drop(server);
+            tokio::time::sleep(Duration::from_millis(600)).await;
+            assert_eq!(alive(pid), expect_alive, "outlives_drop={outlives}");
+            if expect_alive {
+                // SAFETY: kill(2) on the pid of the child this test spawned.
+                unsafe { libc::kill(pid as i32, libc::SIGKILL) };
+            }
+        }
+    }
+
     #[cfg(unix)]
     #[tokio::test]
     async fn mcp_injection_reaches_isolated_server_processes() {
@@ -5410,6 +5477,7 @@ http.createServer((req, res) => {{
                 fixture.path().to_str(),
                 Duration::from_secs(5),
                 Some(&first),
+                false,
             )
             .await
             .unwrap();
@@ -5418,6 +5486,7 @@ http.createServer((req, res) => {{
                 fixture.path().to_str(),
                 Duration::from_secs(5),
                 Some(&second),
+                false,
             )
             .await
             .unwrap();

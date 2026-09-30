@@ -128,6 +128,7 @@ pub struct EngineConfig {
 
 /// The assembled engine core — also constructible without the IPC server for tests
 /// and the in-process (headed) mode.
+#[cfg_attr(not(unix), allow(dead_code))]
 pub struct EngineCore {
     pub sessions: SessionsEngine,
     pub doc_host: DocHost,

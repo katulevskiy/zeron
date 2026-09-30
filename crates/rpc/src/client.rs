@@ -22,6 +22,10 @@ pub type Transport = (mpsc::Sender<String>, mpsc::Receiver<String>);
 /// Re-establishes a dropped connection.
 pub type Dial = Arc<dyn Fn() -> BoxFuture<'static, Result<Transport, RpcError>> + Send + Sync>;
 
+/// A connection that lasted at least this long counts as healthy: the next
+/// redial after it starts from the shortest backoff again.
+const REDIAL_STABLE_AFTER: std::time::Duration = std::time::Duration::from_secs(2);
+
 /// Redial delays for a localhost engine: it is either restarting (sub-second
 /// to a few seconds) or gone, so back off quickly and cap low.
 const REDIAL_BACKOFF: [std::time::Duration; 5] = [
@@ -130,6 +134,11 @@ impl RpcClient {
             let reconnects = reconnects.clone();
             async move {
                 let mut inbound = inbound;
+                // Consecutive connections that died young: the next redial waits
+                // (a server that accepts and immediately closes must not be
+                // redialed in a hot loop).
+                let mut short_lived = 0usize;
+                let mut connected_at = std::time::Instant::now();
                 loop {
                     let sender = out.lock().unwrap_or_else(PoisonError::into_inner).clone();
                     while let Some(payload) = inbound.recv().await {
@@ -150,6 +159,13 @@ impl RpcClient {
                     }
                     fail_pending(&shared);
                     let Some(dial) = dial.as_ref() else { break };
+                    if connected_at.elapsed() < REDIAL_STABLE_AFTER {
+                        let delay = REDIAL_BACKOFF[short_lived.min(REDIAL_BACKOFF.len() - 1)];
+                        short_lived += 1;
+                        tokio::time::sleep(delay).await;
+                    } else {
+                        short_lived = 0;
+                    }
                     let mut attempt = 0usize;
                     let (new_out, new_in) = loop {
                         match dial().await {
@@ -164,6 +180,7 @@ impl RpcClient {
                     };
                     *out.lock().unwrap_or_else(PoisonError::into_inner) = new_out;
                     inbound = new_in;
+                    connected_at = std::time::Instant::now();
                     reconnects.send_modify(|n| *n += 1);
                 }
             }
@@ -496,4 +513,40 @@ async fn dial_ws(url: &str) -> Result<Transport, RpcError> {
         }
     });
     Ok((out_tx, in_rx))
+}
+
+#[cfg(test)]
+mod redial_tests {
+    use super::*;
+    use std::sync::atomic::{AtomicUsize, Ordering};
+    use std::time::Duration;
+
+    /// A server that accepts a connection and closes it at once must not be
+    /// redialed in a hot loop: connections that die young back off.
+    #[tokio::test]
+    async fn a_server_that_accepts_and_immediately_closes_is_not_redialed_in_a_hot_loop() {
+        let dials = Arc::new(AtomicUsize::new(0));
+        let dial: Dial = {
+            let dials = dials.clone();
+            Arc::new(move || {
+                dials.fetch_add(1, Ordering::SeqCst);
+                Box::pin(async move {
+                    let (out, _out_rx) = mpsc::channel::<String>(8);
+                    let (_in_tx, inbound) = mpsc::channel::<String>(8);
+                    // `_in_tx` drops here: the connection is closed before it starts.
+                    Ok((out, inbound))
+                })
+            })
+        };
+        let (out, _rx) = mpsc::channel::<String>(8);
+        let (_tx, inbound) = mpsc::channel::<String>(8);
+        let client = RpcClient::with_transport(out, inbound, Some(dial));
+        drop(_tx);
+        tokio::time::sleep(Duration::from_millis(1500)).await;
+        let count = dials.load(Ordering::SeqCst);
+        // 100 + 250 + 500 ms of backoff fit in the window: a handful of dials,
+        // not the thousands a hot loop would make.
+        assert!((1..=8).contains(&count), "{count} dials in 1.5 s");
+        drop(client);
+    }
 }

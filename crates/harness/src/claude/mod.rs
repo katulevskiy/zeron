@@ -799,7 +799,7 @@ async fn load_image_blocks(paths: &[String]) -> Vec<wire::ImageBlock> {
 /// Schema version of [`ClaudeLoopState`] in a [`HarnessHandoff`]; an adopter
 /// refuses any other, and the engine falls back to crash recovery.
 #[cfg(unix)]
-const STATE_VERSION: u32 = 1;
+pub(crate) const STATE_VERSION: u32 = 1;
 
 /// How long a freeze waits for the queued stdin lines to be written. A child
 /// that stops reading its input while we stop reading its output would
@@ -1198,6 +1198,7 @@ async fn run_session(session: Session) {
 enum Frozen {
     /// The engine let the run go (a failed exec, a refusal): carry on.
     Thawed,
+    #[cfg_attr(not(unix), allow(dead_code))]
     /// A same-process successor took the child and pipes: end the stream.
     Committed,
 }

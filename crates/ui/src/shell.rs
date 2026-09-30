@@ -12493,7 +12493,13 @@ impl Render for Shell {
         }
         if let Some(update) = crate::app_update::AppUpdate::global(cx) {
             let on = self.settings.auto_update;
-            update.update(cx, |update, cx| update.set_auto_update(on, cx));
+            let survives = self.state.read(cx).engine().is_some_and(|engine| {
+                matches!(engine.mode(), crate::state::EngineMode::Remote { .. })
+            });
+            update.update(cx, |update, cx| {
+                update.set_auto_update(on, cx);
+                update.set_engine_survives(survives, cx);
+            });
         }
 
         if self.activation_sub.is_none() {

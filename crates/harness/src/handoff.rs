@@ -32,6 +32,31 @@ use tokio::io::{AsyncWrite, AsyncWriteExt};
 use tokio::sync::{mpsc, oneshot};
 use zeron_proto::HarnessId;
 
+/// The state versions each adoptable harness can READ back, by harness id.
+/// A new binary reports this in its handoff preflight so the running engine can
+/// veto (never kill) a run whose exported state the successor could not adopt.
+/// Add a version here, never remove one, when a harness's state schema changes.
+pub fn adoptable_state_versions() -> Vec<(HarnessId, Vec<u32>)> {
+    #[cfg(unix)]
+    {
+        let acp = vec![crate::acp::STATE_VERSION];
+        vec![
+            (HarnessId::ClaudeCode, vec![crate::claude::STATE_VERSION]),
+            (HarnessId::Codex, vec![crate::codex::STATE_VERSION]),
+            (HarnessId::Cursor, vec![crate::cursor::STATE_VERSION]),
+            (HarnessId::Opencode, vec![crate::opencode::STATE_VERSION]),
+            (HarnessId::Grok, acp.clone()),
+            (HarnessId::Devin, acp.clone()),
+            (HarnessId::Hermes, acp.clone()),
+            (HarnessId::Antigravity, acp),
+        ]
+    }
+    #[cfg(not(unix))]
+    {
+        Vec::new()
+    }
+}
+
 /// Ask a live run to stop at a safe point and hand over its child.
 ///
 /// The run answers through `reply`: [`FreezeRefusal`] when it is not at a safe

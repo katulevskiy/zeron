@@ -34,6 +34,7 @@
 mod antigravity_paths;
 mod devin_models;
 mod normalize;
+#[cfg_attr(not(unix), allow(dead_code))]
 mod subagent;
 mod subagent_devin;
 mod system_message;
@@ -3865,6 +3866,7 @@ impl EventSink {
         self.tx.clone()
     }
 
+    #[cfg_attr(not(unix), allow(dead_code))]
     /// The filter's state, for a live update.
     fn echo_state(&self) -> Option<SystemMessageEchoFilter> {
         self.echo.as_ref().map(|echo| {
@@ -3963,7 +3965,7 @@ struct AcpHandoffState {
 /// Schema version of [`AcpHandoffState`] in a [`HarnessHandoff`]; an adopter
 /// refuses any other, and the engine falls back to crash recovery.
 #[cfg(unix)]
-const STATE_VERSION: u32 = 1;
+pub(crate) const STATE_VERSION: u32 = 1;
 
 /// A freeze during setup (`initialize` through the session's config) is
 /// refused with this.
@@ -4043,6 +4045,7 @@ async fn next_steer(
 enum Frozen {
     /// The engine let the run go (a failed exec, a refusal): carry on.
     Thawed,
+    #[cfg_attr(not(unix), allow(dead_code))]
     /// A same-process successor took the agent and its pipes: end the
     /// stream.
     Committed,

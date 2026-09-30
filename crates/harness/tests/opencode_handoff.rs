@@ -1134,6 +1134,38 @@ async fn a_thaw_after_the_bus_dropped_reconciles_the_gap() {
     ));
 }
 
+/// The prompt is acknowledged but the server has not turned busy yet: a
+/// reconcile now would find "not running" and end a turn that never started.
+#[tokio::test]
+async fn freeze_is_busy_until_the_server_has_turned_busy_for_the_turn() {
+    let fake = Fake::start().await;
+    let (c, rig) = controls();
+    let mut run = harness(&fake).run(request("first"), c).await.unwrap();
+    fake.wait_posts(&format!("/session/{SES}/prompt_async"), 1)
+        .await;
+    // Let the acknowledged POST finish; the session is still not busy.
+    tokio::time::sleep(Duration::from_millis(300)).await;
+    assert_eq!(
+        freeze(&rig).await.unwrap_err(),
+        FreezeRefusal::Busy("the turn has not started yet")
+    );
+    // Once the server reports busy, the very same run may freeze.
+    fake.status(SES, "busy");
+    fake.assistant(SES, "msg_1");
+    fake.text_open(SES, "msg_1", "prt_1");
+    fake.delta(SES, "msg_1", "prt_1", "working");
+    until(
+        &mut run,
+        |e| matches!(e, AgentEvent::TextDelta { text } if text == "working"),
+    )
+    .await;
+    let frozen = freeze(&rig).await.expect("safe once the turn is busy");
+    drop(frozen);
+    rig.interrupt.cancel();
+    fake.status(SES, "idle");
+    let _ = drain(&mut run).await;
+}
+
 #[tokio::test]
 async fn freeze_is_busy_while_a_native_command_or_an_interrupt_is_in_flight() {
     // A native `/command` holds its HTTP request for the whole turn.

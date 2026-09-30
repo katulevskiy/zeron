@@ -70,7 +70,8 @@ passes its fd in `ZERON_HANDOFF_FD`. The manifest is versioned, additive JSON:
                 stdout_leftover, stderr_tail, engine_state, harness_state }] }
 ```
 
-It holds secrets (OpenCode password, IPC token), so it is never a named file.
+It holds secrets (the OpenCode server password, agent session state), so it is
+never a named file.
 
 #### Sequence
 
@@ -86,11 +87,12 @@ It holds secrets (OpenCode password, IPC token), so it is never a named file.
    true: an agent-account login is in flight; a harness update holds a lease;
    a token refresh is in flight; a run is interrupting, in its setup phase, or
    in a non-freezable state (see run handoff).
-4. **Quiesce.** Stop the token refresh loop; pause doc queues; close the edge
-   host relay (so it cannot supersede the new host); stop PTY readers at a
-   read boundary and flush the pump's batch into the replay window; freeze each
-   run (below); flush all doc snapshots; kill or await short-lived helpers
-   (git, probes) so none is left a zombie.
+4. **Quiesce.** Stop the token refresh loop; pause doc queues; stop PTY readers
+   at a read boundary and flush the pump's batch into the replay window; freeze
+   each run (below); flush all doc snapshots. Everything not deliberately
+   carried (the edge relay, sockets, tasks, short-lived helpers such as git)
+   simply ends with the old image; the relay needs no teardown because the
+   successor's join supersedes it.
 5. **Two-phase.** Every freeze is reversible until exec. If any component
    fails to freeze, all thaw and the run continues in the old image; the
    handoff retries later.
@@ -148,8 +150,8 @@ an owned `LineReader` (exposes leftover bytes, cancel-safe stop) replaces them
 in Claude, `jsonrpc.rs` (Codex, ACP) and Cursor; the writer accepts a `Pause`
 message, so queued lines finish and are never torn and the writer parks with
 its queue; stderr fds are passed and
-kept drained so the agent never gets `EPIPE`. Stdout is raised to a 1 MiB pipe
-before freezing so a chatty agent does not block during the window.
+kept drained so the agent never gets `EPIPE`. On Linux stdout is raised to a
+1 MiB pipe before freezing so a chatty agent does not block during the window.
 
 Protocol state is **serialized, not replayed**. Raw lines are not retained;
 Codex's `turn/start` response is swallowed by the RPC client; Claude question
@@ -200,8 +202,11 @@ handoff.
 
 #### What does not survive, by design
 
-Live UI subscriptions end and resubscribe with `afterSeq`; input written during
-the ~1 s gap fails with `Closed` and is retried by the UI; `diff_sync` turn
+Live UI subscriptions end and resubscribe with `afterSeq` (the redialing client
+reconnects by itself); a call in flight at the moment of the exec fails with
+`Closed` and the UI's ordinary error path applies (there is no generic retry);
+new connections during the ~1 s gap queue in the listener's backlog instead of
+being refused; `diff_sync` turn
 snapshots for turns in progress; preview tunnels and login callback forwarders
 (veto while active).
 
@@ -222,9 +227,12 @@ attaches to an **engine host** and runs no engine of its own:
   re-runs `EngineInfo` after each dial (capabilities go stale across an
   upgrade). This also fixes today's "Ready but dead" state, and is what lets
   the UI ride out an engine handoff.
-- **Quit keeps today's meaning.** An engine host the app started stops when the
-  user quits; a pre-existing daemon keeps running (as now). Only the update
-  path detaches without stopping it.
+- **Quit keeps today's meaning.** An engine host the app started (a detached
+  process, or an installed service it brought up from stopped) stops when the
+  user quits; a daemon or service that was already running keeps running (as
+  now). Only the update path detaches without stopping it. A window that
+  embeds its engine (`ZERON_EMBED_ENGINE=1`, source builds, or when no host
+  can be started) never swaps silently, since its engine would die with it.
 - The host inherits the login-shell environment the embedded engine has today
   (PATH, `ZERON_*`, display/dbus/ssh-agent vars where available), because
   shells and agents inherit it.
@@ -277,7 +285,7 @@ remains capability-gated; this work adds a `handoff-v1` capability and an
   a line; per-harness state round-trips; `Busy` at every unsafe point.
 - Integration (Unix, real processes): start `zeron headless` with a fake agent
   (scripted stream-json / JSON-RPC child) and a real shell; run a turn and a
-  parked question; trigger handoff to a second binary with a different version;
+  parked question; trigger handoff to a second copy of the binary;
   assert the agent and shell **PIDs are unchanged**, streaming continues
   without a gap or duplicate transcript entry, the parked question still
   answers, terminal `afterSeq` resume works, and the IPC port never refused a
@@ -370,11 +378,23 @@ in the meantime, the old window stays and the swap is retried later without
 downloading again. The swap waits for an unfocused or 60 s-idle window, no IME
 composition and no unsaved file edits. The new window shows "Updated to vX".
 
-**Per harness** (`supports_adoption`): Claude, Codex, ACP and Cursor are
-implemented with fake-agent tests (real CLIs were not run). ACP carries an
-in-flight `session/prompt` across by request id instead of refusing; Cursor's
-store lease rides in `HarnessHandoff.extra_fds`. OpenCode and Pi: see the
-delivery notes in the PR.
+**Per harness** (`supports_adoption`): Claude, Codex, ACP (Grok, Devin, Hermes,
+Antigravity), Cursor and OpenCode are implemented with fake-agent tests (real
+CLIs were not run). ACP carries an in-flight `session/prompt` across by request
+id instead of refusing; Cursor's store lease rides in
+`HarnessHandoff.extra_fds`; OpenCode's server has no pipes (`NO_PIPE`) and
+reconciles what happened in the gap from REST (2.x refuses mid-turn). Pi has no
+adoption and defers a handoff while mid-turn.
+
+**Who may become the engine.** `HandoffEngine` is reachable by any local process
+on the loopback socket and the target replaces the process, so the engine only
+execs this install's own binary (the managed `app_root`, the macOS bundle, or
+for an unmanaged build the path it runs from), owned by its user and not
+writable by others; `ZERON_HANDOFF_ANY_EXE` in the engine's own environment
+lifts the location rule (tests). The preflight also reports the harness state
+versions the successor can read, and the old image refuses (never kills) a run
+the successor could not adopt: when a harness's state schema changes, add the
+new version to `adoptable_state_versions` and keep reading the old ones.
 
 **Known gaps.** Not exercised on macOS or Windows hardware; the GUI swap has not
 been driven end to end; the swap gate does not see question-panel answers,

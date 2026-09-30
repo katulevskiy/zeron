@@ -23,6 +23,7 @@ pub(crate) struct EngineFreeze {
 }
 
 /// A run stopped at a safe point, fold flushed.
+#[cfg_attr(not(unix), allow(dead_code))]
 pub(crate) struct RunFrozen {
     pub harness: HarnessHandoff,
     pub fold: FoldSnapshot,
@@ -44,6 +45,13 @@ pub(crate) enum RunMode {
     Adopt(Box<AdoptSeed>),
 }
 
+/// Descriptors an engine keeps open for an adopting harness (nothing on
+/// platforms without handoff).
+#[cfg(unix)]
+pub(crate) type HeldFds = Vec<std::os::fd::OwnedFd>;
+#[cfg(not(unix))]
+pub(crate) type HeldFds = Vec<()>;
+
 #[cfg_attr(not(unix), allow(dead_code))]
 pub(crate) struct AdoptSeed {
     pub harness: HarnessHandoff,
@@ -53,7 +61,7 @@ pub(crate) struct AdoptSeed {
     /// originals) and closed once the harness has taken its own copies. The
     /// harness may be delayed (an execution lease waits on a harness update),
     /// and must not find its descriptors closed under it.
-    pub fds: Vec<std::os::fd::OwnedFd>,
+    pub fds: HeldFds,
 }
 
 /// A streaming doc entry already begun: where it sits and what it holds.

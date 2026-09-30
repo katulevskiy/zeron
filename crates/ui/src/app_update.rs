@@ -178,6 +178,10 @@ pub struct AppUpdate {
     auto_update: bool,
     /// The swap failed recently: leave the user alone until this passes.
     swap_retry_at: Option<std::time::Instant>,
+    /// The engine this window is attached to keeps running when the window
+    /// goes away (an engine host or a daemon). An engine embedded in this
+    /// window dies with it, so a window swap would kill every run and PTY.
+    engine_survives: bool,
     edge_url: String,
     data_dir: PathBuf,
     checker: Updater,
@@ -238,6 +242,7 @@ impl AppUpdate {
             automatic: zeron_update::desktop_auto_update_enabled(),
             auto_update: true,
             swap_retry_at: None,
+            engine_survives: false,
             edge_url,
             data_dir: data_dir.clone(),
             checker,
@@ -492,10 +497,24 @@ impl AppUpdate {
         self.auto_update
     }
 
+    /// Whether the engine outlives this window (see the field).
+    pub fn set_engine_survives(&mut self, survives: bool, cx: &mut Context<Self>) {
+        if self.engine_survives != survives {
+            self.engine_survives = survives;
+            cx.notify();
+        }
+    }
+
     /// Whether a staged update installs without asking (as opposed to
     /// "restart to apply").
     pub fn silent(&self) -> bool {
-        self.automatic && self.auto_update && self.self_updating()
+        // Unix installs swap the window while the engine host keeps running;
+        // with an engine embedded in the window that would kill every run, so
+        // it stays "restart to apply" (Windows installs on quit either way).
+        self.automatic
+            && self.auto_update
+            && self.self_updating()
+            && (cfg!(windows) || self.engine_survives)
     }
 
     /// What the shell should do about the staged update given how busy the
@@ -504,7 +523,16 @@ impl AppUpdate {
         if !self.self_updating() {
             return Action::Nothing;
         }
-        if self.swap_retry_at.is_some_and(|at| std::time::Instant::now() < at) {
+        if !cfg!(windows) && !self.engine_survives {
+            return match self.flow {
+                Flow::Ready { .. } | Flow::Applied { .. } => Action::ShowStrip,
+                _ => Action::Nothing,
+            };
+        }
+        if self
+            .swap_retry_at
+            .is_some_and(|at| std::time::Instant::now() < at)
+        {
             return Action::Wait;
         }
         next_action(

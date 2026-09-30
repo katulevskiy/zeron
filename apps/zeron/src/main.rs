@@ -307,7 +307,7 @@ fn main() -> anyhow::Result<()> {
         }
         #[cfg(unix)]
         Some(Command::HandoffPreflight) => {
-            println!("handoff-ok {}", zeron_engine::handoff::MANIFEST_VERSION);
+            print!("{}", zeron_engine::handoff::preflight_report());
             Ok(())
         }
         Some(Command::Login) => {

@@ -7,7 +7,7 @@
 //!
 //! Unix only; drives the engine through the same MCP tool layer an agent uses.
 
-#![cfg(unix)]
+#![cfg(target_os = "linux")]
 
 use std::path::{Path, PathBuf};
 use std::process::{Child, Command, Stdio};
@@ -101,9 +101,20 @@ struct Env {
 
 impl Env {
     async fn start() -> Self {
+        Self::start_with(true).await
+    }
+
+    /// `allow_any_target`: lift the rule that a handoff only goes to this
+    /// install's own binary (the tests hand off to copies in a temp dir).
+    async fn start_with(allow_any_target: bool) -> Self {
         let dir = tempfile::tempdir().unwrap();
         let port = free_port();
-        let engine = Self::spawn_engine(dir.path(), port, Path::new(env!("CARGO_BIN_EXE_zeron")));
+        let engine = Self::spawn_engine(
+            dir.path(),
+            port,
+            Path::new(env!("CARGO_BIN_EXE_zeron")),
+            allow_any_target,
+        );
         let zeron = Arc::new(Zeron::new(
             format!("ws://127.0.0.1:{port}"),
             Origin::default(),
@@ -119,8 +130,12 @@ impl Env {
         env
     }
 
-    fn spawn_engine(dir: &Path, port: u16, exe: &Path) -> Child {
-        Command::new(exe)
+    fn spawn_engine(dir: &Path, port: u16, exe: &Path, allow_any_target: bool) -> Child {
+        let mut command = Command::new(exe);
+        if allow_any_target {
+            command.env("ZERON_HANDOFF_ANY_EXE", "1");
+        }
+        command
             .arg("headless")
             .env("HOME", dir)
             .env("ZERON_DATA_DIR", dir.join("data"))
@@ -572,5 +587,31 @@ async fn a_busy_handoff_disturbs_nothing_and_goes_through_once_it_clears() {
     // The engine still works on its new image.
     let second = create_chat(&env, "first").await;
     env.wait_transcript_contains(&second, "echo: first").await;
+    env.stop();
+}
+
+#[tokio::test(flavor = "multi_thread", worker_threads = 4)]
+async fn a_client_cannot_make_the_engine_exec_an_arbitrary_binary() {
+    // The engine's own rule (no override): only this install's binary.
+    let mut env = Env::start_with(false).await;
+    let chat = create_chat(&env, "first").await;
+    env.wait_transcript_contains(&chat, "echo: first").await;
+    let engine_pid = env.engine.id();
+    let before_exe = exe_of(engine_pid);
+    let stranger = copy_of_binary(env.dir.path());
+    env.handoff_to(&stranger).await;
+    let status = wait_handoff_outcome(&env).await;
+    assert_eq!(status["state"], "failed", "{status}");
+    assert!(
+        status["message"]
+            .as_str()
+            .unwrap_or("")
+            .contains("not this install's binary"),
+        "{status}"
+    );
+    assert_eq!(exe_of(engine_pid), before_exe, "still the same image");
+    env.tool("send_message", json!({ "chat": chat, "text": "second" }))
+        .await;
+    env.wait_transcript_contains(&chat, "echo: second").await;
     env.stop();
 }

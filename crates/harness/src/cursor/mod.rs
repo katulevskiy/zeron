@@ -437,8 +437,9 @@ fn spawn_writer(stdin: ChildStdin) -> mpsc::UnboundedSender<WriteMsg> {
     tx
 }
 
+#[cfg_attr(not(unix), allow(dead_code))]
 /// Version of [`CursorLoopState`]'s schema.
-const STATE_VERSION: u32 = 1;
+pub(crate) const STATE_VERSION: u32 = 1;
 
 /// The run loop's protocol state that cannot be re-read from the shim: what a
 /// freeze exports and an adopter restores. (Interrupting runs refuse to
@@ -926,6 +927,7 @@ async fn next_steer(
 enum Frozen {
     /// The engine let the run go (a failed exec, a refusal): carry on.
     Thawed,
+    #[cfg_attr(not(unix), allow(dead_code))]
     /// A same-process successor took the run (tests; the exec path never
     /// commits): end without a `Done`.
     Committed,

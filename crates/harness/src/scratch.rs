@@ -48,6 +48,7 @@ impl ScratchDir {
                 std::process::id(),
                 NEXT_SCRATCH.fetch_add(1, Ordering::Relaxed)
             ));
+            #[cfg_attr(not(unix), allow(unused_mut))]
             let mut builder = std::fs::DirBuilder::new();
             #[cfg(unix)]
             {
@@ -66,6 +67,7 @@ impl ScratchDir {
         &self.path
     }
 
+    #[cfg_attr(not(unix), allow(dead_code))]
     /// Give the directory up WITHOUT removing it: a live update hands it to
     /// the next image, whose [`Self::adopt`] removes it at the run's end.
     pub(crate) fn into_path(self) -> PathBuf {

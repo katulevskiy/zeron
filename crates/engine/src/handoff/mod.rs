@@ -22,7 +22,8 @@ mod fds;
 mod manifest;
 
 pub use coordinator::{
-    HandoffError, exec_into, preflight, prune_rollback_copies, roll_back, rollback_exe,
+    ANY_TARGET_ENV, HandoffError, SuccessorCaps, check_target, exec_into, preflight,
+    preflight_report, prune_rollback_copies, roll_back, rollback_exe,
 };
 pub use fds::{adopt_fd, is_cloexec, listener_from_inherited, set_inheritable};
 pub use manifest::{

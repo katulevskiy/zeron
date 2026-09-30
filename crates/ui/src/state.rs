@@ -130,6 +130,8 @@ trait EngineBackend: Send + Sync {
     /// host this window started running for the new window to attach to.
     fn detach_for_update(&self) {}
     fn stop_supervising(&self) {}
+    /// This window brought the engine up from stopped: quitting stops it.
+    fn mark_host_owned(&self) {}
     /// Quitting this window stops the engine (it embeds it, or started it).
     fn stops_on_quit(&self) -> bool {
         true
@@ -182,7 +184,7 @@ struct RemoteEngine {
     info_refresh_task: tokio::sync::Mutex<Option<tokio::task::JoinHandle<()>>>,
     /// This window started the engine host it is attached to: quitting stops
     /// it (a daemon somebody else started keeps running, as always).
-    host_owned: bool,
+    host_owned: std::sync::atomic::AtomicBool,
     /// Starts the host again if it dies while this window is up (only for a
     /// host an app started for itself; a service is restarted by its manager).
     host_supervisor: std::sync::Mutex<Option<tokio::task::JoinHandle<()>>>,
@@ -206,7 +208,9 @@ impl EngineBackend for RemoteEngine {
         // unless the window is only being replaced by an update. A daemon
         // somebody else started outlives this viewport.
         self.stop_supervising();
-        if self.host_owned && !self.detach.load(std::sync::atomic::Ordering::SeqCst) {
+        if self.host_owned.load(std::sync::atomic::Ordering::SeqCst)
+            && !self.detach.load(std::sync::atomic::Ordering::SeqCst)
+        {
             self.stop_host().await;
         }
         if let Some(task) = self.lifecycle_task.lock().await.take() {
@@ -224,7 +228,12 @@ impl EngineBackend for RemoteEngine {
     }
 
     fn stops_on_quit(&self) -> bool {
+        self.host_owned.load(std::sync::atomic::Ordering::SeqCst)
+    }
+
+    fn mark_host_owned(&self) {
         self.host_owned
+            .store(true, std::sync::atomic::Ordering::SeqCst);
     }
 
     fn stop_supervising(&self) {
@@ -316,7 +325,8 @@ impl EngineHandle {
         static BOOTSTRAP_GATE: tokio::sync::Mutex<()> = tokio::sync::Mutex::const_new(());
         let _gate = BOOTSTRAP_GATE.lock().await;
 
-        if let Some(handle) = Self::attach_to_daemon(config.ipc_port, Some(&config.data_dir)).await {
+        if let Some(handle) = Self::attach_to_daemon(config.ipc_port, Some(&config.data_dir)).await
+        {
             return Ok(handle);
         }
 
@@ -333,7 +343,9 @@ impl EngineHandle {
                 && tokio::time::Instant::now() < released
             {
                 tokio::time::sleep(std::time::Duration::from_millis(200)).await;
-                if let Some(handle) = Self::attach_to_daemon(config.ipc_port, Some(&config.data_dir)).await {
+                if let Some(handle) =
+                    Self::attach_to_daemon(config.ipc_port, Some(&config.data_dir)).await
+                {
                     return Ok(handle);
                 }
             }
@@ -343,8 +355,13 @@ impl EngineHandle {
             && InstanceLock::holder(&config.data_dir).is_none()
         {
             match crate::engine_host::ensure_engine_host(config.ipc_port).await {
-                Ok(()) => {
-                    if let Some(handle) = Self::attach_to_daemon(config.ipc_port, Some(&config.data_dir)).await {
+                Ok(started) => {
+                    if let Some(handle) =
+                        Self::attach_to_daemon(config.ipc_port, Some(&config.data_dir)).await
+                    {
+                        if started == crate::engine_host::HostStart::Ours {
+                            handle.mark_host_owned();
+                        }
                         return Ok(handle);
                     }
                     tracing::warn!("the engine host started but did not answer; embedding instead");
@@ -387,7 +404,12 @@ impl EngineHandle {
                         return Err(err.into());
                     }
                     tokio::time::sleep(std::time::Duration::from_millis(250)).await;
-                    if let Some(handle) = Self::attach_to_daemon(engine_config.ipc_port, Some(&engine_config.data_dir)).await {
+                    if let Some(handle) = Self::attach_to_daemon(
+                        engine_config.ipc_port,
+                        Some(&engine_config.data_dir),
+                    )
+                    .await
+                    {
                         return Ok(handle);
                     }
                 }
@@ -564,12 +586,17 @@ impl EngineHandle {
                             url,
                             lifecycle_task: tokio::sync::Mutex::new(Some(lifecycle_task)),
                             info_refresh_task: tokio::sync::Mutex::new(Some(info_refresh_task)),
-                            host_owned,
+                            host_owned: std::sync::atomic::AtomicBool::new(host_owned),
                             host_supervisor: std::sync::Mutex::new(
                                 (host_owned
                                     && crate::engine_host::policy()
                                         == crate::engine_host::HostPolicy::SpawnOrAttach)
-                                    .then(|| tokio::spawn(supervise_host(ipc_port, data_dir.map(Into::into)))),
+                                    .then(|| {
+                                        tokio::spawn(supervise_host(
+                                            ipc_port,
+                                            data_dir.map(Into::into),
+                                        ))
+                                    }),
                             ),
                             detach: std::sync::atomic::AtomicBool::new(false),
                         }),
@@ -605,7 +632,7 @@ impl EngineHandle {
                 url: "memory://test".into(),
                 lifecycle_task: tokio::sync::Mutex::new(None),
                 info_refresh_task: tokio::sync::Mutex::new(None),
-                host_owned: false,
+                host_owned: std::sync::atomic::AtomicBool::new(false),
                 host_supervisor: std::sync::Mutex::new(None),
                 detach: std::sync::atomic::AtomicBool::new(false),
             }),
@@ -682,6 +709,11 @@ impl EngineHandle {
         self.inner.detach_for_update();
     }
 
+    /// This window started the engine (from stopped): quitting stops it again.
+    pub fn mark_host_owned(&self) {
+        self.inner.mark_host_owned();
+    }
+
     /// Stop restarting the engine host: an explicit stop is about to be sent.
     pub fn stop_supervising(&self) {
         self.inner.stop_supervising();
@@ -716,11 +748,17 @@ async fn supervise_host(port: u16, data_dir: Option<std::path::PathBuf>) {
                     .as_deref()
                     .is_some_and(|dir| dir.join("engine-stopped").exists())
                 {
-                    tracing::info!(port, "the engine host was stopped on purpose; not restarting it");
+                    tracing::info!(
+                        port,
+                        "the engine host was stopped on purpose; not restarting it"
+                    );
                     return;
                 }
                 if restarts >= 3 {
-                    tracing::warn!(port, "the engine host keeps dying; giving up on restarting it");
+                    tracing::warn!(
+                        port,
+                        "the engine host keeps dying; giving up on restarting it"
+                    );
                     return;
                 }
                 restarts += 1;

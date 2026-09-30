@@ -21,7 +21,7 @@ pub use tokio_util::sync::CancellationToken;
 
 pub use handoff::{
     ChildHandle, ExitOutcome, FreezeRefusal, FreezeRequest, FrozenRun, HarnessHandoff,
-    PausedWriter, SteerRecord, WriteMsg, WriterFd,
+    PausedWriter, SteerRecord, WriteMsg, WriterFd, adoptable_state_versions,
 };
 
 use zeron_proto::{
@@ -245,8 +245,10 @@ pub mod claude;
 pub mod codex;
 pub mod cursor;
 pub(crate) mod executable;
+#[cfg_attr(not(unix), allow(dead_code))]
 pub mod handoff;
 pub mod install;
+#[cfg_attr(not(unix), allow(dead_code))]
 pub(crate) mod jsonrpc;
 pub mod line_reader;
 pub mod mock;
@@ -254,6 +256,7 @@ mod model_context;
 pub mod opencode;
 pub mod pi;
 pub mod process;
+#[cfg_attr(not(unix), allow(dead_code))]
 mod scratch;
 pub mod shell_env;
 pub(crate) mod skills;
@@ -338,6 +341,7 @@ impl StderrTail {
         }
     }
 
+    #[cfg_attr(not(unix), allow(dead_code))]
     /// The kept lines, oldest first (a freeze exports them).
     pub(crate) fn lines(&self) -> Vec<String> {
         self.0
@@ -348,6 +352,7 @@ impl StderrTail {
             .collect()
     }
 
+    #[cfg_attr(not(unix), allow(dead_code))]
     /// A tail that starts with lines a previous image captured (adoption).
     pub(crate) fn seeded(lines: Vec<String>) -> Self {
         let tail = Self::default();

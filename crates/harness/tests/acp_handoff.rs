@@ -11,7 +11,7 @@
 //! process adopts them. The exec path itself never commits; see
 //! `a_run_task_dropped_while_frozen_leaves_the_child_running_and_adoptable`.
 
-#![cfg(unix)]
+#![cfg(target_os = "linux")]
 
 use std::os::fd::RawFd;
 use std::path::{Path, PathBuf};

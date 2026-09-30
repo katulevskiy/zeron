@@ -10,7 +10,9 @@ use crate::terminals::handoff::TerminalHandoff;
 
 /// The manifest schema this build writes and can read. Additive changes keep
 /// the number; a change an older reader cannot understand bumps it, and the
-/// reader refuses rather than guess.
+/// reader refuses rather than guess. A new field whose ABSENCE would change what
+/// an older reader does with the rest (it would skip closing, locking or
+/// validating something it cannot see) is not additive: bump the version.
 pub const MANIFEST_VERSION: u32 = 1;
 /// The fd number of the manifest, in the successor's environment.
 pub const HANDOFF_FD_ENV: &str = "ZERON_HANDOFF_FD";

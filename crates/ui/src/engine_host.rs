@@ -28,17 +28,24 @@ impl HostPolicy {
         Self::from_parts(
             cfg!(unix),
             std::env::var("ZERON_EMBED_ENGINE").ok().as_deref(),
+            // A source build or hand-copied binary never updates itself, and a
+            // host that outlives the window would keep running stale code after
+            // a rebuild: it embeds, as it always did.
+            !matches!(
+                zeron_update::detect_install(),
+                zeron_update::InstallKind::Unmanaged
+            ),
         )
     }
 
-    fn from_parts(unix: bool, embed: Option<&str>) -> Self {
+    fn from_parts(unix: bool, embed: Option<&str>, installed: bool) -> Self {
         let embed = embed.is_some_and(|value| {
             matches!(
                 value.trim().to_ascii_lowercase().as_str(),
                 "1" | "true" | "yes"
             )
         });
-        if unix && !embed {
+        if unix && installed && !embed {
             Self::SpawnOrAttach
         } else {
             Self::Embed
@@ -91,6 +98,9 @@ pub struct HostEnv {
     pub os: &'static str,
     pub systemd_unit: bool,
     pub launchd_plist: bool,
+    /// The app was pointed at a specific engine (`ZERON_IPC_PORT` or
+    /// `ZERON_DATA_DIR`): the installed service would serve another one.
+    pub custom_engine: bool,
 }
 
 impl HostEnv {
@@ -107,6 +117,8 @@ impl HostEnv {
                 home.join("Library/LaunchAgents/sh.zeron.app.plist")
                     .is_file()
             }),
+            custom_engine: std::env::var_os("ZERON_IPC_PORT").is_some()
+                || std::env::var_os("ZERON_DATA_DIR").is_some(),
         }
     }
 }
@@ -114,6 +126,9 @@ impl HostEnv {
 /// Prefer the installed service (it is what the user set up to keep the engine
 /// running), else detach a process of our own.
 pub fn choose_launch(env: &HostEnv) -> HostLaunch {
+    if env.custom_engine {
+        return HostLaunch::Detached;
+    }
     match (env.os, env.systemd_unit, env.launchd_plist) {
         ("linux", true, _) => HostLaunch::Systemd,
         ("macos", _, true) => HostLaunch::Launchd,
@@ -121,11 +136,33 @@ pub fn choose_launch(env: &HostEnv) -> HostLaunch {
     }
 }
 
+/// Whether the host `ensure_engine_host` brought up is this app's to stop when
+/// the window quits.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub enum HostStart {
+    /// The app started it (a detached process, or a service that was stopped):
+    /// quitting stops it again.
+    Ours,
+    /// Something else was already bringing it up (a service that was starting
+    /// on its own), or it is managed by a service manager the app does not
+    /// track: it keeps running.
+    NotOurs,
+}
+
 /// Start an engine host and wait until it answers on `port`.
 #[cfg(unix)]
-pub async fn ensure_engine_host(port: u16) -> anyhow::Result<()> {
+pub async fn ensure_engine_host(port: u16) -> anyhow::Result<HostStart> {
+    let mut start = HostStart::Ours;
     match choose_launch(&HostEnv::detect()) {
         HostLaunch::Systemd => {
+            // A service that is already active or activating (login autostart
+            // racing this app) is not ours; only one we bring up from stopped is.
+            let state = output_blocking("systemctl", &["--user", "is-active", "zeron.service"])
+                .await
+                .unwrap_or_default();
+            if matches!(state.trim(), "active" | "activating" | "reloading") {
+                start = HostStart::NotOurs;
+            }
             run_blocking("systemctl", &["--user", "start", "zeron.service"]).await?
         }
         HostLaunch::Launchd => {
@@ -146,14 +183,20 @@ pub async fn ensure_engine_host(port: u16) -> anyhow::Result<()> {
                 &["kickstart", &format!("{domain}/sh.zeron.app")],
             )
             .await?;
+            // The app does not track launchd's state: leave the agent running.
+            start = HostStart::NotOurs;
         }
-        HostLaunch::Detached => return start_detached(port).await,
+        HostLaunch::Detached => {
+            start_detached(port).await?;
+            return Ok(HostStart::Ours);
+        }
     }
-    wait_for_port(port, Duration::from_secs(20), None).await
+    wait_for_port(port, Duration::from_secs(20), None).await?;
+    Ok(start)
 }
 
 #[cfg(not(unix))]
-pub async fn ensure_engine_host(_port: u16) -> anyhow::Result<()> {
+pub async fn ensure_engine_host(_port: u16) -> anyhow::Result<HostStart> {
     anyhow::bail!("an engine host is not supported on this platform")
 }
 
@@ -168,6 +211,16 @@ pub fn is_app_hosted(info: &zeron_proto::EngineInfo) -> bool {
 fn uid() -> u32 {
     // SAFETY: getuid has no failure mode and touches no memory.
     unsafe { libc::getuid() }
+}
+
+#[cfg(unix)]
+async fn output_blocking(program: &'static str, args: &[&str]) -> anyhow::Result<String> {
+    let args: Vec<String> = args.iter().map(|arg| (*arg).to_owned()).collect();
+    tokio::task::spawn_blocking(move || {
+        let output = std::process::Command::new(program).args(&args).output()?;
+        Ok(String::from_utf8_lossy(&output.stdout).into_owned())
+    })
+    .await?
 }
 
 #[cfg(unix)]
@@ -309,8 +362,18 @@ mod tests {
             os: "linux",
             systemd_unit: true,
             launchd_plist: false,
+            custom_engine: false,
         };
         assert_eq!(choose_launch(&base), HostLaunch::Systemd);
+        // Pointed at a specific engine (custom port/data dir): never the
+        // installed service, which would serve a different one.
+        assert_eq!(
+            choose_launch(&HostEnv {
+                custom_engine: true,
+                ..base
+            }),
+            HostLaunch::Detached
+        );
         assert_eq!(
             choose_launch(&HostEnv {
                 systemd_unit: false,
@@ -322,6 +385,7 @@ mod tests {
             os: "macos",
             systemd_unit: false,
             launchd_plist: true,
+            custom_engine: false,
         };
         assert_eq!(choose_launch(&mac), HostLaunch::Launchd);
         // A systemd unit means nothing on macOS, and a plist nothing on Linux.
@@ -346,15 +410,21 @@ mod tests {
     #[test]
     fn the_app_hosts_its_engine_on_unix_unless_told_to_embed() {
         assert_eq!(
-            HostPolicy::from_parts(true, None),
+            HostPolicy::from_parts(true, None, true),
             HostPolicy::SpawnOrAttach
         );
-        assert_eq!(HostPolicy::from_parts(true, Some("1")), HostPolicy::Embed);
         assert_eq!(
-            HostPolicy::from_parts(true, Some("no")),
+            HostPolicy::from_parts(true, Some("1"), true),
+            HostPolicy::Embed
+        );
+        assert_eq!(
+            HostPolicy::from_parts(true, Some("no"), true),
             HostPolicy::SpawnOrAttach
         );
-        assert_eq!(HostPolicy::from_parts(false, None), HostPolicy::Embed);
+        assert_eq!(HostPolicy::from_parts(false, None, true), HostPolicy::Embed);
+        // A source build (unmanaged install) embeds: a host would outlive
+        // rebuilds and keep running stale code.
+        assert_eq!(HostPolicy::from_parts(true, None, false), HostPolicy::Embed);
     }
 
     #[cfg(unix)]

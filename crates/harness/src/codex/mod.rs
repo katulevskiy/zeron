@@ -893,6 +893,7 @@ struct Session {
 enum Start {
     /// A new app server: handshake, thread, `SessionStarted`, first turn.
     Fresh(Box<RunRequest>),
+    #[cfg_attr(not(unix), allow(dead_code))]
     /// An app server a previous image froze mid-session: straight into the
     /// main loop with its state and the answers of its parked requests.
     Adopted {
@@ -1097,7 +1098,7 @@ struct CodexHandoffState<S> {
 /// Schema version of [`CodexHandoffState`] in a [`HarnessHandoff`]; an
 /// adopter refuses any other, and the engine falls back to crash recovery.
 #[cfg(unix)]
-const STATE_VERSION: u32 = 1;
+pub(crate) const STATE_VERSION: u32 = 1;
 
 /// A freeze during setup (`initialize` through the first `turn/start`
 /// response) is refused with this.
@@ -2059,6 +2060,7 @@ fn write_answer(
 enum Frozen {
     /// The engine let the run go (a failed exec, a refusal): carry on.
     Thawed,
+    #[cfg_attr(not(unix), allow(dead_code))]
     /// A same-process successor took the app server and its pipes: end the
     /// stream.
     Committed,

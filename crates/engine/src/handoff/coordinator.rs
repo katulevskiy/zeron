@@ -40,9 +40,132 @@ pub enum HandoffError {
     Prepare(String),
 }
 
+/// Environment variable that lifts the location rule of [`check_target`] (for
+/// tests and unusual layouts). It is read from the ENGINE's own environment,
+/// which no other local process controls.
+pub const ANY_TARGET_ENV: &str = "ZERON_HANDOFF_ANY_EXE";
+
+/// May `exe` become this engine? It replaces the process — inheriting the IPC
+/// listener, every terminal and the agents' pipes — so it must be this
+/// install's own binary, not whatever path a client names:
+///
+/// - an absolute path to a regular file owned by the engine's user and not
+///   writable by group or others;
+/// - the current install's binary (the `current` symlink of a managed install,
+///   inside its `app_root`; the app bundle on macOS), or, for an unmanaged
+///   build, the very path this engine runs from (a rebuilt binary).
+pub fn check_target(exe: &Path) -> Result<(), String> {
+    use std::os::unix::fs::MetadataExt;
+    if !exe.is_absolute() {
+        return Err(format!("{} is not an absolute path", exe.display()));
+    }
+    let canonical = exe
+        .canonicalize()
+        .map_err(|e| format!("{}: {e}", exe.display()))?;
+    let meta = std::fs::metadata(&canonical).map_err(|e| format!("{}: {e}", exe.display()))?;
+    // SAFETY: geteuid has no failure mode and touches no memory.
+    let euid = unsafe { libc::geteuid() };
+    if !meta.is_file() || meta.uid() != euid || meta.mode() & 0o022 != 0 {
+        return Err(format!(
+            "{} must be a regular file owned by the engine's user and not writable by others",
+            exe.display()
+        ));
+    }
+    if std::env::var_os(ANY_TARGET_ENV).is_some_and(|value| !value.is_empty()) {
+        return Ok(());
+    }
+    let inside = |root: &Path| {
+        root.canonicalize()
+            .is_ok_and(|root| canonical.starts_with(root))
+    };
+    let allowed = match zeron_update::detect_install() {
+        zeron_update::InstallKind::Managed { app_root } => inside(&app_root),
+        zeron_update::InstallKind::MacApp { bundle } => inside(&bundle),
+        _ => std::env::current_exe()
+            .ok()
+            .and_then(|own| own.canonicalize().ok())
+            .is_some_and(|own| own == canonical),
+    };
+    if allowed {
+        Ok(())
+    } else {
+        Err(format!(
+            "{} is not this install's binary; a live handoff only goes to the installed build",
+            exe.display()
+        ))
+    }
+}
+
+/// What `zeron handoff-preflight` prints: `handoff-ok <manifest version>` and one
+/// `handoff-state <harness id> <version,...>` line per adoptable harness (the
+/// state versions this build can read back; see
+/// [`zeron_harness::adoptable_state_versions`]).
+pub fn preflight_report() -> String {
+    let mut report = format!("handoff-ok {MANIFEST_VERSION}\n");
+    for (id, versions) in zeron_harness::adoptable_state_versions() {
+        let name = serde_json::to_value(id)
+            .ok()
+            .and_then(|value| value.as_str().map(str::to_owned));
+        if let Some(name) = name {
+            let versions: Vec<String> = versions.iter().map(u32::to_string).collect();
+            report.push_str(&format!("handoff-state {name} {}\n", versions.join(",")));
+        }
+    }
+    report
+}
+
+/// What a successor said it can adopt.
+#[derive(Debug, Default, Clone)]
+pub struct SuccessorCaps {
+    /// Harness id (its serialized name) -> the state versions it can read. A
+    /// harness the successor does not list is unknown, not unsupported (an older
+    /// build predates the report), and is not vetoed.
+    states: std::collections::HashMap<String, Vec<u32>>,
+}
+
+impl SuccessorCaps {
+    fn parse(stdout: &str) -> Self {
+        let states = stdout
+            .lines()
+            .filter_map(|line| line.strip_prefix("handoff-state "))
+            .filter_map(|rest| {
+                let (id, versions) = rest.split_once(' ')?;
+                let versions = versions
+                    .trim()
+                    .split(',')
+                    .filter_map(|v| v.parse().ok())
+                    .collect();
+                Some((id.to_owned(), versions))
+            })
+            .collect();
+        Self { states }
+    }
+
+    /// Why the successor could not adopt this exported run, if it cannot.
+    fn unreadable(&self, chat_id: &str, harness: &zeron_harness::HarnessHandoff) -> Option<String> {
+        let id = serde_json::to_value(harness.harness)
+            .ok()?
+            .as_str()?
+            .to_owned();
+        let supported = self.states.get(&id)?;
+        (!supported.contains(&harness.state_version)).then(|| {
+            format!(
+                "the new binary cannot read the {id} state (version {}) of chat {chat_id}",
+                harness.state_version
+            )
+        })
+    }
+
+    /// The first exported run the successor could not adopt, if any.
+    fn unreadable_run(&self, runs: &[super::RunHandoff]) -> Option<String> {
+        runs.iter()
+            .find_map(|run| self.unreadable(&run.chat_id, &run.harness))
+    }
+}
+
 /// `exe handoff-preflight` must succeed and print `handoff-ok <N>` with `N`
 /// at least our manifest version, so the successor can read what we write.
-pub async fn preflight(new_exe: &Path) -> Result<(), String> {
+pub async fn preflight(new_exe: &Path) -> Result<SuccessorCaps, String> {
     // A relative path resolves against the engine's cwd and a bare name is
     // searched on PATH — the checked file and the exec'd file could differ.
     if !new_exe.is_absolute() {
@@ -77,7 +200,7 @@ pub async fn preflight(new_exe: &Path) -> Result<(), String> {
             "the new binary reads manifest version {supported}, this build writes {MANIFEST_VERSION}"
         ));
     }
-    Ok(())
+    Ok(SuccessorCaps::parse(&stdout))
 }
 
 /// Replace this process with `exe`, same arguments, telling it where the
@@ -264,6 +387,12 @@ impl EngineCore {
     /// Sockets, threads and tasks that are not deliberately carried simply
     /// end with the old image, which is why the edge relay needs no teardown.
     pub async fn handoff(&self, new_exe: &Path) -> HandoffError {
+        // The caller may be any local process (the RPC is on the loopback
+        // socket): the binary that becomes this engine must be one this
+        // install put there.
+        if let Err(reason) = check_target(new_exe) {
+            return HandoffError::Preflight(reason);
+        }
         self.handoff_with(new_exe, exec_into).await
     }
 
@@ -287,9 +416,10 @@ impl EngineCore {
         if !vetoes.is_empty() {
             return HandoffError::Busy(vetoes.join("; "));
         }
-        if let Err(reason) = preflight(new_exe).await {
-            return HandoffError::Preflight(reason);
-        }
+        let successor = match preflight(new_exe).await {
+            Ok(caps) => caps,
+            Err(reason) => return HandoffError::Preflight(reason),
+        };
 
         // ── Phase A: freeze. Every step below can be undone. ──
         // A WorkOS refresh token is single-use: never exec mid-rotation.
@@ -308,6 +438,14 @@ impl EngineCore {
                 return HandoffError::Busy(err.to_string());
             }
         };
+        // A run whose exported state the successor cannot read would be stopped
+        // and recovered from its journal (losing the turn in flight): refuse the
+        // handoff instead, and never kill work for an update.
+        if let Some(reason) = successor.unreadable_run(&runs.handoffs()) {
+            runs.thaw();
+            resume_queues(self, queues);
+            return HandoffError::Preflight(reason);
+        }
         let terminals = match self.terminals.freeze().await {
             Ok(terminals) => terminals,
             Err(err) => {
@@ -382,6 +520,75 @@ mod tests {
     use tempfile::TempDir;
 
     use super::*;
+
+    #[test]
+    fn a_successor_that_cannot_read_a_runs_state_vetoes_the_handoff_but_unknown_is_fine() {
+        let report = preflight_report();
+        assert!(report.starts_with(&format!("handoff-ok {MANIFEST_VERSION}\n")));
+        assert!(report.contains("handoff-state claude-code 1"), "{report}");
+        let caps = SuccessorCaps::parse(
+            "handoff-ok 1\nhandoff-state claude-code 1,2\nhandoff-state codex 3\n",
+        );
+        let run = |harness, version| zeron_harness::HarnessHandoff {
+            harness,
+            state_version: version,
+            pid: 4242,
+            stdin_fd: 5,
+            stdout_fd: 6,
+            stderr_fd: None,
+            extra_fds: Vec::new(),
+            stdout_leftover: Vec::new(),
+            stderr_tail: Vec::new(),
+            state: serde_json::json!({}),
+            undrained_steers: Vec::new(),
+        };
+        // Listed and readable.
+        assert!(
+            caps.unreadable("c1", &run(HarnessId::ClaudeCode, 2))
+                .is_none()
+        );
+        // Listed, but not this version: veto with the reason.
+        let reason = caps.unreadable("c1", &run(HarnessId::Codex, 1)).unwrap();
+        assert!(
+            reason.contains("codex") && reason.contains("version 1"),
+            "{reason}"
+        );
+        // Not listed at all (an older build predates the report): not vetoed.
+        assert!(caps.unreadable("c1", &run(HarnessId::Cursor, 9)).is_none());
+    }
+
+    #[test]
+    fn only_this_installs_own_binary_may_become_the_engine() {
+        use std::os::unix::fs::PermissionsExt;
+        // (Assumes the override is not set in the test environment.)
+        assert!(std::env::var_os(ANY_TARGET_ENV).is_none());
+        let own = std::env::current_exe().unwrap();
+        assert!(check_target(&own).is_ok(), "the running binary itself");
+        assert!(
+            check_target(Path::new("relative/zeron"))
+                .unwrap_err()
+                .contains("absolute")
+        );
+        let dir = tempfile::tempdir().unwrap();
+        let other = dir.path().join("zeron-other");
+        std::fs::copy(&own, &other).unwrap();
+        std::fs::set_permissions(&other, std::fs::Permissions::from_mode(0o755)).unwrap();
+        // A perfectly good executable somewhere else is not this install.
+        assert!(
+            check_target(&other)
+                .unwrap_err()
+                .contains("not this install's binary")
+        );
+        // Writable by others: refused before anything else.
+        std::fs::set_permissions(&other, std::fs::Permissions::from_mode(0o777)).unwrap();
+        assert!(
+            check_target(&other)
+                .unwrap_err()
+                .contains("not writable by others")
+        );
+        assert!(check_target(dir.path()).is_err(), "a directory");
+        assert!(check_target(&dir.path().join("missing")).is_err());
+    }
 
     #[test]
     fn a_rollback_goes_to_the_running_binary_except_on_macos_where_it_is_kept_aside() {
