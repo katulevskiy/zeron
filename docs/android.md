@@ -404,6 +404,47 @@ Files / Terminal / Browser & previews in its menu. Launch routes
   tool line's file badge (Read / Write / Edit) opens its file on tap and
   offers Open / Open in browser / Save to Downloads / Copy path on long-press.
 
+### Subagents
+
+The desktop's Subagents view (#638, #647), on the phone:
+
+- **Where the data comes from.** Two sources, both shared with the desktop.
+  The session row carries `running_subagents` (the engine publishes it as
+  subagent sinks open and settle and clears it when the run ends; stale rows
+  count zero, like the working indicator), so the sessions list can badge a
+  chat that is not open. The list itself is read from the open chat's
+  transcript: every spawn chip with a stamped doc ref is one subagent
+  (`zeron_client::subagents`, exposed as `CoreClient.subagents(chat)`). Order
+  and grouping are the desktop's and live in Rust so iOS can reuse them:
+  running first, longest-running on top, then unstamped; finished ones split
+  into Completed and Failed, newest first.
+- **Sessions list**: a "● N" pill (Geist Mono digits, capped "99+") leads the
+  row's own status — it never replaces it, so a finished parent reads
+  "● 2 ✓ Done".
+- **Session header**: a subagents button (the bot glyph) appears once the
+  chat has any; while some run its face breathes in the activity colour and
+  a badge shows the count. It opens the **Subagents** sheet: the running
+  count beside the title, running rows on top, then **Finished (N)** — closed
+  by default — holding **Completed (n)** and **Failed (n)**, each collapsible
+  and paging at ten with "Show more". Empty lists are not drawn. The panel
+  state and slot plan are `ui/SubagentsModel.kt` (JVM-tested).
+- **Opening one**: a row, or a spawn card in the transcript (each card is one
+  `zeron-subagent:{doc}` link), opens `SubagentScreen`: the subagent's own
+  transcript, read-only, above a card with what the spawn chip records (type,
+  model, harness, start / age, and its report to the parent). The transcript
+  is the subagent's doc (`{chat}--sub--{id}`) opened with
+  `CoreClient.open_subagent`: the engine keeps every subagent doc on its own
+  chat2 room (the local edge too), so it streams while the subagent runs and
+  stays readable after it settles. The desktop reads a settled subagent from
+  its uploaded blob first; the phone always joins the room. Subagents are
+  steered through the parent chat; the screen has no composer.
+- **Demo**: "Audit every sync path" (3 running, 13 completed, 2 failed) and
+  "Background test sweep" (turn done, 2 still running). Launch straight into
+  them with `--es route subagents:chat-fanout` or
+  `--es route 'subagent:chat-fanout|chat-fanout--sub--fo-soak'`.
+- Not recorded on the chip, so not shown: when a finished subagent ended
+  (the list shows its last update instead).
+
 ## Development: several devices without WorkOS
 
 ```

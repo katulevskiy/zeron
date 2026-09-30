@@ -81,7 +81,8 @@ private enum class Gate { Main, FirstRun }
 
 object Routes {
     const val HOME = "home"
-    const val CHAT = "chat/{id}"
+    const val CHAT = "chat/{id}?subagents={subagents}"
+    const val SUBAGENT = "subagent/{chat}/{doc}"
     const val NEW = "new"
     const val SEARCH = "search"
     const val ENGINE = "engine"
@@ -92,6 +93,12 @@ object Routes {
     const val TERMINAL = "terminal/{ws}"
     const val BROWSER = "browser?ws={ws}&url={url}"
     fun chat(id: String) = "chat/$id"
+
+    /** The chat with its Subagents panel open. */
+    fun chatSubagents(id: String) = "chat/$id?subagents=true"
+
+    /** One subagent of [chat], read-only. */
+    fun subagent(chat: String, doc: String) = "subagent/${Uri.encode(chat)}/${Uri.encode(doc)}"
 
     /** Developer tools address a workspace by chat id, or `space:<id>` for a project. */
     fun files(ws: String) = "files/${Uri.encode(ws)}"
@@ -131,6 +138,11 @@ private fun MainNav(model: AppModel) {
             "transfers" -> nav.navigate(Routes.TRANSFERS) { launchSingleTop = true }
             else -> when {
                 route.startsWith("chat:") -> nav.navigate(Routes.chat(route.removePrefix("chat:")))
+                // subagents:<chat> opens its panel; subagent:<chat>|<doc> one subagent.
+                route.startsWith("subagents:") -> nav.navigate(Routes.chatSubagents(route.removePrefix("subagents:")))
+                route.startsWith("subagent:") -> route.removePrefix("subagent:").split('|', limit = 2).let {
+                    if (it.size == 2) nav.navigate(Routes.subagent(it[0], it[1]))
+                }
                 // Developer tools at launch: files:<chat> / terminal:<chat> / browser:<chat>|<url> / file:<chat>|<path>
                 route.startsWith("files:") -> nav.navigate(Routes.files(route.removePrefix("files:")))
                 route.startsWith("terminal:") -> nav.navigate(Routes.terminal(route.removePrefix("terminal:")))
@@ -142,9 +154,15 @@ private fun MainNav(model: AppModel) {
     }
     NavHost(nav, startDestination = Routes.HOME) {
         composable(Routes.HOME) { Home(model, nav) }
-        composable(Routes.CHAT) { entry ->
+        composable(Routes.CHAT, arguments = listOf(navArgument("subagents") { defaultValue = "false" })) { entry ->
             val id = entry.arguments?.getString("id") ?: return@composable
-            SessionScreen(model, id, onBack = { nav.popBackStack() }, onNavigate = { nav.navigate(it) })
+            val subagents = entry.arguments?.getString("subagents") == "true"
+            SessionScreen(model, id, onBack = { nav.popBackStack() }, onNavigate = { nav.navigate(it) }, showSubagents = subagents)
+        }
+        composable(Routes.SUBAGENT) { entry ->
+            val chat = entry.arguments?.getString("chat") ?: return@composable
+            val doc = entry.arguments?.getString("doc") ?: return@composable
+            SubagentScreen(model, chat, doc, onBack = { nav.popBackStack() }, onNavigate = { nav.navigate(it) })
         }
         composable(Routes.FILES) { entry ->
             val ws = entry.arguments?.getString("ws") ?: return@composable
