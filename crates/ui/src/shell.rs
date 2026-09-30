@@ -75,6 +75,7 @@ mod sidebar_sections;
 pub(crate) mod spaces;
 use side_chats::SideChatTab;
 mod tabs;
+mod ui_state_sync;
 
 use spaces::{AddSpaceFlow, RenameSpaceDialog};
 
@@ -729,12 +730,17 @@ pub struct ChatPanels {
 }
 
 /// The session-scoped panel map. Keys are chat ids; the new-chat canvas uses
-/// the empty key. Not persisted — a fresh app starts with everything closed.
+/// the empty key. Kept in memory for the app run; only each chat's
+/// `changes_open` flag is also persisted (see `ui_state`), so a relaunch
+/// restores it — everything else starts closed.
 #[derive(Debug, Default)]
 pub struct SessionPanels {
     map: std::collections::HashMap<String, ChatPanels>,
     /// Unique surface visits, oldest first, independent of the strip order.
     right_tab_history: std::collections::HashMap<String, Vec<RightSurface>>,
+    /// A flag changed since the last [`Self::take_dirty`] — the trigger for
+    /// re-capturing the persisted UI state.
+    dirty: bool,
 }
 
 impl SessionPanels {
@@ -744,6 +750,7 @@ impl SessionPanels {
 
     /// Flip the terminal flag for `key`; returns the new value.
     pub fn toggle_terminal(&mut self, key: &str) -> bool {
+        self.dirty = true;
         let entry = self.map.entry(key.to_string()).or_default();
         entry.terminal_open = !entry.terminal_open;
         entry.terminal_open
@@ -751,6 +758,7 @@ impl SessionPanels {
 
     /// Flip the changes flag for `key`; returns the new value.
     pub fn toggle_changes(&mut self, key: &str) -> bool {
+        self.dirty = true;
         let entry = self.map.entry(key.to_string()).or_default();
         entry.changes_open = !entry.changes_open;
         entry.changes_open
@@ -758,6 +766,7 @@ impl SessionPanels {
 
     /// Mutate `key`'s flags in place (right-pane surface bookkeeping).
     pub fn update(&mut self, key: &str, f: impl FnOnce(&mut ChatPanels)) {
+        self.dirty = true;
         let panel = self.map.entry(key.to_string()).or_default();
         let previous = panel.right_active;
         f(panel);
@@ -767,6 +776,42 @@ impl SessionPanels {
             history.retain(|visited| *visited != surface);
             history.push(surface);
         }
+    }
+
+    /// Whether any flag changed since the last call; clears the mark.
+    fn take_dirty(&mut self) -> bool {
+        std::mem::take(&mut self.dirty)
+    }
+
+    /// Which chats have the right pane's surface host open, for the persisted
+    /// UI state. Only chats `keep` accepts (the canvas keys are not chats).
+    /// Surfaces themselves (files, diffs, terminals, subagent tabs) are
+    /// process-local handles and cannot be brought back by id.
+    fn ui_snapshot(
+        &self,
+        keep: impl Fn(&str) -> bool,
+    ) -> std::collections::BTreeMap<String, String> {
+        self.map
+            .iter()
+            .filter(|(key, panel)| panel.changes_open && !key.is_empty() && keep(key))
+            .map(|(key, _)| {
+                (
+                    key.clone(),
+                    crate::ui_state::RIGHT_PANE_SURFACES.to_string(),
+                )
+            })
+            .collect()
+    }
+
+    /// Re-open the surface host for the chats a previous window had it open
+    /// on. It lands on the picker — a chat's tab list is rebuilt empty.
+    fn restore_ui_snapshot(&mut self, right_pane: &std::collections::BTreeMap<String, String>) {
+        for (key, value) in right_pane {
+            if value == crate::ui_state::RIGHT_PANE_SURFACES {
+                self.map.entry(key.clone()).or_default().changes_open = true;
+            }
+        }
+        self.dirty = true;
     }
 
     fn forget_right_surface(&mut self, key: &str, surface: RightSurface) {
@@ -1914,6 +1959,15 @@ pub struct Shell {
     sidebar_pin_write_notice: Option<SharedString>,
     /// `settings.last_space_id` applied once after the first spaces frame.
     space_boot_applied: bool,
+    /// The previous window's UI-state snapshot has been applied (see
+    /// `ui_state_sync`). Nothing is written before this: an early capture of
+    /// a still-empty composer would overwrite the very drafts to restore.
+    ui_state_restored: bool,
+    /// Selected chat at the last UI-state capture, to notice navigation.
+    ui_state_selected: Option<String>,
+    /// Private on-disk copy of each staged attachment already written for the
+    /// UI-state snapshot, by staged id.
+    ui_state_attachments: std::collections::HashMap<String, PathBuf>,
     /// Last seen session status per chat — the chime trigger compares against
     /// it (a row's FIRST appearance never chimes, so boot stays silent).
     sound_prev: std::collections::HashMap<String, crate::sound::SessionNotificationState>,
@@ -2079,6 +2133,10 @@ impl Shell {
         let transcript = cx.new(|cx| Transcript::new(state.clone(), cx));
         transcript.update(cx, |transcript, _| transcript.retain_for_route_exit());
         let composer = cx.new(|cx| Composer::new(state.clone(), cx));
+        // Every draft edit, attachment change and chat swap notifies the
+        // composer; that is the trigger for persisting the UI state.
+        cx.observe(&composer, |this: &mut Shell, _, cx| this.note_ui_state(cx))
+            .detach();
         let links = Self::session_links(None, cx);
         transcript.update(cx, |transcript, _| {
             transcript.set_workspace_link_handler(links)
@@ -2336,6 +2394,9 @@ impl Shell {
             sidebar_pin_write_generation: 0,
             sidebar_pin_write_notice: None,
             space_boot_applied: false,
+            ui_state_restored: false,
+            ui_state_selected: None,
+            ui_state_attachments: Default::default(),
             sound_prev: std::collections::HashMap::new(),
             connectivity_notifications: Default::default(),
             attention_sound_gate: Default::default(),
@@ -2784,9 +2845,15 @@ impl Shell {
                 self.schedule_save(cx);
             }
         }
+        // Give back the previous window's selection, drafts and open panes
+        // (live update / crash recovery) before the generic boot landing.
+        self.restore_ui_state(cx);
         // Boot landing: the most recent session once the first chats frame
         // syncs (manual selection wins).
         self.boot_select_chat(cx);
+        if self.ui_state_selected != state.read(cx).selected_chat {
+            self.note_ui_state(cx);
+        }
         // Heal a dangling sidebar filter (space deleted, possibly elsewhere):
         // fall back to "All" rather than filtering everything out.
         if state.read(cx).spaces_synced
@@ -12060,6 +12127,9 @@ fn header_icon_button(
 impl Render for Shell {
     fn render(&mut self, window: &mut Window, cx: &mut Context<Self>) -> impl IntoElement {
         settings::wallpaper::preload(cx);
+        if self.panels.take_dirty() {
+            self.note_ui_state(cx);
+        }
         self.navigation_focus
             .remember(&self.shortcut_focus, window, cx);
         if let Some(command) = self.pending_workspace_command.take() {

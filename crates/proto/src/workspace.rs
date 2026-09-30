@@ -15,6 +15,10 @@ pub mod capabilities {
         "message-queue-clean-attachment-text-v1";
     pub const MESSAGE_QUEUE_EDIT_LEASE_V1: &str = "message-queue-edit-lease-v1";
     pub const HARNESS_UPDATES_V1: &str = "harness-updates-v1";
+    /// The engine can replace itself in place (exec handoff) without stopping
+    /// running agents or terminals. Deliberately absent from [`CURRENT`] until
+    /// the handoff RPC exists, so no engine advertises a capability it lacks.
+    pub const HANDOFF_V1: &str = "handoff-v1";
 
     pub const CURRENT: &[&str] = &[
         COMPOSER_REFERENCES_V1,
@@ -55,6 +59,11 @@ pub struct EngineInfo {
     /// Supported protocol/document features. Missing on older engines.
     #[serde(default, skip_serializing_if = "Vec::is_empty")]
     pub capabilities: Vec<String>,
+    /// Build version of the owning engine, for diagnostics and UI skew
+    /// display only (never a compatibility gate — see `capabilities`).
+    /// Absent on older engines.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub version: Option<String>,
 }
 
 impl EngineInfo {
@@ -89,6 +98,7 @@ mod tests {
             workspace_scope: WorkspaceScope::Local,
             cursor_sdk_version: Some("1.0.31".into()),
             capabilities: capabilities::current(),
+            version: None,
         };
         assert_eq!(
             serde_json::to_value(&info).unwrap(),
@@ -107,6 +117,41 @@ mod tests {
                 ],
             })
         );
+    }
+
+    #[test]
+    fn engine_info_without_a_version_still_parses() {
+        let old: EngineInfo = serde_json::from_value(serde_json::json!({
+            "deviceId": "d",
+            "workspaceScope": "local"
+        }))
+        .unwrap();
+        assert_eq!(old.version, None);
+        let new = EngineInfo {
+            version: Some("0.3.0".into()),
+            ..old
+        };
+        let round: EngineInfo =
+            serde_json::from_str(&serde_json::to_string(&new).unwrap()).unwrap();
+        assert_eq!(round.version.as_deref(), Some("0.3.0"));
+        // An engine that does not report a version leaves the key out entirely.
+        let bare = EngineInfo {
+            version: None,
+            ..new
+        };
+        assert!(
+            serde_json::to_value(&bare)
+                .unwrap()
+                .get("version")
+                .is_none()
+        );
+    }
+
+    #[test]
+    fn handoff_capability_is_named_but_not_yet_advertised() {
+        // Advertised from the release that can actually hand off (see live-update plan, Task 9).
+        assert_eq!(capabilities::HANDOFF_V1, "handoff-v1");
+        assert!(!capabilities::CURRENT.contains(&capabilities::HANDOFF_V1));
     }
 
     #[test]

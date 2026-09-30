@@ -22,7 +22,7 @@ mod client;
 pub mod device_room;
 mod server;
 
-pub use client::{RpcClient, RpcSubscription, connect_ws};
+pub use client::{Dial, RpcClient, RpcSubscription, Transport, connect_ws, connect_ws_redialing};
 pub use device_room::{
     DeviceFrameHeader, DeviceLink, HostRelay, HostRelayConfig, LinkCache, LinkCacheConfig,
     NudgeHandler, PeerLiveness, PeerLivenessProbe, StaticToken, TokenError, TokenSource,
