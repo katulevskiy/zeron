@@ -128,6 +128,9 @@ class AppModel(private val app: Application) {
     )
     val appearance: StateFlow<Appearance> = _appearance.asStateFlow()
 
+    /** Starred models in the model picker (device-local, every mode). */
+    val favorites = FavoritesStore(settings)
+
     fun setAppearance(value: Appearance) {
         _appearance.value = value
         settings.edit().putString("theme", value.mode.name).putBoolean("dynamicColor", value.dynamicColor).apply()
@@ -589,7 +592,12 @@ class AppModel(private val app: Application) {
         }
         val config = ChatConfig(draft.harness, draft.model, draft.effort, emptyMap(), SandboxLevel.WORKSPACE_WRITE)
         return try {
-            val chatId = client.createSession(NewSession(target, config, if (draft.worktree) null else draft.branch, null, null))
+            // A new worktree is minted with the first send; otherwise the
+            // session runs in the checkout — or in the picked branch's own
+            // worktree, reused as is (the desktop's "current worktree").
+            val chatId = client.createSession(
+                NewSession(target, config, if (draft.worktree) null else draft.branch, if (draft.worktree) null else draft.cwd, null),
+            )
             val handle = client.openSession(chatId)
             val project = _workspace.value?.projects?.firstOrNull { it.id == draft.projectId }
             val worktree = if (draft.worktree && project != null) WorktreeSpec(project.path, draft.branch ?: "HEAD", project.id) else null
@@ -630,4 +638,6 @@ data class NewSessionDraft(
     val effort: String? = null,
     val branch: String? = null,
     val worktree: Boolean = false,
+    /** Run in this existing worktree of [branch] instead of the project folder. */
+    val cwd: String? = null,
 )
