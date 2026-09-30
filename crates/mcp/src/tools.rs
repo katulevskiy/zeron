@@ -1194,7 +1194,9 @@ impl Tools {
         )
     }
 
-    /// Pick and perform the delivery the composer would.
+    /// Pick and perform the delivery the composer would. `worktree` only
+    /// rides a first run (create_chat `worktree: true`).
+    #[allow(clippy::too_many_arguments)]
     async fn deliver(
         &self,
         chat: &Chat,
