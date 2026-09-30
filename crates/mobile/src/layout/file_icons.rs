@@ -96,6 +96,17 @@ mod tests {
     }
 
     #[test]
+    fn inline_code_paths_are_links() {
+        use super::super::markdown::code_path;
+        for yes in ["report.pdf", "src/app.py", "/home/zeron/projects/x/index.html", "./a.md", "https://x.dev/a"] {
+            assert!(code_path(yes), "{yes}");
+        }
+        for no in ["datetime", "N 0 obj", "%PDF-1.4", "a.b", "foo.bar()", "/Length", "prefers-color-scheme", "v1.2"] {
+            assert!(!code_path(no), "{no}");
+        }
+    }
+
+    #[test]
     fn folders_resolve_by_name() {
         assert_eq!(folder_icon_asset("unknown-dir"), "fileicon-folders-folder");
         assert_ne!(folder_icon_asset("src"), "fileicon-folders-folder");
