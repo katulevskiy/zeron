@@ -1066,6 +1066,49 @@ impl Client {
         Ok(SessionHandle { core })
     }
 
+    /// Open a SUBAGENT's transcript (`{chatId}--sub--{suffix}`, the doc ref
+    /// on a spawn chip of `parent_chat_id`) read-only. It syncs like a chat —
+    /// the engine publishes every subagent doc to its own chat2 room, which
+    /// keeps the log after the subagent settles — but it has no registry row,
+    /// so there is nothing to send, queue or interrupt through it. Instant:
+    /// the local copy renders first.
+    pub fn open_subagent(&self, parent_chat_id: &str, doc_id: &str) -> Result<SessionHandle> {
+        if !crate::subagents::is_subagent_doc(doc_id) {
+            return Err(ClientError::InvalidArgument(format!(
+                "{doc_id} is not a subagent transcript"
+            )));
+        }
+        if let Some(core) = self.inner.session_core(doc_id) {
+            return Ok(SessionHandle { core });
+        }
+        if self.inner.workspace.chat(parent_chat_id).is_none() {
+            return Err(ClientError::NotFound(parent_chat_id.to_owned()));
+        }
+        let (doc, cursor, hydrated) = match self.inner.backend() {
+            Backend::Demo(demo) => (demo.subagent_doc(parent_chat_id, doc_id)?, 0, true),
+            Backend::Live(live) => {
+                let local = crate::live::room::load_local(&live.store, doc_id);
+                (local.doc, local.cursor, local.had_content)
+            }
+        };
+        let core = SessionCore::new(doc_id, &self.inner, doc, cursor);
+        let core = {
+            let mut sessions = lock(&self.inner.sessions);
+            sessions
+                .entry(doc_id.to_owned())
+                .or_insert_with(|| core.clone())
+                .clone()
+        };
+        if hydrated {
+            core.set_hydrated();
+        }
+        core.ensure_room(&self.inner);
+        core.touch();
+        core.refresh();
+        self.inner.evict_sessions();
+        Ok(SessionHandle { core })
+    }
+
     /// An already-open session, if any.
     pub fn session(&self, chat_id: &str) -> Option<SessionHandle> {
         self.inner
@@ -1178,7 +1221,9 @@ impl Client {
         environment: &str,
         prefs: PushPrefs,
     ) -> Result<()> {
-        let Some(live) = self.inner.live() else { return Ok(()) };
+        let Some(live) = self.inner.live() else {
+            return Ok(());
+        };
         let url = crate::live::urls::registry_push_target(
             &live.edge,
             self.inner.credentials.org_id(),
@@ -1198,14 +1243,19 @@ impl Client {
             .await
             .map_err(|e| ClientError::Network(e.to_string()))?;
         if !response.status().is_success() {
-            return Err(ClientError::HostError(format!("push registration http {}", response.status())));
+            return Err(ClientError::HostError(format!(
+                "push registration http {}",
+                response.status()
+            )));
         }
         Ok(())
     }
 
     /// Stop notifications to this device (sign-out, turned off).
     pub async fn unregister_push_target(&self) -> Result<()> {
-        let Some(live) = self.inner.live() else { return Ok(()) };
+        let Some(live) = self.inner.live() else {
+            return Ok(());
+        };
         let url = crate::live::urls::registry_push_target(
             &live.edge,
             self.inner.credentials.org_id(),
@@ -1219,7 +1269,10 @@ impl Client {
             .await
             .map_err(|e| ClientError::Network(e.to_string()))?;
         if !response.status().is_success() {
-            return Err(ClientError::HostError(format!("push removal http {}", response.status())));
+            return Err(ClientError::HostError(format!(
+                "push removal http {}",
+                response.status()
+            )));
         }
         Ok(())
     }
