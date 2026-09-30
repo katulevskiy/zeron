@@ -402,6 +402,23 @@ class AppModel(private val app: Application) {
         return Agents.parse(c.hostCall(deviceId, method, params.toString()))
     }
 
+    /**
+     * Clone a repository, or create an empty one, on a device and make it a
+     * project. The device's engine does it (`CloneRepo` / `CreateRepo`).
+     */
+    suspend fun addProject(deviceId: String, source: ProjectSource, input: String): Result<String> {
+        val (method, params) = when (source) {
+            ProjectSource.Clone -> "CloneRepo" to JSONObject().put("url", input.trim())
+            ProjectSource.Empty -> "CreateRepo" to JSONObject().put("name", input.trim())
+        }
+        val path = runCatching {
+            val reply = hostCall(deviceId, method, params) as? JSONObject
+            reply?.optString("path")?.ifEmpty { null } ?: error("The device didn't say where the project is.")
+        }.getOrElse { return Result.failure(it) }
+        val c = _client.value ?: return Result.failure(IllegalStateException("Not connected"))
+        return runCatching { c.createProject(deviceId, path, true) }.onSuccess { refreshWorkspace() }
+    }
+
     /** Create the chat and send its first message. */
     fun createSession(draft: NewSessionDraft, text: String, attachments: List<uniffi.zeron_core.OutgoingAttachment> = emptyList()): String? {
         val client = _client.value ?: return null
@@ -448,6 +465,8 @@ fun Throwable.userMessage(): String = when (this) {
     is CoreException.Internal -> reason
     else -> message ?: "Something went wrong."
 }
+
+enum class ProjectSource { Clone, Empty }
 
 /** The new-session page's options (kept across launches). */
 data class NewSessionDraft(
