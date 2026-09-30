@@ -156,6 +156,9 @@ zeron/
                                  # terminal view, diff pane, settings, animation kit
     localedge/    zeron-localedge # loopback single-tenant port of edge/ (SQLite-backed;
                                  # embedded by `zeron headless` for Android on-device mode)
+    transfer/     zeron-transfer # device-to-device file transfer: manifests, verified
+                                 # resumable blocks, relay pipe (docs/file-transfer.md);
+                                 # P2P lanes ride the preview WebRTC mux
   apps/
     zeron/                       # the binary (headed default, `headless` subcommand)
   edge/                          # TypeScript Worker + DOs (ported from zeron/apps/edge,
