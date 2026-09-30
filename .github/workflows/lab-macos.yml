@@ -77,13 +77,12 @@ jobs:
       - name: Coverage parity vs original `cargo test` commands (test-name diff)
         if: inputs.parity
         run: |
-          set -x
           # Original: cargo test -p zeron-update (macos-frame-recovery) and cargo test -p zeron-preview (preview-tests macOS leg),
           #           cargo test -p zeron-ui --lib native_diff_font_geometry / notify::tests::
           { cargo test $PROFILE_FLAG --locked -p zeron-update -- --list; cargo test $PROFILE_FLAG --locked -p zeron-preview -- --list; } 2>/dev/null | grep -E ': (test|benchmark)$' | sort > "$RUNNER_TEMP/orig-tests.txt"
           cargo test $PROFILE_FLAG --locked -p zeron-ui --lib -- --list 2>/dev/null | grep -E '(native_diff_font_geometry|notify::tests::).*: test$' | sort >> "$RUNNER_TEMP/orig-tests.txt"
           sort -o "$RUNNER_TEMP/orig-tests.txt" "$RUNNER_TEMP/orig-tests.txt"
-          cargo nextest list $PROFILE_FLAG --locked -p zeron-update -p zeron-preview -p zeron-ui --features zeron-ui/browser-fixture --lib --tests --examples \
+          cargo nextest list --color never $PROFILE_FLAG --locked -p zeron-update -p zeron-preview -p zeron-ui --features zeron-ui/browser-fixture --lib --tests --examples \
             -E 'package(zeron-update) | package(zeron-preview) | (binary_id(zeron-ui) & (test(native_diff_font_geometry) | test(/notify::tests::/)))' \
             --message-format oneline 2>/dev/null | awk '{print $NF": test"}' | sort > "$RUNNER_TEMP/nextest-tests.txt"
           wc -l "$RUNNER_TEMP/orig-tests.txt" "$RUNNER_TEMP/nextest-tests.txt"
@@ -230,7 +229,7 @@ jobs:
         run: |
           rustup update stable --no-self-update
           rustup show active-toolchain || rustup toolchain install
-          rustup target add aarch64-apple-ios aarch64-apple-ios-sim
+          rustup target add aarch64-apple-ios-sim  # device target not needed: only the simulator slice is built
       - uses: Swatinem/rust-cache@v2
         with:
           prefix-key: lab-macos-${{ inputs.cache_ver }}-ios
