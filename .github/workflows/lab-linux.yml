@@ -89,12 +89,7 @@ jobs:
         run: |
           set -x
           # Faster unpack: no docs/man/locale, no fsync, no man-db trigger.
-          printf 'force-unsafe-io
-path-exclude=/usr/share/doc/*
-path-exclude=/usr/share/man/*
-path-exclude=/usr/share/locale/*
-path-exclude=/usr/share/info/*
-' | sudo tee /etc/dpkg/dpkg.cfg.d/90ci >/dev/null
+          printf '%s\n' force-unsafe-io 'path-exclude=/usr/share/doc/*' 'path-exclude=/usr/share/man/*' 'path-exclude=/usr/share/locale/*' 'path-exclude=/usr/share/info/*' | sudo tee /etc/dpkg/dpkg.cfg.d/90ci >/dev/null
           sudo rm -f /var/lib/man-db/auto-update
           export DEBIAN_FRONTEND=noninteractive
           APT="-o Acquire::Retries=3 -o Acquire::http::Timeout=20 -o Acquire::Languages=none"
@@ -130,12 +125,7 @@ path-exclude=/usr/share/info/*
         run: |
           set -x
           # Faster unpack: no docs/man/locale, no fsync, no man-db trigger.
-          printf 'force-unsafe-io
-path-exclude=/usr/share/doc/*
-path-exclude=/usr/share/man/*
-path-exclude=/usr/share/locale/*
-path-exclude=/usr/share/info/*
-' | sudo tee /etc/dpkg/dpkg.cfg.d/90ci >/dev/null
+          printf '%s\n' force-unsafe-io 'path-exclude=/usr/share/doc/*' 'path-exclude=/usr/share/man/*' 'path-exclude=/usr/share/locale/*' 'path-exclude=/usr/share/info/*' | sudo tee /etc/dpkg/dpkg.cfg.d/90ci >/dev/null
           sudo rm -f /var/lib/man-db/auto-update
           export DEBIAN_FRONTEND=noninteractive
           APT="-o Acquire::Retries=3 -o Acquire::http::Timeout=20 -o Acquire::Languages=none"
