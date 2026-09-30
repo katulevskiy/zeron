@@ -11,7 +11,7 @@ use zeron_doc::parts::{MessagePart, SubagentStatus};
 use zeron_proto::ToolCall;
 use zeron_text::WhiteSpace;
 
-use super::display::{ColorRole, DisplayBuilder, WidgetKind};
+use super::display::{ColorRole, DisplayBuilder, LinkHit, WidgetKind};
 use super::file_icons::{basename, file_icon_asset};
 use super::markdown::{Ctx, PText, Px, place_text, prepare_plain};
 use super::rows::{Content, RowBuilder, RowCore, RowKind, next_version, place_text_lines, row_key};
@@ -53,6 +53,9 @@ pub(crate) struct ToolLine {
     pub key: u64,
     pub open: bool,
     pub body: Vec<DetailBlock>,
+    /// A spawned subagent's card opens its transcript: the card's tap link
+    /// (`zeron-subagent:{docId}`).
+    pub link: Option<String>,
 }
 
 pub(crate) struct ToolGroup {
@@ -393,6 +396,10 @@ impl RowBuilder {
                             key: dkey,
                             open,
                             body,
+                            link: subagent_ref
+                                .as_ref()
+                                .filter(|_| agents)
+                                .map(|doc| format!("{}{doc}", crate::client_ffi::SUBAGENT_LINK_SCHEME)),
                         });
                     }
                     MessagePart::Reasoning { text, .. } => {
@@ -413,6 +420,7 @@ impl RowBuilder {
                             key: dkey,
                             open,
                             body,
+                            link: None,
                         });
                     }
                     _ => {}
@@ -656,6 +664,9 @@ fn place_agents(t: &ToolGroup, px: Px, x: f32, y: f32, cw: f32, mut out: Option<
         let card_y = ry + (row - d(px, AGENT_CARD)) / 2.0;
         let card_h = d(px, AGENT_CARD);
         o.fill(x, card_y, cw, card_h, d(px, 9.0), ColorRole::AgentCard);
+        if let Some(url) = &line.link {
+            o.links.push(LinkHit { x, y: card_y, w: cw, h: card_h, url: url.clone(), scroller: o.scroller });
+        }
         o.hairline(x, card_y, cw, card_h, d(px, 9.0), ColorRole::AgentCardBorder);
         let tile = d(px, 18.0);
         let tx = x + d(px, 8.0);
@@ -690,6 +701,7 @@ pub(crate) fn heap_bytes(t: &ToolGroup) -> usize {
                 l.label.p.heap_bytes()
                     + l.detail.as_ref().map_or(0, |d| d.p.heap_bytes())
                     + l.badge.as_ref().map_or(0, |b| b.1.p.heap_bytes() + b.2.capacity())
+                    + l.link.as_ref().map_or(0, String::capacity)
                     + l.body
                         .iter()
                         .map(|b| match b {
