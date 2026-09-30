@@ -34,6 +34,9 @@ class PhoneEngine(context: Context) {
     fun logTail(lines: Int = 200): String = stripAnsi(runtime.logTail(lines))
     suspend fun exec(command: String, timeoutMs: Long = 600_000): ExecResult = runtime.exec(command, timeoutMs = timeoutMs)
 
+    /** Guest paths (what the engine reports) ↔ the app's view of the rootfs. */
+    val paths: Transfers.GuestPaths get() = Transfers.GuestPaths(runtime.guestRootDir, runtime.guestTmpDir)
+
     companion object {
         /** Projects on the phone's engine live here (docs/android.md § Guest layout). */
         const val PROJECTS_ROOT = sh.zeron.runtime.PROJECTS_ROOT

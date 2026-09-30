@@ -90,6 +90,7 @@ class AppModel(private val app: Application) {
     val wallpaper = WallpaperStore(app)
     val phone by lazy { PhoneEngine(app) }
     val notifier by lazy { Notifier(app) }
+    val transfers by lazy { TransferCenter(app, this) }
     val workspaceApi by lazy { sh.zeron.android.tools.WorkspaceApi(this) }
     val downloads by lazy { sh.zeron.android.tools.Downloads(app, this) }
 
@@ -218,6 +219,9 @@ class AppModel(private val app: Application) {
             }
         }
         watchNetwork()
+        // Incoming-transfer notifications and Downloads export, whenever this
+        // phone's engine runs (docs/android.md § File transfers).
+        transfers.start()
         // `wallpaper <path>` / `wallpaper none` and `wallpaper-effect <name>`:
         // set the wallpaper at launch (screenshots, tests).
         options.wallpaper?.let { path ->

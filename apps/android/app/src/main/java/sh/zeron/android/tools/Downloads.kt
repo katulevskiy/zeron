@@ -7,7 +7,6 @@ import android.content.Intent
 import android.net.Uri
 import android.provider.MediaStore
 import android.util.Log
-import android.webkit.MimeTypeMap
 import kotlinx.coroutines.CoroutineScope
 import kotlinx.coroutines.Dispatchers
 import kotlinx.coroutines.SupervisorJob
@@ -16,7 +15,10 @@ import kotlinx.coroutines.flow.StateFlow
 import kotlinx.coroutines.flow.asStateFlow
 import kotlinx.coroutines.launch
 import kotlinx.coroutines.withContext
+import org.json.JSONArray
+import org.json.JSONObject
 import sh.zeron.android.core.AppModel
+import sh.zeron.android.core.Transfers
 import sh.zeron.android.core.userMessage
 import java.io.OutputStream
 import java.util.zip.ZipEntry
@@ -28,7 +30,8 @@ import java.util.zip.ZipOutputStream
  * permission). Bytes come chunk by chunk over `ReadWorkspaceBytes` from
  * whichever device owns the workspace and go straight into the MediaStore
  * stream — never whole in memory. A device whose engine predates that method
- * can't be saved from (the job says to update Zeron on it).
+ * sends the path to this phone with file transfer instead (it lands in
+ * Download/Zeron the same way).
  */
 class Downloads(private val app: Application, private val model: AppModel) {
     sealed interface State {
@@ -62,7 +65,7 @@ class Downloads(private val app: Application, private val model: AppModel) {
     /** One file, as itself. */
     fun saveFile(ref: WorkspaceRef, path: String) = start(path.substringAfterLast('/').ifEmpty { "file" }) { id, name ->
         val api = model.workspaceApi
-        val uri = insert(name, FOLDER)
+        val uri = insert(name, Transfers.relativePath(emptyList()))
         try {
             write(uri) { out ->
                 api.readBytes(ref, path) { chunk, size ->
@@ -84,7 +87,7 @@ class Downloads(private val app: Application, private val model: AppModel) {
      * files (build outputs, `node_modules`) are left out unless [includeIgnored].
      */
     fun saveFolder(ref: WorkspaceRef, dir: String, includeIgnored: Boolean) =
-        start((dir.substringAfterLast('/').ifEmpty { ref.title }).let(::safeSegment) + ".zip") { id, name ->
+        start((dir.substringAfterLast('/').ifEmpty { ref.title }).let { Transfers.safeSegment(it) } + ".zip") { id, name ->
             val api = model.workspaceApi
             update(id, State.Running(null, "Listing files…"))
             val files = ArrayList<Entry>()
@@ -101,7 +104,7 @@ class Downloads(private val app: Application, private val model: AppModel) {
             val total = files.sumOf { it.size ?: 0L }
             val base = if (dir.isEmpty()) "" else "$dir/"
             val root = name.removeSuffix(".zip")
-            val uri = insert(name, FOLDER)
+            val uri = insert(name, Transfers.relativePath(emptyList()))
             var skipped = 0
             try {
                 write(uri) { out ->
@@ -164,6 +167,17 @@ class Downloads(private val app: Application, private val model: AppModel) {
         return id
     }
 
+    /**
+     * Older engines lack `ReadWorkspaceBytes`: have the owning device send the
+     * path to this phone over file transfer, which lands in Download/Zeron.
+     */
+    fun sendToPhone(ref: WorkspaceRef, path: String) = start(path.substringAfterLast('/').ifEmpty { ref.title }) { _, _ ->
+        val phone = model.engineDeviceId.value ?: error("This phone's engine isn't running.")
+        val abs = ref.absolute(path) ?: error("The project's folder is unknown.")
+        model.hostCall(ref.deviceId, WorkspaceApi.SEND_FILES, JSONObject().put("toDeviceId", phone).put("paths", JSONArray().put(abs)))
+        State.Done(null, "Sending with file transfer — it lands in Downloads/Zeron")
+    }
+
     private fun insert(name: String, relativePath: String): Uri {
         val values = ContentValues().apply {
             put(MediaStore.MediaColumns.DISPLAY_NAME, name)
@@ -187,30 +201,12 @@ class Downloads(private val app: Application, private val model: AppModel) {
         runCatching { app.contentResolver.delete(uri, null, null) }
     }
 
-    fun mime(name: String): String = when {
-        name.endsWith(".zip") -> "application/zip"
-        else -> MimeTypeMap.getSingleton().getMimeTypeFromExtension(name.substringAfterLast('.', "").lowercase()) ?: "application/octet-stream"
-    }
+    fun mime(name: String): String = model.transfers.mimeOf(name).let { if (name.endsWith(".zip")) "application/zip" else it }
 
     /** What tapping a saved item does: open it, or the Downloads app for archives. */
     fun openIntent(name: String, uri: Uri?): Intent = if (uri == null || name.endsWith(".zip")) {
         Intent(DownloadManager.ACTION_VIEW_DOWNLOADS)
     } else {
         Intent(Intent.ACTION_VIEW).setDataAndType(uri, mime(name)).addFlags(Intent.FLAG_GRANT_READ_URI_PERMISSION)
-    }
-
-    companion object {
-        /** MediaStore RELATIVE_PATH of everything saved here. */
-        const val FOLDER = "Download/Zeron/"
-
-        /** A file name MediaStore and FAT-style volumes accept. */
-        fun safeSegment(name: String): String {
-            val cleaned = name.map { c -> if (c.code < 0x20 || c in "\"*/:<>?\\|") '_' else c }.joinToString("")
-                .trim().trimEnd('.')
-            return when (cleaned) {
-                "", ".", ".." -> "_"
-                else -> cleaned
-            }
-        }
     }
 }

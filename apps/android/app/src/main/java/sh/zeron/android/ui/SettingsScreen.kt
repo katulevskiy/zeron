@@ -149,6 +149,24 @@ fun SettingsScreen(model: AppModel, onOpen: (String) -> Unit) {
                     ) { Text("Coding agents") }
                 }
             }
+            section("Files")
+            item {
+                // Transfers go through this phone's engine (docs/android.md § File transfers).
+                val transfers by model.transfers.list.collectAsState()
+                val live = transfers.count { it.state.live }
+                Column(Modifier.padding(horizontal = 16.dp)) {
+                    SegmentedListItem(
+                        onClick = { onOpen(Routes.TRANSFERS) },
+                        shapes = segmentedShapes(0, 1),
+                        colors = ListItemDefaults.segmentedColors(containerColor = cardColor()),
+                        leadingContent = { IconTile(ZIcons.ArrowDown) },
+                        supportingContent = {
+                            Text(if (live > 0) "$live in progress" else "Send and receive files with your other devices")
+                        },
+                        trailingContent = { ZIcon(ZIcons.ChevronRight, null, Modifier.size(20.dp)) },
+                    ) { Text("Transfers") }
+                }
+            }
         }
         section("Appearance")
         item {

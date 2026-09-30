@@ -22,7 +22,7 @@ data class WorkspaceRef(
     val deviceId: String,
     val chatId: String?,
     val spaceId: String?,
-    /** Absolute folder on the device, when known (links, display). */
+    /** Absolute folder on the device, when known (SendFiles, display). */
     val root: String?,
     val title: String,
     val deviceName: String?,
@@ -206,6 +206,7 @@ class WorkspaceApi(private val model: AppModel) {
         const val WATCH_FILES = "WatchWorkspaceFiles"
         const val WATCH_GIT = "WatchWorkspaceGitStatus"
         const val WATCH_PREVIEWS = "WatchPreviews"
+        const val SEND_FILES = "SendFiles"
         private const val MAX_LISTED = 20_000
 
         fun entry(o: JSONObject): Entry {

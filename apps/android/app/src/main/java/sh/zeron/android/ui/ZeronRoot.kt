@@ -87,6 +87,7 @@ object Routes {
     const val SEARCH = "search"
     const val ENGINE = "engine"
     const val AGENTS = "agents"
+    const val TRANSFERS = "transfers"
     const val FILES = "files/{ws}"
     const val FILE = "file/{ws}?path={path}"
     const val TERMINAL = "terminal/{ws}"
@@ -134,6 +135,7 @@ private fun MainNav(model: AppModel) {
             "search" -> nav.navigate(Routes.SEARCH)
             "engine" -> nav.navigate(Routes.ENGINE)
             "agents" -> nav.navigate(Routes.AGENTS)
+            "transfers" -> nav.navigate(Routes.TRANSFERS) { launchSingleTop = true }
             else -> when {
                 route.startsWith("chat:") -> nav.navigate(Routes.chat(route.removePrefix("chat:")))
                 // subagents:<chat> opens its panel; subagent:<chat>|<doc> one subagent.
@@ -205,6 +207,7 @@ private fun MainNav(model: AppModel) {
         }
         composable(Routes.ENGINE) { EngineScreen(model, onBack = { nav.popBackStack() }, onAgents = { nav.navigate(Routes.AGENTS) }) }
         composable(Routes.AGENTS) { AgentsScreen(model, onBack = { nav.popBackStack() }) }
+        composable(Routes.TRANSFERS) { TransfersScreen(model, onBack = { nav.popBackStack() }) }
     }
 }
 
