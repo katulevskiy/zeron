@@ -88,26 +88,61 @@ impl EngineLink {
     pub async fn call(self: &Arc<Self>, method: &str, params: Value) -> Result<Value> {
         let link = self.clone();
         let method = method.to_owned();
-        crate::runtime::run(async move {
-            let mut retried = false;
-            loop {
-                let rpc = link.connected().await?;
-                match rpc.call(&method, params.clone()).await {
-                    Err(RpcError::Closed | RpcError::Transport(_)) if !retried => {
-                        retried = true;
-                        link.forget(&rpc).await;
-                    }
-                    Err(err) => {
-                        if matches!(err, RpcError::Closed | RpcError::Transport(_)) {
-                            link.forget(&rpc).await;
-                        }
-                        return Err(rpc_error(err));
-                    }
-                    Ok(value) => return Ok(value),
+        crate::runtime::run(async move { link.call_rpc(&method, params).await.map_err(rpc_error) })
+            .await
+    }
+
+    /// [`Self::call`] on the caller's runtime, with the wire error — for the
+    /// relay, which routes this device's own host RPCs here.
+    pub(crate) async fn call_rpc(
+        &self,
+        method: &str,
+        params: Value,
+    ) -> std::result::Result<Value, RpcError> {
+        let mut retried = false;
+        loop {
+            let rpc = self.connected_rpc().await?;
+            match rpc.call(method, params.clone()).await {
+                Err(RpcError::Closed | RpcError::Transport(_)) if !retried => {
+                    retried = true;
+                    self.forget(&rpc).await;
                 }
+                Err(err) => {
+                    if matches!(err, RpcError::Closed | RpcError::Transport(_)) {
+                        self.forget(&rpc).await;
+                    }
+                    return Err(err);
+                }
+                Ok(value) => return Ok(value),
             }
-        })
-        .await
+        }
+    }
+
+    /// A drop-cancelled stream, acknowledged by the engine before it
+    /// returns (an unknown method or bad params fail here, not as an empty
+    /// stream). A dropped connection is redialed once.
+    pub(crate) async fn subscribe_rpc(
+        &self,
+        method: &str,
+        params: Value,
+    ) -> std::result::Result<zeron_rpc::RpcSubscription, RpcError> {
+        let mut retried = false;
+        loop {
+            let rpc = self.connected_rpc().await?;
+            match rpc.subscribe_checked(method, params.clone()).await {
+                Err(RpcError::Closed | RpcError::Transport(_)) if !retried => {
+                    retried = true;
+                    self.forget(&rpc).await;
+                }
+                Err(err) => {
+                    if matches!(err, RpcError::Closed | RpcError::Transport(_)) {
+                        self.forget(&rpc).await;
+                    }
+                    return Err(err);
+                }
+                Ok(stream) => return Ok(stream),
+            }
+        }
     }
 
     /// The first item of a stream method (its current value).
@@ -136,15 +171,16 @@ impl EngineLink {
     }
 
     async fn connected(&self) -> Result<Arc<RpcClient>> {
+        self.connected_rpc().await.map_err(rpc_error)
+    }
+
+    async fn connected_rpc(&self) -> std::result::Result<Arc<RpcClient>, RpcError> {
         let mut slot = self.rpc.lock().await;
         if let Some(rpc) = slot.as_ref() {
             return Ok(rpc.clone());
         }
-        let rpc = Arc::new(
-            zeron_rpc::connect_ws_with_token(&self.url, self.token.as_deref())
-                .await
-                .map_err(rpc_error)?,
-        );
+        let rpc =
+            Arc::new(zeron_rpc::connect_ws_with_token(&self.url, self.token.as_deref()).await?);
         *slot = Some(rpc.clone());
         Ok(rpc)
     }

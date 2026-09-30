@@ -1326,6 +1326,28 @@ impl Client {
         }
     }
 
+    /// Untyped host stream from `device_id`'s engine (`SubscribeTerminal`,
+    /// `WatchWorkspaceFiles`, `WatchPreviews`…): returns once the host has
+    /// accepted it (an unknown method or bad params fail here), then pumps
+    /// items into `sink` until the host ends it or the handle is dropped. The
+    /// engine this viewer shares is reached over its IPC port, others over
+    /// the device relay. Demo mode has no generic host: `Unsupported`.
+    pub async fn host_watch(
+        &self,
+        device_id: &str,
+        method: &str,
+        params: serde_json::Value,
+        sink: Arc<dyn crate::rpc::HostWatchSink>,
+    ) -> Result<crate::rpc::HostWatch> {
+        match self.inner.backend() {
+            Backend::Demo(_) => Err(ClientError::Unsupported(method.to_owned())),
+            Backend::Live(live) => {
+                let stream = live.relay.subscribe(device_id, method, params).await?;
+                Ok(crate::rpc::HostWatch::spawn(stream, sink, &self.inner.cancel))
+            }
+        }
+    }
+
     /// `git checkout <ref>` in `repo_path` on the device.
     pub async fn switch_ref(&self, device_id: &str, repo_path: &str, ref_name: &str) -> Result<()> {
         match self.inner.backend() {
