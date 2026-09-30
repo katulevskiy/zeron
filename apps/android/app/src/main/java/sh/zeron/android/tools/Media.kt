@@ -187,14 +187,22 @@ suspend fun openWith(context: Context, model: AppModel, ref: WorkspaceRef, path:
 @Composable
 fun PdfViewer(model: AppModel, ref: WorkspaceRef, path: String) {
     val context = androidx.compose.ui.platform.LocalContext.current
-    val doc by produceState<Result<PdfDoc>?>(null, ref, path) {
+    PdfFrom(ref to path) { cacheCopy(context, model, ref, path, "pdf") }
+}
+
+/** A PDF from any source (a workspace file, a page's download), fetched into a local file first. */
+@Composable
+fun PdfFrom(key: Any, fetch: suspend () -> File) {
+    val doc by produceState<Result<PdfDoc>?>(null, key) {
         value = runCatching {
-            val file = cacheCopy(context, model, ref, path, "pdf")
+            val file = fetch()
             withContext(Dispatchers.IO) { PdfDoc(file) }
         }
     }
-    DisposableEffect(doc) {
-        onDispose { doc?.getOrNull()?.close() }
+    val opened = doc?.getOrNull()
+    DisposableEffect(opened) {
+        // Close the document this effect saw, not whatever `doc` reads later.
+        onDispose { opened?.close() }
     }
     Box(Modifier.fillMaxSize().background(MaterialTheme.colorScheme.surfaceContainerLowest), contentAlignment = Alignment.Center) {
         when (val d = doc) {
@@ -307,7 +315,11 @@ private fun PdfPages(doc: PdfDoc) {
 
 @Composable
 private fun PdfPage(doc: PdfDoc, index: Int, widthPx: Int) {
-    val bitmap by produceState<Bitmap?>(null, index, widthPx) { value = runCatching { doc.render(index, widthPx) }.getOrNull() }
+    val bitmap by produceState<Bitmap?>(null, index, widthPx) {
+        value = runCatching { doc.render(index, widthPx) }
+            .onFailure { android.util.Log.w("Zeron", "PDF page ${index + 1} failed to render", it) }
+            .getOrNull()
+    }
     Surface(shape = RoundedCornerShape(6.dp), color = Color.White, shadowElevation = 1.dp, modifier = Modifier.fillMaxWidth().aspectRatio(1f / doc.ratios[index].coerceIn(0.1f, 10f))) {
         bitmap?.let { Image(it.asImageBitmap(), "Page ${index + 1}", Modifier.fillMaxSize(), contentScale = ContentScale.FillWidth) }
     }

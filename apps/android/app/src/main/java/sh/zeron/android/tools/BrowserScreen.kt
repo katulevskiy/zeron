@@ -99,6 +99,8 @@ fun BrowserScreen(model: AppModel, ref: WorkspaceRef?, initialUrl: String?, onBa
     var overflow by remember { mutableStateOf(false) }
     var showPreviews by remember { mutableStateOf(initialUrl == null && ref?.chatId != null) }
     var previews by remember { mutableStateOf<Browser.Previews?>(null) }
+    /** A PDF the page opened (WebView can't render them): shown natively on top. */
+    var pdf by remember { mutableStateOf<String?>(null) }
     val focus = LocalFocusManager.current
 
     val web = remember {
@@ -153,8 +155,11 @@ fun BrowserScreen(model: AppModel, ref: WorkspaceRef?, initialUrl: String?, onBa
                 }
             }
             // Downloads (a PDF on a dev server, a zip…): hand them to the system.
-            setDownloadListener { url, _, _, _, _ ->
-                if (url.startsWith("http")) openExternally(context, url)
+            setDownloadListener { url, _, _, mime, _ ->
+                when {
+                    mime == "application/pdf" || url.substringBefore('?').endsWith(".pdf", ignoreCase = true) -> pdf = url
+                    url.startsWith("http") -> openExternally(context, url)
+                }
             }
             webChromeClient = object : WebChromeClient() {
                 override fun onProgressChanged(view: WebView, newProgress: Int) {
@@ -287,6 +292,18 @@ fun BrowserScreen(model: AppModel, ref: WorkspaceRef?, initialUrl: String?, onBa
         }
     }
 
+    pdf?.let { link ->
+        BackHandler { pdf = null }
+        Column(Modifier.fillMaxSize().background(MaterialTheme.colorScheme.background)) {
+            ToolHeader(link.substringBefore('?').substringAfterLast('/').ifEmpty { "Document" }, Browser.display(link), onBack = { pdf = null }) {
+                HeaderAction(ZIcons.Link, "Open in another app", onClick = { openExternally(context, link) })
+            }
+            Box(Modifier.weight(1f).fillMaxWidth()) {
+                PdfFrom(link) { download(context, link) }
+            }
+        }
+    }
+
     if (showPreviews) {
         ModalBottomSheet(onDismissRequest = { showPreviews = false }) {
             PreviewsSheet(previews, ref) { target ->
@@ -405,4 +422,26 @@ private fun print(context: Context, web: WebView, name: String) {
     val manager = context.getSystemService(PrintManager::class.java) ?: return
     val job = name.replace(Regex("[^A-Za-z0-9 ._-]"), "_").take(60).ifBlank { "Page" }
     manager.print(job, web.createPrintDocumentAdapter(job), PrintAttributes.Builder().build())
+}
+
+/** Fetch a page's PDF into the cache (plain HTTP GET; dev servers and public links). */
+private suspend fun download(context: Context, url: String): java.io.File = kotlinx.coroutines.withContext(kotlinx.coroutines.Dispatchers.IO) {
+    val dir = java.io.File(context.cacheDir, "pdf").apply { mkdirs() }
+    val file = java.io.File(dir, "page-" + Integer.toHexString(url.hashCode()) + ".pdf")
+    // `<device>.<project>.localhost` resolves inside WebView (Chromium) but
+    // not through the platform resolver: dial loopback and keep the Host.
+    val parsed = java.net.URL(url)
+    val preview = parsed.host.endsWith(".localhost")
+    val target = if (preview) java.net.URL(parsed.protocol, "127.0.0.1", parsed.port, parsed.file) else parsed
+    val connection = target.openConnection() as java.net.HttpURLConnection
+    if (preview) connection.setRequestProperty("Host", "${parsed.host}:${parsed.port}")
+    try {
+        connection.connectTimeout = 15_000
+        connection.readTimeout = 30_000
+        if (connection.responseCode !in 200..299) error("The server answered ${connection.responseCode}.")
+        connection.inputStream.use { input -> file.outputStream().use { input.copyTo(it) } }
+    } finally {
+        connection.disconnect()
+    }
+    file
 }
