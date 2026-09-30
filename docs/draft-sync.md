@@ -168,6 +168,9 @@ device runs its own room client). Updates are opaque base64 Loro bytes:
 - `ui`: gpui tests for caret preservation through remote splices before, inside
   and after the caret; IME deferral; programmatic edits not echoed; capability
   fallback.
+- Live: `scripts/e2e-draft.sh` runs the real `DraftRoom` under `wrangler dev` with two
+  headless engines (one user, two devices) and the `draft_driver` example: live typing A→B,
+  concurrent merge, discard on send, typing under the new epoch.
 - PR verification: `cargo test` for the touched crates, `cargo clippy`, and
   `npm run typecheck && npm test` in `edge/`.
 

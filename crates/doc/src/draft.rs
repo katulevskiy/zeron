@@ -73,9 +73,7 @@ impl DraftDoc {
 
     /// Full state, for checkpoints and for seeding a new replica.
     pub fn snapshot(&self) -> Vec<u8> {
-        self.doc
-            .export(ExportMode::Snapshot)
-            .unwrap_or_default()
+        self.doc.export(ExportMode::Snapshot).unwrap_or_default()
     }
 
     pub fn version(&self) -> VersionVector {
@@ -302,7 +300,8 @@ mod tests {
         let doc = DraftDoc::new();
         let seen = Arc::new(Mutex::new(Vec::<Vec<u8>>::new()));
         let sink = seen.clone();
-        let _sub = doc.subscribe_local_update(move |bytes| sink.lock().unwrap().push(bytes.to_vec()));
+        let _sub =
+            doc.subscribe_local_update(move |bytes| sink.lock().unwrap().push(bytes.to_vec()));
         doc.set_text("a").unwrap();
         doc.set_text("ab").unwrap();
         doc.set_text("ab").unwrap();

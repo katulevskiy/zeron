@@ -12313,6 +12313,7 @@ version = "0.2.99"
 dependencies = [
  "anyhow",
  "async-trait",
+ "base64 0.22.1",
  "futures",
  "serde",
  "serde_json",
