@@ -22,7 +22,7 @@
 //! question is parked): it emits `Steered` and starts a turn of its own.
 
 use std::collections::VecDeque;
-use std::os::fd::{AsRawFd, FromRawFd, IntoRawFd, OwnedFd};
+use std::os::fd::{AsRawFd, IntoRawFd};
 
 use async_trait::async_trait;
 use futures::StreamExt;
@@ -35,7 +35,7 @@ use zeron_proto::{
     UserInputAnswer, UserInputQuestion,
 };
 
-use crate::handoff::{PausedWriter, WriteMsg, drain_steering, run_writer};
+use crate::handoff::{PausedWriter, WriteMsg, drain_steering, dup_inherited, run_writer};
 use crate::line_reader::LineReader;
 use crate::process::{ChildStdin, ChildStdout};
 use crate::{
@@ -238,24 +238,6 @@ fn stream(
         rx.recv().await.map(|event| (Ok(event), rx))
     })
     .boxed()
-}
-
-/// A close-on-exec duplicate of an inherited descriptor, refusing anything
-/// that is not open or is a standard stream.
-fn dup_inherited(fd: i32) -> Result<OwnedFd, HarnessError> {
-    // SAFETY: fcntl on a plain descriptor number; no memory is involved.
-    if fd < 3 || unsafe { libc::fcntl(fd, libc::F_GETFD) } < 0 {
-        return Err(HarnessError::Protocol(format!(
-            "inherited descriptor {fd} is not usable"
-        )));
-    }
-    // SAFETY: as above; the result is a fresh descriptor we own.
-    let dup = unsafe { libc::fcntl(fd, libc::F_DUPFD_CLOEXEC, 3) };
-    if dup < 0 {
-        return Err(std::io::Error::last_os_error().into());
-    }
-    // SAFETY: `dup` was just created and is owned by nobody else.
-    Ok(unsafe { OwnedFd::from_raw_fd(dup) })
 }
 
 fn question(question_id: &str) -> Vec<UserInputQuestion> {
@@ -554,6 +536,7 @@ impl Run {
             stdout_leftover: reader.leftover().to_vec(),
             stderr_tail: Vec::new(),
             state: serde_json::to_value(&self.state).expect("state serializes"),
+            extra_fds: Vec::new(),
             undrained_steers: undrained.clone(),
         };
         let (commit_tx, commit_rx) = oneshot::channel();

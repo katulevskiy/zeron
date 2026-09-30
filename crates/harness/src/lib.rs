@@ -338,6 +338,25 @@ impl StderrTail {
         }
     }
 
+    /// The kept lines, oldest first (a freeze exports them).
+    pub(crate) fn lines(&self) -> Vec<String> {
+        self.0
+            .lock()
+            .unwrap_or_else(std::sync::PoisonError::into_inner)
+            .iter()
+            .cloned()
+            .collect()
+    }
+
+    /// A tail that starts with lines a previous image captured (adoption).
+    pub(crate) fn seeded(lines: Vec<String>) -> Self {
+        let tail = Self::default();
+        for line in &lines {
+            tail.push(line);
+        }
+        tail
+    }
+
     /// The captured tail as one display string, `None` when nothing arrived.
     pub(crate) fn snapshot(&self) -> Option<String> {
         let tail = self

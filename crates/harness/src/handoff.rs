@@ -78,6 +78,11 @@ pub struct HarnessHandoff {
     pub stdin_fd: i32,
     pub stdout_fd: i32,
     pub stderr_fd: Option<i32>,
+    /// Other descriptors this harness keeps across the exec (Cursor's store
+    /// lease: an open, flock-ed file). The engine makes them inheritable next to
+    /// the pipes and validates them as pipes or regular files.
+    #[serde(default, skip_serializing_if = "Vec::is_empty")]
+    pub extra_fds: Vec<i32>,
     /// Stdout bytes already read off the pipe but not yet consumed as lines
     /// (see [`crate::line_reader::LineReader::leftover`]). Base64 on the wire:
     /// a JSON array of numbers would be several times larger.
@@ -497,6 +502,63 @@ impl ChildHandle {
         }
     }
 
+    /// What an interrupt escalation signals: the child's private process
+    /// group when it leads one, else the child. `None` once it is reaped (its
+    /// pid may be someone else's by then).
+    #[cfg(unix)]
+    pub(crate) fn signal_target(&self) -> Option<i32> {
+        match self {
+            Self::Owned(child) => crate::process::signal_target(child),
+            Self::Adopted(_) => {
+                let pid = self.id()? as i32;
+                // SAFETY: getpgid only inspects our own, unreaped child.
+                Some(if unsafe { libc::getpgid(pid) } == pid {
+                    -pid
+                } else {
+                    pid
+                })
+            }
+        }
+    }
+
+    #[cfg(windows)]
+    pub(crate) fn signal_target(&self) -> Option<std::sync::Arc<crate::windows_process::Job>> {
+        match self {
+            Self::Owned(child) => crate::process::signal_target(child),
+        }
+    }
+
+    /// Stop and reap the child, as [`crate::shutdown_child`] does for an
+    /// owned one: SIGTERM, then SIGKILL after `kill_grace`.
+    pub(crate) async fn shutdown(&mut self, kill_grace: std::time::Duration) {
+        match self {
+            Self::Owned(child) => crate::shutdown_child(child, kill_grace).await,
+            #[cfg(unix)]
+            Self::Adopted(_) => {
+                use crate::{Signal, send_signal};
+                let target = self.signal_target();
+                if matches!(self.try_wait(), Ok(Some(_))) {
+                    if let Some(group) = target.filter(|pid| *pid < 0) {
+                        send_signal(&group, Signal::Kill);
+                    }
+                    return;
+                }
+                if let Some(pid) = target {
+                    send_signal(&pid, Signal::Term);
+                    if tokio::time::timeout(kill_grace, self.wait()).await.is_ok() {
+                        if pid < 0 {
+                            send_signal(&pid, Signal::Kill);
+                        }
+                        return;
+                    }
+                    send_signal(&pid, Signal::Kill);
+                }
+                let _ = self.start_kill();
+                let _ = self.wait().await;
+            }
+        }
+    }
+
     /// Give up ownership without killing or reaping, returning the pid for a
     /// hand-over. `None` when the child has already been reaped (nothing to
     /// hand over). ONLY for a same-process successor (tests standing in for an
@@ -574,6 +636,155 @@ fn reap(pid: i32) -> io::Result<Option<ExitOutcome>> {
             Some(libc::EINTR) => continue,
             Some(libc::ECHILD) => return Ok(Some(ExitOutcome::unknown())),
             _ => return Err(err),
+        }
+    }
+}
+
+/// A close-on-exec duplicate of a descriptor inherited across an exec,
+/// refusing anything that is not open or is a standard stream. Adoption works
+/// on duplicates: the inherited originals stay untouched for a rollback and
+/// the engine closes them when the adoption commits.
+#[cfg(unix)]
+pub(crate) fn dup_inherited(fd: i32) -> Result<std::os::fd::OwnedFd, crate::HarnessError> {
+    use std::os::fd::FromRawFd;
+    // SAFETY: fcntl on a plain descriptor number; no memory is involved.
+    if fd < 3 || unsafe { libc::fcntl(fd, libc::F_GETFD) } < 0 {
+        return Err(crate::HarnessError::Protocol(format!(
+            "inherited descriptor {fd} is not usable"
+        )));
+    }
+    // SAFETY: as above; the result is a fresh descriptor we own.
+    let dup = unsafe { libc::fcntl(fd, libc::F_DUPFD_CLOEXEC, 3) };
+    if dup < 0 {
+        return Err(io::Error::last_os_error().into());
+    }
+    // SAFETY: `dup` was just created and is owned by nobody else.
+    Ok(unsafe { std::os::fd::OwnedFd::from_raw_fd(dup) })
+}
+
+/// Best effort: give a child's output pipe 1 MiB so a chatty agent does not
+/// block on it while nobody reads (a freeze, the exec gap). Linux only; an
+/// unprivileged process may be capped lower (`/proc/sys/fs/pipe-max-size`).
+#[cfg(unix)]
+pub(crate) fn grow_pipe(fd: i32) {
+    #[cfg(target_os = "linux")]
+    // SAFETY: fcntl on a descriptor we own; no memory is involved.
+    unsafe {
+        libc::fcntl(fd, libc::F_SETPIPE_SZ, 1 << 20);
+    }
+    #[cfg(not(target_os = "linux"))]
+    let _ = fd;
+}
+
+/// The descriptor behind a child's output pipe, for the hand-over manifest.
+pub(crate) trait PipeFd {
+    /// `None` where there is no descriptor to hand over (Windows).
+    fn pipe_fd(&self) -> Option<i32>;
+    /// Give the descriptor up WITHOUT closing it (a same-process successor
+    /// owns it now). Where there is nothing to hand over this just drops.
+    fn leak_pipe(self);
+}
+
+#[cfg(unix)]
+macro_rules! unix_pipe_fd {
+    ($($ty:ty),*) => {$(
+        impl PipeFd for $ty {
+            fn pipe_fd(&self) -> Option<i32> {
+                use std::os::fd::AsRawFd;
+                Some(self.as_raw_fd())
+            }
+            fn leak_pipe(self) {
+                use std::os::fd::IntoRawFd;
+                if let Ok(fd) = self.into_owned_fd() {
+                    let _ = fd.into_raw_fd();
+                }
+            }
+        }
+    )*};
+}
+#[cfg(unix)]
+unix_pipe_fd!(tokio::process::ChildStdout, tokio::process::ChildStderr);
+
+#[cfg(windows)]
+impl PipeFd for tokio::fs::File {
+    fn pipe_fd(&self) -> Option<i32> {
+        None
+    }
+    fn leak_pipe(self) {}
+}
+
+/// Drains a child's stderr into its [`crate::StderrTail`] for crash messages.
+///
+/// It keeps draining while the run is frozen, so the agent never blocks on a
+/// full stderr pipe, and [`Self::abandon`] lets go of the pipe without
+/// closing it for a same-process successor. Dropping the handle changes
+/// nothing: the drain runs to EOF, then marks the tail closed.
+pub(crate) struct StderrDrain {
+    fd: Option<i32>,
+    stop: Option<oneshot::Sender<oneshot::Sender<()>>>,
+}
+
+impl StderrDrain {
+    pub(crate) fn spawn<R>(stderr: R, tail: crate::StderrTail, harness: &'static str) -> Self
+    where
+        R: tokio::io::AsyncRead + PipeFd + Unpin + Send + 'static,
+    {
+        let fd = stderr.pipe_fd();
+        let (stop, mut stopped) = oneshot::channel::<oneshot::Sender<()>>();
+        tokio::spawn(async move {
+            let mut lines = crate::line_reader::LineReader::new(stderr);
+            let mut stoppable = true;
+            loop {
+                tokio::select! {
+                    ack = &mut stopped, if stoppable => match ack {
+                        Ok(ack) => {
+                            lines.into_parts().0.leak_pipe();
+                            let _ = ack.send(());
+                            return;
+                        }
+                        // The handle went away: drain to EOF as usual.
+                        Err(_) => stoppable = false,
+                    },
+                    line = lines.next_line() => match line {
+                        Ok(Some(line)) => {
+                            tracing::debug!(target: "zeron_harness::stderr", harness, "stderr: {line}");
+                            tail.push(&line);
+                        }
+                        Ok(None) | Err(_) => {
+                            tail.close();
+                            // The descriptor may be named in a handoff manifest
+                            // (the child can exit inside the freeze window): keep
+                            // it open until the owner lets go, or a reused number
+                            // would be inherited as "stderr".
+                            if stoppable && let Ok(ack) = stopped.await {
+                                lines.into_parts().0.leak_pipe();
+                                let _ = ack.send(());
+                            }
+                            return;
+                        }
+                    },
+                }
+            }
+        });
+        Self {
+            fd,
+            stop: Some(stop),
+        }
+    }
+
+    /// The stderr descriptor number, for the manifest.
+    pub(crate) fn fd(&self) -> Option<i32> {
+        self.fd
+    }
+
+    /// A same-process successor took the pipe: stop draining WITHOUT closing
+    /// it. Returns once the drain has let go. The exec path never calls this.
+    pub(crate) async fn abandon(mut self) {
+        let (ack_tx, ack_rx) = oneshot::channel();
+        if let Some(stop) = self.stop.take()
+            && stop.send(ack_tx).is_ok()
+        {
+            let _ = ack_rx.await;
         }
     }
 }
@@ -719,6 +930,41 @@ pub async fn run_writer<W>(
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    /// The child exits inside a freeze window: its stderr hits EOF while the
+    /// descriptor number is already in the handoff manifest. The drain must
+    /// keep it open until its owner lets go (a reused number would otherwise be
+    /// inherited as "stderr" by the next image).
+    #[cfg(unix)]
+    #[tokio::test]
+    async fn the_stderr_drain_keeps_an_exported_fd_open_past_eof_until_its_owner_lets_go() {
+        use crate::process::{Command, Stdio};
+        let mut command = Command::new("sh");
+        command
+            .args(["-c", "echo last words >&2"])
+            .stdin(Stdio::null())
+            .stdout(Stdio::null())
+            .stderr(Stdio::piped())
+            .kill_on_drop(false);
+        let mut child = command.spawn().unwrap();
+        let stderr = child.stderr.take().unwrap();
+        let tail = crate::StderrTail::default();
+        let drain = StderrDrain::spawn(stderr, tail.clone(), "test");
+        let fd = drain.fd().expect("a descriptor to export");
+        child.wait().await.unwrap();
+        tail.wait_closed().await;
+        tokio::time::sleep(Duration::from_millis(200)).await;
+        assert_eq!(tail.lines(), ["last words"]);
+        // SAFETY: fcntl on a plain descriptor number.
+        assert_ne!(
+            unsafe { libc::fcntl(fd, libc::F_GETFD) },
+            -1,
+            "the drain closed the exported descriptor at EOF"
+        );
+        // (Closing on drop is not asserted: a concurrent test may already have
+        // reused the number.)
+        drop(drain);
+    }
     use std::time::Duration;
     use tokio::io::AsyncReadExt;
 
@@ -1018,6 +1264,7 @@ mod tests {
             stdin_fd: 5,
             stdout_fd: 6,
             stderr_fd: Some(7),
+            extra_fds: Vec::new(),
             stdout_leftover: vec![0, 1, 2, 0xff, b'\n', b'x'],
             stderr_tail: vec!["boom".into()],
             state: serde_json::json!({ "password": "hunter2", "turn": 1 }),

@@ -1,6 +1,9 @@
 # Live updates
 
-Status: design (not yet implemented).
+Status: implemented on Linux and macOS (macOS not run on hardware — see
+[Platforms](#platforms)); Windows keeps a silent install-on-quit. Sections below
+are the design; [Implementation notes](#implementation-notes) records where the
+built version deliberately differs.
 
 ## Goal
 
@@ -73,10 +76,12 @@ It holds secrets (OpenCode password, IPC token), so it is never a named file.
 
 1. **Trigger.** The updater has staged and verified the new binary, and the
    coordinator finds a safe moment (below). `ZERON_AUTO_UPDATE` defaults on for
-   managed installs; no prompt.
-2. **Preflight (old image).** Run `<new> --handoff-preflight` (version check,
-   manifest schema check, dry open of the store). Any failure aborts before
-   anything is touched.
+   engines that can hand themselves over in place (explicit `1|true|yes` still
+   opts any engine in, `0|false|no` keeps report-only); no prompt.
+2. **Preflight (old image).** Run `<new> handoff-preflight` (does the binary
+   run and read our manifest version). It deliberately does not open the new
+   binary's store: a newer build could migrate the schema under the running
+   engine. Any failure aborts before anything is touched.
 3. **Veto check.** Refuse (and retry later, never kill) while any of these is
    true: an agent-account login is in flight; a harness update holds a lease;
    a token refresh is in flight; a run is interrupting, in its setup phase, or

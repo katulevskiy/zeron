@@ -8312,10 +8312,12 @@ impl Shell {
         };
         // Everything the new window restores must be on disk first.
         crate::settings::flush(cx);
-        let version = match update.update(cx, |update, cx| update.install_for_swap(cx)) {
-            Ok(version) => version,
-            Err(_) => return, // the flow says why; the strip shows it
-        };
+        if update
+            .update(cx, |update, cx| update.install_for_swap(cx))
+            .is_err()
+        {
+            return; // the flow says why; the strip shows it
+        }
         self.swapping = true;
         let data_dir = update.read(cx).data_dir().to_path_buf();
         let background = !self.window_in_front;

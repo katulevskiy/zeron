@@ -909,24 +909,32 @@ impl SessionsEngine {
         request_id: &str,
         answers: Vec<UserInputAnswer>,
     ) -> Result<bool, EngineError> {
-        // The frozen run's pending questions are already in the handoff: an
-        // answer taken now would be lost with this image.
-        if self.handoff_frozen() {
-            return Err(EngineError::Other(HANDOFF_IN_PROGRESS.into()));
-        }
         let target = lock(&self.inner.runs)
             .get(chat_id)
             .map(|h| (h.pending_inputs.clone(), h.engine_tx.clone()));
         let Some((pending, engine_tx)) = target else {
             return Ok(false);
         };
-        let Some(resolver) = lock(&pending).remove(request_id) else {
-            return Ok(false);
-        };
-        let _ = resolver.tx.send(answers);
-        let _ = engine_tx.send(AgentEvent::InputResolved {
-            request_id: request_id.to_string(),
-        });
+        {
+            let mut pending = lock(&pending);
+            // The frozen run's pending questions are already in the handoff:
+            // an answer taken now would be lost with this image. Checked, taken
+            // and sent under the run's `pending` lock, which the freeze takes
+            // as a barrier: an answer that got past the check is with the run
+            // (and written to the agent) before the freeze goes on.
+            if self.handoff_frozen() {
+                return Err(EngineError::Other(HANDOFF_IN_PROGRESS.into()));
+            }
+            let Some(resolver) = pending.remove(request_id) else {
+                return Ok(false);
+            };
+            let _ = resolver.tx.send(answers);
+            // Inside the lock too: a freeze must not see the answer taken
+            // but the run still marked as awaiting input.
+            let _ = engine_tx.send(AgentEvent::InputResolved {
+                request_id: request_id.to_string(),
+            });
+        }
         Ok(true)
     }
 
@@ -2087,11 +2095,11 @@ async fn drive_run(
     // An adopted run continues a predecessor image's run: its child, its
     // prompt and its doc state already exist, so the start-of-run
     // preparation below is skipped and the fold is seeded from the handoff.
-    let (mut adopt, seed) = match mode {
-        RunMode::Start => (None, None),
+    let (mut adopt, seed, adopt_fds) = match mode {
+        RunMode::Start => (None, None, Vec::new()),
         RunMode::Adopt(seed) => {
-            let AdoptSeed { harness, fold } = *seed;
-            (Some(harness), Some(fold))
+            let AdoptSeed { harness, fold, fds } = *seed;
+            (Some(harness), Some(fold), fds)
         }
     };
     let adopt_pid = adopt.as_ref().map(|handoff| handoff.pid);
@@ -2166,7 +2174,10 @@ async fn drive_run(
                 _execution_lease = Some(lease.clone());
                 controls.execution_lease = Some(lease);
                 if let Some(handoff) = adopt.take() {
-                    harness.adopt(handoff, controls, request).await
+                    let adopted = harness.adopt(handoff, controls, request).await;
+                    // The harness has its own duplicates now (or failed).
+                    drop(adopt_fds);
+                    adopted
                 } else {
                     if let Some(listener) = inner.turn_listener.get() {
                         listener(&chat_id, &request.cwd);

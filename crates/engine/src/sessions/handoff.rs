@@ -78,6 +78,7 @@ impl RunHandoff {
     pub fn fds(&self) -> Vec<RawFd> {
         let mut fds = vec![self.harness.stdin_fd, self.harness.stdout_fd];
         fds.extend(self.harness.stderr_fd);
+        fds.extend(self.harness.extra_fds.iter().copied());
         fds
     }
 }
@@ -303,6 +304,10 @@ impl SessionsEngine {
         // been taken here every accepted steer is in its mailbox and ledger.
         for target in &targets {
             drop(lock(&target.ledger));
+            // Likewise an answer: `respond_input` checks the flag, takes the
+            // resolver and sends the answer under this lock, so once it has
+            // been taken here every accepted answer is already with the run.
+            drop(lock(&target.pending));
         }
         let mut reasons: Vec<String> = targets
             .iter()
@@ -395,7 +400,7 @@ impl SessionsEngine {
         }
     }
 
-    fn adopt_run(&self, run: RunHandoff) -> Result<(), EngineError> {
+    fn adopt_run(&self, mut run: RunHandoff) -> Result<(), EngineError> {
         let harness = self.inner.registry.resolve(run.harness.harness)?;
         if !harness.supports_adoption() {
             return Err(EngineError::Other(format!(
@@ -405,6 +410,10 @@ impl SessionsEngine {
         }
         let handle = self.doc_handle(&run.chat_id)?;
         let chat_id = run.chat_id.clone();
+        // Duplicate the inherited descriptors NOW, while the originals are
+        // certainly open: the harness adopts later, inside the run task, and the
+        // adoption commit closes the originals as soon as boot is done.
+        let fds = dup_harness_fds(&mut run.harness)?;
 
         let (steer_tx, steer_rx) = mpsc::channel::<SteerMessage>(32);
         for steer in run.undrained_steers {
@@ -498,10 +507,46 @@ impl SessionsEngine {
             RunMode::Adopt(Box::new(AdoptSeed {
                 harness: run.harness,
                 fold: run.fold,
+                fds,
             })),
         ));
         Ok(())
     }
+}
+
+/// Replace every descriptor number `handoff` names with an engine-owned
+/// close-on-exec duplicate (returned so the caller keeps them open), refusing
+/// standard streams and anything not open.
+fn dup_harness_fds(
+    handoff: &mut zeron_harness::HarnessHandoff,
+) -> Result<Vec<std::os::fd::OwnedFd>, EngineError> {
+    use std::os::fd::{FromRawFd, OwnedFd};
+    let mut owned = Vec::new();
+    let mut dup = |fd: i32| -> Result<i32, EngineError> {
+        // SAFETY: fcntl on a plain descriptor number; no memory is involved.
+        if fd < 3 || unsafe { libc::fcntl(fd, libc::F_GETFD) } < 0 {
+            return Err(EngineError::Other(format!(
+                "the handed-over descriptor {fd} is not usable"
+            )));
+        }
+        // SAFETY: as above; the result is a fresh descriptor we own.
+        let copy = unsafe { libc::fcntl(fd, libc::F_DUPFD_CLOEXEC, 3) };
+        if copy < 0 {
+            return Err(std::io::Error::last_os_error().into());
+        }
+        // SAFETY: `copy` was just created and is owned by nobody else.
+        owned.push(unsafe { OwnedFd::from_raw_fd(copy) });
+        Ok(copy)
+    };
+    handoff.stdin_fd = dup(handoff.stdin_fd)?;
+    handoff.stdout_fd = dup(handoff.stdout_fd)?;
+    if let Some(fd) = handoff.stderr_fd {
+        handoff.stderr_fd = Some(dup(fd)?);
+    }
+    for fd in &mut handoff.extra_fds {
+        *fd = dup(*fd)?;
+    }
+    Ok(owned)
 }
 
 /// `RunControls.rebind_input` for an adopted run: hand the harness the
@@ -1453,6 +1498,38 @@ mod tests {
         }
     }
 
+    // The adoption commit closes the inherited originals as soon as boot is
+    // done, but a run whose execution lease is delayed (a harness update
+    // pending) adopts later: the engine duplicated the descriptors when the run
+    // was registered, so the harness still finds them open.
+    #[tokio::test(flavor = "multi_thread", worker_threads = 2)]
+    async fn a_delayed_adoption_still_finds_its_descriptors_after_the_originals_close() {
+        let old = rig();
+        old.start("c1", "hold").await;
+        old.until_said("c1", "working").await;
+        let (dir, lock_fd, old_image, runs) = retire_frozen(old).await;
+        let pid = runs[0].harness.pid;
+        let registry = registry(Arc::new(FreezableMock));
+        registry.begin_update(HarnessId::Mock); // the lease is held: adoption waits
+        let new = successor(dir, lock_fd, registry.clone(), runs);
+        assert!(new.live_run("c1").is_some());
+        // The adoption commit: the inherited originals are closed.
+        drop(old_image);
+        tokio::time::sleep(Duration::from_millis(200)).await;
+        registry.end_update(HarnessId::Mock);
+        // The run adopts now and carries on with the same child.
+        new.sessions().steer("c1", "continue", None).await.unwrap();
+        new.until_said("c1", "continued").await;
+        assert!(alive(pid), "the same child answered");
+        assert_eq!(
+            new.sessions().inner.journal.resume_attempts("c1"),
+            0,
+            "not the recovery path"
+        );
+        new.sessions().shutdown().await;
+        eventually("the adopted child is reaped", || !alive(pid)).await;
+    }
+
     // Review fix 2: a Stop while the adopted run still waits for its
     // execution lease settles it as interrupted — no crash path, no resume.
     #[tokio::test(flavor = "multi_thread", worker_threads = 2)]
@@ -1678,6 +1755,7 @@ mod tests {
                         stdin_fd: -1,
                         stdout_fd: -1,
                         stderr_fd: None,
+                        extra_fds: Vec::new(),
                         stdout_leftover: Vec::new(),
                         stderr_tail: Vec::new(),
                         state: serde_json::Value::Null,

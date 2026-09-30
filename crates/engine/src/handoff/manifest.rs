@@ -149,13 +149,33 @@ fn validated_originals(manifest: &Manifest, manifest_fd: RawFd) -> Vec<RawFd> {
     }
     // Agent pipes: stdin/stdout/stderr of each adopted run (pipes or, for
     // some harnesses, sockets). A descriptor of any other kind is not ours.
-    for fd in manifest.runs.iter().flat_map(RunHandoff::fds) {
+    for fd in manifest.runs.iter().flat_map(|run| {
+        run.fds()
+            .into_iter()
+            .filter(|fd| !run.harness.extra_fds.contains(fd))
+    }) {
         if super::fds::is_pipe_like(fd) {
             fds.insert(fd);
         } else {
             tracing::warn!(
                 fd,
                 "the handoff manifest names a run descriptor that is not a pipe"
+            );
+        }
+    }
+    // Descriptors a harness keeps for itself (Cursor's store lease): pipes or
+    // regular files, nothing else.
+    for fd in manifest
+        .runs
+        .iter()
+        .flat_map(|run| run.harness.extra_fds.iter().copied())
+    {
+        if super::fds::is_pipe_like(fd) || super::fds::is_regular_file(fd) {
+            fds.insert(fd);
+        } else {
+            tracing::warn!(
+                fd,
+                "the handoff manifest names an extra run descriptor that is not a pipe or a file"
             );
         }
     }

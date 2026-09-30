@@ -48,6 +48,12 @@ pub(crate) enum RunMode {
 pub(crate) struct AdoptSeed {
     pub harness: HarnessHandoff,
     pub fold: FoldSnapshot,
+    /// Engine-owned duplicates of the descriptors `harness` names, made when the
+    /// run was registered (before the adoption commits and closes the inherited
+    /// originals) and closed once the harness has taken its own copies. The
+    /// harness may be delayed (an execution lease waits on a harness update),
+    /// and must not find its descriptors closed under it.
+    pub fds: Vec<std::os::fd::OwnedFd>,
 }
 
 /// A streaming doc entry already begun: where it sits and what it holds.
