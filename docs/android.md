@@ -231,7 +231,10 @@ Phone mode (`core/PhoneEngine.kt`, `ui/EngineScreens.kt`):
 Settings → Coding agents (`ui/AgentsScreen.kt`, any engine device, so
 account mode manages remote hosts too) speaks `host_call`: `ListHarnesses`,
 `InstallHarness` / `CancelInstall` (a relay timeout falls back to polling the
-catalog), `CheckHarnessUpdates`, `ListAgentAccounts` (plan label),
+catalog), `CheckHarnessUpdates` on open and pull-to-refresh, per-agent
+`ApplyHarnessUpdate` and the header's Update all (`ApplyAllHarnessUpdates`,
+progress by polling `ListHarnessUpdates`), `UninstallHarness` (the confirmation
+dialog shows the engine's `dryRun` list; accounts stay), `ListAgentAccounts` (plan label),
 `StartAgentLogin` → Custom Tab → `PollAgentLogin`, or paste-code
 `CompleteAgentLogin`, and `ForgetAgentAccount`. Reply parsing is in
 `core/Agents.kt` (JVM unit tests: `./gradlew :app:testDebugUnitTest`).

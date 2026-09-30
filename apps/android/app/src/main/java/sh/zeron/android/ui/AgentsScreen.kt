@@ -21,6 +21,7 @@ import androidx.compose.material3.AlertDialog
 import androidx.compose.material3.Button
 import androidx.compose.material3.ButtonDefaults
 import androidx.compose.material3.FilledTonalButton
+import androidx.compose.material3.IconButton
 import androidx.compose.material3.LinearWavyProgressIndicator
 import androidx.compose.material3.LoadingIndicator
 import androidx.compose.material3.MaterialTheme
@@ -70,10 +71,11 @@ import uniffi.zeron_core.CoreException
 
 /**
  * Settings → Coding agents: the harnesses on an engine device with their
- * install state (Install / progress / Cancel) and agent accounts (browser or
- * paste-code sign-in, sign out). Everything goes over `host_call` to that
- * device's engine — this phone's, or a computer's in account mode; Demo
- * answers from a simulated engine.
+ * install state (Install / progress / Cancel), updates (per agent and
+ * Update all), uninstall, and agent accounts (browser or paste-code sign-in,
+ * sign out). Everything goes over `host_call` to that device's engine — this
+ * phone's, or a computer's in account mode; Demo answers from a simulated
+ * engine.
  */
 @Composable
 fun AgentsScreen(model: AppModel, onBack: () -> Unit) {
@@ -87,9 +89,19 @@ fun AgentsScreen(model: AppModel, onBack: () -> Unit) {
     var versions by remember { mutableStateOf<Map<String, Agents.Version>>(emptyMap()) }
     var error by remember { mutableStateOf<String?>(null) }
     val installs = remember { mutableStateMapOf<String, Job>() }
+    val uninstalls = remember { mutableStateMapOf<String, Job>() }
+    val updates = remember { mutableStateMapOf<String, Job>() }
+    /** Inline, per-agent failures and notes (uninstall refusals, failed updates). */
+    val notes = remember { mutableStateMapOf<String, String>() }
+    var updatingAll by remember { mutableStateOf(false) }
+    /** Why the last Update all (as a whole) failed, shown above the list. */
+    var updateAllError by remember { mutableStateOf<String?>(null) }
+    var checking by remember { mutableStateOf(false) }
+    var refreshing by remember { mutableStateOf(false) }
     var reloads by remember { mutableIntStateOf(0) }
     var signingIn by remember { mutableStateOf<Agents.Harness?>(null) }
     var signingOut by remember { mutableStateOf<Pair<Agents.Harness, Agents.Account>?>(null) }
+    var uninstalling by remember { mutableStateOf<Agents.Harness?>(null) }
     var pickDevice by remember { mutableStateOf(false) }
     val snackbar = remember { SnackbarHostState() }
     val scope = rememberCoroutineScope()
@@ -99,17 +111,30 @@ fun AgentsScreen(model: AppModel, onBack: () -> Unit) {
         error = null
         val list = async { runCatching { Agents.harnesses(model.hostCall(d.id, Agents.LIST_HARNESSES)) } }
         val accts = async { runCatching { Agents.accounts(model.hostCall(d.id, Agents.LIST_ACCOUNTS)) } }
-        val vers = async { runCatching { Agents.versions(model.hostCall(d.id, Agents.CHECK_UPDATES)) } }
         list.await().onSuccess { harnesses = it }.onFailure {
             harnesses = harnesses ?: emptyList()
             error = it.userMessage()
         }
         accts.await().onSuccess { accounts = it }
-        vers.await().onSuccess { versions = it }
+        refreshing = false
+        // Checking asks each agent's release channel; the list is already up.
+        checking = true
+        runCatching { Agents.versions(model.hostCall(d.id, Agents.CHECK_UPDATES)) }.onSuccess { versions = it }
+        checking = false
+    }
+
+    /** Mirror the engine's update statuses while [busy] holds (per-agent progress). */
+    suspend fun followUpdates(deviceId: String, busy: () -> Boolean) {
+        while (busy()) {
+            runCatching { Agents.versions(model.hostCall(deviceId, Agents.LIST_UPDATES)) }
+                .onSuccess { if (it.isNotEmpty()) versions = it }
+            delay(1500)
+        }
     }
 
     fun install(h: Agents.Harness) {
         val d = device ?: return
+        notes.remove(h.id)
         installs[h.id] = scope.launch {
             try {
                 harnesses = Agents.harnesses(model.hostCall(d.id, Agents.INSTALL_HARNESS, JSONObject().put("harness", h.id)))
@@ -119,10 +144,10 @@ fun AgentsScreen(model: AppModel, onBack: () -> Unit) {
             } catch (e: Exception) {
                 if (e is CoreException.HostUnavailable && Agents.isTimeout(e.reason)) {
                     // Still installing on the device: watch the catalog instead.
-                    snackbar.showSnackbar(if (awaitInstalled(model, d.id, h.id)) "${h.name} installed" else "${h.name} didn't finish installing. Check the engine log.")
+                    snackbar.showSnackbar(if (awaitInstalled(model, d.id, h.id, true)) "${h.name} installed" else "${h.name} didn't finish installing. Check the engine log.")
                 } else {
                     val msg = e.userMessage()
-                    if (!msg.contains("cancelled", ignoreCase = true)) snackbar.showSnackbar("Couldn't install ${h.name}: $msg")
+                    if (!msg.contains("cancelled", ignoreCase = true)) notes[h.id] = "Couldn't install: $msg"
                 }
             } finally {
                 installs.remove(h.id)
@@ -136,11 +161,135 @@ fun AgentsScreen(model: AppModel, onBack: () -> Unit) {
         scope.launch { runCatching { model.hostCall(d.id, Agents.CANCEL_INSTALL, JSONObject().put("harness", h.id)) } }
     }
 
+    fun uninstall(h: Agents.Harness) {
+        val d = device ?: return
+        notes.remove(h.id)
+        uninstalls[h.id] = scope.launch {
+            try {
+                val result = Agents.uninstall(model.hostCall(d.id, Agents.UNINSTALL_HARNESS, JSONObject().put("harness", h.id)))
+                result.harnesses?.let { harnesses = it }
+                versions = versions - h.id
+                result.remaining?.let { notes[h.id] = it }
+                snackbar.showSnackbar(if (result.remaining == null) "${h.name} uninstalled" else "Removed Zeron's copy of ${h.name}")
+            } catch (e: CancellationException) {
+                throw e
+            } catch (e: Exception) {
+                if (e is CoreException.HostUnavailable && Agents.isTimeout(e.reason)) {
+                    if (!awaitInstalled(model, d.id, h.id, false)) notes[h.id] = "The device didn't finish uninstalling ${h.name}."
+                } else {
+                    notes[h.id] = e.userMessage()
+                }
+            } finally {
+                uninstalls.remove(h.id)
+                runCatching { harnesses = Agents.harnesses(model.hostCall(d.id, Agents.LIST_HARNESSES)) }
+            }
+        }
+    }
+
+    fun update(h: Agents.Harness) {
+        val d = device ?: return
+        notes.remove(h.id)
+        updates[h.id] = scope.launch {
+            val poll = launch { followUpdates(d.id) { true } }
+            try {
+                val reply = model.hostCall(d.id, Agents.APPLY_UPDATE, JSONObject().put("harness", h.id)) as? JSONObject
+                snackbar.showSnackbar(reply?.optString("version")?.ifEmpty { null }?.let { "${h.name} updated to v$it" } ?: "${h.name} updated")
+            } catch (e: CancellationException) {
+                throw e
+            } catch (e: Exception) {
+                if (e is CoreException.HostUnavailable && Agents.isTimeout(e.reason)) {
+                    followUpdates(d.id) { versions[h.id]?.busy == true }
+                } else {
+                    val msg = e.userMessage()
+                    if (!msg.contains("cancelled", ignoreCase = true)) notes[h.id] = "Couldn't update: $msg"
+                }
+            } finally {
+                poll.cancel()
+                runCatching { Agents.versions(model.hostCall(d.id, Agents.LIST_UPDATES)) }.onSuccess { if (it.isNotEmpty()) versions = it }
+                updates.remove(h.id)
+            }
+        }
+    }
+
+    fun updateAll() {
+        val d = device ?: return
+        updatingAll = true
+        updateAllError = null
+        scope.launch {
+            val poll = launch { followUpdates(d.id) { true } }
+            try {
+                val result = Agents.updateAll(model.hostCall(d.id, Agents.APPLY_ALL_UPDATES))
+                if (result.statuses.isNotEmpty()) versions = result.statuses
+                val names = harnesses.orEmpty().associate { it.id to it.name }
+                result.failed.forEach { (id, message) -> notes[id] = "Couldn't update: $message" }
+                val updated = result.updated.size
+                snackbar.showSnackbar(
+                    when {
+                        result.failed.isNotEmpty() -> "${result.failed.size} of ${updated + result.failed.size} updates failed"
+                        updated == 1 -> "${names[result.updated[0]] ?: "1 agent"} updated"
+                        updated > 1 -> "$updated agents updated"
+                        else -> "Everything is up to date"
+                    },
+                )
+            } catch (e: CancellationException) {
+                throw e
+            } catch (e: Exception) {
+                if (e is CoreException.HostUnavailable && Agents.isTimeout(e.reason)) {
+                    followUpdates(d.id) { versions.values.any { it.busy || it.updatable } }
+                } else {
+                    updateAllError = "Couldn't update all: ${e.userMessage()}"
+                }
+            } finally {
+                poll.cancel()
+                runCatching { Agents.versions(model.hostCall(d.id, Agents.LIST_UPDATES)) }.onSuccess { if (it.isNotEmpty()) versions = it }
+                updatingAll = false
+            }
+        }
+    }
+
+    val installed = harnesses.orEmpty().filter { it.installed }.map { it.id }.toSet()
+    val pending = versions.values.count { it.harness in installed && it.updatable }
+    val busyNow = updatingAll || updates.isNotEmpty() || versions.values.any { it.busy }
+    val status = when {
+        device == null -> null
+        updatingAll -> versions.values.firstOrNull { it.busy }?.let { v ->
+            "Updating ${harnesses.orEmpty().firstOrNull { it.id == v.harness }?.name ?: v.harness}…"
+        } ?: "Updating…"
+        checking -> "Checking for updates…"
+        pending == 1 -> "1 update available"
+        pending > 1 -> "$pending updates available"
+        versions.isNotEmpty() && installed.isNotEmpty() -> "Up to date"
+        else -> null
+    }
+
     SubPage(
         title = "Coding agents",
-        subtitle = device?.name,
+        subtitle = listOfNotNull(device?.name, status).joinToString(" · ").ifEmpty { null },
         onBack = onBack,
         overlay = { SnackbarHost(snackbar, Modifier.align(Alignment.BottomCenter).navigationBarsPadding()) },
+        actions = {
+            if (device != null && !harnesses.isNullOrEmpty()) {
+                FilledTonalButton(
+                    onClick = { updateAll() },
+                    enabled = pending > 0 && !busyNow,
+                    shapes = ButtonDefaults.shapes(),
+                    contentPadding = ButtonDefaults.SmallContentPadding,
+                ) {
+                    if (updatingAll) {
+                        LoadingIndicator(Modifier.size(ButtonDefaults.IconSize))
+                    } else {
+                        ZIcon(ZIcons.Refresh, null, Modifier.size(ButtonDefaults.IconSize))
+                    }
+                    Spacer(Modifier.size(ButtonDefaults.IconSpacing))
+                    Text(if (updatingAll) "Updating" else "Update all")
+                }
+            }
+        },
+        refreshing = refreshing,
+        onRefresh = {
+            refreshing = true
+            reloads++
+        },
     ) {
         if (device == null) {
             item { EmptyNote(ZIcons.Bot, "No engine to manage", "Agents install on a device running Zeron — this phone's engine or one of your computers.") }
@@ -154,11 +303,17 @@ fun AgentsScreen(model: AppModel, onBack: () -> Unit) {
                             MenuChoice(d.name, d.id == device.id, if (d.online) "Online" else "Offline") {
                                 deviceId = d.id
                                 harnesses = null
+                                versions = emptyMap()
+                                notes.clear()
+                                updateAllError = null
                             }
                         })))
                     }
                 }
             }
+        }
+        updateAllError?.let { message ->
+            item { InlineProblem(message, Modifier.padding(horizontal = 16.dp, vertical = 4.dp)) }
         }
         val list = harnesses
         when {
@@ -180,9 +335,18 @@ fun AgentsScreen(model: AppModel, onBack: () -> Unit) {
                             accounts.forHarness(h.id),
                             accounts.warnings[h.id],
                             versions[h.id],
-                            installing = h.id in installs,
+                            activity = when {
+                                h.id in installs -> Activity.Installing
+                                h.id in uninstalls -> Activity.Uninstalling
+                                h.id in updates || versions[h.id]?.busy == true -> Activity.Updating
+                                else -> null
+                            },
+                            note = notes[h.id],
+                            canUpdate = !updatingAll,
                             onInstall = { install(h) },
                             onCancel = { cancelInstall(h) },
+                            onUpdate = { update(h) },
+                            onUninstall = { uninstalling = h },
                             onSignIn = { signingIn = h },
                             onSignOut = { signingOut = h to it },
                         )
@@ -219,17 +383,97 @@ fun AgentsScreen(model: AppModel, onBack: () -> Unit) {
             dismissButton = { TextButton(onClick = { signingOut = null }) { Text("Cancel") } },
         )
     }
+    uninstalling?.let { h ->
+        UninstallDialog(model, device!!.id, device.name, h, signedIn = accounts.forHarness(h.id).isNotEmpty(), onDismiss = { uninstalling = null }) {
+            uninstalling = null
+            uninstall(h)
+        }
+    }
 }
 
-/** Poll the catalog until `harness` reports installed (≤ 15 min, the engine's own limit). */
-private suspend fun awaitInstalled(model: AppModel, device: String, harness: String): Boolean {
+/**
+ * Confirm an uninstall with the engine's own dry run: exactly what goes, or
+ * why nothing will (a CLI installed outside Zeron, with how to remove it).
+ */
+@Composable
+private fun UninstallDialog(model: AppModel, device: String, deviceName: String, h: Agents.Harness, signedIn: Boolean, onDismiss: () -> Unit, onConfirm: () -> Unit) {
+    var preview by remember { mutableStateOf<Result<Agents.Uninstall>?>(null) }
+    LaunchedEffect(h.id) {
+        preview = runCatching {
+            Agents.uninstall(model.hostCall(device, Agents.UNINSTALL_HARNESS, JSONObject().put("harness", h.id).put("dryRun", true)))
+        }
+    }
+    val plan = preview?.getOrNull()
+    AlertDialog(
+        onDismissRequest = onDismiss,
+        icon = { ZIcon(ZIcons.Delete, null) },
+        title = { Text("Uninstall ${h.name}?") },
+        text = {
+            Column(Modifier.animateContentSize()) {
+                when {
+                    preview == null -> Waiting("Checking what to remove…")
+                    plan == null -> Text(preview!!.exceptionOrNull()!!.userMessage(), color = MaterialTheme.colorScheme.error)
+                    else -> {
+                        Text("Removes ${h.name} from $deviceName:", style = MaterialTheme.typography.bodyMedium)
+                        Spacer(Modifier.height(8.dp))
+                        Surface(shape = RoundedCornerShape(16.dp), color = MaterialTheme.colorScheme.surfaceContainerHighest, modifier = Modifier.fillMaxWidth()) {
+                            Column(Modifier.padding(12.dp)) {
+                                for (path in plan.removed) {
+                                    Text(path, style = MaterialTheme.typography.bodySmall, fontFamily = GeistMono, maxLines = 2, overflow = TextOverflow.Ellipsis)
+                                }
+                            }
+                        }
+                        Spacer(Modifier.height(12.dp))
+                        Text(
+                            if (signedIn) "Your ${h.name} accounts stay signed in on the device; sign out first to remove them too. Sessions using ${h.name} stop at their next turn."
+                            else "Settings and sign-ins stay on the device. Sessions using ${h.name} stop at their next turn.",
+                            style = MaterialTheme.typography.bodyMedium,
+                            color = MaterialTheme.colorScheme.onSurfaceVariant,
+                        )
+                    }
+                }
+            }
+        },
+        confirmButton = {
+            if (plan != null) {
+                TextButton(onClick = onConfirm) { Text("Uninstall", color = MaterialTheme.colorScheme.error) }
+            }
+        },
+        dismissButton = { TextButton(onClick = onDismiss) { Text(if (preview?.isFailure == true) "Close" else "Cancel") } },
+    )
+}
+
+/** Poll the catalog until `harness` reports [installed] (≤ 15 min, the engine's own limit). */
+private suspend fun awaitInstalled(model: AppModel, device: String, harness: String, installed: Boolean): Boolean {
     val deadline = System.currentTimeMillis() + 15 * 60_000
     while (System.currentTimeMillis() < deadline) {
         delay(4000)
         val list = runCatching { Agents.harnesses(model.hostCall(device, Agents.LIST_HARNESSES)) }.getOrNull() ?: continue
-        if (list.firstOrNull { it.id == harness }?.installed == true) return true
+        if (list.firstOrNull { it.id == harness }?.installed == installed) return true
     }
     return false
+}
+
+private enum class Activity { Installing, Uninstalling, Updating }
+
+private val phaseLabels = mapOf(
+    "waiting-for-idle" to "Waiting for sessions to finish",
+    "preparing" to "Preparing update",
+    "downloading" to "Downloading update",
+    "installing" to "Installing update",
+    "verifying" to "Verifying update",
+)
+
+/** An inline error on the error container: warning icon and the message. */
+@Composable
+private fun InlineProblem(text: String, modifier: Modifier = Modifier) {
+    Surface(shape = RoundedCornerShape(16.dp), color = MaterialTheme.colorScheme.errorContainer, modifier = modifier.fillMaxWidth()) {
+        Row(Modifier.padding(12.dp), verticalAlignment = Alignment.Top) {
+            ZIcon(ZIcons.Warning, null, Modifier.size(18.dp), tint = MaterialTheme.colorScheme.onErrorContainer)
+            Spacer(Modifier.width(10.dp))
+            Text(text, style = MaterialTheme.typography.bodySmall, color = MaterialTheme.colorScheme.onErrorContainer)
+        }
+    }
 }
 
 @Composable
@@ -238,12 +482,18 @@ private fun HarnessCard(
     accounts: List<Agents.Account>,
     warning: String?,
     version: Agents.Version?,
-    installing: Boolean,
+    activity: Activity?,
+    note: String?,
+    canUpdate: Boolean,
     onInstall: () -> Unit,
     onCancel: () -> Unit,
+    onUpdate: () -> Unit,
+    onUninstall: () -> Unit,
     onSignIn: () -> Unit,
     onSignOut: (Agents.Account) -> Unit,
 ) {
+    var menu by remember { mutableStateOf(false) }
+    val available = h.installed && version?.available == true && activity == null
     Surface(
         shape = RoundedCornerShape(28.dp),
         color = cardColor(),
@@ -260,26 +510,53 @@ private fun HarnessCard(
                     Text(h.name, style = MaterialTheme.typography.titleMedium, maxLines = 1)
                     Text(
                         when {
-                            installing -> "Installing…"
+                            activity == Activity.Installing -> "Installing…"
+                            activity == Activity.Uninstalling -> "Uninstalling…"
+                            activity == Activity.Updating -> (phaseLabels[version?.phase] ?: "Updating") + "…"
+                            available -> "Update available · v${version?.installed} → v${version?.latest}"
+                            h.installed && version?.phase == "updated" -> "Updated · v${version?.installed}"
                             h.installed -> listOfNotNull("Installed", version?.installed?.let { "v$it" }).joinToString(" · ")
                             h.canInstall -> "Not installed"
                             else -> "Not installed · install it on the device"
                         },
                         style = MaterialTheme.typography.bodyMedium,
-                        color = MaterialTheme.colorScheme.onSurfaceVariant,
-                        maxLines = 1,
+                        color = if (available) MaterialTheme.colorScheme.primary else MaterialTheme.colorScheme.onSurfaceVariant,
+                        maxLines = 2,
+                        overflow = TextOverflow.Ellipsis,
                     )
                 }
                 when {
-                    installing -> OutlinedButton(onClick = onCancel, shapes = ButtonDefaults.shapes()) { Text("Cancel") }
+                    activity == Activity.Installing -> OutlinedButton(onClick = onCancel, shapes = ButtonDefaults.shapes()) { Text("Cancel") }
+                    activity != null -> {}
                     !h.installed && h.canInstall -> Button(onClick = onInstall, shapes = ButtonDefaults.shapes()) { Text("Install") }
+                    available && version?.canApply == true -> Button(onClick = onUpdate, enabled = canUpdate, shapes = ButtonDefaults.shapes()) { Text("Update") }
+                }
+                if (h.installed && activity == null) {
+                    Box {
+                        IconButton(onClick = { menu = true }) {
+                            ZIcon(ZIcons.More, "More for ${h.name}", Modifier.size(22.dp), tint = MaterialTheme.colorScheme.onSurfaceVariant)
+                        }
+                        ActionMenu(menu, { menu = false }, listOf(MenuAction("Uninstall", ZIcons.Delete, destructive = true, onClick = onUninstall)))
+                    }
                 }
             }
-            if (installing) {
+            if (activity != null) {
                 Spacer(Modifier.height(14.dp))
                 LinearWavyProgressIndicator(Modifier.fillMaxWidth())
+                version?.progress?.takeIf { activity == Activity.Updating }?.let {
+                    Spacer(Modifier.height(6.dp))
+                    Text(it, style = MaterialTheme.typography.bodySmall, color = MaterialTheme.colorScheme.onSurfaceVariant, maxLines = 1)
+                }
             }
-            if (h.installed && !installing) {
+            // Inline problems: this screen's own failures first, then the engine's.
+            val problem = note
+                ?: version?.error?.takeIf { version?.phase == "failed" && h.installed }?.let { "Update failed: $it" }
+                ?: version?.manualCommand?.takeIf { available && version?.canApply == false }?.let { "Update it on the device: $it" }
+            if (problem != null && activity == null) {
+                Spacer(Modifier.height(10.dp))
+                InlineProblem(problem)
+            }
+            if (h.installed && activity == null) {
                 for (a in accounts) {
                     Spacer(Modifier.height(10.dp))
                     Surface(shape = RoundedCornerShape(18.dp), color = MaterialTheme.colorScheme.surfaceContainerHigh) {

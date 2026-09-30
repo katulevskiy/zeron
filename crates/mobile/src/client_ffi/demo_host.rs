@@ -3,7 +3,8 @@
 //! harness-install and agent-account surface for the Android Settings →
 //! Agents panel to be developed and screenshot offline: a catalog with
 //! installed and installable agents, installs that take a few seconds and can
-//! be cancelled, and browser / paste-code sign-ins that complete.
+//! be cancelled, an update to apply (alone or with Update all), uninstalls,
+//! and browser / paste-code sign-ins that complete.
 //!
 //! Reply shapes mirror the engine (`HarnessDescriptor`, `AgentAccountsSnapshot`,
 //! `AgentLoginStart`, `AgentLoginPoll`, `HarnessUpdateStatus`), camelCase JSON.
@@ -23,20 +24,37 @@ use super::types::{CoreError, CoreResult};
 const INSTALL_TIME: Duration = Duration::from_millis(2600);
 /// How long a demo `git clone` takes.
 const CLONE_TIME: Duration = Duration::from_millis(900);
+/// How long a demo update takes.
+const UPDATE_TIME: Duration = Duration::from_millis(1800);
 /// Browser sign-ins report `done` on this poll.
 const POLLS_TO_FINISH: u32 = 3;
 
+/// (id, name, latest release)
 const HARNESSES: &[(&str, &str, &str)] = &[
     ("claude-code", "Claude Code", "2.1.14"),
-    ("codex", "Codex", "0.41.0"),
+    ("codex", "Codex", "0.42.0"),
     ("opencode", "OpenCode", "0.9.2"),
     ("grok", "Grok", "0.3.1"),
     ("pi", "Pi", "0.12.0"),
 ];
 
+/// What a demo uninstall removes, per agent.
+fn removed_paths(id: &str) -> Vec<&'static str> {
+    match id {
+        "claude-code" => vec!["~/.local/bin/claude", "~/.local/share/claude"],
+        "codex" => vec!["~/.local/bin/codex", "~/.codex/packages/standalone"],
+        "opencode" => vec!["npm uninstall -g opencode-ai (/usr/local)"],
+        "grok" => vec!["~/.grok/bin/grok", "~/.grok/downloads"],
+        _ => vec!["npm uninstall -g @earendil-works/pi-coding-agent (/usr/local)"],
+    }
+}
+
 #[derive(Default)]
 struct State {
     installed: HashSet<String>,
+    /// Installed version per agent; the latest release when absent.
+    versions: HashMap<String, String>,
+    updating: HashSet<String>,
     installing: HashMap<String, Arc<Mutex<bool>>>,
     /// harness → (account id, email, plan)
     accounts: Vec<(String, String, String, String)>,
@@ -57,6 +75,8 @@ impl Default for DemoHost {
                 .iter()
                 .map(|s| s.to_string())
                 .collect(),
+            // Codex is one release behind: Update / Update all have work.
+            versions: [("codex".to_string(), "0.41.0".to_string())].into(),
             accounts: vec![(
                 "claude-code".into(),
                 "acct-demo".into(),
@@ -100,6 +120,59 @@ impl DemoHost {
                 })
                 .collect(),
         )
+    }
+
+    fn statuses(&self, only: Option<&str>) -> Value {
+        let s = self.state.lock().unwrap();
+        Value::Array(
+            HARNESSES
+                .iter()
+                .filter(|h| only.is_none_or(|o| o == h.0))
+                .map(|(id, _, latest)| {
+                    let installed = s.installed.contains(*id);
+                    let version = s.versions.get(*id).map_or(*latest, String::as_str);
+                    let phase = match () {
+                        _ if !installed => "dormant",
+                        _ if s.updating.contains(*id) => "installing",
+                        _ if version != *latest => "available",
+                        _ => "current",
+                    };
+                    json!({
+                        "harness": id,
+                        "installedVersion": installed.then_some(version),
+                        "latestVersion": latest,
+                        "phase": phase,
+                        "canApply": true,
+                    })
+                })
+                .collect(),
+        )
+    }
+
+    /// One demo update: `installing` for a moment, then the latest release.
+    async fn apply(&self, harness: &str) -> CoreResult<String> {
+        let latest = HARNESSES
+            .iter()
+            .find(|h| h.0 == harness)
+            .map(|h| h.2)
+            .ok_or_else(|| CoreError::HostError {
+                message: format!("ApplyHarnessUpdate: unknown harness `{harness}`"),
+            })?;
+        {
+            let mut s = self.state.lock().unwrap();
+            let current = s.versions.get(harness).map_or(latest, String::as_str);
+            if !s.installed.contains(harness) || current == latest {
+                return Err(CoreError::HostError {
+                    message: "ApplyHarnessUpdate: no applicable harness update".into(),
+                });
+            }
+            s.updating.insert(harness.to_owned());
+        }
+        sleep(UPDATE_TIME).await;
+        let mut s = self.state.lock().unwrap();
+        s.updating.remove(harness);
+        s.versions.remove(harness);
+        Ok(latest.to_owned())
     }
 
     fn accounts(&self) -> Value {
@@ -179,25 +252,54 @@ impl DemoHost {
                 }
                 Ok(json!({}))
             }
-            "CheckHarnessUpdates" => {
-                let s = self.state.lock().unwrap();
-                let only = params["harness"].as_str();
-                Ok(Value::Array(
-                    HARNESSES
-                        .iter()
-                        .filter(|h| only.is_none_or(|o| o == h.0))
-                        .map(|(id, _, version)| {
-                            let installed = s.installed.contains(*id);
-                            json!({
-                                "harness": id,
-                                "installedVersion": installed.then_some(*version),
-                                "latestVersion": version,
-                                "phase": if installed { "current" } else { "dormant" },
-                                "canApply": false,
-                            })
-                        })
-                        .collect(),
-                ))
+            "CheckHarnessUpdates" => Ok(self.statuses(params["harness"].as_str())),
+            "ListHarnessUpdates" => Ok(self.statuses(None)),
+            "ApplyHarnessUpdate" => {
+                let harness = param(&params, "harness")?;
+                let version = self.apply(harness).await?;
+                Ok(json!({ "ok": true, "version": version }))
+            }
+            "ApplyAllHarnessUpdates" => {
+                let pending: Vec<String> = self
+                    .statuses(None)
+                    .as_array()
+                    .unwrap()
+                    .iter()
+                    .filter(|s| s["phase"] == "available")
+                    .filter_map(|s| s["harness"].as_str().map(str::to_owned))
+                    .collect();
+                let mut updated = Vec::new();
+                for harness in pending {
+                    let version = self.apply(&harness).await?;
+                    updated.push(json!({ "harness": harness, "version": version }));
+                }
+                Ok(json!({
+                    "updated": updated,
+                    "failed": [],
+                    "manual": [],
+                    "statuses": self.statuses(None),
+                }))
+            }
+            "UninstallHarness" => {
+                let harness = param(&params, "harness")?.to_owned();
+                let dry_run = params["dryRun"].as_bool().unwrap_or(false);
+                if !self.state.lock().unwrap().installed.contains(&harness) {
+                    return Err(CoreError::HostError {
+                        message: "UninstallHarness: not installed on this device".into(),
+                    });
+                }
+                if !dry_run {
+                    sleep(INSTALL_TIME / 3).await;
+                    let mut s = self.state.lock().unwrap();
+                    s.installed.remove(&harness);
+                    s.versions.remove(&harness);
+                }
+                Ok(json!({
+                    "harness": harness,
+                    "removed": removed_paths(&harness),
+                    "dryRun": dry_run,
+                    "harnesses": self.descriptors(),
+                }))
             }
             "ListAgentAccounts" => Ok(self.accounts()),
             "StartAgentLogin" => {
@@ -373,6 +475,41 @@ mod tests {
         let updates =
             block(host.call("CheckHarnessUpdates", json!({ "harness": "grok" }))).unwrap();
         assert_eq!(updates[0]["installedVersion"], "0.3.1");
+    }
+
+    #[test]
+    fn update_all_and_uninstall() {
+        let host = DemoHost::default();
+        let statuses = block(host.call("ListHarnessUpdates", json!({}))).unwrap();
+        let codex = |v: &Value| {
+            v.as_array()
+                .unwrap()
+                .iter()
+                .find(|s| s["harness"] == "codex")
+                .cloned()
+                .unwrap()
+        };
+        assert_eq!(codex(&statuses)["phase"], "available");
+        let all = block(host.call("ApplyAllHarnessUpdates", json!({}))).unwrap();
+        assert_eq!(all["updated"][0]["harness"], "codex");
+        assert_eq!(codex(&all["statuses"])["phase"], "current");
+        assert_eq!(codex(&all["statuses"])["installedVersion"], "0.42.0");
+        let again = block(host.call("ApplyAllHarnessUpdates", json!({}))).unwrap();
+        assert!(again["updated"].as_array().unwrap().is_empty());
+
+        let preview = block(host.call(
+            "UninstallHarness",
+            json!({ "harness": "claude-code", "dryRun": true }),
+        ))
+        .unwrap();
+        assert_eq!(preview["removed"][0], "~/.local/bin/claude");
+        assert!(installed(&host, "claude-code"));
+        block(host.call("UninstallHarness", json!({ "harness": "claude-code" }))).unwrap();
+        assert!(!installed(&host, "claude-code"));
+        // Accounts stay unless signed out.
+        let snap = block(host.call("ListAgentAccounts", json!({}))).unwrap();
+        assert!(!snap["accounts"].as_array().unwrap().is_empty());
+        assert!(block(host.call("UninstallHarness", json!({ "harness": "claude-code" }))).is_err());
     }
 
     #[test]

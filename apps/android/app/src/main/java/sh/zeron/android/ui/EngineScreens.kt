@@ -11,6 +11,7 @@ import androidx.compose.foundation.horizontalScroll
 import androidx.compose.foundation.layout.Arrangement
 import androidx.compose.foundation.layout.Box
 import androidx.compose.foundation.layout.BoxScope
+import androidx.compose.foundation.layout.RowScope
 import androidx.compose.foundation.layout.Column
 import androidx.compose.foundation.layout.PaddingValues
 import androidx.compose.foundation.layout.Row
@@ -49,6 +50,9 @@ import androidx.compose.material3.Surface
 import androidx.compose.material3.Text
 import androidx.compose.material3.TextButton
 import androidx.compose.material3.toShape
+import androidx.compose.material3.pulltorefresh.PullToRefreshBox
+import androidx.compose.material3.pulltorefresh.PullToRefreshDefaults
+import androidx.compose.material3.pulltorefresh.rememberPullToRefreshState
 import androidx.compose.runtime.Composable
 import androidx.compose.runtime.LaunchedEffect
 import androidx.compose.runtime.collectAsState
@@ -382,29 +386,55 @@ private fun ResetDialog(onDismiss: () -> Unit, onReset: () -> Unit) {
     )
 }
 
-/** A pushed settings page: round back button, the expressive title, a list. */
+/**
+ * A pushed settings page: round back button, the expressive title (with
+ * optional header [actions]), a list; pull-to-refresh when [onRefresh] is set.
+ */
 @Composable
 fun SubPage(
     title: String,
     subtitle: String?,
     onBack: () -> Unit,
     overlay: @Composable BoxScope.() -> Unit = {},
+    actions: @Composable RowScope.() -> Unit = {},
+    refreshing: Boolean = false,
+    onRefresh: (() -> Unit)? = null,
     content: LazyListScope.() -> Unit,
 ) {
     val list = rememberLazyListState()
     Box(Modifier.fillMaxSize().background(MaterialTheme.colorScheme.background)) {
-        LazyColumn(
-            Modifier.fillMaxSize(),
-            state = list,
-            contentPadding = PaddingValues(bottom = WindowInsets.statusBars.asPaddingValues().calculateTopPadding() + 48.dp),
-        ) {
-            item {
-                Box(Modifier.statusBarsPadding().padding(start = 12.dp, top = 8.dp)) {
-                    TonalCircleButton(ZIcons.Back, "Back", onClick = onBack)
+        val column = @Composable {
+            LazyColumn(
+                Modifier.fillMaxSize(),
+                state = list,
+                contentPadding = PaddingValues(bottom = WindowInsets.statusBars.asPaddingValues().calculateTopPadding() + 48.dp),
+            ) {
+                item {
+                    Box(Modifier.statusBarsPadding().padding(start = 12.dp, top = 8.dp)) {
+                        TonalCircleButton(ZIcons.Back, "Back", onClick = onBack)
+                    }
                 }
+                item { ScreenHeader(title, subtitle, actions = actions) }
+                content()
             }
-            item { ScreenHeader(title, subtitle) }
-            content()
+        }
+        if (onRefresh == null) {
+            column()
+        } else {
+            val pull = rememberPullToRefreshState()
+            PullToRefreshBox(
+                isRefreshing = refreshing,
+                onRefresh = onRefresh,
+                state = pull,
+                modifier = Modifier.fillMaxSize(),
+                indicator = {
+                    PullToRefreshDefaults.LoadingIndicator(
+                        state = pull,
+                        isRefreshing = refreshing,
+                        modifier = Modifier.align(Alignment.TopCenter).padding(WindowInsets.statusBars.asPaddingValues()),
+                    )
+                },
+            ) { column() }
         }
         StatusBarScrim(scrolled = list.firstVisibleItemIndex > 0 || list.firstVisibleItemScrollOffset > 0)
         overlay()

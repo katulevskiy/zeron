@@ -40,6 +40,51 @@ class AgentsTest {
         assertEquals("2.1.0", Agents.versions(JSONArray("""[{"harness":"codex","installedVersion":"2.1.0","phase":"current"}]"""))["codex"]?.installed)
     }
 
+    @Test fun updateStatuses() {
+        val statuses = Agents.versions(
+            JSONArray(
+                """[{"harness":"claude-code","installedVersion":"2.1.10","latestVersion":"2.1.14","phase":"available","canApply":true},
+                   {"harness":"codex","installedVersion":"0.41.0","latestVersion":"0.42.0","phase":"available","canApply":false,"manualCommand":"brew upgrade codex"},
+                   {"harness":"grok","phase":"installing","progress":{"message":"Downloading"}},
+                   {"harness":"pi","phase":"failed","error":{"message":"npm exited with 1","retryable":true}},
+                   {"harness":"opencode"}]""",
+            ),
+        )
+        assertTrue(statuses.getValue("claude-code").updatable)
+        assertFalse("package-manager installs are reported, not applied", statuses.getValue("codex").updatable)
+        assertTrue(statuses.getValue("codex").available)
+        assertEquals("brew upgrade codex", statuses.getValue("codex").manualCommand)
+        assertTrue(statuses.getValue("grok").busy)
+        assertEquals("Downloading", statuses.getValue("grok").progress)
+        assertEquals("npm exited with 1", statuses.getValue("pi").error)
+        assertEquals("dormant", statuses.getValue("opencode").phase)
+    }
+
+    @Test fun uninstallAndUpdateAllReplies() {
+        val done = Agents.uninstall(
+            JSONObject(
+                """{"harness":"claude-code","removed":["~/.local/bin/claude","~/.local/share/claude"],"dryRun":false,
+                   "remaining":"Claude Code is installed outside Zeron (/opt/homebrew/bin/claude); remove it with `brew uninstall --cask claude-code`",
+                   "harnesses":[{"id":"claude-code","name":"Claude Code","installed":true}]}""",
+            ),
+        )
+        assertEquals(listOf("~/.local/bin/claude", "~/.local/share/claude"), done.removed)
+        assertTrue(done.remaining!!.contains("brew uninstall"))
+        assertEquals("claude-code", done.harnesses!!.single().id)
+        assertNull(Agents.uninstall(JSONObject("""{"removed":[]}""")).harnesses)
+
+        val all = Agents.updateAll(
+            JSONObject(
+                """{"updated":[{"harness":"grok","version":"1.0.41"}],"failed":[{"harness":"hermes","error":"network unreachable"}],
+                   "manual":["codex"],"statuses":[{"harness":"grok","installedVersion":"1.0.41","phase":"updated"}]}""",
+            ),
+        )
+        assertEquals(listOf("grok"), all.updated)
+        assertEquals("network unreachable", all.failed["hermes"])
+        assertEquals(listOf("codex"), all.manual)
+        assertEquals("1.0.41", all.statuses["grok"]?.installed)
+    }
+
     @Test fun hostCallReplies() {
         assertTrue(Agents.parse(" [1]") is JSONArray)
         assertTrue(Agents.parse("{}") is JSONObject)
