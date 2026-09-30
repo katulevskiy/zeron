@@ -49,7 +49,6 @@ jobs:
     timeout-minutes: 40
     env:
       PKGS: -p zeron -p zeron-update -p zeron-engine -p zeron-harness -p gpui_windows --features zeron-harness/native-fixture
-      SEL: --lib --bins --test noop_browser --test codex_availability --test windows_native --test codex_catalog --test codex_login_resolution --test auth
     steps:
       - uses: actions/checkout@v4
         with: {ref: "${{ inputs.target }}"}
@@ -57,10 +56,21 @@ jobs:
         with: {ref: "${{ github.sha }}", path: lab, sparse-checkout: .github/actions}
       - uses: ./lab/.github/actions/lab-win-setup
         with: {shared-key: crates, save: "${{ inputs.save_cache }}"}
+      - name: Select test targets
+        run: |
+          # Original: plain `cargo test -p zeron -p zeron-update` (every target of these two) plus
+          # engine --lib/codex_catalog/codex_login_resolution/auth, harness --lib/codex_availability/windows_native.
+          $sel = @('--lib','--bins','--test','codex_availability','--test','windows_native','--test','codex_catalog','--test','codex_login_resolution','--test','auth')
+          foreach ($pkg in 'apps/zeron','crates/update') {
+            if (Test-Path "$pkg/tests") { Get-ChildItem "$pkg/tests/*.rs" | ForEach-Object { $sel += @('--test', $_.BaseName) } }
+          }
+          "SEL=$($sel -join ' ')" >> $env:GITHUB_ENV
       - name: Compile tests
         run: cargo test --release --locked --no-run $env:PKGS.Split(' ') $env:SEL.Split(' ')
       - name: Run tests
         run: cargo test --release --locked --no-fail-fast $env:PKGS.Split(' ') $env:SEL.Split(' ')
+      - name: Doc tests (zeron, zeron-update)
+        run: cargo test --release --locked --doc -p zeron -p zeron-update
 
   app:
     runs-on: windows-2022

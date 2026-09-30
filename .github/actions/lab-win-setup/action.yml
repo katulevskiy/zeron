@@ -4,6 +4,8 @@ inputs:
   shared-key: {required: true}
   save: {default: 'false'}
   workspace-crates: {default: 'false'}
+  ws-opt: {default: '0', description: 'opt-level for workspace members in release profile (off = keep)'}
+  prefix: {default: 'lab-windows-v2'}
 runs:
   using: composite
   steps:
@@ -25,9 +27,20 @@ runs:
           Sort-Object FullName -Descending | Select-Object -First 1
         if (-not $fxc) { throw 'Windows SDK fxc.exe is required for GPUI release shaders' }
         "GPUI_FXC_PATH=$($fxc.FullName)" >> $env:GITHUB_ENV
+    - name: Workspace members at low opt-level (CARGO_HOME config, repo untouched)
+      if: ${{ inputs.ws-opt != 'off' }}
+      shell: pwsh
+      env:
+        WS_OPT: ${{ inputs.ws-opt }}
+      run: |
+        $names = (cargo metadata --no-deps --format-version 1 | ConvertFrom-Json).packages.name
+        $cfg = Join-Path ($env:CARGO_HOME ?? "$env:USERPROFILE\.cargo") 'config.toml'
+        $lines = foreach ($n in $names) { "[profile.release.package.`"$n`"]"; "opt-level = $env:WS_OPT" }
+        Add-Content -Path $cfg -Value $lines
+        Write-Host "workspace members ($($names.Count)) -> opt-level $env:WS_OPT"
     - uses: Swatinem/rust-cache@v2
       with:
-        prefix-key: lab-windows-v1
+        prefix-key: ${{ inputs.prefix }}
         shared-key: ${{ inputs.shared-key }}
         save-if: ${{ inputs.save }}
         cache-workspace-crates: ${{ inputs.workspace-crates }}
