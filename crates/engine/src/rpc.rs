@@ -1652,6 +1652,7 @@ fn forwardable(method: &str) -> bool {
             | methods::SEARCH_WORKSPACE_FILES
             | methods::READ_WORKSPACE_IMAGE
             | methods::READ_WORKSPACE_FILE
+            | methods::READ_WORKSPACE_BYTES
             | methods::WRITE_WORKSPACE_FILE
             | methods::WATCH_WORKSPACE_FILES
             | methods::CREATE_WORKTREE
@@ -3331,6 +3332,17 @@ impl RpcService for EngineRpc {
                 .map_err(RpcError::from)?;
                 RpcReply::value(&matches)
             }
+            methods::READ_WORKSPACE_BYTES => {
+                let request: zeron_proto::ReadWorkspaceBytesRequest = parse_params(params)?;
+                let chunk = tokio::time::timeout(
+                    crate::workspace_files::WORKSPACE_FILE_RPC_TIMEOUT,
+                    self.workspace_files.read_bytes(request),
+                )
+                .await
+                .map_err(|_| RpcError::Failed("Workspace file read timed out".into()))?
+                .map_err(RpcError::from)?;
+                RpcReply::value(&chunk)
+            }
             methods::READ_WORKSPACE_IMAGE => {
                 let request: zeron_proto::ReadWorkspaceImageRequest = parse_params(params)?;
                 let chunk = tokio::time::timeout(
@@ -4440,6 +4452,8 @@ mod tests {
         assert!(forwardable(methods::SEARCH_WORKSPACE_FILES));
         assert!(forwardable(methods::READ_WORKSPACE_FILE));
         assert!(forwardable(methods::READ_WORKSPACE_IMAGE));
+        assert!(forwardable(methods::READ_WORKSPACE_BYTES));
+        assert!(!is_stream_method(methods::READ_WORKSPACE_BYTES));
         assert!(forwardable(methods::WRITE_WORKSPACE_FILE));
         assert!(forwardable(methods::WATCH_WORKSPACE_FILES));
         assert!(forwardable(methods::WATCH_WORKSPACE_GIT_STATUS));
