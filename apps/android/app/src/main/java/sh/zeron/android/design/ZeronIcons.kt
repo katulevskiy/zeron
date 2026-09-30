@@ -61,6 +61,14 @@ object ZIcons {
     val Text = R.drawable.zi_document
     val Image = R.drawable.zi_file_image
     val Link = R.drawable.zi_arrow_up_right
+    val Bell = R.drawable.zi_bell
+    val Bot = R.drawable.zi_bot
+    val Key = R.drawable.zi_key_minimalistic
+    val Terminal = R.drawable.zi_terminal
+    val Restart = R.drawable.zi_restart
+    val Globe = R.drawable.zi_globe
+    val AddCircle = R.drawable.zi_add_circle
+    val Cloud = R.drawable.zi_cloud
 }
 
 @Composable

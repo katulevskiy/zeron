@@ -20,6 +20,7 @@ import kotlinx.coroutines.flow.SharedFlow
 import kotlinx.coroutines.flow.StateFlow
 import kotlinx.coroutines.flow.asStateFlow
 import kotlinx.coroutines.launch
+import org.json.JSONObject
 import uniffi.zeron_core.AuthCallback
 import uniffi.zeron_core.AuthOrg
 import uniffi.zeron_core.ChatConfig
@@ -28,9 +29,11 @@ import uniffi.zeron_core.ClientListener
 import uniffi.zeron_core.Connectivity
 import uniffi.zeron_core.CoreClient
 import uniffi.zeron_core.CoreConfig
+import uniffi.zeron_core.CoreException
 import uniffi.zeron_core.Credentials
 import uniffi.zeron_core.DemoFixture
 import uniffi.zeron_core.DemoOptions
+import uniffi.zeron_core.DeviceView
 import uniffi.zeron_core.NewSession
 import uniffi.zeron_core.SandboxLevel
 import uniffi.zeron_core.SendRequest
@@ -385,6 +388,17 @@ class AppModel(private val app: Application) {
 
     fun row(id: String): SessionRow? = _client.value?.sessionRow(id)
 
+    /** Devices that run agents (the account's computers). */
+    fun executionDevices(): List<DeviceView> = runCatching { _client.value?.executionDevices() }.getOrNull().orEmpty()
+
+    // ── host calls ─────────────────────────────────────────────────────────
+
+    /** Untyped engine RPC (harness installs, agent sign-ins). Throws on failure. */
+    suspend fun hostCall(deviceId: String, method: String, params: JSONObject = JSONObject()): Any {
+        val c = _client.value ?: throw IllegalStateException("Not connected")
+        return Agents.parse(c.hostCall(deviceId, method, params.toString()))
+    }
+
     /** Create the chat and send its first message. */
     fun createSession(draft: NewSessionDraft, text: String, attachments: List<uniffi.zeron_core.OutgoingAttachment> = emptyList()): String? {
         val client = _client.value ?: return null
@@ -407,6 +421,24 @@ class AppModel(private val app: Application) {
             null
         }
     }
+}
+
+/** Human wording for core errors. */
+fun Throwable.userMessage(): String = when (this) {
+    is CoreException.HostUnavailable ->
+        if (Agents.isTimeout(reason)) "The device took too long to answer." else "The device isn't reachable right now."
+    is CoreException.Unsupported -> "Not supported by this device's engine."
+    is CoreException.Closed -> "Not connected."
+    // Host errors arrive as "Method: reason" — the reason is what people read.
+    is CoreException.HostException -> reason.substringAfter(": ", reason).ifBlank { "The device couldn't do that." }
+    is CoreException.NotFound -> reason
+    is CoreException.InvalidArgument -> reason
+    is CoreException.Network -> reason
+    is CoreException.Auth -> reason
+    is CoreException.Storage -> reason
+    is CoreException.NotImplemented -> reason
+    is CoreException.Internal -> reason
+    else -> message ?: "Something went wrong."
 }
 
 /** The new-session page's options (kept across launches). */

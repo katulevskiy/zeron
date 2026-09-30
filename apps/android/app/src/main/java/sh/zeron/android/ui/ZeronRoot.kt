@@ -64,6 +64,7 @@ object Routes {
     const val CHAT = "chat/{id}"
     const val NEW = "new"
     const val SEARCH = "search"
+    const val AGENTS = "agents"
     fun chat(id: String) = "chat/$id"
 }
 
@@ -75,6 +76,7 @@ private fun MainNav(model: AppModel) {
             null -> Unit
             "new" -> nav.navigate(Routes.NEW)
             "search" -> nav.navigate(Routes.SEARCH)
+            "agents" -> nav.navigate(Routes.AGENTS)
             else -> if (route.startsWith("chat:")) nav.navigate(Routes.chat(route.removePrefix("chat:")))
         }
     }
@@ -93,6 +95,7 @@ private fun MainNav(model: AppModel) {
         composable(Routes.SEARCH) {
             SearchScreen(model, onBack = { nav.popBackStack() }, onOpen = { nav.navigate(Routes.chat(it)) })
         }
+        composable(Routes.AGENTS) { AgentsScreen(model, onBack = { nav.popBackStack() }) }
     }
 }
 
@@ -106,7 +109,7 @@ private fun Home(model: AppModel, nav: NavHostController) {
     Box(Modifier.fillMaxSize().background(MaterialTheme.colorScheme.background)) {
         when (tab) {
             Tab.Sessions -> SessionsScreen(model, onOpen = { nav.navigate(Routes.chat(it)) })
-            Tab.Settings -> SettingsScreen(model)
+            Tab.Settings -> SettingsScreen(model, onOpen = { nav.navigate(it) })
         }
         // Floating chrome over a soft scrim: new session, then the nav capsule.
         Column(
