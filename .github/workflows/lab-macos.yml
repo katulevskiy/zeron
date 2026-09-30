@@ -12,6 +12,7 @@ on:
       gpui_runner: {description: "runner label for gpui/frame-source job", type: string, default: macos-14}
       ios_runner: {description: "runner label for the iOS job", type: string, default: macos-15}
       release: {description: "use --release (original) instead of the dev profile", type: boolean, default: false}
+      ios_fast_core: {description: "opt-level 1 for workspace crates in the iOS core", type: boolean, default: true}
       cache_ver: {description: "cache key version (change for a cold run)", type: string, default: v1}
 
 permissions:
@@ -134,7 +135,7 @@ jobs:
   # Moved off macOS: Rust mobile core tests + "Swift bindings are current" (UniFFI bindgen on Linux)
   # ---------------------------------------------------------------------------------------------
   linux-mobile:
-    if: inputs.only == 'all' || inputs.only == 'linux' || (inputs.only == 'ios' && false)
+    if: inputs.only == 'all' || inputs.only == 'linux' || inputs.only == 'ios'
     runs-on: ubuntu-24.04
     timeout-minutes: 30
     steps:
@@ -156,6 +157,15 @@ jobs:
           target/debug/uniffi-bindgen generate --library target/debug/libzeron_mobile.so \
             --language swift --out-dir "$RUNNER_TEMP/gen" >/dev/null
           diff -u apps/ios/Zeron/Core/Generated/zeron_core.swift "$RUNNER_TEMP/gen/zeron_core.swift"
+          mkdir -p "$RUNNER_TEMP/ios-include"
+          cp "$RUNNER_TEMP/gen/zeron_coreFFI.h" "$RUNNER_TEMP/ios-include/zeron_coreFFI.h"
+          cp "$RUNNER_TEMP/gen/zeron_coreFFI.modulemap" "$RUNNER_TEMP/ios-include/module.modulemap"
+      - name: Upload generated FFI header + modulemap for the iOS job
+        uses: actions/upload-artifact@v4
+        with:
+          name: ios-ffi-include
+          path: ${{ runner.temp }}/ios-include
+          retention-days: 1
 
   # ---------------------------------------------------------------------------------------------
   # iOS unit tests (simulator). Path filter (PR-only, not wired here): run when any file under
@@ -163,9 +173,9 @@ jobs:
   #   Cargo.lock Cargo.toml rust-toolchain.toml or this workflow changes (same as `changes` job).
   # ---------------------------------------------------------------------------------------------
   mac-ios:
-    if: ${{ !cancelled() && inputs.run_ios && (inputs.only == 'all' || inputs.only == 'ios') && (needs.mac-gpui.result == 'success' || needs.mac-gpui.result == 'skipped') }}
+    if: ${{ !cancelled() && inputs.run_ios && (inputs.only == 'all' || inputs.only == 'ios') && (needs.mac-gpui.result == 'success' || needs.mac-gpui.result == 'skipped') && needs.linux-mobile.result == 'success' }}
     # Serialise behind mac-gpui so this lab never holds more than 2 macOS runners at once.
-    needs: [mac-gpui]
+    needs: [mac-gpui, linux-mobile]
     runs-on: ${{ inputs.ios_runner }}
     timeout-minutes: 40
     steps:
@@ -201,10 +211,27 @@ jobs:
           prefix-key: lab-macos-${{ inputs.cache_ver }}-ios
           save-if: ${{ inputs.save_cache }}
           cache-on-failure: true
-      - name: Build Rust core for the simulator
-        run: scripts/ios/build-core.sh iphonesimulator
+      - name: Lower opt-level of workspace crates only (deps stay cached at opt 3)
+        if: inputs.ios_fast_core
+        run: |
+          mkdir -p ~/.cargo
+          for c in proto text syntax markdown doc sync rpc client mobile; do
+            printf '[profile.mobile.package.zeron-%s]\nopt-level = 1\n' "$c" >> ~/.cargo/config.toml
+          done
+      - name: Build Rust core for the simulator (bindings come from the Linux job)
+        run: |
+          IPHONEOS_DEPLOYMENT_TARGET=26.0 cargo build --locked -p zeron-mobile --lib --profile mobile --target aarch64-apple-ios-sim
+          out=target/ios-core/iphonesimulator
+          mkdir -p "$out/include"
+          cp target/aarch64-apple-ios-sim/mobile/libzeron_mobile.a "$out/libzeron_mobile.a"
+      - uses: actions/download-artifact@v4
+        with:
+          name: ios-ffi-include
+          path: target/ios-core/iphonesimulator/include
       - name: Run iOS unit tests
         working-directory: apps/ios
+        env:
+          ZERON_SKIP_CORE: 1
         run: |
           xcodebuild -project Zeron.xcodeproj -scheme Zeron \
             -destination "platform=iOS Simulator,id=$IOS_SIMULATOR_ID" \
