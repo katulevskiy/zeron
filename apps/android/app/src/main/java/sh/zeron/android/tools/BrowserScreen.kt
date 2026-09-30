@@ -83,7 +83,7 @@ import uniffi.zeron_core.HostStream
  */
 @SuppressLint("SetJavaScriptEnabled")
 @Composable
-fun BrowserScreen(model: AppModel, ref: WorkspaceRef?, initialUrl: String?, onBack: () -> Unit) {
+fun BrowserScreen(model: AppModel, ref: WorkspaceRef?, initialUrl: String?, onBack: () -> Unit, onOpenFile: (String) -> Unit = {}) {
     val context = LocalContext.current
     val clipboard = LocalClipboardManager.current
     val scope = rememberCoroutineScope()
@@ -116,6 +116,14 @@ fun BrowserScreen(model: AppModel, ref: WorkspaceRef?, initialUrl: String?, onBa
                     if (Browser.isWorkspace(request.url.toString())) Browser.intercept(model, request.url) else null
 
                 override fun shouldOverrideUrlLoading(view: WebView, request: WebResourceRequest): Boolean {
+                    // A workspace PDF/image/binary opens in the native viewer (WebView can't show PDFs).
+                    Browser.resolve(request.url)?.let { (target, path) ->
+                        val kind = FileKind.of(path)
+                        if (target == ref && (kind == FileKind.Pdf || kind == FileKind.Binary)) {
+                            onOpenFile(path)
+                            return true
+                        }
+                    }
                     val scheme = request.url.scheme ?: return false
                     if (scheme == "http" || scheme == "https" || scheme == "about" || scheme == "data" || scheme == "blob") return false
                     runCatching { context.startActivity(Intent(Intent.ACTION_VIEW, request.url)) }
@@ -142,6 +150,10 @@ fun BrowserScreen(model: AppModel, ref: WorkspaceRef?, initialUrl: String?, onBa
                     canBack = view.canGoBack()
                     canForward = view.canGoForward()
                 }
+            }
+            // Downloads (a PDF on a dev server, a zip…): hand them to the system.
+            setDownloadListener { url, _, _, _, _ ->
+                if (url.startsWith("http")) openExternally(context, url)
             }
             webChromeClient = object : WebChromeClient() {
                 override fun onProgressChanged(view: WebView, newProgress: Int) {

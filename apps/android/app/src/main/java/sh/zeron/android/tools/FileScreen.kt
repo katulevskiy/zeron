@@ -198,7 +198,8 @@ private fun TextFile(
                             changedOnDisk = true
                         } else {
                             loaded = Loaded.Ready(fresh)
-                            fresh.text?.let { buffer = TextFieldValue(it) }
+                            // Keep the caret where it was (clamped) on a live refresh.
+                            fresh.text?.let { buffer = TextFieldValue(it, androidx.compose.ui.text.TextRange(buffer.selection.start.coerceIn(0, it.length))) }
                         }
                     }
                 }, onEnd = {})

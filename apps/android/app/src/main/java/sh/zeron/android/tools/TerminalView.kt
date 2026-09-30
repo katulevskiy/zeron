@@ -202,6 +202,9 @@ class TerminalView(context: Context, private val sticky: StickyKeys) : View(cont
     }
 
     override fun onDraw(canvas: Canvas) {
+        // Hosted in Compose, the canvas isn't clipped to this view: drawColor
+        // would paint over the header above it.
+        canvas.clipRect(0, 0, width, height)
         canvas.drawColor(background)
         val f = session?.frame ?: return
         for ((row, line) in f.lines.withIndex()) {
