@@ -20,7 +20,9 @@
 //!   token holder, so owner claims and `orgId`/`userId` room partitioning
 //!   collapse; `/auth/*` answers like a Worker without WorkOS configured.
 //!
-//! The listener binds 127.0.0.1 only.
+//! The listener binds 127.0.0.1 unless [`LocalEdgeConfig::bind`] says
+//! otherwise — only the standalone development server (`zeron local-edge`,
+//! for cross-device tests without WorkOS) listens beyond loopback.
 
 // `Result<_, Reply>`: the error IS the HTTP answer (status + body), returned
 // straight to hyper on a cold path; boxing it buys nothing.
@@ -35,7 +37,7 @@ mod store;
 
 use std::collections::HashMap;
 use std::convert::Infallible;
-use std::net::{Ipv4Addr, SocketAddr};
+use std::net::{IpAddr, Ipv4Addr, SocketAddr};
 use std::path::PathBuf;
 use std::sync::atomic::{AtomicU64, Ordering};
 use std::sync::{Arc, Mutex, PoisonError};
@@ -66,10 +68,25 @@ const GC_INTERVAL: Duration = Duration::from_secs(24 * 60 * 60);
 pub struct LocalEdgeConfig {
     /// Directory for the edge's SQLite state (created if missing).
     pub data_dir: PathBuf,
-    /// Loopback port; 0 picks an ephemeral one (tests).
+    /// Listen address: loopback for an embedded edge; `0.0.0.0` for the
+    /// standalone development server other devices dial.
+    pub bind: IpAddr,
+    /// Port; 0 picks an ephemeral one (tests).
     pub port: u16,
     /// The shared secret every request must present.
     pub token: String,
+}
+
+impl LocalEdgeConfig {
+    /// An edge on `127.0.0.1:{port}` — what `zeron headless` embeds.
+    pub fn loopback(data_dir: impl Into<PathBuf>, port: u16, token: impl Into<String>) -> Self {
+        Self {
+            data_dir: data_dir.into(),
+            bind: IpAddr::V4(Ipv4Addr::LOCALHOST),
+            port,
+            token: token.into(),
+        }
+    }
 }
 
 #[derive(Debug, thiserror::Error)]
@@ -92,7 +109,7 @@ pub struct LocalEdge {
 
 impl LocalEdge {
     /// Open (or create) the state under `data_dir` and start serving on
-    /// `127.0.0.1:{port}`. Returns once the listener is bound.
+    /// `{bind}:{port}`. Returns once the listener is bound.
     pub async fn start(config: LocalEdgeConfig) -> Result<Self, LocalEdgeError> {
         if !valid_token(&config.token) {
             return Err(LocalEdgeError::InvalidToken);
@@ -100,7 +117,7 @@ impl LocalEdge {
         std::fs::create_dir_all(&config.data_dir)?;
         let mut db = store::open(&config.data_dir)?;
         registry::gc_tombstones(&mut db)?;
-        let listener = TcpListener::bind((Ipv4Addr::LOCALHOST, config.port)).await?;
+        let listener = TcpListener::bind((config.bind, config.port)).await?;
         let addr = listener.local_addr()?;
         let edge = Arc::new(Edge {
             token: config.token,
@@ -128,7 +145,8 @@ impl LocalEdge {
         self.addr
     }
 
-    /// `http://127.0.0.1:{port}` — what engines and clients use as edge URL.
+    /// `http://{addr}` — what engines and clients on this machine use as
+    /// edge URL (`http://127.0.0.1:{port}` for an embedded edge).
     pub fn url(&self) -> String {
         format!("http://{}", self.addr)
     }

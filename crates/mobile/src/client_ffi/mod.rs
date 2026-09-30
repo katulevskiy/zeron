@@ -376,7 +376,11 @@ impl CoreClient {
                 .register_push_target(
                     &token,
                     &environment,
-                    zc::PushPrefs { done: prefs.done, input: prefs.input, failed: prefs.failed },
+                    zc::PushPrefs {
+                        done: prefs.done,
+                        input: prefs.input,
+                        failed: prefs.failed,
+                    },
                 )
                 .await
         })
@@ -410,7 +414,12 @@ impl CoreClient {
         query: String,
     ) -> CoreResult<Vec<FileMatch>> {
         let client = self.client.clone();
-        let files = on_runtime(async move { client.search_files(&device_id, chat_id, space_id, &query).await }).await?;
+        let files = on_runtime(async move {
+            client
+                .search_files(&device_id, chat_id, space_id, &query)
+                .await
+        })
+        .await?;
         Ok(files
             .into_iter()
             .map(|f| FileMatch {
@@ -530,6 +539,84 @@ impl CoreClient {
     /// App is backgrounding: persist now; pause time-driven work.
     pub fn on_background(&self) {
         self.client.on_background();
+    }
+}
+
+// ── the engine on this device ───────────────────────────────────────────────
+
+/// The engine running on this device (Android's on-device engine), over its
+/// token-gated IPC port. The app signs the account in *through* it and builds
+/// its [`CoreClient`] from it: the engine's device id, edge and identity, and
+/// `Credentials::Engine` — see docs/android.md.
+#[derive(uniffi::Object)]
+pub struct EngineLink {
+    link: Arc<zc::engine::EngineLink>,
+}
+
+#[uniffi::export]
+impl EngineLink {
+    /// `ipc_url`: `ws://127.0.0.1:{port}`; `ipc_token`: `ZERON_IPC_TOKEN`.
+    #[uniffi::constructor]
+    pub fn new(ipc_url: String, ipc_token: Option<String>) -> Arc<Self> {
+        Arc::new(Self {
+            link: zc::engine::EngineLink::new(ipc_url, ipc_token),
+        })
+    }
+
+    pub async fn identity(&self) -> CoreResult<EngineIdentity> {
+        let info = self.link.info().await?;
+        let scope = serde_json::to_value(info.workspace_scope)
+            .ok()
+            .and_then(|v| v.as_str().map(str::to_owned))
+            .unwrap_or_default();
+        Ok(EngineIdentity {
+            device_id: info.device_id,
+            workspace_scope: scope,
+        })
+    }
+
+    pub async fn edge(&self) -> CoreResult<EngineEdge> {
+        let edge = self.link.edge_bearer().await?;
+        Ok(EngineEdge {
+            signed_out: edge.signed_out || edge.bearer.is_none(),
+            edge_url: edge.edge_url,
+            user_id: edge.user_id,
+            org_id: edge.org_id,
+        })
+    }
+
+    pub async fn account(&self) -> CoreResult<EngineAccount> {
+        Ok(self.link.auth_state().await?.into())
+    }
+
+    /// WorkOS authorize URL redirecting to `redirect_uri` (`zeron://callback`);
+    /// empty when the engine has no WorkOS (a development server).
+    pub async fn sign_in_url(&self, redirect_uri: String) -> CoreResult<String> {
+        Ok(self.link.sign_in_url(&redirect_uri).await?)
+    }
+
+    /// The callback's `state` and `code`: the engine exchanges and saves the
+    /// session; restart it to open the synced workspace.
+    pub async fn complete_sign_in(&self, state: String, code: String) -> CoreResult<()> {
+        Ok(self.link.complete_sign_in(&state, &code).await?)
+    }
+
+    pub async fn list_orgs(&self) -> CoreResult<Vec<AuthOrg>> {
+        Ok(self
+            .link
+            .list_orgs()
+            .await?
+            .into_iter()
+            .map(Into::into)
+            .collect())
+    }
+
+    pub async fn select_org(&self, organization_id: String) -> CoreResult<()> {
+        Ok(self.link.select_org(&organization_id).await?)
+    }
+
+    pub async fn sign_out(&self) -> CoreResult<()> {
+        Ok(self.link.sign_out().await?)
     }
 }
 

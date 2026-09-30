@@ -154,8 +154,9 @@ zeron/
                                  # validation, provenance, and local VS Code compiler
     ui/           zeron-ui       # gpui app: shell, sidebar, conversation, composer,
                                  # terminal view, diff pane, settings, animation kit
-    localedge/    zeron-localedge # loopback single-tenant port of edge/ (SQLite-backed;
-                                 # embedded by `zeron headless` for Android on-device mode)
+    localedge/    zeron-localedge # single-tenant port of edge/ (SQLite-backed; embedded by
+                                 # `zeron headless` for the signed-out Android phone,
+                                 # standalone as `zeron local-edge` for development)
   apps/
     zeron/                       # the binary (headed default, `headless` subcommand)
   edge/                          # TypeScript Worker + DOs (ported from zeron/apps/edge,
@@ -258,12 +259,15 @@ A single-tenant Rust port of the edge for loopback use: chat2 rooms, the registr
 with the same `zeron_doc::apply_op`), DeviceRoom relays with durable nudges, preview signaling,
 and the small HTTP surfaces around them, on the Worker's exact paths and wire protocols, with
 every DO's storage in one SQLite file. Auth is one shared secret (bearer or `?token=`) instead of
-WorkOS; the listener binds 127.0.0.1 only. `zeron headless` embeds it when
-`ZERON_LOCAL_EDGE_PORT`/`ZERON_LOCAL_EDGE_TOKEN` are set and runs the engine against it in
-`Development` scope as user/org `local` — the Android app's on-device mode (`docs/android.md`),
-where the phone's engine and its `zeron-client` (`Credentials::Local`) sync through it unmodified.
-The TypeScript edge stays the production deployment; this is not the self-hosting contract §1
-defers, only its seed.
+WorkOS; embedded, the listener binds 127.0.0.1 only. `zeron headless` embeds it when
+`ZERON_LOCAL_EDGE_PORT`/`ZERON_LOCAL_EDGE_TOKEN` are set and no org-scoped session is saved, and
+runs the engine against it in `Development` scope as user/org `local` while answering the account
+methods from WorkOS — the Android phone's signed-out workspace (`docs/android.md`). Signed in, the
+phone's engine is synced like any desktop. Either way the app is the same device's viewer: it
+shares the engine's device id and takes its edge bearer over the token-gated IPC (`EdgeBearer`,
+`Credentials::Engine`), so only the engine refreshes. `zeron local-edge` serves one standalone for
+multi-device development without WorkOS. The TypeScript edge stays the production deployment; this
+is not the self-hosting contract §1 defers, only its seed.
 
 ## 7. Parity exclusions & deliberate changes
 

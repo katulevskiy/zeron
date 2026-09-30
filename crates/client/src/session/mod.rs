@@ -342,7 +342,8 @@ impl SessionCore {
             crate::live::room::RoomDeps {
                 bearer: crate::live::LiveBackend::bearer(client),
                 edge: live.edge.clone(),
-                device_id: client.config.device_id.clone(),
+                // See `Credentials::chat_writer_id`.
+                device_id: client.credentials.chat_writer_id(&client.config.device_id),
                 store: live.store.clone(),
                 on_applied,
                 on_status,

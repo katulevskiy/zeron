@@ -133,6 +133,12 @@ pub mod methods {
     pub const LIST_ORGS: &str = "ListOrgs";
     pub const CREATE_ORG: &str = "CreateOrg";
     pub const SELECT_ORG: &str = "SelectOrg";
+    /// The bearer this engine presents to its edge, for a viewer on the same
+    /// device that shares the engine's account (the Android app): `{edgeUrl,
+    /// bearer, expiresAtMs?, userId, orgId}`. The engine stays the only
+    /// refresher — WorkOS refresh tokens rotate, so a second one would race it.
+    /// Served only on a token-gated `zeron headless` IPC port; never relayed.
+    pub const EDGE_BEARER: &str = "EdgeBearer";
     /// One-time local→synced profile import: what's importable (unary).
     pub const LOCAL_IMPORT_STATUS: &str = "LocalImportStatus";
     /// One-time local→synced profile import: run it (stream of progress items).
