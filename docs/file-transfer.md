@@ -138,10 +138,15 @@ Agents use the `send_files` MCP tool (`docs/mcp.md`).
 - **Desktop:** "Send to device…" in the file tree, a transfers indicator
   and panel (progress, cancel, accept/decline, Show in folder), an incoming
   toast, and the confirmation setting.
-- **Android** (on-device engine): a Transfers screen, a notification per
-  received transfer, a copy of received files in `Download/Zeron` via
+- **Android** (on-device engine; docs/android.md § File transfers): a
+  Transfers screen (Settings → Files) that polls `ListFileTransfers` over
+  `host_call`, a notification per incoming transfer (with Accept/Decline when
+  confirmation is on), a copy of received files in `Download/Zeron` via
   MediaStore (an APK opens the package installer), and a "Share to Zeron"
-  target that stages shared files into the guest and sends them.
+  target that stages shared files into the guest's
+  `~/.zeron/outbox/<uuid>/` and sends them. To reach engines on other
+  machines in development, Settings → Developer → Custom server points the
+  phone's engine at a shared `zeron local-edge`.
 
 ## Limits
 

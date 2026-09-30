@@ -101,6 +101,7 @@ Nothing else runs as fake root — Claude Code refuses permission bypass as uid 
 | Env | Effect |
 | --- | --- |
 | `ZERON_LOCAL_EDGE_PORT` + `ZERON_LOCAL_EDGE_TOKEN` | `zeron headless` starts the embedded local edge on `127.0.0.1:<port>` and runs the engine against it in `Development` scope with that bearer (no WorkOS) |
+| `ZERON_LOCAL_EDGE_URL` + `ZERON_LOCAL_EDGE_TOKEN` | instead joins a shared edge (`zeron local-edge`) at that URL — the app's Custom server |
 | `ZERON_IPC_TOKEN` | the IPC server rejects upgrades without `?token=` / `Authorization: Bearer`; `zeron mcp` / `zeron sync` send it |
 | `ZERON_DEVICE_PLATFORM` | overrides the platform string on this engine's device row |
 
@@ -228,6 +229,52 @@ Phone mode (`core/PhoneEngine.kt`, `ui/EngineScreens.kt`):
 - `core/Notifier.kt` posts local notifications (finished / needs input /
   failed) while the app is in the background; tapping one opens the session.
 
+### Custom server (developer)
+
+Settings → About → tap Version seven times → Developer → Custom server
+takes an edge URL + token (`RuntimeController.setCustomEdge`, kept in the
+runtime's own preferences so a guest reset keeps it). While set, the guest
+engine starts with `ZERON_LOCAL_EDGE_URL=<url> ZERON_LOCAL_EDGE_TOKEN=<token>`
+instead of `ZERON_LOCAL_EDGE_PORT`, the health check probes `<url>/health`,
+and `Running.edgeUrl`/`edgeToken` carry the custom edge, so `AppModel`'s
+phone client follows it (`Credentials.Local(token)`; `filesDir/phone` is
+wiped when the edge URL changes). Saving or turning it off restarts a running
+engine in place. This lets the phone's engine meet engines on other machines,
+e.g. a computer running `zeron local-edge --port 27720 --token T` and
+`ZERON_LOCAL_EDGE_URL=http://127.0.0.1:27720 ZERON_LOCAL_EDGE_TOKEN=T zeron
+headless`; the emulator reaches it as `http://10.0.2.2:27720`.
+
+### File transfers
+
+(docs/file-transfer.md.) `core/TransferCenter.kt` polls `ListFileTransfers`
+on the phone engine over `host_call` — every second while the Transfers
+screen or the share sheet is open or a transfer is live, every five seconds
+otherwise (RuntimeService keeps the process alive). The engine's id is read
+from `rootfs/home/zeron/.zeron/device-id`; guest paths map to host paths
+through the rootfs (`/tmp` → `runtime/tmp`), `Transfers.GuestPaths`.
+- **Settings → Files → Transfers** (`ui/TransfersScreen.kt`): live rows with
+  progress, throughput and transport (Direct/Relayed), Cancel,
+  Accept/Decline, received items with Open/Show, Clear, and the
+  "Ask before accepting" setting (`requireConfirmation`).
+- **Notifications** (`Notifier`, channel `transfers`, always posted): progress
+  per incoming transfer, an ask with Accept/Decline actions
+  (`TransferActionReceiver`), and "Received …" whose tap opens the file.
+- **Downloads**: a completed incoming transfer is copied once into
+  `Download/Zeron` through `MediaStore.Downloads` (IS_PENDING insert, no
+  storage permission; folders keep their structure under
+  `Download/Zeron/<folder>/…`, symlinks skipped). Exported transfer ids and
+  content URIs are remembered in the `transfers` preferences. Opening uses
+  ACTION_VIEW on the content URI with MimeTypeMap's type (APKs:
+  `application/vnd.android.package-archive` → the package installer; the app
+  holds `REQUEST_INSTALL_PACKAGES`, the user still allows the source once).
+  minSdk is 29, so there is no pre-MediaStore path.
+- **Share to Zeron** (`ShareActivity`, ACTION_SEND / SEND_MULTIPLE `*/*`):
+  copies the shared URIs (or shared text) into
+  `/home/zeron/.zeron/outbox/<uuid>/`, lists devices whose row advertises
+  `file-transfer-v1` (not the phone's own engine), calls `SendFiles`, and
+  shows progress. The batch is deleted when the transfer ends, when the
+  sheet is left before sending, and (as a sweep) after a day.
+
 Settings → Coding agents (`ui/AgentsScreen.kt`, any engine device, so
 account mode manages remote hosts too) speaks `host_call`: `ListHarnesses`,
 `InstallHarness` / `CancelInstall` (a relay timeout falls back to polling the
@@ -259,10 +306,25 @@ Not yet verified:
   `libproot-loader32.so`, are both open.
 - **Capsules.** Moving work between machines is the next design, not in v1.
 
+- File transfer on the Android 16 x86_64 emulator (2026-09-29), against a
+  computer's `zeron local-edge` through Custom server: a folder + an APK and a
+  142 MB APK computer → phone over P2P (~50 MB/s live), notifications, the
+  copies in `Download/Zeron` (sha256 equal), the APK opening the package
+  installer, Ask before accepting → Accept, and Share to Zeron phone →
+  computer (142 MB, P2P, sha256 equal). Custom server on/off restarts the
+  engine onto the other edge.
+
 Emulator note: boot with `-feature -ReadColorBufferDma -feature -GLDMA2`
 (swiftshader); otherwise `system_server` aborts on
 `hasReadColorBufferDma`. `adb exec-out screencap` still hits the assertion in
-its own process; use `adb emu screenrecord screenshot <file>`.
+its own process; use `adb emu screenrecord screenshot <file>`. Emulator
+36.2.12 rejects `ReadColorBufferDma` as a feature name, and with any flags
+`system_server` aborts in `TaskSnapshotConvertUtil` whenever a task is hidden
+(an app backgrounding, another app's activity closing): drive such flows from
+a freshly restarted system, and switch to three-button navigation
+(`cmd overlay enable-exclusive --category
+com.android.internal.systemui.navbar.threebutton`) so SurfaceFlinger's region
+sampling doesn't hit the same assertion.
 
 ## Build
 
