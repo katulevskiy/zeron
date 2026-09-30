@@ -1,0 +1,33 @@
+name: lab-win-setup
+description: Windows CI setup (Defender off, rust toolchain, fxc, rust-cache)
+inputs:
+  shared-key: {required: true}
+  save: {default: 'false'}
+  workspace-crates: {default: 'false'}
+runs:
+  using: composite
+  steps:
+    - name: Defender exclusions
+      shell: pwsh
+      run: |
+        try {
+          Set-MpPreference -DisableRealtimeMonitoring $true -ErrorAction Stop
+          Add-MpPreference -ExclusionPath $env:GITHUB_WORKSPACE, "$env:USERPROFILE\.cargo", "$env:USERPROFILE\.rustup", 'D:\' -ErrorAction Stop
+          Write-Host 'defender realtime off'
+        } catch { Write-Host "defender tweak failed: $_" }
+    - name: Rust toolchain
+      shell: pwsh
+      run: rustup show active-toolchain || rustup toolchain install
+    - name: Locate Windows SDK shader compiler
+      shell: pwsh
+      run: |
+        $fxc = Get-ChildItem "${env:ProgramFiles(x86)}/Windows Kits/10/bin/*/x64/fxc.exe" |
+          Sort-Object FullName -Descending | Select-Object -First 1
+        if (-not $fxc) { throw 'Windows SDK fxc.exe is required for GPUI release shaders' }
+        "GPUI_FXC_PATH=$($fxc.FullName)" >> $env:GITHUB_ENV
+    - uses: Swatinem/rust-cache@v2
+      with:
+        prefix-key: lab-windows-v1
+        shared-key: ${{ inputs.shared-key }}
+        save-if: ${{ inputs.save }}
+        cache-workspace-crates: ${{ inputs.workspace-crates }}

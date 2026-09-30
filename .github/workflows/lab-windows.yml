@@ -4,8 +4,153 @@ on:
     inputs:
       target: {description: "ref/sha of zeron source to test", type: string, default: main}
       save_cache: {description: "save rust caches (seed run)", type: boolean, default: false}
+      native_gui: {description: "Run native GUI/pixel probes", type: boolean, default: false}
+
+permissions:
+  contents: read
+
+defaults:
+  run:
+    shell: pwsh
+
+env:
+  CARGO_INCREMENTAL: '0'
+  CARGO_TERM_COLOR: always
+  CARGO_NET_RETRY: '5'
+  # CI-only release tweaks (no committed profile change): tests do not need LTO.
+  CARGO_PROFILE_RELEASE_LTO: 'off'
+  CARGO_PROFILE_RELEASE_DEBUG: '0'
+
 jobs:
-  stub:
-    runs-on: ubuntu-24.04
+  ui-tests:
+    runs-on: windows-2022
+    timeout-minutes: 40
     steps:
-      - run: echo "stub on $GITHUB_REF"
+      - uses: actions/checkout@v4
+        with: {ref: "${{ inputs.target }}"}
+      - uses: actions/checkout@v4
+        with: {ref: "${{ github.sha }}", path: lab, sparse-checkout: .github/actions}
+      - uses: ./lab/.github/actions/lab-win-setup
+        with: {shared-key: ui, save: "${{ inputs.save_cache }}"}
+      - name: Compile UI tests
+        run: cargo test --release --locked -p zeron-ui --lib --no-run
+      - name: UI tests
+        env:
+          RUST_BACKTRACE: '1'
+        run: |
+          cargo test --release --locked -p zeron-ui --lib native_diff_font_geometry -- --test-threads=1 --nocapture
+          $nativeResult = $LASTEXITCODE
+          cargo test --release --locked -p zeron-ui --lib -- --test-threads=1 --skip native_diff_font_geometry --nocapture
+          $headlessResult = $LASTEXITCODE
+          if ($nativeResult -ne 0 -or $headlessResult -ne 0) { exit 1 }
+
+  crate-tests:
+    runs-on: windows-2022
+    timeout-minutes: 40
+    env:
+      PKGS: -p zeron -p zeron-update -p zeron-engine -p zeron-harness -p gpui_windows --features zeron-harness/native-fixture
+      SEL: --lib --bins --test noop_browser --test codex_availability --test windows_native --test codex_catalog --test codex_login_resolution --test auth
+    steps:
+      - uses: actions/checkout@v4
+        with: {ref: "${{ inputs.target }}"}
+      - uses: actions/checkout@v4
+        with: {ref: "${{ github.sha }}", path: lab, sparse-checkout: .github/actions}
+      - uses: ./lab/.github/actions/lab-win-setup
+        with: {shared-key: crates, save: "${{ inputs.save_cache }}"}
+      - name: Compile tests
+        run: cargo test --release --locked --no-run $env:PKGS.Split(' ') $env:SEL.Split(' ')
+      - name: Run tests
+        run: cargo test --release --locked --no-fail-fast $env:PKGS.Split(' ') $env:SEL.Split(' ')
+
+  app:
+    runs-on: windows-2022
+    timeout-minutes: 40
+    steps:
+      - uses: actions/checkout@v4
+        with: {ref: "${{ inputs.target }}"}
+      - uses: actions/checkout@v4
+        with: {ref: "${{ github.sha }}", path: lab, sparse-checkout: .github/actions}
+      - uses: ./lab/.github/actions/lab-win-setup
+        with: {shared-key: app, save: "${{ inputs.save_cache }}"}
+      - name: Build and package (release)
+        run: ./scripts/package-windows.ps1 -ReleasesUrl "https://github.com/$env:GITHUB_REPOSITORY/releases/latest/download"
+      - name: Installer install/uninstall
+        run: ./scripts/test-windows-installer.ps1
+      - name: GUI subsystem and redirected CLI output
+        run: ./scripts/test-windows-startup.ps1
+      - name: CLI startup without HOME
+        run: |
+          $env:HOME = $null
+          $env:ZERON_DATA_DIR = $null
+          $env:ZERON_EDGE_TOKEN = $null
+          $env:ZERON_IPC_PORT = '0'
+          $env:LOCALAPPDATA = Join-Path $env:RUNNER_TEMP "zeron smoke O'Brien 日本語"
+          $expected = Join-Path $env:LOCALAPPDATA 'Zeron'
+          $probe = [Diagnostics.ProcessStartInfo]::new()
+          $probe.FileName = (Resolve-Path -LiteralPath './target/release/zeron.exe').Path
+          $probe.Arguments = 'status'
+          $probe.UseShellExecute = $false
+          $probe.CreateNoWindow = $true
+          $probe.RedirectStandardOutput = $true
+          $probe.RedirectStandardError = $true
+          $process = [Diagnostics.Process]::Start($probe)
+          try {
+            $stdout = $process.StandardOutput.ReadToEndAsync()
+            $stderr = $process.StandardError.ReadToEndAsync()
+            if (-not $process.WaitForExit(10000)) {
+              $process.Kill()
+              throw 'Isolated status probe timed out'
+            }
+            if ($process.ExitCode -ne 0) { throw "Status failed: $($stderr.Result)" }
+            $output = $stdout.Result -split '\r?\n'
+          } finally { $process.Dispose() }
+          $output
+          if (-not ($output -contains "Data dir: $expected")) {
+            throw 'Windows startup did not select LOCALAPPDATA/Zeron'
+          }
+          if (-not ($output -match '^Mode:\s+local only$')) {
+            throw 'An isolated Windows startup must select local-only mode'
+          }
+      - name: Build rendering fixture
+        if: ${{ inputs.native_gui }}
+        run: cargo build --release --locked -p zeron-ui --example windows-render-fixture --features windows-render-fixture
+      - name: Upload GUI test binaries
+        if: ${{ inputs.native_gui }}
+        uses: actions/upload-artifact@v4
+        with:
+          name: windows-gui-binaries
+          path: |
+            target/release/zeron.exe
+            target/release/examples/windows-render-fixture.exe
+          if-no-files-found: error
+          retention-days: 1
+
+  native-gui:
+    if: ${{ inputs.native_gui }}
+    needs: app
+    runs-on: windows-2022
+    timeout-minutes: 10
+    steps:
+      - uses: actions/checkout@v4
+        with: {ref: "${{ inputs.target }}"}
+      - uses: actions/download-artifact@v4
+        with:
+          name: windows-gui-binaries
+          path: target/release
+      - name: App lifecycle tests
+        run: ./scripts/test-windows-lifecycle.ps1
+      - name: Rendering tests
+        run: ./scripts/test-windows-rendering.ps1
+      - name: Upload GUI test results
+        if: always()
+        uses: actions/upload-artifact@v4
+        with:
+          name: windows-native-probes
+          path: |
+            target/windows-render-*/capture.png
+            target/windows-render-*/measurements.json
+            target/windows-render-*/stdout.txt
+            target/windows-render-*/stderr.txt
+            target/windows-lifecycle-*/result.txt
+            target/windows-lifecycle-*/run-*.txt
+          if-no-files-found: warn
