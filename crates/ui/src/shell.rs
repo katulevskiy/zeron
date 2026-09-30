@@ -1032,6 +1032,11 @@ const GITHUB_REPO_URL: &str = "https://github.com/zeronsh/comet";
 const NEW_THREAD_BACKGROUND_FROSTED_OPACITY: f32 = 0.84;
 const NEW_THREAD_BACKGROUND_VIEWPORT_RATIO: f32 = 0.72;
 const NEW_THREAD_BACKGROUND_MAX_HEIGHT: f32 = 760.0;
+/// Under `AllSessions` the hero also sits behind a live transcript. At hero
+/// strength the image eats message text, so it drops to a wash: the reading
+/// column keeps the artwork's colour without losing contrast, and the blank
+/// canvas (no body text to fight) stays at full strength.
+const NEW_THREAD_BACKGROUND_TRANSCRIPT_OPACITY: f32 = 0.3;
 
 /// Drag marker for the sidebar resize handle.
 struct SidebarResize;
@@ -1286,6 +1291,26 @@ fn new_thread_background_opacity(is_frost: bool) -> f32 {
     } else {
         1.0
     }
+}
+
+/// Strength the hero keeps over what the canvas is showing. The blank canvas
+/// is empty, so the image runs at full strength; once the route clock hands
+/// the canvas to a transcript under `AllSessions` it washes out, because
+/// message text now paints on top of it. The default scope never coexists
+/// with a transcript, so it stays untouched.
+fn new_thread_background_backdrop_opacity(
+    scope: crate::settings::NewThreadBackgroundScope,
+    dissolve: f32,
+) -> f32 {
+    if scope != crate::settings::NewThreadBackgroundScope::AllSessions {
+        return 1.0;
+    }
+    // Ride the same clock the artwork's own fade rides: it leads the
+    // transcript in both directions, so the wash lands before text arrives
+    // and outlives it — no brightness pop on selection or departure.
+    let dissolve = dissolve.clamp(0.0, 1.0);
+    NEW_THREAD_BACKGROUND_TRANSCRIPT_OPACITY
+        + (1.0 - NEW_THREAD_BACKGROUND_TRANSCRIPT_OPACITY) * (1.0 - dissolve)
 }
 
 fn new_thread_background_height(viewport_height: f32) -> f32 {
@@ -9891,7 +9916,8 @@ impl Shell {
         let term_h = self.terminal_geometry.get().height;
         // Under `AllSessions` the artwork is a canvas backdrop in an open
         // session too, so the hero/thread dissolve (which hands the canvas
-        // over to a transcript) must not fade it away.
+        // over to a transcript) must not fade it away. It loses strength
+        // instead: message text now paints on top of it.
         let background_dissolve =
             new_thread_background_scope.background_dissolve(dock_frame.dissolve());
         let new_thread_background_layer = new_thread_background_scope
@@ -9902,7 +9928,11 @@ impl Shell {
                 }
                 let width = (self.viewport_width - self.sidebar_now()).max(0.0);
                 let bounds = self.composer.read(cx).surface_bounds();
-                let opacity = new_thread_background_opacity(theme.is_frost());
+                let opacity = new_thread_background_opacity(theme.is_frost())
+                    * new_thread_background_backdrop_opacity(
+                        new_thread_background_scope,
+                        dock_frame.dissolve(),
+                    );
                 div()
                     .absolute()
                     .inset_0()
@@ -13100,6 +13130,29 @@ mod tests {
         assert_eq!(EmptySessions.background_dissolve(0.0), 0.0);
         assert_eq!(AllSessions.background_dissolve(1.0), 0.0);
         assert_eq!(AllSessions.background_dissolve(0.0), 0.0);
+    }
+
+    #[test]
+    fn transcript_washes_the_artwork_only_under_all_sessions() {
+        use crate::settings::NewThreadBackgroundScope::{AllSessions, EmptySessions};
+        let strength = new_thread_background_backdrop_opacity;
+        // Blank canvas (route clock at 0): full hero strength either way.
+        assert_eq!(strength(AllSessions, 0.0), 1.0);
+        assert_eq!(strength(EmptySessions, 0.0), 1.0);
+        // Transcript owns the canvas (clock at 1): `AllSessions` washes the
+        // image so message text keeps its contrast — gentler than the
+        // composer cutout's reveal of the hero, because body text is smaller.
+        let wash = strength(AllSessions, 1.0);
+        assert_eq!(wash, NEW_THREAD_BACKGROUND_TRANSCRIPT_OPACITY);
+        assert!(wash < crate::new_thread_background_mask::CUTOUT_REVEAL_OPACITY);
+        // Mid-handoff it slides between the two instead of popping, and an
+        // out-of-range clock clamps rather than overshoots.
+        let mid = strength(AllSessions, 0.5);
+        assert!(wash < mid && mid < 1.0);
+        assert_eq!(strength(AllSessions, -1.0), 1.0);
+        assert_eq!(strength(AllSessions, 9.0), wash);
+        // The default scope never coexists with a transcript, so it stays.
+        assert_eq!(strength(EmptySessions, 1.0), 1.0);
     }
 
     #[test]
