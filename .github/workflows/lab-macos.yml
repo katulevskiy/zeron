@@ -54,6 +54,10 @@ jobs:
           cargo nextest run --no-run $PROFILE_FLAG --locked \
             -p zeron-update -p zeron-preview -p zeron-ui \
             --features zeron-ui/browser-fixture --lib --tests --examples
+      - name: Build fixture examples
+        run: |
+          cargo build $PROFILE_FLAG --locked -p zeron-update -p zeron-preview -p zeron-ui \
+            --features zeron-ui/browser-fixture --examples
       - name: Check macOS application
         run: cargo check $PROFILE_FLAG --locked -p zeron
       - name: Run updater + preview + native UI regressions
@@ -159,7 +163,7 @@ jobs:
   #   Cargo.lock Cargo.toml rust-toolchain.toml or this workflow changes (same as `changes` job).
   # ---------------------------------------------------------------------------------------------
   mac-ios:
-    if: inputs.run_ios && (inputs.only == 'all' || inputs.only == 'ios')
+    if: ${{ !cancelled() && inputs.run_ios && (inputs.only == 'all' || inputs.only == 'ios') && (needs.mac-gpui.result == 'success' || needs.mac-gpui.result == 'skipped') }}
     # Serialise behind mac-gpui so this lab never holds more than 2 macOS runners at once.
     needs: [mac-gpui]
     runs-on: ${{ inputs.ios_runner }}
@@ -169,13 +173,21 @@ jobs:
         with: {ref: "${{ inputs.target }}"}
       - name: Select an available iPhone simulator and boot it in the background
         run: |
+          ls -d /Applications/Xcode*
+          newest=$(ls -d /Applications/Xcode_26*.app 2>/dev/null | sort -V | tail -1 || true)
+          if [ -n "$newest" ]; then echo "DEVELOPER_DIR=$newest/Contents/Developer" >> "$GITHUB_ENV"; export DEVELOPER_DIR="$newest/Contents/Developer"; fi
+          xcodebuild -version
           python3 - <<'PYTHON'
           import json, os, subprocess
           devices = json.loads(subprocess.check_output(["xcrun", "simctl", "list", "devices", "available", "--json"]))["devices"]
-          iphones = [device for runtime, group in devices.items() if "iOS" in runtime
-                     for device in group if device["name"].startswith("iPhone")]
+          def ver(runtime):
+              return [int(x) for x in runtime.split("iOS-")[-1].split("-") if x.isdigit()]
+          # newest iOS runtime first: the app targets iOS 26
+          iphones = [device for runtime, group in sorted(devices.items(), key=lambda kv: ver(kv[0]), reverse=True)
+                     if "iOS" in runtime for device in group if device["name"].startswith("iPhone")]
           if not iphones:
               raise SystemExit("No iPhone simulator is installed")
+          print(iphones[0])
           with open(os.environ["GITHUB_ENV"], "a") as env:
               env.write("IOS_SIMULATOR_ID=" + iphones[0]["udid"] + "\n")
           subprocess.Popen(["xcrun", "simctl", "boot", iphones[0]["udid"]])
