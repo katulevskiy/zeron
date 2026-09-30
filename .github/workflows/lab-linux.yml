@@ -62,7 +62,7 @@ jobs:
     strategy:
       fail-fast: false
       matrix:
-        shard: [1, 2, 3]
+        shard: [1, 2]
     steps:
       - uses: actions/checkout@v4
         with: {ref: "${{ inputs.target }}"}
@@ -73,10 +73,10 @@ jobs:
       - uses: taiki-e/install-action@nextest
       - uses: actions/download-artifact@v4
         with: {name: core-archive}
-      - name: Run tests (shard ${{ matrix.shard }}/3)
+      - name: Run tests (shard ${{ matrix.shard }}/2)
         run: |
-          cargo nextest run --archive-file core.tar.zst --workspace-remap . \
-            --no-fail-fast --partition hash:${{ matrix.shard }}/3
+          cargo nextest run --archive-file core.tar.zst --extract-to . --extract-overwrite --workspace-remap . \
+            --no-fail-fast --partition hash:${{ matrix.shard }}/2
 
   # ------------------------------------------------------------------ build ui
   build-ui:
@@ -85,10 +85,22 @@ jobs:
     steps:
       - uses: actions/checkout@v4
         with: {ref: "${{ inputs.target }}"}
-      - name: GPUI system dependencies
+      - name: GPUI system dependencies (timed)
         run: |
-          sudo apt-get update -qq -o Dir::Etc::sourcelist="sources.list.d/ubuntu.sources" -o Dir::Etc::sourceparts="-"
-          sudo apt-get install -y -qq $GPUI_DEPS
+          set -x
+          # Faster unpack: no docs/man/locale, no fsync, no man-db trigger.
+          printf 'force-unsafe-io
+path-exclude=/usr/share/doc/*
+path-exclude=/usr/share/man/*
+path-exclude=/usr/share/locale/*
+path-exclude=/usr/share/info/*
+' | sudo tee /etc/dpkg/dpkg.cfg.d/90ci >/dev/null
+          sudo rm -f /var/lib/man-db/auto-update
+          export DEBIAN_FRONTEND=noninteractive
+          APT="-o Acquire::Retries=3 -o Acquire::http::Timeout=20 -o Acquire::Languages=none"
+          time sudo apt-get update -qq $APT -o Dir::Etc::sourcelist="sources.list.d/ubuntu.sources" -o Dir::Etc::sourceparts="-"
+          time sudo timeout 420 apt-get install -y -qq --no-install-recommends $APT --download-only $GPUI_DEPS
+          time sudo timeout 420 apt-get install -y -qq --no-install-recommends $APT $GPUI_DEPS
       - name: Rust toolchain
         run: rustup show active-toolchain || rustup toolchain install
       - uses: rui314/setup-mold@v1
@@ -114,14 +126,154 @@ jobs:
     steps:
       - uses: actions/checkout@v4
         with: {ref: "${{ inputs.target }}"}
-      - name: GPUI system dependencies
+      - name: GPUI system dependencies (timed)
         run: |
-          sudo apt-get update -qq -o Dir::Etc::sourcelist="sources.list.d/ubuntu.sources" -o Dir::Etc::sourceparts="-"
-          sudo apt-get install -y -qq $GPUI_DEPS
+          set -x
+          # Faster unpack: no docs/man/locale, no fsync, no man-db trigger.
+          printf 'force-unsafe-io
+path-exclude=/usr/share/doc/*
+path-exclude=/usr/share/man/*
+path-exclude=/usr/share/locale/*
+path-exclude=/usr/share/info/*
+' | sudo tee /etc/dpkg/dpkg.cfg.d/90ci >/dev/null
+          sudo rm -f /var/lib/man-db/auto-update
+          export DEBIAN_FRONTEND=noninteractive
+          APT="-o Acquire::Retries=3 -o Acquire::http::Timeout=20 -o Acquire::Languages=none"
+          time sudo apt-get update -qq $APT -o Dir::Etc::sourcelist="sources.list.d/ubuntu.sources" -o Dir::Etc::sourceparts="-"
+          time sudo timeout 420 apt-get install -y -qq --no-install-recommends $APT --download-only $GPUI_DEPS
+          time sudo timeout 420 apt-get install -y -qq --no-install-recommends $APT $GPUI_DEPS
       - name: Rust toolchain
         run: rustup show active-toolchain || rustup toolchain install
       - uses: taiki-e/install-action@nextest
       - uses: actions/download-artifact@v4
         with: {name: ui-archive}
       - name: UI and headless layout regressions
-        run: cargo nextest run --archive-file ui.tar.zst --workspace-remap . --no-fail-fast
+        run: cargo nextest run --archive-file ui.tar.zst --extract-to . --extract-overwrite --workspace-remap . --no-fail-fast
+
+  # ------------------------------------------------------------ browser fixture
+  build-fixture:
+    runs-on: ubuntu-24.04
+    timeout-minutes: 30
+    steps:
+      - uses: actions/checkout@v4
+        with: {ref: "${{ inputs.target }}"}
+      - name: GPUI system dependencies (timed)
+        run: |
+          set -x
+          # Faster unpack: no docs/man/locale, no fsync, no man-db trigger.
+          printf 'force-unsafe-io\npath-exclude=/usr/share/doc/*\npath-exclude=/usr/share/man/*\npath-exclude=/usr/share/locale/*\npath-exclude=/usr/share/info/*\n' | sudo tee /etc/dpkg/dpkg.cfg.d/90ci >/dev/null
+          sudo rm -f /var/lib/man-db/auto-update
+          export DEBIAN_FRONTEND=noninteractive
+          APT="-o Acquire::Retries=3 -o Acquire::http::Timeout=20 -o Acquire::Languages=none"
+          time sudo apt-get update -qq $APT -o Dir::Etc::sourcelist="sources.list.d/ubuntu.sources" -o Dir::Etc::sourceparts="-"
+          time sudo timeout 420 apt-get install -y -qq --no-install-recommends $APT --download-only $GPUI_DEPS
+          time sudo timeout 420 apt-get install -y -qq --no-install-recommends $APT $GPUI_DEPS
+      - name: Rust toolchain
+        run: rustup show active-toolchain || rustup toolchain install
+      - uses: rui314/setup-mold@v1
+      - uses: Swatinem/rust-cache@v2
+        with:
+          prefix-key: lab-linux-v1
+          shared-key: ui
+          save-if: false
+      - name: Build browser fixture (dev profile)
+        run: cargo build --locked -p zeron-ui --example browser-fixture --features browser-fixture
+      - uses: actions/upload-artifact@v4
+        with:
+          name: browser-fixture
+          path: target/debug/examples/browser-fixture
+          compression-level: 1
+          retention-days: 1
+
+  test-browser:
+    needs: build-fixture
+    runs-on: ubuntu-24.04
+    timeout-minutes: 20
+    steps:
+      - uses: actions/checkout@v4
+        with: {ref: "${{ inputs.target }}"}
+      - name: Native browser and GPUI dependencies
+        run: |
+          set -x
+          printf 'force-unsafe-io\npath-exclude=/usr/share/doc/*\npath-exclude=/usr/share/man/*\npath-exclude=/usr/share/locale/*\npath-exclude=/usr/share/info/*\n' | sudo tee /etc/dpkg/dpkg.cfg.d/90ci >/dev/null
+          sudo rm -f /var/lib/man-db/auto-update
+          export DEBIAN_FRONTEND=noninteractive
+          APT="-o Acquire::Retries=3 -o Acquire::http::Timeout=20 -o Acquire::Languages=none"
+          time sudo apt-get update -qq $APT -o Dir::Etc::sourcelist="sources.list.d/ubuntu.sources" -o Dir::Etc::sourceparts="-"
+          time sudo timeout 420 apt-get install -y -qq $APT $GPUI_DEPS xvfb xdotool openbox weston ffmpeg imagemagick fonts-noto-cjk
+      - uses: actions/download-artifact@v4
+        with: {name: browser-fixture, path: target/debug/examples}
+      - name: X11 and Wayland browser regressions
+        timeout-minutes: 5
+        env:
+          RUST_LOG: gpui_wgpu=info
+          BROWSER_FIXTURE_BINARY: target/debug/examples/browser-fixture
+        run: |
+          chmod +x target/debug/examples/browser-fixture
+          scripts/test-linux-browser.sh "$RUNNER_TEMP/linux-browser/default"
+          VK_DRIVER_FILES=/dev/null scripts/test-linux-browser.sh "$RUNNER_TEMP/linux-browser/opengl"
+      - name: Upload native browser evidence
+        if: always()
+        uses: actions/upload-artifact@v4
+        with:
+          name: linux-browser
+          path: ${{ runner.temp }}/linux-browser
+          if-no-files-found: warn
+
+  # -------------------------------------------------------------- no-rust jobs
+  cursor-node:
+    runs-on: ubuntu-24.04
+    timeout-minutes: 10
+    steps:
+      - uses: actions/checkout@v4
+        with: {ref: "${{ inputs.target }}"}
+      - uses: actions/setup-node@v4
+        with: {node-version: '22'}
+      - name: Dependency updater validation
+        run: python3 scripts/test-update-cursor-sdk.py
+      - name: Install the exact SDK selected by this engine
+        run: |
+          pin=$(python3 -c 'import re; print(re.search(r"const CURSOR_SDK_PIN: &str = \"([^\"]+)\"", open("crates/harness/src/cursor/mod.rs").read())[1])')
+          npm install --prefix "$RUNNER_TEMP/cursor-sdk-contract" --ignore-scripts --no-audit --no-fund "$pin"
+      - name: Actual SDK token expiry, stream invalidation, and transient auth recovery
+        run: node scripts/test-cursor-sdk-auth.mjs "$RUNNER_TEMP/cursor-sdk-contract/node_modules/@cursor/sdk"
+
+  preview-coordinator:
+    runs-on: ubuntu-24.04
+    timeout-minutes: 10
+    defaults:
+      run:
+        working-directory: edge
+    steps:
+      - uses: actions/checkout@v4
+        with: {ref: "${{ inputs.target }}"}
+      - uses: actions/setup-node@v4
+        with:
+          node-version: 24
+          cache: npm
+          cache-dependency-path: edge/package-lock.json
+      - run: npm ci
+      - run: npm run typecheck
+      - run: npm test
+
+  installer:
+    runs-on: ubuntu-24.04
+    timeout-minutes: 10
+    steps:
+      - uses: actions/checkout@v4
+        with: {ref: "${{ inputs.target }}"}
+      - name: Desktop entry validator
+        run: |
+          sudo apt-get update -qq -o Dir::Etc::sourcelist="sources.list.d/ubuntu.sources" -o Dir::Etc::sourceparts="-"
+          sudo apt-get install -y -qq --no-install-recommends desktop-file-utils
+      - name: Installers write a valid launcher entry
+        run: scripts/test-linux-desktop-entry.sh
+
+  fmt:
+    runs-on: ubuntu-24.04
+    timeout-minutes: 5
+    steps:
+      - uses: actions/checkout@v4
+        with: {ref: "${{ inputs.target }}"}
+      - run: rustup show active-toolchain || rustup toolchain install
+      - run: cargo fmt --all --check
