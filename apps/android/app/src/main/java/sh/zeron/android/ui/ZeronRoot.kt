@@ -80,6 +80,7 @@ object Routes {
     const val SEARCH = "search"
     const val ENGINE = "engine"
     const val AGENTS = "agents"
+    const val TRANSFERS = "transfers"
     fun chat(id: String) = "chat/$id"
 }
 
@@ -94,6 +95,7 @@ private fun MainNav(model: AppModel) {
             "search" -> nav.navigate(Routes.SEARCH)
             "engine" -> nav.navigate(Routes.ENGINE)
             "agents" -> nav.navigate(Routes.AGENTS)
+            "transfers" -> nav.navigate(Routes.TRANSFERS) { launchSingleTop = true }
             else -> if (route.startsWith("chat:")) nav.navigate(Routes.chat(route.removePrefix("chat:")))
         }
         model.pendingRoute.value = null
@@ -115,6 +117,7 @@ private fun MainNav(model: AppModel) {
         }
         composable(Routes.ENGINE) { EngineScreen(model, onBack = { nav.popBackStack() }) }
         composable(Routes.AGENTS) { AgentsScreen(model, onBack = { nav.popBackStack() }) }
+        composable(Routes.TRANSFERS) { TransfersScreen(model, onBack = { nav.popBackStack() }) }
     }
 }
 

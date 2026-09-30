@@ -49,6 +49,37 @@ internal class GuestRuntime(private val app: Context) : RuntimeController {
     private val _state = MutableStateFlow(idleState())
     override val state: StateFlow<RuntimeState> = _state.asStateFlow()
 
+    // Survives reset(): a developer setting, not guest state.
+    private val prefs = app.getSharedPreferences("zeron_runtime", Context.MODE_PRIVATE)
+
+    /** The running engine (proot process + pid), for restarts. */
+    @Volatile private var engine: Pair<Process, Int>? = null
+    @Volatile private var restartRequested = false
+
+    override val guestRootDir: File get() = paths.rootfs
+    override val guestTmpDir: File get() = paths.tmp
+
+    override val customEdge: CustomEdge?
+        get() {
+            val url = prefs.getString("customEdgeUrl", null)?.takeIf { it.isNotBlank() } ?: return null
+            val token = prefs.getString("customEdgeToken", null)?.takeIf { it.isNotBlank() } ?: return null
+            return CustomEdge(url, token)
+        }
+
+    override fun setCustomEdge(edge: CustomEdge?) {
+        if (edge == customEdge) return
+        prefs.edit().putString("customEdgeUrl", edge?.url).putString("customEdgeToken", edge?.token).apply()
+        log.note(if (edge == null) "custom server cleared" else "custom server: ${edge.url}")
+        restartEngine()
+    }
+
+    /** Stop the running engine; the supervisor starts it again with the current settings. */
+    private fun restartEngine() {
+        val (process, pid) = engine ?: return
+        restartRequested = true
+        scope.launch(Dispatchers.IO) { terminate(process, pid) }
+    }
+
     override val isSupportedAbi: Boolean
         get() = paths.abi != null && paths.proot.exists() && paths.engine.exists() && hasRootfsAsset()
 
@@ -163,6 +194,12 @@ internal class GuestRuntime(private val app: Context) : RuntimeController {
                 EngineExit(-1, null)
             }
             if (stopping) return
+            if (restartRequested) {
+                restartRequested = false
+                failures = 0
+                log.note("engine restarting with new settings")
+                continue
+            }
             val ranMs = SystemClock.elapsedRealtime() - startedAt
             log.note("engine exited ($exit) after ${ranMs / 1000}s")
 
@@ -199,10 +236,12 @@ internal class GuestRuntime(private val app: Context) : RuntimeController {
 
     private suspend fun runEngineOnce(): EngineExit = withContext(Dispatchers.IO) {
         val secrets = store.secrets()
-        val command = guest.command(listOf("/opt/zeron/lib/libzeron.so", "headless"), guest.env(secrets))
+        val custom = customEdge
+        val command = guest.command(listOf("/opt/zeron/lib/libzeron.so", "headless"), guest.env(secrets, custom))
         val (process, pid) = guest.start(command)
+        engine = process to pid
         paths.enginePidFile.writeText("$pid")
-        log.note("engine starting (proot pid $pid)")
+        log.note("engine starting (proot pid $pid${custom?.let { ", server ${it.url}" }.orEmpty()})")
         var signal: Int? = null
         val reader = Thread({
             try {
@@ -213,7 +252,7 @@ internal class GuestRuntime(private val app: Context) : RuntimeController {
             } catch (_: java.io.IOException) {
             }
         }, "zeron-engine-log").apply { isDaemon = true; start() }
-        val health = launch { watchHealth(secrets) }
+        val health = launch { watchHealth(secrets, custom) }
         try {
             val code = runInterruptible { process.waitFor() }
             // proot's last words (the signal line) may still be in the pipe.
@@ -221,6 +260,7 @@ internal class GuestRuntime(private val app: Context) : RuntimeController {
             EngineExit(code, signal)
         } finally {
             health.cancel()
+            engine = null
             withContext(NonCancellable) {
                 if (process.isAlive) terminate(process, pid)
                 paths.enginePidFile.delete()
@@ -261,7 +301,9 @@ internal class GuestRuntime(private val app: Context) : RuntimeController {
      * the second, so it stays Starting with one clear log line instead of
      * flapping.
      */
-    private suspend fun watchHealth(secrets: Secrets) {
+    private suspend fun watchHealth(secrets: Secrets, custom: CustomEdge?) {
+        val edgeUrl = custom?.url ?: "http://127.0.0.1:$EDGE_PORT"
+        val edgeToken = custom?.token ?: secrets.edgeToken
         val startedAt = SystemClock.elapsedRealtime()
         var warned = false
         var misses = 0
@@ -282,15 +324,15 @@ internal class GuestRuntime(private val app: Context) : RuntimeController {
                     else -> {}
                 }
             }
-            val edge = ipc && Health.edgeHealthy(EDGE_PORT, secrets.edgeToken)
+            val edge = ipc && if (custom != null) Health.edgeHealthy(custom.url, custom.token) else Health.edgeHealthy(EDGE_PORT, secrets.edgeToken)
             when {
                 ipc && edge -> {
                     misses = 0
                     if (_state.value !is RuntimeState.Running) {
-                        log.note("engine healthy (ipc :$IPC_PORT, edge :$EDGE_PORT)")
+                        log.note("engine healthy (ipc :$IPC_PORT, edge $edgeUrl)")
                         _state.value = RuntimeState.Running(
-                            edgeUrl = "http://127.0.0.1:$EDGE_PORT",
-                            edgeToken = secrets.edgeToken,
+                            edgeUrl = edgeUrl,
+                            edgeToken = edgeToken,
                             ipcPort = IPC_PORT,
                             ipcToken = secrets.ipcToken,
                             deviceName = guest.deviceName,
@@ -304,9 +346,16 @@ internal class GuestRuntime(private val app: Context) : RuntimeController {
                 }
                 ipc && !warned && SystemClock.elapsedRealtime() - startedAt > EDGE_GRACE_MS -> {
                     warned = true
-                    log.note("engine IPC :$IPC_PORT is up but the local edge (GET :$EDGE_PORT/health) " +
-                        "isn't answering — this engine build probably predates ZERON_LOCAL_EDGE_* " +
-                        "support. Staying in Starting.")
+                    log.note(
+                        if (custom != null) {
+                            "engine IPC :$IPC_PORT is up but the custom server ($edgeUrl/health) isn't " +
+                                "answering. Staying in Starting."
+                        } else {
+                            "engine IPC :$IPC_PORT is up but the local edge (GET :$EDGE_PORT/health) " +
+                                "isn't answering — this engine build probably predates ZERON_LOCAL_EDGE_* " +
+                                "support. Staying in Starting."
+                        },
+                    )
                 }
             }
             delay(if (_state.value is RuntimeState.Running) 5_000 else 1_000)

@@ -47,12 +47,38 @@ internal object Health {
     }
 
     /** GET /health with the edge bearer; any 2xx is healthy. */
-    fun edgeHealthy(port: Int, token: String): Boolean = try {
+    fun edgeHealthy(port: Int, token: String): Boolean = httpHealthy("127.0.0.1", port, token)
+
+    /**
+     * The same probe against a shared edge (the custom server): a plain
+     * socket for http (no cleartext policy applies), HttpsURLConnection
+     * for https.
+     */
+    fun edgeHealthy(url: String, token: String): Boolean = try {
+        val uri = java.net.URI(url)
+        if (uri.scheme == "https") {
+            val conn = java.net.URL("$url/health").openConnection() as java.net.HttpURLConnection
+            conn.connectTimeout = TIMEOUT_MS
+            conn.readTimeout = TIMEOUT_MS
+            conn.setRequestProperty("Authorization", "Bearer $token")
+            try {
+                conn.responseCode in 200..299
+            } finally {
+                conn.disconnect()
+            }
+        } else {
+            httpHealthy(uri.host, if (uri.port > 0) uri.port else 80, token)
+        }
+    } catch (_: Exception) {
+        false
+    }
+
+    private fun httpHealthy(host: String, port: Int, token: String): Boolean = try {
         Socket().use { socket ->
-            socket.connect(InetSocketAddress("127.0.0.1", port), TIMEOUT_MS)
+            socket.connect(InetSocketAddress(host, port), TIMEOUT_MS)
             socket.soTimeout = TIMEOUT_MS
             socket.getOutputStream().write(
-                ("GET /health HTTP/1.1\r\nHost: 127.0.0.1:$port\r\n" +
+                ("GET /health HTTP/1.1\r\nHost: $host:$port\r\n" +
                     "Authorization: Bearer $token\r\nConnection: close\r\n\r\n").toByteArray(),
             )
             readLine(socket).split(' ').getOrNull(1)?.toIntOrNull() in 200..299

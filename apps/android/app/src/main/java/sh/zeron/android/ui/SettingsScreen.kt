@@ -61,6 +61,8 @@ fun SettingsScreen(model: AppModel, onOpen: (String) -> Unit) {
     val workspace by model.workspace.collectAsState()
     val devices = workspace?.devices.orEmpty()
     val list = androidx.compose.foundation.lazy.rememberLazyListState()
+    var developer by androidx.compose.runtime.remember { androidx.compose.runtime.mutableStateOf(model.developer) }
+    var versionTaps by androidx.compose.runtime.remember { androidx.compose.runtime.mutableIntStateOf(0) }
     Box(Modifier.fillMaxSize()) {
     LazyColumn(
         Modifier.fillMaxSize(),
@@ -117,6 +119,25 @@ fun SettingsScreen(model: AppModel, onOpen: (String) -> Unit) {
                     supportingContent = { Text("Install agents and sign in to their accounts") },
                     trailingContent = { ZIcon(ZIcons.ChevronRight, null, Modifier.size(20.dp)) },
                 ) { Text("Coding agents") }
+            }
+        }
+        if (mode == AppMode.Phone) {
+            section("Files")
+            item {
+                val transfers by model.transfers.list.collectAsState()
+                val live = transfers.count { it.state.live }
+                Column(Modifier.padding(horizontal = 16.dp)) {
+                    SegmentedListItem(
+                        onClick = { onOpen(Routes.TRANSFERS) },
+                        shapes = segmentedShapes(0, 1),
+                        colors = ListItemDefaults.segmentedColors(containerColor = cardColor()),
+                        leadingContent = { IconTile(ZIcons.ArrowDown) },
+                        supportingContent = {
+                            Text(if (live > 0) "$live in progress" else "Send and receive files with your other devices")
+                        },
+                        trailingContent = { ZIcon(ZIcons.ChevronRight, null, Modifier.size(20.dp)) },
+                    ) { Text("Transfers") }
+                }
             }
         }
         section("Appearance")
@@ -202,11 +223,22 @@ fun SettingsScreen(model: AppModel, onOpen: (String) -> Unit) {
                 }
             }
         }
+        if (developer && model.phone.isSupportedAbi) {
+            section("Developer")
+            item { DeveloperSettings(model) }
+        }
         section("About")
         item {
             Column(Modifier.padding(horizontal = 16.dp), verticalArrangement = Arrangement.spacedBy(ListItemDefaults.SegmentedGap)) {
                 SegmentedListItem(
-                    onClick = {},
+                    // Seven taps reveal the developer section (Android's own convention).
+                    onClick = {
+                        versionTaps++
+                        if (versionTaps >= 7 && !developer) {
+                            developer = true
+                            model.setDeveloper(true)
+                        }
+                    },
                     shapes = segmentedShapes(0, 2),
                     colors = ListItemDefaults.segmentedColors(containerColor = cardColor()),
                     leadingContent = { IconTile(ZIcons.Info) },
@@ -334,4 +366,80 @@ private fun WallpaperSettings(model: AppModel) {
             ) { Text("Remove wallpaper", color = MaterialTheme.colorScheme.error) }
         }
     }
+}
+
+/**
+ * Developer → Custom server: run this phone's engine against a shared edge
+ * (`zeron local-edge` on a computer) instead of its own, so it meets other
+ * engines — e.g. to test file transfer (docs/android.md § Custom server).
+ */
+@Composable
+private fun DeveloperSettings(model: AppModel) {
+    var edge by androidx.compose.runtime.remember { androidx.compose.runtime.mutableStateOf(model.phone.customEdge) }
+    var editing by androidx.compose.runtime.remember { androidx.compose.runtime.mutableStateOf(false) }
+    Column(Modifier.padding(horizontal = 16.dp), verticalArrangement = Arrangement.spacedBy(ListItemDefaults.SegmentedGap)) {
+        SegmentedListItem(
+            onClick = { editing = true },
+            shapes = segmentedShapes(0, 1),
+            colors = ListItemDefaults.segmentedColors(containerColor = cardColor()),
+            leadingContent = { IconTile(ZIcons.Server) },
+            supportingContent = { Text(edge?.url ?: "Off — the engine hosts its own edge on this phone") },
+            trailingContent = { ZIcon(ZIcons.ChevronRight, null, Modifier.size(20.dp)) },
+        ) { Text("Custom server") }
+    }
+    if (editing) {
+        CustomServerDialog(edge, onDismiss = { editing = false }) { next ->
+            editing = false
+            edge = next
+            model.phone.setCustomEdge(next)
+        }
+    }
+}
+
+@Composable
+private fun CustomServerDialog(current: sh.zeron.runtime.CustomEdge?, onDismiss: () -> Unit, onSave: (sh.zeron.runtime.CustomEdge?) -> Unit) {
+    var url by androidx.compose.runtime.remember { androidx.compose.runtime.mutableStateOf(current?.url ?: "http://") }
+    var token by androidx.compose.runtime.remember { androidx.compose.runtime.mutableStateOf(current?.token ?: "") }
+    val problem = sh.zeron.runtime.CustomEdge.problem(url, token)
+    androidx.compose.material3.AlertDialog(
+        onDismissRequest = onDismiss,
+        icon = { ZIcon(ZIcons.Server, null) },
+        title = { Text("Custom server") },
+        text = {
+            Column(verticalArrangement = Arrangement.spacedBy(12.dp)) {
+                Text(
+                    "The engine joins this edge (zeron local-edge) instead of hosting its own, and restarts. Use it to meet engines on other machines.",
+                    style = MaterialTheme.typography.bodyMedium,
+                )
+                androidx.compose.material3.OutlinedTextField(
+                    url, { url = it },
+                    label = { Text("Server URL") },
+                    placeholder = { Text("http://10.0.2.2:27720") },
+                    singleLine = true,
+                    modifier = Modifier.fillMaxWidth(),
+                )
+                androidx.compose.material3.OutlinedTextField(
+                    token, { token = it },
+                    label = { Text("Token") },
+                    singleLine = true,
+                    modifier = Modifier.fillMaxWidth(),
+                )
+                if (problem != null && token.isNotEmpty()) {
+                    Text(problem, style = MaterialTheme.typography.bodySmall, color = MaterialTheme.colorScheme.error)
+                }
+            }
+        },
+        confirmButton = {
+            androidx.compose.material3.TextButton(
+                onClick = { onSave(sh.zeron.runtime.CustomEdge.of(url, token)) },
+                enabled = problem == null,
+            ) { Text("Save") }
+        },
+        dismissButton = {
+            Row {
+                if (current != null) androidx.compose.material3.TextButton(onClick = { onSave(null) }) { Text("Turn off") }
+                androidx.compose.material3.TextButton(onClick = onDismiss) { Text("Cancel") }
+            }
+        },
+    )
 }

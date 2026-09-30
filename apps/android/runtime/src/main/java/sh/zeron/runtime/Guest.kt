@@ -54,7 +54,11 @@ internal class Guest(private val context: Context, private val paths: RuntimePat
             ?.takeIf { it.isNotBlank() } ?: Build.MODEL
     }
 
-    fun env(secrets: Secrets): List<String> = listOf(
+    /**
+     * The engine's environment. With a [custom] edge it joins that shared
+     * edge (`ZERON_LOCAL_EDGE_URL`) instead of embedding one on loopback.
+     */
+    fun env(secrets: Secrets, custom: CustomEdge? = null): List<String> = listOf(
         "HOME=$GUEST_HOME",
         "USER=zeron",
         "LOGNAME=zeron",
@@ -67,8 +71,13 @@ internal class Guest(private val context: Context, private val paths: RuntimePat
         "ZERON_DEVICE_NAME=$deviceName",
         "ZERON_DEVICE_PLATFORM=android",
         "ZERON_NO_LOGIN_SHELL=1",
-        "ZERON_LOCAL_EDGE_PORT=$EDGE_PORT",
-        "ZERON_LOCAL_EDGE_TOKEN=${secrets.edgeToken}",
+    ) + (
+        if (custom != null) {
+            listOf("ZERON_LOCAL_EDGE_URL=${custom.url}", "ZERON_LOCAL_EDGE_TOKEN=${custom.token}")
+        } else {
+            listOf("ZERON_LOCAL_EDGE_PORT=$EDGE_PORT", "ZERON_LOCAL_EDGE_TOKEN=${secrets.edgeToken}")
+        }
+    ) + listOf(
         "ZERON_IPC_PORT=$IPC_PORT",
         "ZERON_IPC_TOKEN=${secrets.ipcToken}",
         // Claude Code's documented setting for musl distros: use Alpine's

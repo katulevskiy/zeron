@@ -2,7 +2,9 @@ package sh.zeron.android.core
 
 import android.content.Context
 import kotlinx.coroutines.flow.StateFlow
+import sh.zeron.runtime.CustomEdge
 import sh.zeron.runtime.ExecResult
+import java.io.File
 import sh.zeron.runtime.RuntimeController
 import sh.zeron.runtime.RuntimeState
 import sh.zeron.runtime.ZeronRuntime
@@ -23,6 +25,18 @@ class PhoneEngine(context: Context) {
     /** The runtime's log with the engine's terminal colours stripped. */
     fun logTail(lines: Int = 200): String = stripAnsi(runtime.logTail(lines))
     suspend fun exec(command: String, timeoutMs: Long = 600_000): ExecResult = runtime.exec(command, timeoutMs = timeoutMs)
+
+    /** Guest paths (what the engine reports) ↔ the app's view of the rootfs. */
+    val paths: Transfers.GuestPaths get() = Transfers.GuestPaths(runtime.guestRootDir, runtime.guestTmpDir)
+
+    /** The engine's device id (`$ZERON_DATA_DIR/device-id`), once it has run. */
+    fun engineDeviceId(): String? =
+        runCatching { File(runtime.guestRootDir, "home/zeron/.zeron/device-id").readText().trim() }.getOrNull()?.ifEmpty { null }
+
+    /** Developer override: the shared edge the engine joins (docs/android.md § Custom server). */
+    val customEdge: CustomEdge? get() = runtime.customEdge
+
+    fun setCustomEdge(edge: CustomEdge?) = runtime.setCustomEdge(edge)
 
     /** `git clone` into the projects root; returns the checkout path. */
     suspend fun clone(url: String): Result<String> {

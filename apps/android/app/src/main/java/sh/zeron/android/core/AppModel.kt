@@ -95,6 +95,7 @@ class AppModel(private val app: Application) {
     val wallpaper = WallpaperStore(app)
     val phone by lazy { PhoneEngine(app) }
     val notifier by lazy { Notifier(app) }
+    val transfers by lazy { TransferCenter(app, this) }
 
     private val _mode = MutableStateFlow<AppMode?>(null)
     val mode: StateFlow<AppMode?> = _mode.asStateFlow()
@@ -127,6 +128,11 @@ class AppModel(private val app: Application) {
         ),
     )
     val appearance: StateFlow<Appearance> = _appearance.asStateFlow()
+
+    /** Settings → About → seven taps on Version: the Developer section (custom server). */
+    val developer: Boolean get() = settings.getBoolean("developer", false)
+
+    fun setDeveloper(on: Boolean) = settings.edit().putBoolean("developer", on).apply()
 
     fun setAppearance(value: Appearance) {
         _appearance.value = value
@@ -172,6 +178,13 @@ class AppModel(private val app: Application) {
         }
     }
 
+    private var booted = false
+
+    /** Entry points other than MainActivity (the share sheet): boot once with defaults. */
+    fun ensureBooted() {
+        if (!booted) boot(LaunchOptions())
+    }
+
     fun boot(options: LaunchOptions) {
         launch = options
         if (_client.value != null) return
@@ -180,7 +193,18 @@ class AppModel(private val app: Application) {
             credentials.clear()
             settings.edit().remove("mode").apply()
         }
-        watchNetwork()
+        if (!booted) {
+            booted = true
+            watchNetwork()
+            transfers.start()
+            // Relative times ("4m") and staleness age without events.
+            scope.launch {
+                while (true) {
+                    delay(30_000)
+                    refreshWorkspace()
+                }
+            }
+        }
         // `wallpaper <path>` / `wallpaper none` and `wallpaper-effect <name>`:
         // set the wallpaper at launch (screenshots, tests).
         options.wallpaper?.let { path ->
@@ -194,13 +218,6 @@ class AppModel(private val app: Application) {
             options.demo -> start(Credentials.Demo(demoOptions()))
             options.phone || settings.getString("mode", null) == AppMode.Phone.name -> startPhone()
             stored != null -> start(stored)
-        }
-        // Relative times ("4m") and staleness age without events.
-        scope.launch {
-            while (true) {
-                delay(30_000)
-                refreshWorkspace()
-            }
         }
     }
 
@@ -233,10 +250,18 @@ class AppModel(private val app: Application) {
         marker.writeText(owner)
     }
 
+    /** The phone's docs mirror one edge: a custom server (or leaving it) starts empty. */
+    private fun claimPhoneDir(edge: String) {
+        val marker = File(phoneDir, ".edge")
+        if (runCatching { marker.readText() }.getOrNull() != edge) phoneDir.deleteRecursively()
+        phoneDir.mkdirs()
+        marker.writeText(edge)
+    }
+
     private fun start(credentials: Credentials, edge: String = edgeUrl, name: String = deviceName()): Boolean {
         val dir = when (credentials) {
             is Credentials.Demo -> File(app.filesDir, "demo")
-            is Credentials.Local -> phoneDir
+            is Credentials.Local -> phoneDir.also { claimPhoneDir(edge) }
             else -> coreDir.also { claimCoreDir(credentials) }
         }
         dir.mkdirs()
@@ -295,6 +320,7 @@ class AppModel(private val app: Application) {
     }
 
     private var phoneWatch: Job? = null
+    /** The edge (url + token) the phone client was started against. */
     private var phoneToken: String? = null
 
     /**
@@ -310,9 +336,9 @@ class AppModel(private val app: Application) {
         phoneWatch = scope.launch {
             phone.state.collect { state ->
                 when (state) {
-                    is RuntimeState.Running -> if (_client.value == null || phoneToken != state.edgeToken) {
+                    is RuntimeState.Running -> if (_client.value == null || phoneToken != "${state.edgeUrl} ${state.edgeToken}") {
                         dropClient()
-                        phoneToken = state.edgeToken
+                        phoneToken = "${state.edgeUrl} ${state.edgeToken}"
                         start(Credentials.Local(state.edgeToken), state.edgeUrl, state.deviceName)
                     }
                     RuntimeState.Stopped, RuntimeState.NotInstalled, is RuntimeState.Failed -> {
