@@ -161,7 +161,7 @@ private fun MainNav(model: AppModel) {
             val ws = entry.arguments?.getString("ws").orEmpty()
             val url = entry.arguments?.getString("url").orEmpty()
             val ref = remember(ws) { ws.ifEmpty { null }?.let { model.refFor(it) } }
-            BrowserScreen(model, ref, url.ifEmpty { null }, onBack = { nav.popBackStack() })
+            BrowserScreen(model, ref, url.ifEmpty { null }, onBack = { nav.popBackStack() }, onOpenFile = { if (ws.isNotEmpty()) nav.navigate(Routes.file(ws, it)) })
         }
         composable(Routes.NEW) {
             NewSessionScreen(model, onClose = { nav.popBackStack() }, onCreated = { id ->

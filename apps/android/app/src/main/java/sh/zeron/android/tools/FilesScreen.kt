@@ -85,11 +85,13 @@ fun FilesScreen(
     val context = LocalContext.current
     val clipboard = LocalClipboardManager.current
 
-    val children = remember(ref) { mutableStateMapOf<String, List<Entry>>() }
-    val expanded = remember(ref) { mutableStateListOf<String>() }
+    // The tree outlives the screen (opening a file and coming back keeps it).
+    val tree = remember(ref) { TreeState.of(ref) }
+    val children = tree.children
+    val expanded = tree.expanded
     val loading = remember(ref) { mutableStateMapOf<String, Boolean>() }
     var error by remember(ref) { mutableStateOf<String?>(null) }
-    var includeIgnored by remember { mutableStateOf(false) }
+    var includeIgnored by tree.includeIgnored
     var marks by remember(ref) { mutableStateOf<Map<String, GitMark>>(emptyMap()) }
     val folderMarks = remember(marks) { WorkspaceApi.folderMarks(marks) }
 
@@ -113,7 +115,8 @@ fun FilesScreen(
     }
 
     LaunchedEffect(ref, includeIgnored) {
-        children.clear()
+        if (tree.listedIgnored != includeIgnored) children.clear()
+        tree.listedIgnored = includeIgnored
         load("")
         for (dir in expanded) load(dir)
     }
@@ -300,6 +303,20 @@ fun FilesScreen(
 @Composable
 private fun ToolbarButton(icon: Int, label: String, onClick: () -> Unit) {
     IconButton(onClick = onClick) { ZIcon(icon, label, Modifier.size(22.dp)) }
+}
+
+/** Per-workspace tree state, kept for the app's lifetime. */
+private class TreeState {
+    val children = mutableStateMapOf<String, List<Entry>>()
+    val expanded = mutableStateListOf<String>()
+    val includeIgnored = mutableStateOf(false)
+    var listedIgnored = false
+
+    companion object {
+        private val all = HashMap<String, TreeState>()
+
+        fun of(ref: WorkspaceRef): TreeState = all.getOrPut("${ref.deviceId}|${ref.chatId ?: ref.spaceId}") { TreeState() }
+    }
 }
 
 data class TreeRowModel(val entry: Entry, val depth: Int)
