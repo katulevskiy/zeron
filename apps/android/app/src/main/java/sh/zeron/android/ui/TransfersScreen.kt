@@ -183,7 +183,7 @@ private fun TransferCard(
     onAccept: () -> Unit,
     onDecline: () -> Unit,
     onOpen: (Transfers.Item) -> Unit,
-    onClear: () -> Unit,
+    onClear: (() -> Unit)?,
 ) {
     val liveTone = t.state.live
     Surface(
@@ -212,7 +212,7 @@ private fun TransferCard(
                 }
                 if (liveTone) {
                     TonalCircleButton(ZIcons.Close, "Cancel", onClick = onCancel, size = 40.dp)
-                } else {
+                } else if (onClear != null) {
                     TonalCircleButton(ZIcons.Close, "Remove from list", onClick = onClear, size = 40.dp, container = androidx.compose.ui.graphics.Color.Transparent)
                 }
             }
@@ -277,5 +277,5 @@ private fun TransferCard(
 /** A compact live row for the share sheet: progress of one transfer. */
 @Composable
 fun TransferProgressCard(t: Transfers.Transfer, center: TransferCenter, onCancel: () -> Unit) {
-    TransferCard(t, center.exports.collectAsState().value[t.id], onCancel, {}, {}, {}, {})
+    TransferCard(t, center.exports.collectAsState().value[t.id], onCancel, {}, {}, {}, null)
 }

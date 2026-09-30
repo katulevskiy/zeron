@@ -241,22 +241,27 @@ class TransferCenter(private val app: Application, private val model: AppModel) 
         }
         val out = ArrayList<Staged>()
         val resolver = app.contentResolver
-        for (uri in uris) {
-            val display = runCatching {
-                resolver.query(uri, arrayOf(OpenableColumns.DISPLAY_NAME), null, null, null)?.use { c ->
-                    if (c.moveToFirst()) c.getString(0) else null
-                }
-            }.getOrNull() ?: uri.lastPathSegment?.substringAfterLast('/')
-            val name = unique(Transfers.safeSegment(display ?: "Shared file"))
-            val file = File(dir, name)
-            val input = resolver.openInputStream(uri) ?: error("Couldn't read $name")
-            input.use { src -> file.outputStream().use { src.copyTo(it, 1 shl 16) } }
-            out += Staged(name, file.length(), "$batch/$name")
-        }
-        if (uris.isEmpty() && !text.isNullOrEmpty()) {
-            val name = unique("Shared text.txt")
-            val file = File(dir, name).apply { writeText(text) }
-            out += Staged(name, file.length(), "$batch/$name")
+        try {
+            for (uri in uris) {
+                val display = runCatching {
+                    resolver.query(uri, arrayOf(OpenableColumns.DISPLAY_NAME), null, null, null)?.use { c ->
+                        if (c.moveToFirst()) c.getString(0) else null
+                    }
+                }.getOrNull() ?: uri.lastPathSegment?.substringAfterLast('/')
+                val name = unique(Transfers.safeSegment(display ?: "Shared file"))
+                val file = File(dir, name)
+                val input = resolver.openInputStream(uri) ?: error("Couldn't read $name")
+                input.use { src -> file.outputStream().use { src.copyTo(it, 1 shl 16) } }
+                out += Staged(name, file.length(), "$batch/$name")
+            }
+            if (uris.isEmpty() && !text.isNullOrEmpty()) {
+                val name = unique("Shared text.txt")
+                val file = File(dir, name).apply { writeText(text) }
+                out += Staged(name, file.length(), "$batch/$name")
+            }
+        } catch (e: Exception) {
+            dir.deleteRecursively()
+            throw e
         }
         batch to out
     }
@@ -348,8 +353,10 @@ class TransferCenter(private val app: Application, private val model: AppModel) 
     /** Opens [item]; false if it isn't in Downloads (yet) or nothing can open it. */
     fun open(context: Context, t: Transfer, item: Transfers.Item? = null): Boolean {
         val intent = openIntent(t, item ?: t.items.singleOrNull()) ?: return false
+        // From a screen the viewer stacks on Zeron's task (Back returns here).
+        if (context !is android.app.Activity) intent.addFlags(Intent.FLAG_ACTIVITY_NEW_TASK)
         return try {
-            context.startActivity(intent.addFlags(Intent.FLAG_ACTIVITY_NEW_TASK))
+            context.startActivity(intent)
             true
         } catch (e: Exception) {
             Log.w("Zeron", "open failed", e)

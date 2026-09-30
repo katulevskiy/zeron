@@ -92,7 +92,9 @@ fun ShareScreen(model: AppModel, uris: List<Uri>, text: String?, onClose: () -> 
         }
         runCatching { center.stage(uris, text) }
             .onSuccess { staged = it }
-            .onFailure { stageError = it.message ?: "Couldn't read what was shared." }
+            .onFailure {
+                stageError = if (it is SecurityException) "The app you shared from didn't give Zeron access to the file." else it.message ?: "Couldn't read what was shared."
+            }
     }
     // Abandoned before sending: drop the staged copy.
     DisposableEffect(Unit) {
