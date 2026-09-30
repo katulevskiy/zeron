@@ -29,14 +29,13 @@ use serde::de::DeserializeOwned;
 
 use crate::comments::ReviewComment;
 use zeron_doc::{SessionMessageEntry, TranscriptDesync, TranscriptFrame};
+use zeron_engine::host::{DeferredEngineRpc, DeferredEngineState, wait_for_deferred_engine};
 use zeron_engine::{Engine, EngineConfig, EngineRuntime, InstanceLock, rpc::AuthRpc};
 use zeron_proto::{
     AuthState, ChangeRequestSummary, Chat, ChatIndicator, CheckoutChangeRequestStatus, Device,
     EngineInfo, HarnessId, Session, SidebarPreferencesState, Space, WorkspaceScope,
 };
-use zeron_rpc::{
-    RpcClient, RpcError, RpcReply, RpcService, connect_ws_redialing, memory_client, methods,
-};
+use zeron_rpc::{RpcClient, RpcError, RpcService, connect_ws_redialing, memory_client, methods};
 
 use crate::change_requests::{
     ChangeRequestClientState, ChangeRequestWatchKey, desired_watch_targets, watch_params,
@@ -127,6 +126,14 @@ trait EngineBackend: Send + Sync {
     fn mode(&self) -> EngineMode;
     /// Graceful teardown (drains runs / flushes docs for the in-process engine).
     async fn shutdown(&self);
+    /// The window is about to be replaced by a newer build: leave an engine
+    /// host this window started running for the new window to attach to.
+    fn detach_for_update(&self) {}
+    fn stop_supervising(&self) {}
+    /// Quitting this window stops the engine (it embeds it, or started it).
+    fn stops_on_quit(&self) -> bool {
+        true
+    }
 }
 
 /// Embedded engine: owns the [`EngineCore`] and an in-memory RPC loop.
@@ -166,77 +173,6 @@ impl EngineBackend for InProcessEngine {
     }
 }
 
-#[derive(Clone)]
-enum DeferredEngineState {
-    Waiting,
-    Ready,
-    Failed(String),
-}
-
-/// Serves engine identity and AuthRpc immediately, then holds data calls only
-/// while a captured synced profile still needs organization onboarding.
-/// Existing subscriptions attach to the assembled service without reconnecting.
-struct DeferredEngineRpc {
-    auth: AuthRpc,
-    engine_info: EngineInfo,
-    state: tokio::sync::watch::Receiver<DeferredEngineState>,
-    service: Arc<tokio::sync::OnceCell<Arc<dyn RpcService>>>,
-}
-
-#[async_trait]
-impl RpcService for DeferredEngineRpc {
-    async fn handle(&self, method: &str, params: serde_json::Value) -> Result<RpcReply, RpcError> {
-        if method == methods::ENGINE_INFO {
-            return RpcReply::value(&self.engine_info);
-        }
-        if method == methods::ENGINE_READY {
-            let mut state = self.state.clone();
-            return match wait_for_deferred_engine(&mut state).await {
-                Ok(()) => RpcReply::value(&serde_json::json!({ "ready": true })),
-                Err(message) => Err(RpcError::Failed(message)),
-            };
-        }
-        if AuthRpc::handles(method) {
-            return self.auth.handle(method, params).await;
-        }
-
-        let mut state = self.state.clone();
-        loop {
-            let current = { state.borrow().clone() };
-            match current {
-                DeferredEngineState::Waiting => {}
-                DeferredEngineState::Ready => {
-                    let service = self.service.get().ok_or_else(|| {
-                        RpcError::Failed(
-                            "embedded engine became ready without an RPC service".into(),
-                        )
-                    })?;
-                    return service.handle(method, params).await;
-                }
-                DeferredEngineState::Failed(message) => return Err(RpcError::Failed(message)),
-            }
-            state.changed().await.map_err(|_| RpcError::Closed)?;
-        }
-    }
-}
-
-async fn wait_for_deferred_engine(
-    state: &mut tokio::sync::watch::Receiver<DeferredEngineState>,
-) -> Result<(), String> {
-    loop {
-        let current = { state.borrow().clone() };
-        match current {
-            DeferredEngineState::Waiting => {}
-            DeferredEngineState::Ready => return Ok(()),
-            DeferredEngineState::Failed(message) => return Err(message),
-        }
-        state
-            .changed()
-            .await
-            .map_err(|_| "embedded engine assembly ended without a result".to_string())?;
-    }
-}
-
 /// External daemon over `ws://127.0.0.1:{port}`.
 struct RemoteEngine {
     client: Arc<RpcClient>,
@@ -244,6 +180,15 @@ struct RemoteEngine {
     lifecycle_task: tokio::sync::Mutex<Option<tokio::task::JoinHandle<()>>>,
     /// Re-runs the `EngineInfo` handshake after every redial.
     info_refresh_task: tokio::sync::Mutex<Option<tokio::task::JoinHandle<()>>>,
+    /// This window started the engine host it is attached to: quitting stops
+    /// it (a daemon somebody else started keeps running, as always).
+    host_owned: bool,
+    /// Starts the host again if it dies while this window is up (only for a
+    /// host an app started for itself; a service is restarted by its manager).
+    host_supervisor: std::sync::Mutex<Option<tokio::task::JoinHandle<()>>>,
+    /// The window is being replaced by a newer build (an update): leave the
+    /// host running for it to attach to.
+    detach: std::sync::atomic::AtomicBool,
 }
 
 #[async_trait]
@@ -257,12 +202,75 @@ impl EngineBackend for RemoteEngine {
         }
     }
     async fn shutdown(&self) {
-        // The daemon outlives this viewport; only stop our readiness probe.
+        // Stop the engine host THIS window started (quit keeps its meaning),
+        // unless the window is only being replaced by an update. A daemon
+        // somebody else started outlives this viewport.
+        self.stop_supervising();
+        if self.host_owned && !self.detach.load(std::sync::atomic::Ordering::SeqCst) {
+            self.stop_host().await;
+        }
         if let Some(task) = self.lifecycle_task.lock().await.take() {
             task.abort();
         }
         if let Some(task) = self.info_refresh_task.lock().await.take() {
             task.abort();
+        }
+    }
+
+    fn detach_for_update(&self) {
+        self.detach.store(true, std::sync::atomic::Ordering::SeqCst);
+        // The new window supervises the host from now on.
+        self.stop_supervising();
+    }
+
+    fn stops_on_quit(&self) -> bool {
+        self.host_owned
+    }
+
+    fn stop_supervising(&self) {
+        RemoteEngine::stop_supervising(self);
+    }
+}
+
+impl RemoteEngine {
+    fn stop_supervising(&self) {
+        if let Some(task) = self
+            .host_supervisor
+            .lock()
+            .unwrap_or_else(std::sync::PoisonError::into_inner)
+            .take()
+        {
+            task.abort();
+        }
+    }
+
+    /// Ask the host to stop and give it a bounded moment to drain its runtime.
+    async fn stop_host(&self) {
+        let stop = tokio::time::timeout(
+            std::time::Duration::from_secs(3),
+            self.client
+                .call(methods::STOP_ENGINE, serde_json::json!({})),
+        )
+        .await;
+        if !matches!(stop, Ok(Ok(_))) {
+            tracing::debug!("stopping the engine host did not get an answer (already gone?)");
+            return;
+        }
+        let Some(port) = self
+            .url
+            .rsplit(':')
+            .next()
+            .and_then(|port| port.parse::<u16>().ok())
+        else {
+            return;
+        };
+        let deadline = tokio::time::Instant::now() + std::time::Duration::from_secs(10);
+        while tokio::time::Instant::now() < deadline
+            && tokio::net::TcpStream::connect(("127.0.0.1", port))
+                .await
+                .is_ok()
+        {
+            tokio::time::sleep(std::time::Duration::from_millis(100)).await;
         }
     }
 }
@@ -275,6 +283,7 @@ impl Drop for RemoteEngine {
         if let Some(task) = self.info_refresh_task.get_mut().take() {
             task.abort();
         }
+        self.stop_supervising();
     }
 }
 
@@ -307,8 +316,49 @@ impl EngineHandle {
         static BOOTSTRAP_GATE: tokio::sync::Mutex<()> = tokio::sync::Mutex::const_new(());
         let _gate = BOOTSTRAP_GATE.lock().await;
 
-        if let Some(handle) = Self::attach_to_daemon(config.ipc_port).await {
+        if let Some(handle) = Self::attach_to_daemon(config.ipc_port, Some(&config.data_dir)).await {
             return Ok(handle);
+        }
+
+        // Nothing answers: start an engine host and attach to it, so agents
+        // and terminals outlive this window and a live update can replace the
+        // engine without it. If no host comes up, embed as before.
+        #[cfg(unix)]
+        if crate::engine_host::policy() == crate::engine_host::HostPolicy::SpawnOrAttach {
+            // A previous host may still be draining (an app quit and relaunch
+            // in quick succession): it holds the data dir but no longer
+            // answers. Wait for it to let go instead of embedding beside it.
+            let released = tokio::time::Instant::now() + std::time::Duration::from_secs(12);
+            while InstanceLock::holder(&config.data_dir).is_some()
+                && tokio::time::Instant::now() < released
+            {
+                tokio::time::sleep(std::time::Duration::from_millis(200)).await;
+                if let Some(handle) = Self::attach_to_daemon(config.ipc_port, Some(&config.data_dir)).await {
+                    return Ok(handle);
+                }
+            }
+        }
+        #[cfg(unix)]
+        if crate::engine_host::policy() == crate::engine_host::HostPolicy::SpawnOrAttach
+            && InstanceLock::holder(&config.data_dir).is_none()
+        {
+            match crate::engine_host::ensure_engine_host(config.ipc_port).await {
+                Ok(()) => {
+                    if let Some(handle) = Self::attach_to_daemon(config.ipc_port, Some(&config.data_dir)).await {
+                        return Ok(handle);
+                    }
+                    tracing::warn!("the engine host started but did not answer; embedding instead");
+                }
+                Err(error) => {
+                    tracing::warn!(%error, "could not start an engine host; embedding instead");
+                }
+            }
+        }
+
+        // A window started by an update swap must attach to the running host:
+        // embedding a second engine beside it would fight over the data dir.
+        if crate::engine_host::attach_only() {
+            anyhow::bail!("no engine host answers on port {}", config.ipc_port);
         }
 
         tracing::info!(data_dir = %config.data_dir.display(), "no daemon on port; embedding engine");
@@ -337,7 +387,7 @@ impl EngineHandle {
                         return Err(err.into());
                     }
                     tokio::time::sleep(std::time::Duration::from_millis(250)).await;
-                    if let Some(handle) = Self::attach_to_daemon(engine_config.ipc_port).await {
+                    if let Some(handle) = Self::attach_to_daemon(engine_config.ipc_port, Some(&engine_config.data_dir)).await {
                         return Ok(handle);
                     }
                 }
@@ -352,12 +402,12 @@ impl EngineHandle {
         let refresh_task = auth.spawn_refresh_loop();
         let (state_tx, mut state_rx) = tokio::sync::watch::channel(DeferredEngineState::Waiting);
         let assembled_service = Arc::new(tokio::sync::OnceCell::new());
-        let service: Arc<dyn RpcService> = Arc::new(DeferredEngineRpc {
-            auth: AuthRpc::new(auth.clone()),
-            engine_info: engine_info.clone(),
-            state: state_rx.clone(),
-            service: assembled_service.clone(),
-        });
+        let service: Arc<dyn RpcService> = Arc::new(DeferredEngineRpc::new(
+            AuthRpc::new(auth.clone()),
+            engine_info.clone(),
+            state_rx.clone(),
+            assembled_service.clone(),
+        ));
         let client = memory_client(service.clone());
 
         // Serve the same service on the IPC port so a terminal viewport can
@@ -464,7 +514,10 @@ impl EngineHandle {
     /// Probe the IPC port and, if a live engine answers, attach as a remote
     /// viewport. `None` means embed: nothing listening, a non-engine listener,
     /// or a listener without an identity.
-    async fn attach_to_daemon(ipc_port: u16) -> Option<EngineHandle> {
+    async fn attach_to_daemon(
+        ipc_port: u16,
+        data_dir: Option<&std::path::Path>,
+    ) -> Option<EngineHandle> {
         let url = format!("ws://127.0.0.1:{ipc_port}");
         let probe = tokio::time::timeout(
             std::time::Duration::from_millis(750),
@@ -479,6 +532,10 @@ impl EngineHandle {
             Ok(client) => match query_engine_info(&client).await {
                 Ok(engine_info) => {
                     let client = Arc::new(client);
+                    // The engine says whether it is the host an app started for
+                    // itself: only then does quitting stop it (a service or a
+                    // hand-started daemon outlives the window, as always).
+                    let host_owned = crate::engine_host::is_app_hosted(&engine_info);
                     let (info_tx, info_rx) = tokio::sync::watch::channel(engine_info.clone());
                     let info_refresh_task = spawn_engine_info_refresh(client.clone(), info_tx);
                     let (state_tx, state_rx) =
@@ -507,6 +564,14 @@ impl EngineHandle {
                             url,
                             lifecycle_task: tokio::sync::Mutex::new(Some(lifecycle_task)),
                             info_refresh_task: tokio::sync::Mutex::new(Some(info_refresh_task)),
+                            host_owned,
+                            host_supervisor: std::sync::Mutex::new(
+                                (host_owned
+                                    && crate::engine_host::policy()
+                                        == crate::engine_host::HostPolicy::SpawnOrAttach)
+                                    .then(|| tokio::spawn(supervise_host(ipc_port, data_dir.map(Into::into)))),
+                            ),
+                            detach: std::sync::atomic::AtomicBool::new(false),
                         }),
                         engine_info,
                         engine_info_rx: Some(info_rx),
@@ -540,6 +605,9 @@ impl EngineHandle {
                 url: "memory://test".into(),
                 lifecycle_task: tokio::sync::Mutex::new(None),
                 info_refresh_task: tokio::sync::Mutex::new(None),
+                host_owned: false,
+                host_supervisor: std::sync::Mutex::new(None),
+                detach: std::sync::atomic::AtomicBool::new(false),
             }),
             engine_info: EngineInfo {
                 device_id: "local".into(),
@@ -608,6 +676,65 @@ impl EngineHandle {
     pub async fn shutdown(&self) {
         self.inner.shutdown().await;
     }
+
+    /// See [`EngineBackend::detach_for_update`].
+    pub fn detach_for_update(&self) {
+        self.inner.detach_for_update();
+    }
+
+    /// Stop restarting the engine host: an explicit stop is about to be sent.
+    pub fn stop_supervising(&self) {
+        self.inner.stop_supervising();
+    }
+
+    /// `false` for an engine that outlives this window on its own (a daemon
+    /// somebody else started): the quit affordance then offers to stop it.
+    pub fn stops_on_quit(&self) -> bool {
+        self.inner.stops_on_quit()
+    }
+}
+
+/// Start the engine host again when it goes away under a live window (it
+/// crashed, or was stopped by something else): the window's redialing client
+/// then reconnects by itself. Two refused probes in a row, and a pause after
+/// each attempt, keep a draining host or a slow start from being doubled up.
+async fn supervise_host(port: u16, data_dir: Option<std::path::PathBuf>) {
+    #[cfg(unix)]
+    {
+        let mut refused = 0;
+        let mut restarts = 0;
+        loop {
+            tokio::time::sleep(std::time::Duration::from_secs(3)).await;
+            let up = tokio::net::TcpStream::connect(("127.0.0.1", port))
+                .await
+                .is_ok();
+            refused = if up { 0 } else { refused + 1 };
+            if refused >= 2 {
+                // A host that shut down on purpose (a stop request, a signal)
+                // leaves a note; only one that vanished is started again.
+                if data_dir
+                    .as_deref()
+                    .is_some_and(|dir| dir.join("engine-stopped").exists())
+                {
+                    tracing::info!(port, "the engine host was stopped on purpose; not restarting it");
+                    return;
+                }
+                if restarts >= 3 {
+                    tracing::warn!(port, "the engine host keeps dying; giving up on restarting it");
+                    return;
+                }
+                restarts += 1;
+                tracing::warn!(port, "the engine host is gone; starting it again");
+                if let Err(error) = crate::engine_host::ensure_engine_host(port).await {
+                    tracing::warn!(%error, "could not restart the engine host");
+                }
+                refused = 0;
+                tokio::time::sleep(std::time::Duration::from_secs(10)).await;
+            }
+        }
+    }
+    #[cfg(not(unix))]
+    let _ = port;
 }
 
 /// Re-run the `EngineInfo` handshake after every redial: the engine behind
@@ -1328,8 +1455,7 @@ impl AppState {
         if Some(chat.device_id.as_str()) == self.local_device_id.as_deref() {
             return false;
         }
-        if self.connectivity.state == S::Offline
-            || !self.device_online(&chat.device_id, Utc::now())
+        if self.connectivity.state == S::Offline || !self.device_online(&chat.device_id, Utc::now())
         {
             return true;
         }
@@ -2267,6 +2393,8 @@ impl AppState {
             self.harness_updates.clear();
         }
         self.engine = Some(handle.clone());
+        // A window a swap started is attached now: tell the old one it may go.
+        crate::app_update::signal_ready(cx);
         let mut watch_tasks = Vec::with_capacity(10);
         if let Some(task) = spawn_deferred_engine_watch(cx, handle.clone()) {
             watch_tasks.push(task);
@@ -2648,7 +2776,10 @@ impl AppState {
         cx.spawn(async move |_, _| {
             if let Err(error) = handle
                 .client()
-                .call(methods::FOCUS_CHAT, serde_json::json!({ "chatId": chat_id }))
+                .call(
+                    methods::FOCUS_CHAT,
+                    serde_json::json!({ "chatId": chat_id }),
+                )
                 .await
             {
                 tracing::debug!(%chat_id, %error, "chat focus sync hint unavailable");
@@ -3222,6 +3353,7 @@ mod tests {
     use chrono::TimeDelta;
     use gpui::AppContext;
     use zeron_engine::{EngineCore, default_registry};
+    use zeron_rpc::RpcReply;
     use zeron_rpc::connect_ws;
     // `SessionStatus` is only needed to build the fixtures below — the module
     // itself derives everything through `zeron_proto::view`.
@@ -3275,6 +3407,93 @@ mod tests {
                 other => Err(RpcError::UnknownMethod(other.into())),
             }
         }
+    }
+
+    /// Answers identity and counts `StopEngine` calls: what a window's quit
+    /// does to its engine host, observed from the host's side.
+    struct StopCountingRpc {
+        info: EngineInfo,
+        stops: Arc<std::sync::atomic::AtomicUsize>,
+    }
+
+    #[async_trait]
+    impl RpcService for StopCountingRpc {
+        async fn handle(
+            &self,
+            method: &str,
+            _params: serde_json::Value,
+        ) -> Result<RpcReply, RpcError> {
+            match method {
+                methods::ENGINE_INFO => RpcReply::value(&self.info),
+                methods::ENGINE_READY => RpcReply::value(&serde_json::json!({ "ready": true })),
+                methods::STOP_ENGINE => {
+                    self.stops.fetch_add(1, std::sync::atomic::Ordering::SeqCst);
+                    RpcReply::value(&serde_json::json!({ "stopping": true }))
+                }
+                other => Err(RpcError::UnknownMethod(other.into())),
+            }
+        }
+    }
+
+    /// Serve a host with `capabilities`, attach a window, run `then` on the
+    /// handle, and return how many times the host was told to stop.
+    async fn stops_after(
+        capabilities: Vec<String>,
+        then: impl AsyncFnOnce(&EngineHandle),
+    ) -> usize {
+        let listener = tokio::net::TcpListener::bind("127.0.0.1:0").await.unwrap();
+        let port = listener.local_addr().unwrap().port();
+        let stops = Arc::new(std::sync::atomic::AtomicUsize::new(0));
+        let server = zeron_engine::serve_ipc_on(
+            listener,
+            Arc::new(StopCountingRpc {
+                info: info_with(capabilities),
+                stops: stops.clone(),
+            }),
+        );
+        let handle = EngineHandle::attach_to_daemon(port, None)
+            .await
+            .expect("attaches to the fake host");
+        then(&handle).await;
+        handle.shutdown().await;
+        server.abort();
+        stops.load(std::sync::atomic::Ordering::SeqCst)
+    }
+
+    fn app_hosted() -> Vec<String> {
+        vec![zeron_proto::capabilities::APP_HOSTED.to_string()]
+    }
+
+    #[tokio::test]
+    async fn quitting_stops_an_engine_host_the_app_started() {
+        assert_eq!(stops_after(app_hosted(), async |_| {}).await, 1);
+    }
+
+    #[tokio::test]
+    async fn quitting_leaves_a_service_or_hand_started_daemon_running() {
+        assert_eq!(stops_after(Vec::new(), async |_| {}).await, 0);
+    }
+
+    #[tokio::test]
+    async fn an_update_swap_leaves_the_engine_host_running_for_the_new_window() {
+        let stops = stops_after(app_hosted(), async |handle| {
+            assert!(handle.stops_on_quit());
+            handle.detach_for_update();
+        })
+        .await;
+        assert_eq!(stops, 0);
+    }
+
+    #[tokio::test]
+    async fn only_an_app_hosted_engine_stops_when_its_window_quits() {
+        let mut daemon = None;
+        let _ = stops_after(Vec::new(), async |handle| {
+            daemon = Some(handle.stops_on_quit());
+        })
+        .await;
+        // A daemon somebody else runs keeps running: the overlay then offers
+        // "Stop daemon and quit" instead of a plain quit.
+        assert_eq!(daemon, Some(false));
     }
 
     struct FixedInfoRpc(EngineInfo);

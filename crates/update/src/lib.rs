@@ -999,9 +999,33 @@ fn watches_for_newer_install(is_installed_service: bool, can_hand_off: bool) -> 
 pub fn engine_auto_update_enabled(can_hand_off: bool) -> bool {
     engine_auto_update_from(
         std::env::var("ZERON_AUTO_UPDATE").ok().as_deref(),
-        std::env::var("ZERON_ENGINE_HOST").ok().as_deref(),
+        engine_host().as_deref(),
         can_hand_off,
     )
+}
+
+static ENGINE_HOST: std::sync::OnceLock<Option<String>> = std::sync::OnceLock::new();
+
+/// Read `ZERON_ENGINE_HOST` (set by an app that started this process as its
+/// engine host) into the process and REMOVE it from the environment, so the
+/// agents and terminals this process spawns never inherit it and mistake
+/// themselves for an app-hosted engine. `keep` says whether this process is
+/// such a host at all. Call once, first thing in `main`, while single-threaded.
+pub fn capture_engine_host_env(keep: bool) {
+    let value = std::env::var("ZERON_ENGINE_HOST").ok();
+    // SAFETY: the caller runs this before any thread exists.
+    unsafe { std::env::remove_var("ZERON_ENGINE_HOST") };
+    let _ = ENGINE_HOST.set(if keep { value } else { None });
+}
+
+/// The engine host role captured by [`capture_engine_host_env`] (`Some("app")`
+/// for an app's own host); the environment itself when nothing captured it
+/// (tests, embedders).
+pub fn engine_host() -> Option<String> {
+    match ENGINE_HOST.get() {
+        Some(value) => value.clone(),
+        None => std::env::var("ZERON_ENGINE_HOST").ok(),
+    }
 }
 
 fn engine_auto_update_from(

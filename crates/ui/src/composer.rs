@@ -2147,6 +2147,12 @@ impl ComposerInput {
         cx.notify();
     }
 
+    /// An IME composition is in progress (unconfirmed marked text): the
+    /// window must not be swapped out from under it.
+    pub fn is_composing(&self) -> bool {
+        self.marked_range.is_some()
+    }
+
     pub fn is_empty(&self) -> bool {
         self.content.is_empty()
     }
@@ -5407,6 +5413,11 @@ pub struct Composer {
 impl EventEmitter<ComposerEvent> for Composer {}
 
 impl Composer {
+    /// An IME composition is in progress in the message box.
+    pub fn is_composing(&self, cx: &App) -> bool {
+        self.input.read(cx).is_composing()
+    }
+
     pub(crate) fn set_dock_frame(
         &mut self,
         frame: crate::composer_dock::DockFrame,

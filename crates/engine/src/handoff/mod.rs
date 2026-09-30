@@ -21,7 +21,9 @@ mod coordinator;
 mod fds;
 mod manifest;
 
-pub use coordinator::{HandoffError, exec_into, preflight, prune_rollback_copies, roll_back};
+pub use coordinator::{
+    HandoffError, exec_into, preflight, prune_rollback_copies, roll_back, rollback_exe,
+};
 pub use fds::{adopt_fd, is_cloexec, listener_from_inherited, set_inheritable};
 pub use manifest::{
     Adoption, HANDOFF_ATTEMPT_ENV, HANDOFF_FD_ENV, HANDOFF_ROLLED_BACK_ENV, MANIFEST_VERSION,

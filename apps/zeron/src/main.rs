@@ -33,7 +33,13 @@ struct Cli {
 #[derive(Subcommand)]
 enum Command {
     /// Run the engine without a UI (local-only unless a saved session enables sync).
-    Headless,
+    Headless {
+        /// Run as the engine host of a headed app: a cloud profile that still
+        /// needs its organization is onboarded by the attached window, not on
+        /// a terminal. Started by the app itself; not for direct use.
+        #[arg(long, hide = true)]
+        host: bool,
+    },
     /// Answer a live handoff's preflight (used by the running engine before it
     /// replaces itself with this binary; not for direct use).
     #[cfg(unix)]
@@ -194,10 +200,14 @@ fn main() -> anyhow::Result<()> {
     #[cfg(windows)]
     attach_parent_console();
     let cli = Cli::parse();
+    zeron_update::capture_engine_host_env(matches!(
+        &cli.command,
+        Some(Command::Headless { host: true })
+    ));
     #[cfg(windows)]
     if let Some(pid) = cli.wait_for_exit {
         zeron_update::windows::wait_for_exit(pid)?;
-    } else if matches!(&cli.command, None | Some(Command::Headless)) {
+    } else if matches!(&cli.command, None | Some(Command::Headless { .. })) {
         zeron_update::windows::cleanup_previous_image();
     }
     // Long-running modes log at info, one-shot CLI commands at warn (RUST_LOG
@@ -206,7 +216,7 @@ fn main() -> anyhow::Result<()> {
     // journald on every snapshot export — enough to fill a disk on a
     // long-running headless host. Quiet them by default (RUST_LOG still
     // overrides the whole filter).
-    let long_running = matches!(&cli.command, None | Some(Command::Headless));
+    let long_running = matches!(&cli.command, None | Some(Command::Headless { .. }));
     let default_filter = if long_running {
         "info,loro_internal=warn,loro=warn"
     } else {
@@ -220,10 +230,11 @@ fn main() -> anyhow::Result<()> {
     // the engine logs the exact failure line. One file per launch, previous
     // launch kept as `.old`.
     let log_file = if long_running {
-        let mode = if cli.command.is_some() {
-            "headless"
-        } else {
-            "headed"
+        let mode = match &cli.command {
+            // The app's own engine host logs beside the window's file, not over it.
+            Some(Command::Headless { host: true }) => "host",
+            Some(_) => "headless",
+            None => "headed",
         };
         open_log_file(mode)
     } else {
@@ -275,15 +286,23 @@ fn main() -> anyhow::Result<()> {
     }
 
     match cli.command {
-        Some(Command::Headless) => {
+        Some(Command::Headless { host }) => {
             let runtime = tokio::runtime::Runtime::new()?;
             runtime.block_on(async {
                 let engine = zeron_engine::Engine::new(engine_config_from_env());
                 #[cfg(unix)]
                 if let Some(adoption) = adoption {
-                    return engine.run_adopting(adoption).await;
+                    return if host {
+                        engine.run_host_adopting(adoption).await
+                    } else {
+                        engine.run_adopting(adoption).await
+                    };
                 }
-                engine.run().await
+                if host {
+                    engine.run_host().await
+                } else {
+                    engine.run().await
+                }
             })
         }
         #[cfg(unix)]

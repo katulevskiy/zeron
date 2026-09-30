@@ -25,6 +25,7 @@ pub mod doc_host;
 #[cfg(unix)]
 pub mod handoff;
 pub mod harness_updates;
+pub mod host;
 mod http_error;
 pub mod instance_lock;
 pub mod local_import;
@@ -163,8 +164,12 @@ pub struct EngineCore {
     handoff_listener_fd: std::sync::atomic::AtomicI32,
     /// A handoff is running; a second one is refused.
     handoff_running: std::sync::atomic::AtomicBool,
-    /// This engine's data directory (where a handoff keeps its rollback copy).
+    /// This engine's data directory.
     data_dir: PathBuf,
+    /// Where a failed successor hands the handoff back to (see
+    /// [`handoff::rollback_exe`]); set at boot, before any update can swap the
+    /// binary on disk.
+    rollback_exe: std::sync::OnceLock<PathBuf>,
 }
 
 /// What a predecessor engine image handed over: the live terminals and runs.
@@ -423,6 +428,7 @@ impl EngineCore {
             handoff_listener_fd: std::sync::atomic::AtomicI32::new(-1),
             handoff_running: std::sync::atomic::AtomicBool::new(false),
             data_dir: data_dir.to_path_buf(),
+            rollback_exe: std::sync::OnceLock::new(),
         })
     }
 
@@ -752,6 +758,7 @@ impl RpcService for HeadlessRpc {
                                     info.capabilities
                                         .push(zeron_proto::capabilities::HANDOFF_V1.to_string());
                                 }
+                                host::advertise_app_host(&mut info);
                                 RpcReply::value(&info)
                             }
                             Err(_) => Ok(RpcReply::Value(value)),
@@ -1114,8 +1121,28 @@ impl Engine {
         self.run_with(
             #[cfg(unix)]
             None,
+            false,
         )
         .await
+    }
+
+    /// [`Self::run`] as the engine host of a headed app (`zeron headless
+    /// --host`): a captured cloud profile that still needs its organization is
+    /// onboarded by the attached window over IPC instead of on a terminal that
+    /// does not exist.
+    pub async fn run_host(self) -> anyhow::Result<()> {
+        self.run_with(
+            #[cfg(unix)]
+            None,
+            true,
+        )
+        .await
+    }
+
+    /// [`Self::run_adopting`] for an engine host.
+    #[cfg(unix)]
+    pub async fn run_host_adopting(self, adoption: handoff::Adoption) -> anyhow::Result<()> {
+        self.run_with(Some(adoption), true).await
     }
 
     /// Run as the successor of a live handoff: adopt the predecessor's IPC
@@ -1124,12 +1151,13 @@ impl Engine {
     /// the predecessor, which adopts the same manifest.
     #[cfg(unix)]
     pub async fn run_adopting(self, adoption: handoff::Adoption) -> anyhow::Result<()> {
-        self.run_with(Some(adoption)).await
+        self.run_with(Some(adoption), false).await
     }
 
     async fn run_with(
         self,
         #[cfg(unix)] adoption: Option<handoff::Adoption>,
+        host: bool,
     ) -> anyhow::Result<()> {
         let config = self.config;
         tracing::info!(data_dir = %config.data_dir.display(), "engine starting");
@@ -1138,6 +1166,7 @@ impl Engine {
             &config,
             #[cfg(unix)]
             adoption.as_ref(),
+            host,
         )
         .await
         {
@@ -1158,6 +1187,7 @@ impl Engine {
             handoff::prune_rollback_copies(&config.data_dir);
             adoption.commit();
         }
+        let _ = std::fs::remove_file(config.data_dir.join("engine-stopped"));
         let Booted {
             runtime,
             server,
@@ -1184,6 +1214,8 @@ impl Engine {
             }
         }
         tracing::info!("shutting down");
+        // Tell whoever supervises this engine that it went away on purpose.
+        let _ = std::fs::write(config.data_dir.join("engine-stopped"), b"");
         server.abort();
         runtime.shutdown().await;
         Ok(())
@@ -1194,6 +1226,7 @@ impl Engine {
     async fn boot(
         config: &EngineConfig,
         #[cfg(unix)] adoption: Option<&handoff::Adoption>,
+        host: bool,
     ) -> anyhow::Result<Booted> {
         std::fs::create_dir_all(&config.data_dir)?;
         // Nothing this image spawns may inherit what the predecessor handed
@@ -1211,8 +1244,30 @@ impl Engine {
         // A captured cloud session without an organization must finish onboarding
         // before its profile can open. A clean signed-out install is local and never
         // enters the terminal sign-in flow.
+        //
+        // An engine host has no terminal: it serves identity and sign-in over
+        // IPC first (the attached window drives the onboarding) and keeps that
+        // very listener for the assembled service, so the window's connection
+        // and subscriptions never notice the switch.
+        #[cfg_attr(not(unix), allow(unused_mut))]
+        let (stop_tx, mut stop_rx) = tokio::sync::mpsc::unbounded_channel();
+        #[cfg(unix)]
+        let mut front: Option<HostFront> = None;
         if workspace_scope == WorkspaceScope::Synced && profile.is_none() {
-            terminal_sign_in(&auth).await?;
+            #[cfg(unix)]
+            if host && adoption.is_none() {
+                let hosted =
+                    HostFront::serve(config, &auth, workspace_scope, stop_tx.clone()).await?;
+                wait_for_host_onboarding(&auth, &mut stop_rx).await?;
+                front = Some(hosted);
+            } else {
+                terminal_sign_in(&auth).await?;
+            }
+            #[cfg(not(unix))]
+            {
+                let _ = host;
+                terminal_sign_in(&auth).await?;
+            }
             profile = Self::resolve_profile(config, &auth, workspace_scope)?;
         }
         let profile = profile
@@ -1233,11 +1288,18 @@ impl Engine {
         #[cfg(not(unix))]
         let runtime = Self::assemble_runtime(config, auth, profile).await?;
         let runtime = Arc::new(runtime);
+        #[cfg(unix)]
+        {
+            let dir = config.data_dir.clone();
+            if let Ok(path) = tokio::task::spawn_blocking(move || handoff::rollback_exe(&dir)).await
+            {
+                let _ = runtime.core().rollback_exe.set(path);
+            }
+        }
 
         // A daemon exists to serve this port, so a bind failure is fatal here —
         // unlike the headed app, which can still work over its in-process
         // transport (see `serve_ipc`).
-        let (stop_tx, stop_rx) = tokio::sync::mpsc::unbounded_channel();
         let service: Arc<dyn RpcService> = Arc::new(HeadlessRpc {
             inner: runtime.core().rpc_service(),
             stop_tx,
@@ -1250,6 +1312,11 @@ impl Engine {
         #[cfg(unix)]
         let (server, port) = {
             let (server, listener_fd, port) = match adoption {
+                _ if front.is_some() => {
+                    let mut front = front.take().expect("checked");
+                    let server = front.finish(service);
+                    (server, front.listener_fd, front.port)
+                }
                 Some(adoption) => {
                     let listener = handoff::listener_from_inherited(adoption.manifest.listener_fd)?;
                     let listener_fd = std::os::fd::AsRawFd::as_raw_fd(&listener);
@@ -1326,6 +1393,97 @@ impl Engine {
             workspace_scope,
             _refresh_loop: refresh_loop,
         })
+    }
+}
+
+/// The IPC front of an engine host that is still waiting for the window to
+/// finish signing in: identity and sign-in are served now, everything else
+/// waits, and the SAME listener carries the assembled service afterwards.
+#[cfg(unix)]
+struct HostFront {
+    /// Taken by [`Self::finish`]; still here on a failed boot, when dropping
+    /// the front stops serving and tells waiting clients why.
+    server: Option<tokio::task::JoinHandle<()>>,
+    listener_fd: std::os::fd::RawFd,
+    port: u16,
+    cell: Arc<tokio::sync::OnceCell<Arc<dyn RpcService>>>,
+    state: tokio::sync::watch::Sender<host::DeferredEngineState>,
+}
+
+#[cfg(unix)]
+impl HostFront {
+    async fn serve(
+        config: &EngineConfig,
+        auth: &Auth,
+        scope: WorkspaceScope,
+        stop: tokio::sync::mpsc::UnboundedSender<()>,
+    ) -> anyhow::Result<Self> {
+        use std::os::fd::AsRawFd;
+        let (state, state_rx) = tokio::sync::watch::channel(host::DeferredEngineState::Waiting);
+        let cell = Arc::new(tokio::sync::OnceCell::new());
+        let service = Arc::new(
+            host::DeferredEngineRpc::new(
+                rpc::AuthRpc::new(auth.clone()),
+                Engine::engine_info(config, scope)?,
+                state_rx,
+                cell.clone(),
+            )
+            .with_stop(stop),
+        );
+        // A host exists to serve this port: failing to bind is fatal.
+        let listener = tokio::net::TcpListener::bind(("127.0.0.1", config.ipc_port)).await?;
+        let listener_fd = listener.as_raw_fd();
+        let port = listener.local_addr()?.port();
+        Ok(Self {
+            server: Some(serve_ipc_on(listener, service)),
+            listener_fd,
+            port,
+            cell,
+            state,
+        })
+    }
+
+    /// The engine is assembled: hand the waiting calls to its service and
+    /// give the running server to the caller.
+    fn finish(&mut self, service: Arc<dyn RpcService>) -> tokio::task::JoinHandle<()> {
+        let _ = self.cell.set(service);
+        self.state.send_replace(host::DeferredEngineState::Ready);
+        self.server.take().expect("finished once")
+    }
+}
+
+#[cfg(unix)]
+impl Drop for HostFront {
+    fn drop(&mut self) {
+        if let Some(server) = self.server.take() {
+            self.state.send_replace(host::DeferredEngineState::Failed(
+                "the engine failed to start".into(),
+            ));
+            server.abort();
+        }
+    }
+}
+
+/// Wait for the window to finish sign-in and organization onboarding. A stop
+/// request ends the wait (the host exits instead of waiting forever).
+#[cfg(unix)]
+async fn wait_for_host_onboarding(
+    auth: &Auth,
+    stop: &mut tokio::sync::mpsc::UnboundedReceiver<()>,
+) -> anyhow::Result<()> {
+    let mut state = auth.watch_state();
+    loop {
+        if state.borrow().is_signed_in() {
+            return Ok(());
+        }
+        tokio::select! {
+            changed = state.changed() => {
+                if changed.is_err() {
+                    anyhow::bail!("authentication state closed before workspace onboarding");
+                }
+            }
+            _ = stop.recv() => anyhow::bail!("stopped before sign-in finished"),
+        }
     }
 }
 

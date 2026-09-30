@@ -21,6 +21,12 @@ pub mod capabilities {
     /// serves that method, never by an embedded engine that shares `EngineRpc`.
     pub const HANDOFF_V1: &str = "handoff-v1";
 
+    /// This engine is the host a headed app started for itself (its process
+    /// carries `ZERON_ENGINE_HOST=app`): quitting that app stops it, and an
+    /// update swap of the window leaves it running. Not in [`CURRENT`]; a
+    /// service or hand-started engine never has it.
+    pub const APP_HOSTED: &str = "app-hosted";
+
     pub const CURRENT: &[&str] = &[
         COMPOSER_REFERENCES_V1,
         MESSAGE_QUEUE_V1,

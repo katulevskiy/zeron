@@ -33,6 +33,11 @@ pub enum HandoffError {
     /// `execve` failed. The freeze was undone: the engine is running as before.
     #[error("exec failed: {0}")]
     Exec(std::io::Error),
+    /// Describing what the successor inherits failed (descriptors, manifest).
+    /// Everything was thawed; not necessarily transient, so it is not retried
+    /// as eagerly as a `Freeze`.
+    #[error("could not prepare the handoff: {0}")]
+    Prepare(String),
 }
 
 /// `exe handoff-preflight` must succeed and print `handoff-ok <N>` with `N`
@@ -98,6 +103,11 @@ fn exec_with(
     if let Some(version) = rolled_back_from {
         command.env(HANDOFF_ROLLED_BACK_ENV, version);
     }
+    // The role was taken out of the environment at startup (agents must not
+    // inherit it); the next image needs it back.
+    if let Some(host) = zeron_update::engine_host() {
+        command.env("ZERON_ENGINE_HOST", host);
+    }
     command.exec()
 }
 
@@ -139,7 +149,11 @@ pub fn roll_back(adoption: super::manifest::Adoption, error: &anyhow::Error) {
 /// whole app bundle, so by the time the successor fails, that path holds the
 /// NEW binary and a "rollback" would exec the very build that just failed. A
 /// private copy of the running binary, named by version, keeps the way back.
-fn rollback_exe(data_dir: &Path) -> PathBuf {
+///
+/// Call it at BOOT, before anything can swap the bundle: the copy must be of
+/// the binary this process is really running, which only holds until an update
+/// replaces the file at `current_exe()`.
+pub fn rollback_exe(data_dir: &Path) -> PathBuf {
     let current = std::env::current_exe().unwrap_or_default();
     if !cfg!(target_os = "macos") {
         return current;
@@ -147,7 +161,12 @@ fn rollback_exe(data_dir: &Path) -> PathBuf {
     let dir = rollback_dir(data_dir);
     let copy = dir.join(format!("zeron-{}", zeron_update::current_version()));
     let made = (|| -> std::io::Result<()> {
-        if copy.exists() {
+        // A copy left by an earlier boot of this same version is reusable
+        // (the version names the binary); a different size is not this build.
+        if std::fs::metadata(&copy).map(|m| m.len()).ok()
+            == std::fs::metadata(&current).map(|m| m.len()).ok()
+            && copy.exists()
+        {
             return Ok(());
         }
         std::fs::create_dir_all(&dir)?;
@@ -311,7 +330,11 @@ impl EngineCore {
         let mut inherit = Inheritable(Vec::new());
         let manifest = Manifest {
             version: MANIFEST_VERSION,
-            from_exe: rollback_exe(&self.data_dir),
+            from_exe: self
+                .rollback_exe
+                .get()
+                .cloned()
+                .unwrap_or_else(|| std::env::current_exe().unwrap_or_default()),
             from_version: zeron_update::current_version().to_string(),
             listener_fd,
             lock_fd: self._instance_lock.raw_fd(),
@@ -332,7 +355,7 @@ impl EngineCore {
                 terminals.thaw();
                 runs.thaw();
                 resume_queues(self, queues);
-                return HandoffError::Freeze(format!("preparing the handoff: {err}"));
+                return HandoffError::Prepare(err.to_string());
             }
         };
         // A committed engine starts the failure count afresh: `attempt` only

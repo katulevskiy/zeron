@@ -798,3 +798,105 @@ async fn online_runtime_shutdown_stops_edge_workers_and_retires_the_graph() {
     );
     edge_task.abort();
 }
+
+async fn free_port() -> u16 {
+    let listener = tokio::net::TcpListener::bind("127.0.0.1:0").await.unwrap();
+    listener.local_addr().unwrap().port()
+}
+
+async fn connect_when_up(port: u16) -> zeron_rpc::RpcClient {
+    tokio::time::timeout(std::time::Duration::from_secs(20), async {
+        loop {
+            if let Ok(client) = connect_ws(&format!("ws://127.0.0.1:{port}")).await {
+                break client;
+            }
+            tokio::time::sleep(std::time::Duration::from_millis(20)).await;
+        }
+    })
+    .await
+    .expect("the engine host did not start listening")
+}
+
+/// An engine host serves like `zeron headless`: same capabilities, same stop.
+#[cfg(unix)]
+#[tokio::test]
+async fn an_engine_host_serves_like_a_headless_engine_and_stops_on_request() {
+    let dir = tempfile::tempdir().unwrap();
+    let port = free_port().await;
+    let mut engine_config = config(
+        dir.path(),
+        "http://127.0.0.1:1".into(),
+        Some("client_test"),
+        None,
+    );
+    engine_config.ipc_port = port;
+    let host = tokio::spawn(Engine::new(engine_config).run_host());
+    let client = connect_when_up(port).await;
+    let info: EngineInfo = client
+        .call_as(methods::ENGINE_INFO, serde_json::json!({}))
+        .await
+        .unwrap();
+    assert!(info.supports(zeron_proto::capabilities::HANDOFF_V1));
+    client
+        .call(methods::ENGINE_READY, serde_json::json!({}))
+        .await
+        .unwrap();
+    client
+        .call(methods::STOP_ENGINE, serde_json::json!({}))
+        .await
+        .unwrap();
+    tokio::time::timeout(std::time::Duration::from_secs(10), host)
+        .await
+        .expect("the engine host did not stop")
+        .expect("host task panicked")
+        .expect("host shutdown failed");
+}
+
+/// A captured cloud session that still needs its organization: a terminal
+/// engine gives up, an engine host answers identity and sign-in at once, holds
+/// data calls, and can still be stopped.
+#[cfg(unix)]
+#[tokio::test]
+async fn an_engine_host_waits_for_in_window_onboarding_and_can_be_stopped_meanwhile() {
+    let dir = tempfile::tempdir().unwrap();
+    std::fs::write(
+        dir.path().join("session.json"),
+        r#"{"refreshToken":"still-valid","user":{"id":"user_1","email":"u@example.com"}}"#,
+    )
+    .unwrap();
+    let port = free_port().await;
+    let mut engine_config = config(
+        dir.path(),
+        "http://127.0.0.1:1".into(),
+        Some("client_test"),
+        None,
+    );
+    engine_config.ipc_port = port;
+    let host = tokio::spawn(Engine::new(engine_config).run_host());
+    let client = connect_when_up(port).await;
+    // Identity answers while the engine is still waiting.
+    let info: EngineInfo = client
+        .call_as(methods::ENGINE_INFO, serde_json::json!({}))
+        .await
+        .unwrap();
+    assert_eq!(info.workspace_scope, zeron_proto::WorkspaceScope::Synced);
+    // Data calls wait for the onboarding instead of failing.
+    let pending = tokio::time::timeout(
+        std::time::Duration::from_millis(400),
+        client.call(methods::ENGINE_READY, serde_json::json!({})),
+    )
+    .await;
+    assert!(pending.is_err(), "ready before onboarding finished");
+    client
+        .call(methods::STOP_ENGINE, serde_json::json!({}))
+        .await
+        .unwrap();
+    let result = tokio::time::timeout(std::time::Duration::from_secs(10), host)
+        .await
+        .expect("the waiting host did not stop")
+        .expect("host task panicked");
+    assert!(
+        result.unwrap_err().to_string().contains("stopped before"),
+        "a stop request ends the wait"
+    );
+}

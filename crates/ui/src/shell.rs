@@ -1565,6 +1565,7 @@ async fn stop_synced_runtime(
     data_dir: &std::path::Path,
 ) -> Result<(), String> {
     let stop_error = if matches!(engine.mode(), EngineMode::Remote { .. }) {
+        engine.stop_supervising();
         engine
             .client()
             .call(methods::STOP_ENGINE, serde_json::json!({}))
@@ -1788,6 +1789,8 @@ enum PendingExit {
     Quit,
     RuntimeChange,
     InstallUpdate(PathBuf),
+    /// The silent UI swap, waiting for unsaved files to be dealt with.
+    UiSwap,
 }
 
 pub struct Shell {
@@ -2028,6 +2031,16 @@ pub struct Shell {
     /// Last observed `window.is_window_active()` — rising edge fires a
     /// ProbeSync so a broadcast-deaf room heals as the user looks at the app.
     was_window_active: bool,
+    /// Whether the window is in front right now (kept current by the
+    /// activation observer, unlike `was_window_active`, which render edges use).
+    window_in_front: bool,
+    /// The last key press, click or scroll in this window (the UI swap waits
+    /// for it to be old enough).
+    last_interaction: std::time::Instant,
+    /// Polls whether a staged update may replace this window.
+    swap_poll: Option<Task<()>>,
+    /// A swap is under way (installing, or waiting for the new window).
+    swapping: bool,
     /// Dev/testing knobs (`ZERON_OPEN_DIALOG`, `ZERON_FORCE_GATE`,
     /// `ZERON_DEMO_UPLOAD`) — see [`Shell::new`].
     debug_dialog: Option<String>,
@@ -2430,6 +2443,10 @@ impl Shell {
             sidebar_new_keys: std::collections::HashSet::new(),
             resort_epoch: 0,
             was_window_active: false,
+            window_in_front: true,
+            last_interaction: std::time::Instant::now(),
+            swap_poll: None,
+            swapping: false,
             debug_dialog,
             debug_gate,
             debug_upload,
@@ -5788,6 +5805,7 @@ impl Shell {
         self.runtime_change_error = None;
         let ipc_port = self.boot.ipc_port;
         let data_dir = self.data_dir.clone();
+        engine.stop_supervising();
         let shutdown = Tokio::spawn(cx, async move {
             engine
                 .client()
@@ -8246,6 +8264,121 @@ impl Shell {
         )
     }
 
+    /// How busy the user is, for the UI swap.
+    fn swap_gate(&self, cx: &App) -> crate::app_update::SwapGate {
+        crate::app_update::SwapGate {
+            window_active: self.window_in_front,
+            idle_for: self.last_interaction.elapsed(),
+            composing: self.composer.read(cx).is_composing(cx),
+            unsaved_edits: self
+                .file_surfaces
+                .values()
+                .any(|surface| surface.read(cx).has_unsaved_changes()),
+        }
+    }
+
+    /// Ask, every few seconds, whether a staged update may replace this window
+    /// now (silent updates; see [`crate::app_update`]).
+    fn poll_ui_swap(&mut self, cx: &mut Context<Self>) {
+        use crate::app_update::{Action, AppUpdate};
+        if self.swapping {
+            return;
+        }
+        let Some(update) = AppUpdate::global(cx) else {
+            return;
+        };
+        let gate = self.swap_gate(cx);
+        if update.read(cx).swap_action(gate) == Action::Install {
+            self.start_ui_swap(cx);
+        }
+    }
+
+    /// Install the staged update, start the new window, and — once it is up
+    /// and attached to the same engine host — close this one WITHOUT stopping
+    /// the host. If the new window does not come up in time, or the user
+    /// started something in the meantime, this window stays and the swap is
+    /// retried later (the update stays installed; nothing is fetched again).
+    fn start_ui_swap(&mut self, cx: &mut Context<Self>) {
+        use crate::app_update::AppUpdate;
+        if self.swapping {
+            return;
+        }
+        // Unsaved file edits get their usual chance to be saved first.
+        if !self.prepare_exit(PendingExit::UiSwap, cx) {
+            return;
+        }
+        let Some(update) = AppUpdate::global(cx) else {
+            return;
+        };
+        // Everything the new window restores must be on disk first.
+        crate::settings::flush(cx);
+        let version = match update.update(cx, |update, cx| update.install_for_swap(cx)) {
+            Ok(version) => version,
+            Err(_) => return, // the flow says why; the strip shows it
+        };
+        self.swapping = true;
+        let data_dir = update.read(cx).data_dir().to_path_buf();
+        let background = !self.window_in_front;
+        let started = Tokio::spawn(cx, async move {
+            let mut child = crate::app_update::spawn_new_ui(background)?;
+            let up = crate::app_update::wait_for_new_ui(
+                &data_dir,
+                &mut child,
+                std::time::Duration::from_secs(20),
+            )
+            .await;
+            if !up {
+                let _ = child.kill();
+                let _ = child.wait();
+            }
+            anyhow::Ok(up.then_some(child))
+        });
+        cx.spawn(async move |this, cx| {
+            let outcome = match started.await {
+                Ok(Ok(Some(child))) => Ok(child),
+                Ok(Ok(None)) => Err("the new window did not start in time".to_string()),
+                Ok(Err(err)) => Err(format!("{err:#}")),
+                Err(join) => Err(join.to_string()),
+            };
+            this.update(cx, |shell, cx| {
+                shell.swapping = false;
+                let outcome = outcome.and_then(|mut child| {
+                    // Twenty seconds passed: only leave if the user is still
+                    // not in the middle of something.
+                    let gate = shell.swap_gate(cx);
+                    if gate.composing || gate.unsaved_edits {
+                        let _ = child.kill();
+                        let _ = child.wait();
+                        Err("the user started something while the new window started".to_string())
+                    } else {
+                        Ok(())
+                    }
+                });
+                match outcome {
+                    Ok(()) => {
+                        if let Some(engine) = shell.state.read(cx).engine() {
+                            engine.detach_for_update();
+                        }
+                        crate::app_menus::quit_after_save(cx);
+                    }
+                    Err(message) => {
+                        if let Some(update) = crate::app_update::AppUpdate::global(cx) {
+                            update.update(cx, |update, cx| update.swap_postponed(&message, cx));
+                        }
+                    }
+                }
+            })
+            .ok();
+        })
+        .detach();
+    }
+
+    fn set_auto_update(&mut self, on: bool, cx: &mut Context<Self>) {
+        self.settings.auto_update = on;
+        self.schedule_save(cx);
+        cx.notify();
+    }
+
     fn dismiss_github_star_banner(&mut self, cx: &mut Context<Self>) {
         self.settings.github_star_banner_dismissed = true;
         self.schedule_save(cx);
@@ -8317,11 +8450,18 @@ impl Shell {
             StripAction::None => {}
             StripAction::Download => update.update(cx, |update, cx| update.start_download(cx)),
             StripAction::Restart => {
-                if let Some(staged) = update.read(cx).staged() {
+                if update.read(cx).silent() && !cfg!(windows) {
+                    // "Install now" on a silent install swaps the window and
+                    // leaves the engine host running.
+                    self.start_ui_swap(cx);
+                } else if let Some(staged) = update.read(cx).staged() {
                     self.apply_staged_update(staged, cx);
                 }
             }
             StripAction::Explain => update.update(cx, |update, cx| update.show_result(cx)),
+            StripAction::DismissUpdated => {
+                update.update(cx, |update, cx| update.dismiss_updated(cx))
+            }
             StripAction::Advise { open_releases } => {
                 if open_releases {
                     cx.open_url(zeron_update::RELEASES_PAGE);
@@ -8345,6 +8485,11 @@ impl Shell {
             .update(cx, |update, cx| update.install_for_restart(&staged, cx))
             .is_ok()
         {
+            // The relaunched app attaches to the engine host again: an update
+            // must not stop the agents and terminals running in it.
+            if let Some(engine) = self.state.read(cx).engine() {
+                engine.detach_for_update();
+            }
             crate::app_menus::quit_after_save(cx);
         }
     }
@@ -8395,7 +8540,7 @@ impl Shell {
                             )
                         } else if update.install().supports_desktop_update() {
                             match update.flow() {
-                                Flow::Idle => (
+                                Flow::Idle | Flow::Swapped { .. } => (
                                     title,
                                     format!("You're on {current}.").into(),
                                     vec![
@@ -8411,12 +8556,22 @@ impl Shell {
                                 ),
                                 Flow::Ready { version, .. } => (
                                     format!("Zeron {version} is ready").into(),
-                                    "Restart to finish updating. If you don't, it installs the next time you quit Zeron."
-                                        .into(),
+                                    if update.silent() && !cfg!(windows) {
+                                        "It installs by itself when you step away — running agents and terminals keep going."
+                                    } else {
+                                        "Restart to finish updating. If you don't, it installs the next time you quit Zeron."
+                                    }
+                                    .into(),
                                     vec![
                                         UpdatePromptButton::Close("Later"),
                                         UpdatePromptButton::Restart,
                                     ],
+                                ),
+                                Flow::Applied { version } => (
+                                    format!("Zeron {version} is installed").into(),
+                                    "This window switches to it when you step away — running agents and terminals keep going."
+                                        .into(),
+                                    vec![UpdatePromptButton::Close("OK")],
                                 ),
                                 Flow::Failed { message, .. } => (
                                     title,
@@ -8693,6 +8848,25 @@ impl Shell {
                     };
                     menu.child(row)
                 })
+                .child({
+                    let on = self.settings.auto_update;
+                    popover::menu_row(theme, false, "user-menu-auto-update")
+                        .id("user-menu-auto-update")
+                        .on_click(cx.listener(move |this, _, _, cx| {
+                            this.close_user_menu(cx);
+                            this.set_auto_update(!on, cx);
+                        }))
+                        .child(
+                            icon(icons::REFRESH)
+                                .size(px(16.0))
+                                .text_color(theme.text_muted),
+                        )
+                        .child(SharedString::from(if on {
+                            "Automatic updates: on"
+                        } else {
+                            "Automatic updates: off"
+                        }))
+                })
                 // macOS keeps "Check for Updates…" in the app menu under
                 // About; elsewhere there is no app menu, so it lives here.
                 .when(!cfg!(target_os = "macos"), |menu| {
@@ -8806,7 +8980,7 @@ impl Shell {
             .state
             .read(cx)
             .engine()
-            .is_some_and(|engine| matches!(engine.mode(), EngineMode::Remote { .. }));
+            .is_some_and(|engine| !engine.stops_on_quit());
         let runtime_change_label = if self.runtime_change_task.is_some() {
             "Stopping engine…"
         } else if remote_engine {
@@ -9255,6 +9429,7 @@ impl Shell {
         window: &mut Window,
         cx: &mut Context<Self>,
     ) {
+        self.last_interaction = std::time::Instant::now();
         if event.keystroke.key == "escape" && self.sidebar_session_transfer.is_some() {
             cx.stop_active_drag(window);
             self.cancel_sidebar_session_transfer(cx);
@@ -12180,6 +12355,7 @@ impl Render for Shell {
                             PendingExit::InstallUpdate(staged) => {
                                 shell.apply_staged_update(staged, cx)
                             }
+                            PendingExit::UiSwap => shell.start_ui_swap(cx),
                             PendingExit::Quit => unreachable!(),
                         })
                         .ok();
@@ -12301,10 +12477,29 @@ impl Render for Shell {
         self.reduced_motion = motion::reduced_motion(cx);
         self.motion_active.set(false);
 
+        if self.swap_poll.is_none() {
+            self.swap_poll = Some(cx.spawn(async move |this, cx| {
+                loop {
+                    cx.background_executor()
+                        .timer(std::time::Duration::from_secs(5))
+                        .await;
+                    if this.update(cx, |shell, cx| shell.poll_ui_swap(cx)).is_err() {
+                        break;
+                    }
+                }
+            }));
+        }
+        if let Some(update) = crate::app_update::AppUpdate::global(cx) {
+            let on = self.settings.auto_update;
+            update.update(cx, |update, cx| update.set_auto_update(on, cx));
+        }
+
         if self.activation_sub.is_none() {
             self.activation_sub = Some(cx.observe_window_activation(
                 window,
                 |this: &mut Shell, window, cx| {
+                    this.window_in_front = window.is_window_active();
+                    this.last_interaction = std::time::Instant::now();
                     motion::window_activation_changed(window.is_window_active(), cx);
                     if window.is_window_active()
                         && let Some(update) = crate::app_update::AppUpdate::global(cx)
@@ -12401,6 +12596,12 @@ impl Render for Shell {
                 }),
             )
             .capture_key_down(cx.listener(Self::on_key_down_capture))
+            .capture_any_mouse_down(cx.listener(|this, _, _, _| {
+                this.last_interaction = std::time::Instant::now();
+            }))
+            .on_scroll_wheel(cx.listener(|this, _, _, _| {
+                this.last_interaction = std::time::Instant::now();
+            }))
             .on_key_down(cx.listener(Self::on_key_down))
             .on_drag_move(cx.listener(Self::on_sidebar_drag))
             .on_drag_move(cx.listener(Self::on_right_pane_drag))
