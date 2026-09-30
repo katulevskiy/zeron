@@ -231,10 +231,9 @@ jobs:
         run: |
           rustup update stable --no-self-update
           rustup show active-toolchain || rustup toolchain install
-          # Only the simulator slice is built (device target not needed). Downloading + unpacking rust-std is
-          # ~90s on these runners, so overlap it with the cache restore and join before the cargo build.
-          nohup rustup target add aarch64-apple-ios-sim > "$RUNNER_TEMP/target-add.log" 2>&1 &
-          echo $! > "$RUNNER_TEMP/target-add.pid"
+          # Only the simulator slice is built (device target not needed). Tried overlapping this with the cache
+          # restore in the background: no gain (rust-cache's `rustc -vV` blocks on the toolchain lock).
+          rustup target add aarch64-apple-ios-sim
       - uses: Swatinem/rust-cache@v2
         with:
           prefix-key: lab-macos-${{ inputs.cache_ver }}-ios
@@ -249,9 +248,6 @@ jobs:
           done
       - name: Build Rust core for the simulator (bindings come from the Linux job)
         run: |
-          while kill -0 "$(cat "$RUNNER_TEMP/target-add.pid")" 2>/dev/null; do sleep 1; done
-          cat "$RUNNER_TEMP/target-add.log"
-          rustup target list --installed | grep -x aarch64-apple-ios-sim
           IPHONEOS_DEPLOYMENT_TARGET=26.0 cargo build --locked -p zeron-mobile --lib --profile mobile --target aarch64-apple-ios-sim
           out=target/ios-core/iphonesimulator
           mkdir -p "$out/include"
