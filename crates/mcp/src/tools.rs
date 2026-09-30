@@ -30,6 +30,9 @@ const MAX_WAIT: Duration = Duration::from_secs(3600);
 /// A session row older than this is not trusted to still be working
 /// (the UI's staleness window): a crashed host must not read as busy forever.
 const SESSION_STALE: chrono::Duration = chrono::Duration::seconds(45);
+/// How long a completed wait keeps re-reading the transcript for the reply
+/// when the session row outran the (separately synced) chat doc.
+const TRANSCRIPT_GRACE: Duration = Duration::from_secs(20);
 /// Fan-out cap: unarchived chats one chat may have spawned at once (side and
 /// top-level together). Archiving finished workers frees slots.
 pub const MAX_LIVE_SPAWNS: usize = 32;
@@ -799,8 +802,12 @@ impl Tools {
         let harness = match args.harness.as_deref() {
             Some(raw) => {
                 let id: HarnessId = parse_enum("harness", raw).map_err(anyhow::Error::msg)?;
+                // The mock test rig is never offered in pickers (always
+                // "disabled"), but an explicit request for it is honoured when
+                // the host has it, as the dev rig's `ZERON_HARNESS=mock` does.
                 if let Some(info) = harnesses.iter().find(|h| h.id == id)
                     && !info.available()
+                    && !(id == HarnessId::Mock && info.installed)
                 {
                     anyhow::bail!(
                         "harness {raw} is not available on device {device_id}; available there: {}",
@@ -1288,8 +1295,31 @@ impl Tools {
             .zeron
             .wait_for_turn(chat, baseline, expect_turn, timeout)
             .await?;
-        let entries = self.zeron.transcript(&chat.id).await.unwrap_or_default();
-        let rendered = render_entries(&entries, RenderOptions::default());
+        // The session row and the transcript sync separately: for a chat
+        // hosted on another device the "idle" row can land here before the
+        // reply does. After a completed send, give the replica a moment to
+        // catch up instead of reporting an empty reply.
+        let grace = std::time::Instant::now() + TRANSCRIPT_GRACE;
+        let rendered = loop {
+            let entries = self.zeron.transcript(&chat.id).await.unwrap_or_default();
+            let rendered = render_entries(&entries, RenderOptions::default());
+            let settled = rendered
+                .iter()
+                .rev()
+                .find(|m| m.role == zeron_doc::MessageRole::Assistant)
+                .is_some_and(|m| {
+                    m.created_at >= since_millis.saturating_sub(2_000)
+                        && m.status != Some(zeron_doc::MessageStatus::Streaming)
+                });
+            if outcome != TurnOutcome::Completed
+                || since_millis == 0
+                || settled
+                || std::time::Instant::now() >= grace
+            {
+                break rendered;
+            }
+            tokio::time::sleep(Duration::from_millis(250)).await;
+        };
         let replies: Vec<&RenderedMessage> = rendered
             .iter()
             .filter(|m| m.role == zeron_doc::MessageRole::Assistant)
@@ -1540,6 +1570,11 @@ mod tests {
         beta_parent: Option<String>,
         /// Extra chat rows appended to the two fixed ones.
         extra_chats: Vec<Value>,
+        /// Simulate a remote host: every created chat's session row reads as
+        /// a finished turn at once, while its reply reaches the transcript
+        /// only from the third read on (the doc syncing behind the row).
+        lagging_remote_reply: bool,
+        transcript_reads: std::sync::atomic::AtomicUsize,
     }
 
     fn stream(item: Value) -> RpcReply {
@@ -1602,7 +1637,37 @@ mod tests {
                     chats.extend(self.extra_chats.iter().cloned());
                     stream(Value::Array(chats))
                 }
+                methods::WATCH_SESSIONS if self.lagging_remote_reply => {
+                    let rows: Vec<Value> = self
+                        .writes
+                        .lock()
+                        .unwrap()
+                        .iter()
+                        .filter(|(_, p)| p["op"] == "createChat")
+                        .map(|(_, p)| json!({
+                            "chatId": p["chatId"], "deviceId": p["deviceId"], "status": "idle",
+                            "startedAt": null, "updatedAt": chrono::Utc::now(),
+                            "lastCompletedTurn": "turn-1"
+                        }))
+                        .collect();
+                    stream(Value::Array(rows))
+                }
                 methods::WATCH_SESSIONS => stream(json!([])),
+                methods::WATCH_DOC_MESSAGES
+                    if self.lagging_remote_reply
+                        && self
+                            .transcript_reads
+                            .fetch_add(1, std::sync::atomic::Ordering::SeqCst)
+                            >= 2 =>
+                {
+                    stream(json!({ "reset": [
+                        { "id": "u1", "role": "user", "createdAt": 1, "deviceId": "dev-gpu",
+                          "parts": [{ "kind": "text", "id": "t", "text": "go" }] },
+                        { "id": "a9", "role": "assistant", "createdAt": now_millis(),
+                          "deviceId": "dev-gpu", "status": "complete",
+                          "parts": [{ "kind": "text", "id": "t", "text": "late reply" }] }
+                    ]}))
+                }
                 methods::LIST_HARNESSES | methods::LIST_MODELS
                     if params.get("targetDeviceId").is_some() =>
                 {
@@ -1624,7 +1689,8 @@ mod tests {
                     { "id": "claude-code", "name": "Claude Code", "supportsSteering": true,
                       "steeringMode": "step-boundary", "reasoningLevels": [], "installed": true, "enabled": true },
                     { "id": "codex", "name": "Codex", "supportsSteering": true,
-                      "steeringMode": "turn-boundary", "reasoningLevels": [], "installed": false, "enabled": true }
+                      "steeringMode": "turn-boundary", "reasoningLevels": [], "installed": false, "enabled": true },
+                    { "id": "mock", "name": "Mock", "installed": true, "enabled": false }
                 ])),
                 methods::LIST_MODELS => RpcReply::Value(json!([
                     { "id": "opus", "label": "Opus" }, { "id": "sonnet", "label": "Sonnet" }
@@ -2187,6 +2253,44 @@ mod tests {
             .unwrap();
         assert_eq!(default["harness"], "codex");
         assert_eq!(creates(&world).len(), 6);
+    }
+
+    #[tokio::test]
+    async fn a_remote_reply_that_syncs_after_the_session_row_is_still_returned() {
+        let world = Arc::new(World {
+            lagging_remote_reply: true,
+            ..Default::default()
+        });
+        let tools = tools(world.clone(), origin("chat-alpha-1"));
+        let created = tools
+            .call(
+                "create_chat",
+                json!({ "kind": "chat", "device": "GPU box", "harness": "codex",
+                        "prompt": "go", "wait": true, "timeout_secs": 10 }),
+            )
+            .await
+            .unwrap();
+        assert_eq!(created["turn"]["outcome"], "completed");
+        assert_eq!(created["turn"]["replies"][0]["text"], "late reply", "{created}");
+        assert!(world.transcript_reads.load(std::sync::atomic::Ordering::SeqCst) >= 3);
+    }
+
+    #[tokio::test]
+    async fn the_mock_rig_is_explicit_only() {
+        let world = Arc::new(World::default());
+        let tools = tools(world.clone(), Origin::default());
+        let created = tools
+            .call("create_chat", json!({ "harness": "mock" }))
+            .await
+            .unwrap();
+        assert_eq!(created["harness"], "mock");
+        let err = tools
+            .call("create_chat", json!({ "harness": "codex" }))
+            .await
+            .unwrap_err();
+        assert!(err.contains("available there: claude-code"), "{err}");
+        let default = tools.call("create_chat", json!({})).await.unwrap();
+        assert_eq!(default["harness"], "claude-code");
     }
 
     #[tokio::test]
