@@ -4,6 +4,7 @@ on:
     inputs:
       target: {description: "ref/sha of zeron source to test", type: string, default: main}
       save_cache: {description: "save rust caches (seed run)", type: boolean, default: false}
+      select: {description: "affected-crates job selection (else run everything)", type: boolean, default: false}
 
 permissions:
   contents: read
@@ -36,10 +37,36 @@ jobs:
         continue-on-error: true
         run: cargo fmt --all --check
 
+  # ------------------------------------------------------------------------ plan
+  # Affected-crates selection; any doubt => everything runs (scripts/ci/affected.py).
+  plan:
+    runs-on: ubuntu-24.04
+    timeout-minutes: 5
+    outputs:
+      core: ${{ steps.p.outputs.core }}
+      ui: ${{ steps.p.outputs.ui }}
+      browser: ${{ steps.p.outputs.browser }}
+    steps:
+      - uses: actions/checkout@v4
+        with: {ref: "${{ inputs.target }}", fetch-depth: 0}
+      - uses: actions/checkout@v4
+        with: {path: .lab-ci, sparse-checkout: scripts/ci}
+      - id: p
+        env:
+          SELECT: ${{ inputs.select }}
+        run: |
+          if [ "$SELECT" = true ]; then
+            python3 .lab-ci/scripts/ci/affected.py origin/main HEAD
+          else
+            printf 'core=true\nui=true\nbrowser=true\n' | tee -a "$GITHUB_OUTPUT"
+          fi
+
   # ------------------------------------------------------------------------ core
   # Replaces: session-sync-regressions, cursor-compatibility (rust part), preview
   # networking (linux leg). One compile, one nextest run.
   core:
+    needs: plan
+    if: needs.plan.outputs.core == 'true'
     runs-on: ubuntu-24.04
     timeout-minutes: 30
     steps:
@@ -74,6 +101,8 @@ jobs:
 
   # -------------------------------------------------------------------------- ui
   ui:
+    needs: plan
+    if: needs.plan.outputs.ui == 'true'
     runs-on: ubuntu-24.04
     timeout-minutes: 30
     steps:
@@ -110,6 +139,8 @@ jobs:
 
   # --------------------------------------------------------------------- browser
   browser:
+    needs: plan
+    if: needs.plan.outputs.browser == 'true'
     runs-on: ubuntu-24.04
     timeout-minutes: 30
     steps:
