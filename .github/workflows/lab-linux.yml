@@ -103,8 +103,10 @@ jobs:
             --lib --bins $tests $engine \
             --test attachments_roundtrip
           # handoff_core re-execs itself and asserts which file descriptors its grandchildren
-          # inherit (`ls /proc/self/fd`); nextest's own pipes show up there and fail it
-          # (fds 142,145 in run 36766349221), so run it with libtest like the original job does.
+          # inherit (`ls /proc/self/fd`).  Run it with libtest exactly like the original job
+          # (process/fd-sensitive, so no nextest process model).  NOTE: on the live-updates
+          # target 2 of its 5 tests FAIL ("LEAKED [142, 145]") - identically in upstream's own
+          # CI for that commit (zeronsh/zeron run 36708882392), so this is the PR, not this CI.
           if [ -f crates/engine/tests/handoff_core.rs ]; then
             cargo test --locked -p zeron-engine --test handoff_core
           fi
