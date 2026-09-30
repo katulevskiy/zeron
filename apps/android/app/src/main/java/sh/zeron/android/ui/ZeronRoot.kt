@@ -45,6 +45,13 @@ import androidx.navigation.compose.composable
 import androidx.navigation.compose.rememberNavController
 import sh.zeron.android.core.AppModel
 import sh.zeron.android.design.ZeronTheme
+import android.net.Uri
+import androidx.navigation.navArgument
+import sh.zeron.android.tools.BrowserScreen
+import sh.zeron.android.tools.FileScreen
+import sh.zeron.android.tools.FilesScreen
+import sh.zeron.android.tools.TerminalScreen
+import sh.zeron.android.tools.WorkspaceRef
 
 @Composable
 fun ZeronRoot(model: AppModel) {
@@ -76,8 +83,21 @@ object Routes {
     const val ENGINE = "engine"
     const val AGENTS = "agents"
     const val TRANSFERS = "transfers"
+    const val FILES = "files/{ws}"
+    const val FILE = "file/{ws}?path={path}"
+    const val TERMINAL = "terminal/{ws}"
+    const val BROWSER = "browser?ws={ws}&url={url}"
     fun chat(id: String) = "chat/$id"
+
+    /** Developer tools address a workspace by chat id, or `space:<id>` for a project. */
+    fun files(ws: String) = "files/${Uri.encode(ws)}"
+    fun file(ws: String, path: String) = "file/${Uri.encode(ws)}?path=${Uri.encode(path)}"
+    fun terminal(ws: String) = "terminal/${Uri.encode(ws)}"
+    fun browser(ws: String?, url: String?) = "browser?ws=${Uri.encode(ws ?: "")}&url=${Uri.encode(url ?: "")}"
 }
+
+private fun AppModel.refFor(ws: String): WorkspaceRef? =
+    if (ws.startsWith("space:")) projectRef(ws.removePrefix("space:")) else workspaceRef(ws)
 
 @Composable
 private fun MainNav(model: AppModel) {
@@ -91,7 +111,14 @@ private fun MainNav(model: AppModel) {
             "engine" -> nav.navigate(Routes.ENGINE)
             "agents" -> nav.navigate(Routes.AGENTS)
             "transfers" -> nav.navigate(Routes.TRANSFERS) { launchSingleTop = true }
-            else -> if (route.startsWith("chat:")) nav.navigate(Routes.chat(route.removePrefix("chat:")))
+            else -> when {
+                route.startsWith("chat:") -> nav.navigate(Routes.chat(route.removePrefix("chat:")))
+                // Developer tools at launch: files:<chat> / terminal:<chat> / browser:<chat>|<url> / file:<chat>|<path>
+                route.startsWith("files:") -> nav.navigate(Routes.files(route.removePrefix("files:")))
+                route.startsWith("terminal:") -> nav.navigate(Routes.terminal(route.removePrefix("terminal:")))
+                route.startsWith("file:") -> route.removePrefix("file:").split('|', limit = 2).let { nav.navigate(Routes.file(it[0], it.getOrElse(1) { "" })) }
+                route.startsWith("browser:") -> route.removePrefix("browser:").split('|', limit = 2).let { nav.navigate(Routes.browser(it[0], it.getOrNull(1))) }
+            }
         }
         model.pendingRoute.value = null
     }
@@ -99,7 +126,39 @@ private fun MainNav(model: AppModel) {
         composable(Routes.HOME) { Home(model, nav) }
         composable(Routes.CHAT) { entry ->
             val id = entry.arguments?.getString("id") ?: return@composable
-            SessionScreen(model, id, onBack = { nav.popBackStack() })
+            SessionScreen(model, id, onBack = { nav.popBackStack() }, onNavigate = { nav.navigate(it) })
+        }
+        composable(Routes.FILES) { entry ->
+            val ws = entry.arguments?.getString("ws") ?: return@composable
+            val ref = remember(ws) { model.refFor(ws) } ?: return@composable Unavailable { nav.popBackStack() }
+            FilesScreen(
+                model,
+                ref,
+                onBack = { nav.popBackStack() },
+                onOpenFile = { nav.navigate(Routes.file(ws, it)) },
+                onTerminal = { nav.navigate(Routes.terminal(ws)) },
+                onBrowser = { nav.navigate(Routes.browser(ws, it)) },
+            )
+        }
+        composable(Routes.FILE, arguments = listOf(navArgument("path") { defaultValue = "" })) { entry ->
+            val ws = entry.arguments?.getString("ws") ?: return@composable
+            val path = entry.arguments?.getString("path").orEmpty()
+            val ref = remember(ws) { model.refFor(ws) } ?: return@composable Unavailable { nav.popBackStack() }
+            FileScreen(model, ref, path, onBack = { nav.popBackStack() }, onBrowser = { nav.navigate(Routes.browser(ws, it)) })
+        }
+        composable(Routes.TERMINAL) { entry ->
+            val ws = entry.arguments?.getString("ws") ?: return@composable
+            val ref = remember(ws) { model.refFor(ws) } ?: return@composable Unavailable { nav.popBackStack() }
+            TerminalScreen(model, ref, onBack = { nav.popBackStack() })
+        }
+        composable(
+            Routes.BROWSER,
+            arguments = listOf(navArgument("ws") { defaultValue = "" }, navArgument("url") { defaultValue = "" }),
+        ) { entry ->
+            val ws = entry.arguments?.getString("ws").orEmpty()
+            val url = entry.arguments?.getString("url").orEmpty()
+            val ref = remember(ws) { ws.ifEmpty { null }?.let { model.refFor(it) } }
+            BrowserScreen(model, ref, url.ifEmpty { null }, onBack = { nav.popBackStack() })
         }
         composable(Routes.NEW) {
             NewSessionScreen(model, onClose = { nav.popBackStack() }, onCreated = { id ->
@@ -149,5 +208,13 @@ private fun Home(model: AppModel, nav: NavHostController) {
                 },
             )
         }
+    }
+}
+
+@Composable
+private fun Unavailable(onBack: () -> Unit) {
+    Column(Modifier.fillMaxSize().navigationBarsPadding().padding(32.dp), verticalArrangement = Arrangement.Center, horizontalAlignment = Alignment.CenterHorizontally) {
+        Text("This workspace isn't available.", style = MaterialTheme.typography.titleMedium)
+        androidx.compose.material3.TextButton(onClick = onBack) { Text("Back") }
     }
 }

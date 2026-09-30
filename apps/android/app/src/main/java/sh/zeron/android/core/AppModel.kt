@@ -91,6 +91,8 @@ class AppModel(private val app: Application) {
     val phone by lazy { PhoneEngine(app) }
     val notifier by lazy { Notifier(app) }
     val transfers by lazy { TransferCenter(app, this) }
+    val workspaceApi by lazy { sh.zeron.android.tools.WorkspaceApi(this) }
+    val downloads by lazy { sh.zeron.android.tools.Downloads(app, this) }
 
     private val settings = app.getSharedPreferences("settings", 0)
 
@@ -641,6 +643,26 @@ class AppModel(private val app: Application) {
     fun setSectionCollapsed(id: String, collapsed: Boolean) = attempt("collapse") { _client.value?.setSectionCollapsed(id, collapsed) }
 
     fun row(id: String): SessionRow? = _client.value?.sessionRow(id)
+
+    /** The workspace a chat runs in, for the developer tools. */
+    fun workspaceRef(chatId: String): sh.zeron.android.tools.WorkspaceRef? {
+        val row = row(chatId) ?: return null
+        val project = row.project?.let { runCatching { _client.value?.project(it.id) }.getOrNull() }
+        return sh.zeron.android.tools.WorkspaceRef(
+            deviceId = row.deviceId,
+            chatId = chatId,
+            spaceId = row.project?.id,
+            root = row.cwd ?: project?.path,
+            title = row.project?.name ?: row.cwd?.substringAfterLast('/')?.ifEmpty { null } ?: "Home",
+            deviceName = row.deviceName,
+        )
+    }
+
+    /** A project's folder on its device (no chat). */
+    fun projectRef(spaceId: String): sh.zeron.android.tools.WorkspaceRef? {
+        val p = runCatching { _client.value?.project(spaceId) }.getOrNull() ?: return null
+        return sh.zeron.android.tools.WorkspaceRef(p.deviceId, null, p.id, p.path, p.name, p.deviceName)
+    }
 
     /** Devices that run agents — this phone among them, like any computer. */
     fun executionDevices(): List<DeviceView> = runCatching { _client.value?.executionDevices() }.getOrNull().orEmpty()

@@ -164,6 +164,29 @@ class Notifier(private val context: Context) {
         NotificationManagerCompat.from(context).cancel(transferId(id))
     }
 
+    /** Save to Downloads from the developer tools: progress, then where it landed. */
+    fun download(id: String, title: String, text: String, fraction: Float?, done: Boolean, open: Intent? = null) {
+        val tap = open?.let {
+            PendingIntent.getActivity(context, "download:$id".hashCode(), it.addFlags(Intent.FLAG_ACTIVITY_NEW_TASK), PendingIntent.FLAG_IMMUTABLE or PendingIntent.FLAG_UPDATE_CURRENT)
+        }
+        val n = NotificationCompat.Builder(context, TRANSFERS_CHANNEL)
+            .setSmallIcon(R.drawable.ic_stat_zeron)
+            .setContentTitle(title)
+            .setContentText(text)
+            .setCategory(if (done) NotificationCompat.CATEGORY_STATUS else NotificationCompat.CATEGORY_PROGRESS)
+            .apply {
+                if (!done) setProgress(100, ((fraction ?: 0f) * 100).toInt(), fraction == null).setOngoing(true).setOnlyAlertOnce(true).setSilent(true)
+                else setAutoCancel(true)
+                if (tap != null) setContentIntent(tap)
+            }
+            .build()
+        if (!permitted) return
+        try {
+            NotificationManagerCompat.from(context).notify("download:$id".hashCode(), n)
+        } catch (_: SecurityException) {
+        }
+    }
+
     companion object {
         const val CHANNEL = "sessions"
         const val TRANSFERS_CHANNEL = "transfers"
