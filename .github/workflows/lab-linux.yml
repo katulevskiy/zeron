@@ -135,7 +135,7 @@ jobs:
           add-job-id-key: false
           save-if: ${{ inputs.save_cache }}
       - name: UI and headless layout regressions
-        run: cargo nextest run --locked --no-fail-fast -p zeron-ui --lib
+        run: cargo nextest run --config-file .lab-ci/scripts/ci/nextest.toml --locked --no-fail-fast -p zeron-ui --lib
 
   # --------------------------------------------------------------------- browser
   browser:

@@ -1,0 +1,18 @@
+# nextest settings for the Linux lab workflow (passed with --config-file so the
+# tested branch does not need to carry it).
+#
+# `state::tests::*` in zeron-ui bootstrap embedded engines on a "free" localhost
+# port obtained by bind(:0)+drop and then assert that nothing listens there
+# after a failed bootstrap.  The original workflow ran with --test-threads=1, so
+# the port could never be claimed by a concurrent test.  nextest runs every test
+# in its own process in parallel, which reopens that race (observed once:
+# bootstrap_reports_local_assembly_failure_before_returning_a_handle, run
+# 36764470875).  Serialise the group and allow a retry for the residual
+# cross-process port reuse (shell.rs tests also bind :0).
+[test-groups.ui-ipc-ports]
+max-threads = 1
+
+[[profile.default.overrides]]
+filter = 'package(zeron-ui) & test(/^state::tests::/)'
+test-group = 'ui-ipc-ports'
+retries = 2
