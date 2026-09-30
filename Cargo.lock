@@ -12440,6 +12440,7 @@ dependencies = [
  "gpui_tokio",
  "image",
  "libc",
+ "loro",
  "mermaid-rs-renderer",
  "mimalloc",
  "objc",
