@@ -62,6 +62,10 @@ data class LaunchOptions(
     val huge: Boolean = false,
     val noProjects: Boolean = false,
     val signedOut: Boolean = false,
+    /** Developer (debuggable builds): sign in to an `AUTH_MODE=dev` edge as `devUser@devOrg`. */
+    val devEdge: String? = null,
+    val devUser: String? = null,
+    val devOrg: String? = null,
     val route: String? = null,
     val wallpaper: String? = null,
     val wallpaperEffect: String? = null,
@@ -162,8 +166,10 @@ class AppModel(private val app: Application) {
             WallpaperStore.effects.firstOrNull { it.name.equals(name, ignoreCase = true) }?.let(wallpaper::setEffect)
         }
         val stored = credentials.stored()
+        val dev = options.devEdge?.takeIf { isDebuggable }
         when {
             options.demo -> start(Credentials.Demo(demoOptions()))
+            dev != null -> devSignIn(dev, options.devUser ?: "dev-user", options.devOrg ?: "dev-org")
             stored != null -> start(stored)
         }
         // Relative times ("4m") and staleness age without events.
@@ -192,7 +198,7 @@ class AppModel(private val app: Application) {
     private fun claimCoreDir(credentials: Credentials) {
         val owner = when (credentials) {
             is Credentials.WorkOs -> "${credentials.userId}/${credentials.orgId}"
-            is Credentials.Dev -> "${credentials.userId}/${credentials.orgId}"
+            is Credentials.Dev -> "${credentials.userId}/${credentials.orgId}@${this.credentials.devEdge}"
             is Credentials.Demo -> return
         }
         val marker = File(coreDir, ".owner")
@@ -207,7 +213,7 @@ class AppModel(private val app: Application) {
         if (!demo) claimCoreDir(credentials)
         dir.mkdirs()
         val config = CoreConfig(
-            edgeUrl = edgeUrl,
+            edgeUrl = if (credentials is Credentials.Dev) this.credentials.devEdge ?: edgeUrl else edgeUrl,
             dataDir = dir.path,
             deviceId = deviceId,
             deviceName = deviceName(),
@@ -232,6 +238,30 @@ class AppModel(private val app: Application) {
     }
 
     val edgeUrl: String get() = authProductionEdgeUrl()
+
+    /** Developer sign-in is offered in debuggable builds only. */
+    val isDebuggable: Boolean get() = (app.applicationInfo.flags and android.content.pm.ApplicationInfo.FLAG_DEBUGGABLE) != 0
+
+    /**
+     * Developer: join an `AUTH_MODE=dev` edge (`wrangler dev --var
+     * AUTH_MODE:dev`) as `user@org` — no WorkOS. Debuggable builds only;
+     * hidden behind seven taps on the sign-in screen's mark (or the
+     * `dev-edge` launch extra).
+     */
+    fun devSignIn(edge: String, user: String, org: String): Boolean {
+        if (!isDebuggable) return false
+        val url = edge.trim().trimEnd('/')
+        if (!(url.startsWith("http://") || url.startsWith("https://")) || user.isBlank()) {
+            signInError.value = "Enter the edge URL (http://…) and a user id."
+            return false
+        }
+        _client.value?.shutdown()
+        _client.value = null
+        val dev = Credentials.Dev(user.trim(), org.trim())
+        credentials.store(dev, devEdge = url)
+        credentials.profile = CredentialStore.Profile(user.trim(), url, org.trim().ifEmpty { null })
+        return start(dev).also { if (!it) signInError.value = "Couldn't open the dev workspace." }
+    }
 
     private val deviceId: String
         get() {
