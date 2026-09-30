@@ -21,7 +21,7 @@ internal class GuestRunner(
         timeoutMs: Long = 600_000,
         onLine: ((String) -> Unit)? = null,
     ): ExecResult = withContext(Dispatchers.IO) {
-        val (process, pid) = guest.start(guest.command(argv, guest.env(store.secrets()), asRoot))
+        val (process, pid) = guest.start(guest.command(argv, guest.env(store.secrets(), store.read().customServer), asRoot))
         live += pid
         val output = OutputBuffer(MAX_OUTPUT)
         // A plain thread: a blocking pipe read can't be cancelled, and a

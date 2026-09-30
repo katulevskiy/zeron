@@ -6,11 +6,14 @@ where; Kotlin paints, scrolls and handles gestures.** The transcript's text
 measurement, markdown layout, prefix-sum virtualization and display lists are
 the exact code iOS runs — see [`docs/mobile-rewrite.md`](../../docs/mobile-rewrite.md).
 
-It also runs coding agents **on the phone**: the `:runtime` module boots a
-proot Linux guest with the Zeron engine and a local edge, and the app talks
-to it like any other engine — see [`docs/android.md`](../../docs/android.md).
-Three modes, switchable in Settings: your computers (Zeron account), this
-phone, and an offline demo.
+The phone is a regular Zeron device: the `:runtime` module boots a proot
+Linux guest running the Zeron engine, which owns the account and runs coding
+agents **on the phone**, and the app is that device's viewer — it signs in
+through the engine, shares its device id and takes its edge bearer. Other
+devices start sessions on the phone and the phone on them; see
+[`docs/android.md`](../../docs/android.md). First run offers Sign in,
+Continue without an account (the phone's local workspace), and an offline
+demo.
 
 The UI is Material 3 Expressive (`MaterialExpressiveTheme`, expressive motion,
 flexible app bars, shape-morphing loading indicators, connected button groups,
@@ -46,19 +49,20 @@ which the build runs only while their outputs are missing
 ## Layout
 
 ```
-core/        AppModel (owns the mode's CoreClient, republishes snapshots as
-             flows), CredentialStore, Fonts + AndroidMeasurer (Minikin
-             fallback measurement for glyphs Geist lacks), PhoneEngine (the
-             :runtime engine as the UI sees it), Agents (harness install and
-             agent sign-in over host_call), Notifier (local session
-             notifications in phone mode)
+core/        AppModel (the device's CoreClient built from its engine via
+             EngineLink, sign-in through the engine, snapshots as flows),
+             Devices (identity key, machine grouping), Fonts +
+             AndroidMeasurer (Minikin fallback measurement for glyphs Geist
+             lacks), PhoneEngine (the :runtime engine as the UI sees it),
+             Agents (harness install and agent sign-in over host_call),
+             Notifier (local session notifications)
 design/      ZeronTheme (Material 3 Expressive), transcript palette
 transcript/  TranscriptState (layout engine + viewport: anchoring, follow the
              tail), Transcript (virtualized rows over LayoutFrame), RowModel
              (canvas painter for Rust display lists, streaming veil, fades),
              Widgets (copy, disclosures, tool rail, shimmer, images…)
-ui/          Sign-in, sessions, session + composer, new session, search,
-             settings, phone setup + on-device engine, coding agents
+ui/          First run, sessions, session + composer, new session, search,
+             settings, This phone (engine page), coding agents
 ```
 
 `../runtime` (`sh.zeron.runtime`) is the on-device engine: guest bootstrap,
@@ -78,8 +82,9 @@ adb shell am start -n sh.zeron.android/.MainActivity \
 | `--ez demo true` | Offline demo workspace (Rust `DemoHost`) |
 | `--ez fast true` / `--ez longreply true` | Demo stream speed / reply length |
 | `--ez big true` / `--ez huge true` | Demo transcripts with 120 / 600 turns |
-| `--ez phone true` | Phone mode (the on-device engine) |
+| `--ez local true` | Skip the first-run screen: continue without an account |
+| `--es server <url> --es server-token <t>` | Developer custom server (`zeron local-edge`); `--es server none` clears it |
 | `--es route chat:<id>` / `new` / `search` / `settings` / `engine` / `agents` | Open a screen at launch |
-| `--ez signedout true` | Clear stored credentials and the chosen mode |
+| `--ez signedout true` | Back to the first-run screen (the engine keeps its sign-in) |
 | `--es wallpaper <path>` / `none` | Set (or clear) the wallpaper from a file the app can read, e.g. `adb push art.jpg /data/local/tmp/ && adb shell run-as sh.zeron.android cp /data/local/tmp/art.jpg files/` then `--es wallpaper /data/user/0/sh.zeron.android/files/art.jpg` |
 | `--es wallpaper-effect <none\|dither\|ascii\|halftone\|scanlines>` | Wallpaper effect |

@@ -47,9 +47,13 @@ import androidx.compose.ui.focus.FocusRequester
 import androidx.compose.ui.text.style.TextAlign
 import androidx.compose.ui.unit.dp
 import kotlinx.coroutines.launch
-import sh.zeron.android.core.AppMode
 import sh.zeron.android.core.AppModel
+import sh.zeron.android.core.DeviceIdentity
+import sh.zeron.android.core.MachineGroup
+import sh.zeron.android.core.Machines
 import sh.zeron.android.core.PhoneEngine
+import sh.zeron.android.core.ProjectSource
+import uniffi.zeron_core.DeviceView
 import sh.zeron.android.core.userMessage
 import sh.zeron.android.design.HarnessMark
 import sh.zeron.android.design.ZIcon
@@ -127,9 +131,7 @@ fun NewSessionScreen(model: AppModel, onClose: () -> Unit, onCreated: (String) -
 
     LaunchedEffect(Unit) { focus.requestFocus() }
 
-    // New projects: cloned (or, on this phone, created empty) on the draft's device.
-    val mode by model.mode.collectAsState()
-    val phone = mode == AppMode.Phone
+    // New projects: cloned or created empty by the draft's device's engine.
     var adding by remember { mutableStateOf<ProjectSource?>(null) }
     // Reported by the branch chip (it reloads, and re-reports, per project).
     var currentBranch by remember { mutableStateOf<String?>(null) }
@@ -137,6 +139,7 @@ fun NewSessionScreen(model: AppModel, onClose: () -> Unit, onCreated: (String) -
     val latestProject by androidx.compose.runtime.rememberUpdatedState(project)
     val latestChoice by androidx.compose.runtime.rememberUpdatedState(choice)
     val targetDevice = deviceId.ifEmpty { hosts.firstOrNull { it.online }?.id ?: hosts.firstOrNull()?.id.orEmpty() }
+    val target = hosts.firstOrNull { it.id == targetDevice }
 
     fun create() {
         model.lastDraft = draft
@@ -204,9 +207,10 @@ fun NewSessionScreen(model: AppModel, onClose: () -> Unit, onCreated: (String) -
                 ProjectChip(
                     draft,
                     projects,
+                    hosts,
                     onPick = { draft = it },
-                    onAdd = if (mode == AppMode.Demo || targetDevice.isEmpty()) null else { source -> adding = source },
-                    phone = phone,
+                    onAdd = if (model.isDemo || target == null) null else { source -> adding = source },
+                    target = target,
                 )
                 if (project != null) {
                     if (project.gitDetected) BranchChip(model, draft, project.deviceId, project.path, onCurrent = { currentBranch = it }) { draft = it }
@@ -223,12 +227,8 @@ fun NewSessionScreen(model: AppModel, onClose: () -> Unit, onCreated: (String) -
         }
     }
     adding?.let { source ->
-        NewProjectDialog(source, phone, onDismiss = { adding = null }) { input ->
-            val result = when (source) {
-                ProjectSource.Clone -> model.cloneRepo(targetDevice, input)
-                ProjectSource.Empty -> model.newPhoneProject(targetDevice, input)
-            }
-            result.onSuccess { id ->
+        NewProjectDialog(source, target, onDismiss = { adding = null }) { input ->
+            model.addProject(targetDevice, source, input).onSuccess { id ->
                 adding = null
                 draft = draft.copy(projectId = id, hostId = null, branch = null, cwd = null)
             }.exceptionOrNull()?.userMessage()
@@ -237,15 +237,13 @@ fun NewSessionScreen(model: AppModel, onClose: () -> Unit, onCreated: (String) -
 }
 }
 
-private enum class ProjectSource { Clone, Empty }
-
 /**
- * Clone a repository (on this phone: `git clone` in the guest, into
- * /home/zeron/projects) or start an empty one, then make it a project.
+ * Clone a repository or start an empty one on `device` — its engine does it
+ * (this phone's into /home/zeron/projects) — then make it a project.
  * `submit` returns an error to show, or null once it's done.
  */
 @Composable
-private fun NewProjectDialog(source: ProjectSource, phone: Boolean, onDismiss: () -> Unit, submit: suspend (String) -> String?) {
+private fun NewProjectDialog(source: ProjectSource, device: DeviceView?, onDismiss: () -> Unit, submit: suspend (String) -> String?) {
     var text by remember { mutableStateOf("") }
     var busy by remember { mutableStateOf(false) }
     var error by remember { mutableStateOf<String?>(null) }
@@ -268,11 +266,7 @@ private fun NewProjectDialog(source: ProjectSource, phone: Boolean, onDismiss: (
         text = {
             Column {
                 Text(
-                    when {
-                        clone && phone -> "Cloned into ${PhoneEngine.PROJECTS_ROOT} on this phone."
-                        clone -> "Cloned by the device's engine."
-                        else -> "An empty git repository in ${PhoneEngine.PROJECTS_ROOT}."
-                    },
+                    projectDestination(source, device),
                     style = MaterialTheme.typography.bodyMedium,
                     color = MaterialTheme.colorScheme.onSurfaceVariant,
                 )
@@ -310,13 +304,27 @@ private fun NewProjectDialog(source: ProjectSource, phone: Boolean, onDismiss: (
     )
 }
 
+/** Where a new project lands, in words. */
+private fun projectDestination(source: ProjectSource, device: DeviceView?): String {
+    val where = when {
+        device == null -> "the device"
+        device.isSelf -> "${PhoneEngine.PROJECTS_ROOT} on this phone"
+        else -> device.name
+    }
+    return when (source) {
+        ProjectSource.Clone -> "Cloned into $where by its engine."
+        ProjectSource.Empty -> "An empty git repository in $where."
+    }
+}
+
 @Composable
 private fun ProjectChip(
     draft: sh.zeron.android.core.NewSessionDraft,
     projects: List<uniffi.zeron_core.ProjectView>,
+    hosts: List<DeviceView>,
     onPick: (sh.zeron.android.core.NewSessionDraft) -> Unit,
     onAdd: ((ProjectSource) -> Unit)?,
-    phone: Boolean,
+    target: DeviceView?,
 ) {
     var open by remember { mutableStateOf(false) }
     val project = projects.firstOrNull { it.id == draft.projectId }
@@ -331,10 +339,10 @@ private fun ProjectChip(
     if (open) {
         ProjectSheet(
             draft,
-            projects,
+            Machines.groups(projects, hosts),
             onDismiss = { open = false },
             onAdd = onAdd?.let { add -> { source: ProjectSource -> open = false; add(source) } },
-            phone = phone,
+            target = target,
         ) {
             onPick(it)
             open = false
@@ -342,14 +350,18 @@ private fun ProjectChip(
     }
 }
 
-/** Projects grouped by the machine they live on; the choice keeps its tile and gains a check. */
+/**
+ * Projects grouped by the machine they live on — this phone beside your
+ * computers — each machine also offering "No project" (a session in its home
+ * folder), as the desktop's picker does. The choice gains a check.
+ */
 @Composable
 private fun ProjectSheet(
     draft: sh.zeron.android.core.NewSessionDraft,
-    projects: List<uniffi.zeron_core.ProjectView>,
+    machines: List<MachineGroup>,
     onDismiss: () -> Unit,
     onAdd: ((ProjectSource) -> Unit)?,
-    phone: Boolean,
+    target: DeviceView?,
     onPick: (sh.zeron.android.core.NewSessionDraft) -> Unit,
 ) {
     val sheet = androidx.compose.material3.rememberModalBottomSheetState(skipPartiallyExpanded = true)
@@ -366,35 +378,39 @@ private fun ProjectSheet(
                     modifier = Modifier.padding(start = 24.dp, bottom = 8.dp),
                 )
             }
-            val byDevice = projects.groupBy { it.deviceId }.values.sortedByDescending { it.first().deviceOnline }
-            for (group in byDevice) {
-                val host = group.first()
-                item("h-${host.deviceId}") {
+            for (machine in machines) {
+                item("h-${machine.deviceId}") {
                     androidx.compose.foundation.layout.Row(
                         Modifier.padding(start = 24.dp, end = 24.dp, top = 16.dp, bottom = 8.dp),
                         verticalAlignment = Alignment.CenterVertically,
                     ) {
-                        ZIcon(if (phone) ZIcons.Phone else ZIcons.Laptop, null, Modifier.size(18.dp), tint = MaterialTheme.colorScheme.onSurfaceVariant)
+                        ZIcon(DeviceIdentity.icon(machine.platform), null, Modifier.size(18.dp), tint = MaterialTheme.colorScheme.onSurfaceVariant)
                         Spacer(Modifier.size(8.dp))
-                        Text(host.deviceName ?: "Host", style = MaterialTheme.typography.titleSmallEmphasized, color = MaterialTheme.colorScheme.onSurfaceVariant)
+                        Text(machine.name, style = MaterialTheme.typography.titleSmallEmphasized, color = MaterialTheme.colorScheme.onSurfaceVariant)
                         Spacer(Modifier.size(8.dp))
                         Box(
                             Modifier.size(8.dp).clip(androidx.compose.foundation.shape.CircleShape).background(
-                                if (host.deviceOnline) successColor() else MaterialTheme.colorScheme.outlineVariant,
+                                if (machine.online) successColor() else MaterialTheme.colorScheme.outlineVariant,
                             ),
                         )
-                        if (!host.deviceOnline) {
+                        val note = when {
+                            machine.isSelf -> "This phone"
+                            !machine.online -> "Offline"
+                            else -> null
+                        }
+                        note?.let {
                             Spacer(Modifier.size(6.dp))
-                            Text("Offline", style = MaterialTheme.typography.labelMedium, color = MaterialTheme.colorScheme.outline)
+                            Text(it, style = MaterialTheme.typography.labelMedium, color = MaterialTheme.colorScheme.outline)
                         }
                     }
                 }
-                group.forEachIndexed { i, p ->
+                val rows = machine.projects.size + 1
+                machine.projects.forEachIndexed { i, p ->
                     item(p.id) {
                         ProjectRow(
                             selected = p.id == draft.projectId,
                             index = i,
-                            count = group.size,
+                            count = rows,
                             leading = { ProjectTile(p.name, p.colorIndex.toInt(), 40.dp) },
                             title = p.name,
                             supporting = p.path.replace(Regex("^/(Users|home)/[^/]+"), "~"),
@@ -402,24 +418,23 @@ private fun ProjectSheet(
                         ) { onPick(draft.copy(projectId = p.id, hostId = null, branch = null, cwd = null)) }
                     }
                 }
+                item("none-${machine.deviceId}") {
+                    ProjectRow(
+                        selected = draft.projectId == null && draft.hostId == machine.deviceId,
+                        index = rows - 1,
+                        count = rows,
+                        leading = { IconTile(ZIcons.Home) },
+                        title = "No project",
+                        supporting = if (machine.isSelf) "Run in this phone's home folder" else "Run in ${machine.name}'s home folder",
+                        mono = false,
+                    ) { onPick(draft.copy(projectId = null, hostId = machine.deviceId, worktree = false, branch = null, cwd = null)) }
+                }
             }
-            item("none") {
-                Spacer(Modifier.size(16.dp))
-                ProjectRow(
-                    selected = draft.projectId == null,
-                    index = 0,
-                    count = 1,
-                    leading = { IconTile(ZIcons.Home) },
-                    title = "No project",
-                    supporting = "Run in a host's home folder",
-                    mono = false,
-                ) { onPick(draft.copy(projectId = null, hostId = draft.hostId ?: projects.firstOrNull()?.deviceId, worktree = false, branch = null, cwd = null)) }
-            }
-            if (onAdd != null) {
-                val sources = if (phone) listOf(ProjectSource.Clone, ProjectSource.Empty) else listOf(ProjectSource.Clone)
+            if (onAdd != null && target != null) {
+                val sources = listOf(ProjectSource.Clone, ProjectSource.Empty)
                 item("add-title") {
                     Text(
-                        "New project",
+                        if (target.isSelf) "New project on this phone" else "New project on ${target.name}",
                         style = MaterialTheme.typography.titleSmallEmphasized,
                         color = MaterialTheme.colorScheme.onSurfaceVariant,
                         modifier = Modifier.padding(start = 24.dp, top = 16.dp, bottom = 8.dp),
@@ -434,11 +449,7 @@ private fun ProjectSheet(
                             count = sources.size,
                             leading = { IconTile(if (clone) ZIcons.Branch else ZIcons.Plus) },
                             title = if (clone) "Clone repository" else "Empty project",
-                            supporting = when {
-                                clone && phone -> "git clone into ${PhoneEngine.PROJECTS_ROOT}"
-                                clone -> "The device's engine clones it"
-                                else -> "A new git repository in ${PhoneEngine.PROJECTS_ROOT}"
-                            },
+                            supporting = projectDestination(source, target),
                             mono = false,
                         ) { onAdd(source) }
                     }
@@ -496,13 +507,19 @@ private fun HostChip(
     onPick: (sh.zeron.android.core.NewSessionDraft) -> Unit,
 ) {
     var open by remember { mutableStateOf(false) }
+    val host = hosts.firstOrNull { it.id == draft.hostId }
     ContextChip(
-        hosts.firstOrNull { it.id == draft.hostId }?.name ?: "Choose host",
-        leading = { ZIcon(ZIcons.Laptop, null, Modifier.size(16.dp)) },
+        host?.name ?: "Choose device",
+        leading = { ZIcon(DeviceIdentity.icon(host?.platform.orEmpty()), null, Modifier.size(16.dp)) },
         onClick = { open = true },
     ) {
         ChoiceMenu(open, { open = false }, listOf(MenuSection("Run on", hosts.map { h ->
-            MenuChoice(h.name, h.id == draft.hostId, if (h.online) "Online" else "Offline") { onPick(draft.copy(hostId = h.id)) }
+            MenuChoice(
+                h.name,
+                h.id == draft.hostId,
+                if (h.isSelf) "This phone" else if (h.online) "Online" else "Offline",
+                leading = { ZIcon(DeviceIdentity.icon(h.platform), null, Modifier.size(18.dp)) },
+            ) { onPick(draft.copy(hostId = h.id)) }
         })))
     }
 }

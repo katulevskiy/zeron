@@ -59,6 +59,25 @@ enum Command {
         #[arg(long)]
         check: bool,
     },
+    /// Serve a standalone local edge — the single-tenant Rust port of the edge
+    /// with one shared-secret bearer, no WorkOS — for development and
+    /// cross-device tests. Engines join it with `ZERON_EDGE_URL`,
+    /// `ZERON_EDGE_TOKEN` and `ZERON_USER_ID=local ZERON_ORG_ID=local`.
+    #[command(name = "local-edge")]
+    LocalEdge {
+        #[arg(long, default_value_t = 27655)]
+        port: u16,
+        /// The shared secret (≥ 16 URL-safe chars); default `$ZERON_LOCAL_EDGE_TOKEN`.
+        #[arg(long)]
+        token: Option<String>,
+        /// Listen address; `0.0.0.0` lets other machines (an emulator reaches
+        /// its host at 10.0.2.2) join.
+        #[arg(long, default_value = "127.0.0.1")]
+        bind: std::net::IpAddr,
+        /// State directory; default `{data_dir}/local-edge-server`.
+        #[arg(long)]
+        data_dir: Option<std::path::PathBuf>,
+    },
 }
 
 #[derive(Subcommand)]
@@ -133,7 +152,10 @@ fn main() -> anyhow::Result<()> {
     // journald on every snapshot export — enough to fill a disk on a
     // long-running headless host. Quiet them by default (RUST_LOG still
     // overrides the whole filter).
-    let long_running = matches!(&cli.command, None | Some(Command::Headless));
+    let long_running = matches!(
+        &cli.command,
+        None | Some(Command::Headless) | Some(Command::LocalEdge { .. })
+    );
     let default_filter = if long_running {
         "info,loro_internal=warn,loro=warn"
     } else {
@@ -147,10 +169,10 @@ fn main() -> anyhow::Result<()> {
     // the engine logs the exact failure line. One file per launch, previous
     // launch kept as `.old`.
     let log_file = if long_running {
-        let mode = if cli.command.is_some() {
-            "headless"
-        } else {
-            "headed"
+        let mode = match &cli.command {
+            None => "headed",
+            Some(Command::LocalEdge { .. }) => "local-edge",
+            Some(_) => "headless",
         };
         open_log_file(mode)
     } else {
@@ -220,11 +242,15 @@ fn main() -> anyhow::Result<()> {
         }
         Some(Command::Status) => {
             let runtime = tokio::runtime::Runtime::new()?;
-            let mut config = engine_config_from_env();
-            if let Some((port, token)) = local_edge_from_env()? {
-                config = config.with_local_edge(local_edge_url(port), token);
-            }
-            runtime.block_on(auth_cli::status(config))
+            runtime.block_on(async {
+                let mut config = engine_config_from_env();
+                if let Some((port, token)) = local_edge_from_env()?
+                    && !runs_synced(&config).await
+                {
+                    config = config.with_local_edge(local_edge_url(port), token);
+                }
+                auth_cli::status(config).await
+            })
         }
         Some(Command::Sync) => {
             let runtime = tokio::runtime::Runtime::new()?;
@@ -244,6 +270,26 @@ fn main() -> anyhow::Result<()> {
         Some(Command::Update { check }) => {
             let runtime = tokio::runtime::Runtime::new()?;
             runtime.block_on(update_cli::update(&edge_url_from_env(), check))
+        }
+        Some(Command::LocalEdge {
+            port,
+            token,
+            bind,
+            data_dir,
+        }) => {
+            let token = token
+                .or_else(|| std::env::var("ZERON_LOCAL_EDGE_TOKEN").ok())
+                .map(|t| t.trim().to_string())
+                .filter(|t| !t.is_empty())
+                .ok_or_else(|| anyhow::anyhow!("pass --token (or set ZERON_LOCAL_EDGE_TOKEN)"))?;
+            let data_dir = data_dir.unwrap_or_else(|| paths::data_dir().join("local-edge-server"));
+            let runtime = tokio::runtime::Runtime::new()?;
+            runtime.block_on(serve_local_edge(zeron_localedge::LocalEdgeConfig {
+                data_dir,
+                bind,
+                port,
+                token,
+            }))
         }
         Some(Command::Daemon { command }) => match command {
             DaemonCommand::Install => daemon::install(&engine_config_from_env().data_dir),
@@ -323,8 +369,14 @@ fn engine_config_from_env() -> zeron_engine::EngineConfig {
         // Real auth against production by default; see
         // `workos_client_id_from_env` for the dev-mode escape hatches.
         workos_client_id: workos_client_id_from_env(&edge_token),
+        // An opaque dev bearer (a local edge's shared secret) names no user:
+        // `ZERON_USER_ID` does. Unset, the bearer is parsed as `user[@org]`.
+        dev_user_id: edge_token
+            .as_ref()
+            .and(std::env::var("ZERON_USER_ID").ok())
+            .map(|user| user.trim().to_string())
+            .filter(|user| !user.is_empty()),
         edge_token,
-        dev_user_id: None,
     }
 }
 
@@ -357,10 +409,25 @@ fn local_edge_url(port: u16) -> String {
     format!("http://127.0.0.1:{port}")
 }
 
-/// `zeron headless` hosting its own edge on loopback: start the local edge
-/// (state under `{data_dir}/local-edge/`), run the engine against it in
-/// `Development` scope with the shared secret as bearer, and stop the edge
-/// only after the engine has drained its last pushes into it.
+/// Whether `zeron headless` with `ZERON_LOCAL_EDGE_*` opens the synced
+/// profile (see [`headless_with_local_edge`]).
+async fn runs_synced(config: &zeron_engine::EngineConfig) -> bool {
+    let auth = zeron_engine::Engine::build_auth(config).await;
+    auth.loaded_workos_session() && auth.state().is_signed_in()
+}
+
+/// `zeron headless` with `ZERON_LOCAL_EDGE_*` (docs/android.md): the engine is
+/// a device of its signed-in account, or serves its signed-out profile to a
+/// viewer on the same device through an edge of its own.
+///
+/// - A saved, org-scoped WorkOS session runs the engine synced against the
+///   production edge, like any desktop; the local edge stays off.
+/// - Otherwise start the local edge (state under `{data_dir}/local-edge/`),
+///   run the engine against it in `Development` scope with the shared secret
+///   as bearer, and answer the account methods (SignIn, SelectOrg, …) from
+///   the production WorkOS auth — so the viewer signs in *through the
+///   engine*, and the next start is synced. The edge stops only after the
+///   engine has drained its last pushes into it.
 async fn headless_with_local_edge(
     config: zeron_engine::EngineConfig,
     port: u16,
@@ -370,16 +437,57 @@ async fn headless_with_local_edge(
         // Loopback is shared by every app on an Android device.
         tracing::warn!("local edge without ZERON_IPC_TOKEN: the engine's IPC port is ungated");
     }
-    let edge = zeron_localedge::LocalEdge::start(zeron_localedge::LocalEdgeConfig {
-        data_dir: config.data_dir.join("local-edge"),
+    let account = zeron_engine::Engine::build_auth(&config).await;
+    // Org-less sessions stay here too: nothing can pick an organization on a
+    // TTY-less device, so the viewer finishes onboarding through the engine.
+    if account.loaded_workos_session() && account.state().is_signed_in() {
+        tracing::info!("saved session: running synced; the local edge stays off");
+        return zeron_engine::Engine::new(config).run().await;
+    }
+    let edge = zeron_localedge::LocalEdge::start(zeron_localedge::LocalEdgeConfig::loopback(
+        config.data_dir.join("local-edge"),
         port,
-        token: token.clone(),
-    })
+        token.clone(),
+    ))
     .await?;
     let config = config.with_local_edge(edge.url(), token);
-    let result = zeron_engine::Engine::new(config).run().await;
+    let result = zeron_engine::Engine::new(config)
+        .with_account(account)
+        .run()
+        .await;
     edge.shutdown().await;
     result
+}
+
+/// `zeron local-edge`: serve until ctrl-c / SIGTERM.
+async fn serve_local_edge(config: zeron_localedge::LocalEdgeConfig) -> anyhow::Result<()> {
+    let edge = zeron_localedge::LocalEdge::start(config).await?;
+    let port = edge.addr().port();
+    println!("Local edge listening on {}", edge.addr());
+    println!(
+        "Join an engine:  ZERON_EDGE_URL=http://127.0.0.1:{port} ZERON_EDGE_TOKEN=<token> \
+         ZERON_USER_ID=local ZERON_ORG_ID=local zeron headless"
+    );
+    shutdown_signal().await?;
+    edge.shutdown().await;
+    Ok(())
+}
+
+/// Ctrl-C or SIGTERM.
+async fn shutdown_signal() -> std::io::Result<()> {
+    #[cfg(unix)]
+    {
+        let mut sigterm =
+            tokio::signal::unix::signal(tokio::signal::unix::SignalKind::terminate())?;
+        tokio::select! {
+            result = tokio::signal::ctrl_c() => result,
+            _ = sigterm.recv() => Ok(()),
+        }
+    }
+    #[cfg(not(unix))]
+    {
+        tokio::signal::ctrl_c().await
+    }
 }
 
 /// `ZERON_HARNESS` (kebab-case id) picks the default harness for chats without a
@@ -646,5 +754,49 @@ fn sweep_stale_pid_logs(dir: &std::path::Path, mode: &str) {
         if stale {
             let _ = std::fs::remove_file(entry.path());
         }
+    }
+}
+
+#[cfg(test)]
+mod local_edge_tests {
+    use super::runs_synced;
+
+    fn config(dir: &std::path::Path) -> zeron_engine::EngineConfig {
+        zeron_engine::EngineConfig {
+            data_dir: dir.to_path_buf(),
+            edge_url: "http://127.0.0.1:9".into(),
+            edge_token: None,
+            ipc_port: 0,
+            default_harness: zeron_engine::HarnessId::Mock,
+            org_id: None,
+            workos_client_id: Some("client_test".into()),
+            dev_user_id: None,
+        }
+    }
+
+    fn save(dir: &std::path::Path, org: Option<&str>) {
+        let mut session = serde_json::json!({
+            "refreshToken": "r0",
+            "user": { "id": "user_1", "email": "wing@example.com" },
+        });
+        if let Some(org) = org {
+            session["orgId"] = org.into();
+        }
+        std::fs::write(dir.join("session.json"), session.to_string()).unwrap();
+    }
+
+    /// The phone's engine keeps its local edge until a sign-in names an
+    /// organization: an org-less session can't finish onboarding on a TTY.
+    #[tokio::test]
+    async fn only_an_org_scoped_session_turns_the_local_edge_off() {
+        let dir = tempfile::tempdir().unwrap();
+        assert!(!runs_synced(&config(dir.path())).await, "signed out");
+        save(dir.path(), None);
+        assert!(
+            !runs_synced(&config(dir.path())).await,
+            "no organization yet"
+        );
+        save(dir.path(), Some("org_1"));
+        assert!(runs_synced(&config(dir.path())).await, "signed in");
     }
 }

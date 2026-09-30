@@ -1516,3 +1516,20 @@ fn side_chat_origin_syncs_and_survives_updates_and_restart() {
         Some("main")
     );
 }
+
+/// A viewer sharing its engine's device id clocks as its own writer, so the
+/// two replicas can never mint one HLC; the rows still name the device.
+#[test]
+fn a_clock_writer_suffixes_hlcs_but_rows_keep_the_device_id() {
+    let mut doc = RegistryDoc::new("dev-1");
+    doc.set_clock_writer("dev-1-viewer");
+    doc.claim_chat("c1", None, None, Utc::now());
+    let op = &doc.pending.last().unwrap().ops[0];
+    assert!(op.hlc.ends_with("-dev-1-viewer"), "{}", op.hlc);
+    assert_eq!(op.set.as_ref().unwrap()["deviceId"], json!("dev-1"));
+
+    let mut plain = RegistryDoc::new("dev-1");
+    plain.set_clock_writer("dev-1");
+    plain.claim_chat("c1", None, None, Utc::now());
+    assert!(plain.pending.last().unwrap().ops[0].hlc.ends_with("-dev-1"));
+}

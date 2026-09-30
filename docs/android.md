@@ -1,36 +1,79 @@
-# Android — agents that run on the phone
+# Android — the phone is a Zeron device
 
-The Android app does both jobs:
+The phone is a device like any desktop: it runs its own engine (`zeron
+headless` plus real agent CLIs — Claude Code, Codex, Grok, OpenCode… — inside
+a user-space Linux guest), that engine owns the Zeron account, and the app is
+the device's viewer. Every device signed in to the account sees the phone in
+its pickers and can start sessions on it; the phone starts sessions on them.
+There is no separate "phone mode".
 
-1. **Remote control** — the same viewer the iOS app is: a `zeron-client` peer
-   that drives engines on other devices through the production edge.
-2. **On-device engine** — the phone runs its own `zeron headless` plus real
-   agent CLIs (Claude Code, Codex, Grok, OpenCode…) inside a user-space Linux
-   guest, so agents execute *on the phone* with no computer involved.
-
-## Topology (on-device mode)
+## Topology
 
 ```
-┌──────────── Android app process ────────────┐
-│ Compose UI ── zeron-mobile (UniFFI, JNI .so) │
-│                 └─ zeron-client (Live backend, Credentials::Local)
-│                        │  ws/http 127.0.0.1:27655 + bearer token
-│ RuntimeService (foreground, specialUse)      │
-│   └─ spawns: libproot.so ─┐                  │
-└───────────────────────────┼──────────────────┘
+┌──────────────── Android app process ─────────────────┐
+│ Compose UI ── zeron-mobile (UniFFI, JNI .so)          │
+│   ├─ EngineLink ─── ws 127.0.0.1:27654 + IPC token ───┼──┐ EngineInfo, EdgeBearer,
+│   └─ CoreClient: device id = the engine's,            │  │ SignIn…SelectOrg, SignOut
+│      Credentials::Engine ─ ws/https → the engine's edge ─┼──► edge.zeron.sh (signed in)
+│                                                       │  │   127.0.0.1:27655 (signed out)
+│ RuntimeService (foreground, specialUse)               │  │
+│   └─ spawns: libproot.so ─┐                           │  │
+└───────────────────────────┼───────────────────────────┘  │
                             ▼  proot guest (Alpine arm64/x86_64 rootfs)
             /opt/zeron/lib/libzeron.so headless   (static musl engine)
-              ├─ local edge   127.0.0.1:27655  (chat2 rooms, registry room,
-              │                                 device relay — Rust port of edge/)
-              ├─ engine IPC   127.0.0.1:27654  (token-gated)
+              ├─ engine IPC   127.0.0.1:27654  (token-gated) ◄──────┘
+              ├─ local edge   127.0.0.1:27655  (only while signed out:
+              │                                 chat2, registry, device relay)
               └─ harness subprocesses: claude / codex / grok / git / node …
 ```
 
-The engine and the client speak **the exact production protocols** — chat2
-rows, registry row-frames, DeviceRoom relay — to a *local edge* that the
-engine hosts on loopback. Neither the engine's sync code nor the client's sync
-code learns anything new; only the edge moved onto the phone. The same local
-edge is the seed of the self-hosting contract ARCHITECTURE §1 defers.
+### One device, one account
+
+The engine's workspace is fixed per start (ARCHITECTURE §1), so what it
+syncs through depends on how it last started:
+
+| Engine start | `WorkspaceScope` | Edge | Identity |
+| --- | --- | --- | --- |
+| No account ("Continue without an account") | `Development` | the embedded local edge | `local` / `local` |
+| Saved, org-scoped WorkOS session | `Synced` | production (`ZERON_EDGE_URL`) | the account |
+| Developer custom server | `Development` | that edge (`zeron local-edge`) | `local` / `local` |
+
+The app asks the engine rather than knowing: `EngineInfo` (device id) and
+`EdgeBearer` (edge URL, user, org) over the IPC port, then builds its
+`CoreClient` with that device id, edge and identity and
+`Credentials::Engine{ipc_url, ipc_token, user_id, org_id}`. A signed-out
+engine still needs an edge because the viewer syncs only through one — hence
+the local edge; its sessions stay on the phone (local-only data isn't moved
+into an account on sign-in, as on desktop).
+
+- **Sign-in goes through the engine**, like the desktop UI's:
+  `SignInHeadless{redirectUri: "zeron://callback"}` → Custom Tab → the deep
+  link hands `state`/`code` back → `CompleteSignIn("state.code")` →
+  `ListOrgs`/`SelectOrg` (a picker for several, automatic for one) →
+  `RuntimeController.restart()` → the engine starts synced. `zeron://callback`
+  is registered for the same WorkOS client id as the engine's loopback
+  redirect. While signed out, `zeron headless` answers the account methods
+  from a production WorkOS `Auth` beside the local edge's dev bearer
+  (`Engine::with_account`). A saved session without an organization keeps
+  the local edge (no TTY can pick one) until the app finishes onboarding.
+- **Sign-out**: `SignOut` (a synced engine stops itself) → restart → local.
+- **One refresher.** WorkOS refresh tokens rotate, so only the engine
+  refreshes. `EdgeBearer` → `{edgeUrl, userId, orgId, bearer, expiresAtMs?}`
+  (or `{…, signedOut: true}`), served only on a token-gated `zeron headless`
+  IPC port and never over the relay. `Credentials::Engine` caches the bearer
+  until `expiresAtMs − 20 s` — inside the engine's 30 s refresh slack, so a
+  re-ask gets the rotated token — and single-flights re-asks; an unreachable
+  engine (restarting) keeps the last bearer; `signedOut` or a different
+  identity raises `AuthExpired` and the app rebuilds from the restarted engine.
+- **One device id.** The viewer uses the engine's id, so commands it stamps
+  are the device's own and the phone is one row in the registry. Loro peer
+  ids are random per document, so two writers sharing a device id never
+  collide; the viewer publishes no presence of its own (the engine's beat is
+  the device's), so the phone reads online exactly while its engine runs.
+- **Execution hosts** are what an engine advertises on its device row
+  (`Device::is_execution_host`: capabilities, else the platform), so the
+  phone's engine is a host on every device; the desktop's pickers filter on
+  it, never on the platform.
 
 ### Why the engine runs inside the guest
 
@@ -60,12 +103,12 @@ location) under `lib*.so` names, extracted to disk
 Host paths (app-private): `filesDir/runtime/`
 - `rootfs/` — Alpine minirootfs, extracted from `assets/rootfs-<abi>.tar.gz`
 - `tmp/` — `PROOT_TMP_DIR`
-- `state.json` — bootstrap version, generated secrets
+- `state.json` — bootstrap version, generated secrets, the custom server
 
 Guest layout:
 - user `zeron` with the app's uid/gid (added to `/etc/passwd`), HOME `/home/zeron`
 - `ZERON_DATA_DIR=/home/zeron/.zeron`
-- projects default to `/home/zeron/projects`
+- projects go to `/home/zeron/projects` (`ZERON_PROJECTS_DIR`)
 - `nativeLibraryDir` bound at `/opt/zeron/lib`; `/usr/local/bin/zeron` → `/opt/zeron/lib/libzeron.so`
 
 proot invocation (engine; `Guest.kt` is the source of truth):
@@ -80,10 +123,15 @@ libproot.so --kill-on-exit --link2symlink -r rootfs -w /home/zeron \
     PATH=/home/zeron/.local/bin:/usr/local/sbin:/usr/local/bin:/usr/sbin:/usr/bin:/sbin:/bin \
     ZERON_DATA_DIR=/home/zeron/.zeron ZERON_DEVICE_NAME="<model>" \
     ZERON_DEVICE_PLATFORM=android ZERON_NO_LOGIN_SHELL=1 \
-    ZERON_LOCAL_EDGE_PORT=27655 ZERON_LOCAL_EDGE_TOKEN=<secret> \
+    ZERON_PROJECTS_DIR=/home/zeron/projects \
     ZERON_IPC_PORT=27654 ZERON_IPC_TOKEN=<secret2> \
+    ZERON_LOCAL_EDGE_PORT=27655 ZERON_LOCAL_EDGE_TOKEN=<secret> \
     /opt/zeron/lib/libzeron.so headless
 ```
+With a custom server the last line is `ZERON_EDGE_URL=<url>
+ZERON_EDGE_TOKEN=<token> ZERON_USER_ID=local ZERON_ORG_ID=local` instead,
+with `ZERON_DATA_DIR=/home/zeron/.zeron-dev` (both workspaces are
+`local`/`local`; one store would re-seed each edge with the other's rows).
 Android's seccomp policy rejects `fork`/`vfork` from apps on x86_64 (arm64 has
 no such syscalls), which breaks every musl shell pipeline; `fetch-proot.sh`
 therefore rebuilds the x86_64 proot from source with a patch that rewrites
@@ -100,17 +148,21 @@ Nothing else runs as fake root — Claude Code refuses permission bypass as uid 
 
 | Env | Effect |
 | --- | --- |
-| `ZERON_LOCAL_EDGE_PORT` + `ZERON_LOCAL_EDGE_TOKEN` | `zeron headless` starts the embedded local edge on `127.0.0.1:<port>` and runs the engine against it in `Development` scope with that bearer (no WorkOS) |
-| `ZERON_IPC_TOKEN` | the IPC server rejects upgrades without `?token=` / `Authorization: Bearer`; `zeron mcp` / `zeron sync` send it |
+| `ZERON_LOCAL_EDGE_PORT` + `ZERON_LOCAL_EDGE_TOKEN` | with a saved, org-scoped sign-in `zeron headless` runs synced; otherwise it starts the embedded local edge on `127.0.0.1:<port>`, runs against it in `Development` scope with that bearer, and serves the account methods for sign-in |
+| `ZERON_IPC_TOKEN` | the IPC server rejects upgrades without `?token=` / `Authorization: Bearer`; `zeron mcp` / `zeron sync` send it; enables `EdgeBearer` |
 | `ZERON_DEVICE_PLATFORM` | overrides the platform string on this engine's device row |
+| `ZERON_PROJECTS_DIR` | where `CloneRepo` / `CreateRepo` put projects (the guest: `/home/zeron/projects`) |
+| `ZERON_EDGE_URL` + `ZERON_EDGE_TOKEN` + `ZERON_USER_ID` | the developer custom server: join that edge with an opaque bearer as user `ZERON_USER_ID` (with `ZERON_ORG_ID`) |
 
 Loopback on Android is shared by **every app on the device**, so both
 listeners are token-gated. The app generates both secrets on first run
 (`SecureRandom`, 32 bytes hex) and keeps them in app-private storage.
 
 Local edge details (`crates/localedge`):
-- Binds `127.0.0.1` only; state is one SQLite file,
+- Binds `127.0.0.1` only when embedded; state is one SQLite file,
   `$ZERON_DATA_DIR/local-edge/edge.db`, so rooms survive engine/app restarts.
+  `zeron local-edge --port P --token T [--bind 0.0.0.0]` serves one
+  standalone (development: several devices without WorkOS).
 - The token must be ≥ 16 URL-safe characters (`[A-Za-z0-9._~-]`; hex is
   fine) — the engine splices it into WebSocket URLs unencoded. `zeron headless`
   exits with an error otherwise. It is accepted as `Authorization: Bearer` or
@@ -133,17 +185,6 @@ Local edge details (`crates/localedge`):
   platform only for capability-less rows — so the phone's engine is a host and
   viewer rows stay viewers.
 
-### Client side
-
-`CoreClient(CoreConfig{ edge_url: "http://127.0.0.1:27655", platform: "android", … },
-Credentials.Local{ token })`. Credentials::Local is a new variant: the bearer is
-the token verbatim, identity is the fixed local user/org (`local` / `local`).
-
-Remote-control mode is the unmodified WorkOS flow against the production edge
-(`zeron://` callback scheme). The app keeps one `CoreClient` per mode and lets
-the user switch; a later milestone lets the phone's engine sign into the
-account so it appears as a device beside the desktops.
-
 ### Runtime API (`:runtime` module → `:app`)
 
 ```kotlin
@@ -156,6 +197,8 @@ interface RuntimeController {
     val isSupportedAbi: Boolean
     fun start()                 // bootstrap if needed, then run RuntimeService
     fun stop()
+    fun restart()               // new engine process (adopts a sign-in/out)
+    var customServer: CustomServer?   // developer edge; next (re)start
     suspend fun reset()         // wipe the guest (keeps nothing)
     fun logTail(lines: Int = 200): String
     suspend fun exec(command: String, asRoot: Boolean = false,
@@ -166,13 +209,13 @@ sealed interface RuntimeState {
     data object NotInstalled : RuntimeState
     data class Bootstrapping(val step: String, val progress: Float?) : RuntimeState
     data object Starting : RuntimeState
-    data class Running(val edgeUrl: String, val edgeToken: String,
-                       val ipcPort: Int, val ipcToken: String,
-                       val deviceName: String) : RuntimeState
+    data class Running(val ipcPort: Int, val ipcToken: String,
+                       val deviceName: String) : RuntimeState   // IPC answers with our token
     data object Stopped : RuntimeState
     data class Failed(val reason: String, val logTail: String) : RuntimeState
 }
 
+data class CustomServer(val edgeUrl: String, val token: String)
 data class ExecResult(val exitCode: Int, val output: String)
 ```
 
@@ -183,81 +226,54 @@ data class ExecResult(val exitCode: Int, val output: String)
 - **Phantom process killer** (Android 12+) caps child processes across apps.
   The engine runs as one proot tree; the app detects kills (engine exit with
   SIGKILL while foregrounded) and surfaces the developer-options switch.
-- **Battery**: `REQUEST_IGNORE_BATTERY_OPTIMIZATIONS` is requested only when
-  the user starts the engine.
+- **Battery**: `REQUEST_IGNORE_BATTERY_OPTIMIZATIONS` is requested when the
+  user continues without an account, and from Settings → This phone.
 - **Distribution**: proot + downloaded rootfs has Play precedent (UserLAnd);
   sideload/F-Droid builds are the fallback.
 - **Licences**: proot is GPL-2.0 and talloc LGPL-3.0, shipped as separate
   executables; listed in `THIRD_PARTY_NOTICES.md` with source links.
 
-## Milestones
-
-1. **Engine side** — local edge crate (`crates/localedge`), `zeron headless`
-   embedding, IPC token, platform override, `Credentials::Local`; an e2e test
-   drives engine (mock harness) ⇄ local edge ⇄ `zeron-client`.
-2. **Runtime** — `apps/android` Gradle project, proot/rootfs packaging,
-   bootstrap, `RuntimeService`, health/logs; verified on the emulator:
-   engine up, `/health` ok, a harness installs and `--version` runs.
-3. **UI** — the Material 3 Expressive Compose app over `zeron-mobile`
-   (see § UI).
-4. **Integration** — on-device mode end-to-end.
-
 ## UI
 
-One app, three modes, chosen on the first-run screen and switchable in
-Settings → Where agents run (`AppModel.chooseMode`):
-
-| Mode | Client | Data dir |
-| --- | --- | --- |
-| Your computers (account) | `Credentials.WorkOs`, production edge | `filesDir/core` |
-| This phone | `Credentials.Local(Running.edgeToken)`, `Running.edgeUrl` | `filesDir/phone` |
-| Demo | `Credentials.Demo` (Rust `DemoHost`) | `filesDir/demo` |
-
-Phone mode (`core/PhoneEngine.kt`, `ui/EngineScreens.kt`):
-- A client exists only while the runtime is `Running`; otherwise the setup
-  screen shows the state (bootstrap step + progress, failure reason + log
-  tail + the child-process hint) with Set up / Start / Try again / Reset.
-- Set up / Start asks for the notification permission, then the battery
-  exemption (`RuntimePermissions`). Launch restarts the engine unless the
-  user stopped it (the `phoneAutostart` setting).
-- Settings → On-device engine: state, Stop/Start, Reset, battery and
-  notification status, live log.
-- New sessions default to a harness the device has installed; the project
-  sheet adds "Clone repository" (`git clone` through `RuntimeController.exec`
-  into `/home/zeron/projects`, then `createProject`) and "Empty project".
+- **First run** (#609's sign-in screen): Sign in / Continue without an
+  account / Explore the demo. The engine bootstraps in the background from
+  the first launch (a compact status strip under the buttons shows the step
+  and progress); Sign in waits for it ("Preparing this phone…") rather than
+  blocking the screen. The demo is reachable only from here.
+- **Launch** autostarts the engine unless the user stopped it (Settings →
+  This phone → Stop); the runtime restarts it after a crash. While it isn't
+  running the Sessions screen shows the same strip.
+- **Settings**: the account (sign in / sign out, or the custom server),
+  **This phone** (engine state → the engine page: Start/Stop, Reset, battery
+  and notifications, Coding agents, the log), Devices (the phone is "This
+  device"), and — after seven taps on Version — Developer → Custom server
+  (edge URL + token; the engine restarts against it).
+- **New session**: projects grouped by machine — this phone first, then your
+  computers — each with "No project" (its home folder); "New project" clones
+  or creates on the chosen device through its engine (`CloneRepo` /
+  `CreateRepo`; on the phone into `/home/zeron/projects`). Harnesses and
+  models come from the chosen device.
+- **Coding agents** (any engine device, this phone first) speaks `host_call`:
+  `ListHarnesses`, `InstallHarness` / `CancelInstall`, `CheckHarnessUpdates`,
+  `ListAgentAccounts`, `StartAgentLogin` → Custom Tab → `PollAgentLogin`, or
+  paste-code `CompleteAgentLogin`, and `ForgetAgentAccount` (`core/Agents.kt`).
 - `core/Notifier.kt` posts local notifications (finished / needs input /
-  failed) while the app is in the background; tapping one opens the session.
+  failed) for the device's sessions while the app is in the background.
 
-Settings → Coding agents (`ui/AgentsScreen.kt`, any engine device, so
-account mode manages remote hosts too) speaks `host_call`: `ListHarnesses`,
-`InstallHarness` / `CancelInstall` (a relay timeout falls back to polling the
-catalog), `CheckHarnessUpdates`, `ListAgentAccounts` (plan label),
-`StartAgentLogin` → Custom Tab → `PollAgentLogin`, or paste-code
-`CompleteAgentLogin`, and `ForgetAgentAccount`. Reply parsing is in
-`core/Agents.kt` (JVM unit tests: `./gradlew :app:testDebugUnitTest`).
+JVM unit tests: `./gradlew :app:testDebugUnitTest`.
 
-### Status (2026-09-29)
+## Development: several devices without WorkOS
 
-- The engine, runtime and the earlier UI ran on a real arm64 phone: Claude
-  Code (Max) and Codex signed in and ran sessions on-device.
-- The combined app is verified on an Android 16 x86_64 emulator: clean
-  install → "Run agents on this phone" → notification + battery prompts →
-  guest set up in ~10 s → Coding agents → OpenCode installed → a cloned
-  repository → a session on OpenCode Zen "Big Pickle" wrote and ran
-  `hello.py` and streamed the reply; relaunch autostarts the engine; Stop,
-  Reset and re-setup; Demo (sessions, agent sign-in) and the account sign-in
-  screen.
+```
+zeron local-edge --port 27700 --token <≥16 url-safe chars> --bind 0.0.0.0
+ZERON_EDGE_URL=http://127.0.0.1:27700 ZERON_EDGE_TOKEN=<token> \
+  ZERON_USER_ID=local ZERON_ORG_ID=local ZERON_IPC_TOKEN=<secret> zeron headless
+```
 
-Not yet verified:
-- **The combined app on arm64 hardware**, and account-mode WorkOS sign-in and
-  agent browser sign-in end to end: the emulator's `system_server` aborts on a
-  GPU assertion whenever the app backgrounds (a Custom Tab opening), so
-  background notifications are unverified too.
-- **A real phantom-process kill.** Detection was exercised with a simulated
-  SIGKILL only.
-- **Release builds.** Per-ABI APK splits, and Play's 16 KB alignment for
-  `libproot-loader32.so`, are both open.
-- **Capsules.** Moving work between machines is the next design, not in v1.
+On the phone: Settings → About → tap Version seven times → Developer →
+Custom server `http://10.0.2.2:27700` (the emulator's host) + the token, or
+`adb shell am start -n sh.zeron.android/.MainActivity --ez local true
+--es server http://10.0.2.2:27700 --es server-token <token>`.
 
 Emulator note: boot with `-feature -ReadColorBufferDma -feature -GLDMA2`
 (swiftshader); otherwise `system_server` aborts on

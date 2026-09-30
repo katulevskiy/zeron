@@ -20,13 +20,9 @@ const TOKEN: &str = "0123456789abcdef0123456789abcdef";
 type Socket = WebSocketStream<MaybeTlsStream<TcpStream>>;
 
 async fn start(dir: &std::path::Path, port: u16) -> LocalEdge {
-    LocalEdge::start(LocalEdgeConfig {
-        data_dir: dir.to_path_buf(),
-        port,
-        token: TOKEN.into(),
-    })
-    .await
-    .expect("local edge starts")
+    LocalEdge::start(LocalEdgeConfig::loopback(dir, port, TOKEN))
+        .await
+        .expect("local edge starts")
 }
 
 fn ws_url(edge: &LocalEdge, path: &str) -> String {
@@ -198,12 +194,7 @@ async fn every_route_but_health_requires_the_token() {
 #[tokio::test]
 async fn weak_tokens_are_refused_and_only_loopback_is_bound() {
     let dir = tempfile::tempdir().unwrap();
-    let weak = LocalEdge::start(LocalEdgeConfig {
-        data_dir: dir.path().to_path_buf(),
-        port: 0,
-        token: "short".into(),
-    })
-    .await;
+    let weak = LocalEdge::start(LocalEdgeConfig::loopback(dir.path(), 0, "short")).await;
     assert!(matches!(weak, Err(LocalEdgeError::InvalidToken)));
     let edge = start(dir.path(), 0).await;
     assert!(edge.addr().ip().is_loopback());

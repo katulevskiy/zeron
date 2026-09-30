@@ -12,6 +12,7 @@ internal data class PersistedState(
     val rootfsRelease: String? = null,
     val packages: String? = null,
     val secrets: Secrets? = null,
+    val customServer: CustomServer? = null,
 )
 
 internal class StateStore(private val file: File) {
@@ -26,6 +27,9 @@ internal class StateStore(private val file: File) {
                 packages = json.optString("packages").ifEmpty { null },
                 secrets = json.optJSONObject("secrets")?.let {
                     Secrets(it.getString("edgeToken"), it.getString("ipcToken"))
+                },
+                customServer = json.optJSONObject("customServer")?.let {
+                    CustomServer(it.getString("edgeUrl"), it.getString("token"))
                 },
             )
         } catch (_: Exception) {
@@ -42,6 +46,9 @@ internal class StateStore(private val file: File) {
             .put("packages", next.packages ?: "")
         next.secrets?.let {
             json.put("secrets", JSONObject().put("edgeToken", it.edgeToken).put("ipcToken", it.ipcToken))
+        }
+        next.customServer?.let {
+            json.put("customServer", JSONObject().put("edgeUrl", it.edgeUrl).put("token", it.token))
         }
         file.parentFile?.mkdirs()
         // Write-then-rename: a crash mid-write must not lose the secrets the

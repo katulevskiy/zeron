@@ -70,7 +70,6 @@ import androidx.lifecycle.compose.LifecycleEventEffect
 import kotlinx.coroutines.Dispatchers
 import kotlinx.coroutines.delay
 import kotlinx.coroutines.withContext
-import sh.zeron.android.core.AppMode
 import sh.zeron.android.core.AppModel
 import sh.zeron.android.core.PhoneEngine
 import sh.zeron.android.design.GeistMono
@@ -80,108 +79,44 @@ import sh.zeron.runtime.RuntimePermissions
 import sh.zeron.runtime.RuntimeState
 
 /**
- * Start the engine the way the platform wants it: the notification permission
- * (the engine's status and finished sessions) and then the battery exemption
- * are asked for only now (docs/android.md § Android platform constraints).
+ * Ask for what keeps this phone's engine useful, the first time the user
+ * commits (first run): the notification permission (engine status, finished
+ * sessions), then — when [battery] — the battery exemption. `then` runs once
+ * the notification dialog is answered (never over it: it may open a browser).
  */
 @Composable
-fun rememberEngineStarter(model: AppModel): () -> Unit {
+fun rememberPermissionAsk(): (battery: Boolean, then: () -> Unit) -> Unit {
     val activity = LocalContext.current as Activity
+    var pending by remember { mutableStateOf<Pair<Boolean, () -> Unit>?>(null) }
     val notifications = rememberLauncherForActivityResult(ActivityResultContracts.RequestPermission()) {
-        RuntimePermissions.requestIgnoreBatteryOptimizations(activity)
+        pending?.let { (battery, then) ->
+            pending = null
+            if (battery) RuntimePermissions.requestIgnoreBatteryOptimizations(activity)
+            then()
+        }
     }
-    return remember(model, activity) {
-        {
-            model.startEngine()
+    return remember(activity) {
+        { battery, then ->
             if (Build.VERSION.SDK_INT >= 33 && RuntimePermissions.needsNotificationPermission(activity)) {
+                pending = battery to then
                 notifications.launch(Manifest.permission.POST_NOTIFICATIONS)
             } else {
-                RuntimePermissions.requestIgnoreBatteryOptimizations(activity)
+                if (battery) RuntimePermissions.requestIgnoreBatteryOptimizations(activity)
+                then()
             }
         }
     }
 }
 
-/** Phone mode before the engine answers: set up / start / progress / failure. */
+/**
+ * Settings → This phone: the device's engine like any computer's — state,
+ * start/stop/reset, keeping it alive, its coding agents, the log.
+ */
 @Composable
-fun PhoneSetupScreen(model: AppModel) {
+fun EngineScreen(model: AppModel, onBack: () -> Unit, onAgents: () -> Unit) {
     val phone = model.phone
     val state by phone.state.collectAsState()
-    val start = rememberEngineStarter(model)
-    var confirmReset by remember { mutableStateOf(false) }
-    Box(Modifier.fillMaxSize().safeDrawingPadding(), contentAlignment = Alignment.TopCenter) {
-        Column(
-            Modifier.widthIn(max = 560.dp).fillMaxSize().verticalScroll(rememberScrollState()).padding(horizontal = 20.dp),
-            horizontalAlignment = Alignment.CenterHorizontally,
-        ) {
-            Spacer(Modifier.height(48.dp))
-            Box(
-                Modifier.size(112.dp).clip(MaterialShapes.Cookie9Sided.toShape()).background(MaterialTheme.colorScheme.primaryContainer),
-                contentAlignment = Alignment.Center,
-            ) { ZIcon(ZIcons.Phone, null, Modifier.size(52.dp), tint = MaterialTheme.colorScheme.onPrimaryContainer) }
-            Spacer(Modifier.height(24.dp))
-            Text("Agents on this phone", style = MaterialTheme.typography.headlineMediumEmphasized, textAlign = TextAlign.Center)
-            Spacer(Modifier.height(8.dp))
-            Text(
-                "Zeron runs its engine and real coding agents in a small Linux system on this device.",
-                style = MaterialTheme.typography.bodyLarge,
-                color = MaterialTheme.colorScheme.onSurfaceVariant,
-                textAlign = TextAlign.Center,
-            )
-            Spacer(Modifier.height(28.dp))
-            EngineCard(phone, state)
-            Spacer(Modifier.height(20.dp))
-            val wide = Modifier.fillMaxWidth().heightIn(min = ButtonDefaults.MediumContainerHeight)
-            when (state) {
-                RuntimeState.NotInstalled, RuntimeState.Stopped, is RuntimeState.Failed -> Button(
-                    onClick = start,
-                    enabled = phone.isSupportedAbi,
-                    modifier = wide,
-                    shapes = ButtonDefaults.shapes(),
-                    contentPadding = ButtonDefaults.contentPaddingFor(ButtonDefaults.MediumContainerHeight),
-                ) {
-                    Text(
-                        when (state) {
-                            RuntimeState.NotInstalled -> "Set up"
-                            is RuntimeState.Failed -> "Try again"
-                            else -> "Start engine"
-                        },
-                        style = ButtonDefaults.textStyleFor(ButtonDefaults.MediumContainerHeight),
-                    )
-                }
-                is RuntimeState.Running -> Row(verticalAlignment = Alignment.CenterVertically) {
-                    LoadingIndicator(Modifier.size(32.dp))
-                    Spacer(Modifier.width(8.dp))
-                    Text("Connecting to the engine…", style = MaterialTheme.typography.bodyLarge, color = MaterialTheme.colorScheme.onSurfaceVariant)
-                }
-                else -> FilledTonalButton(onClick = { model.stopEngine() }, modifier = wide, shapes = ButtonDefaults.shapes()) {
-                    Text("Stop", style = ButtonDefaults.textStyleFor(ButtonDefaults.MediumContainerHeight))
-                }
-            }
-            if (state is RuntimeState.Failed) {
-                Spacer(Modifier.height(12.dp))
-                OutlinedButton(onClick = { confirmReset = true }, modifier = wide, shapes = ButtonDefaults.shapes()) {
-                    Text("Reset engine…", color = MaterialTheme.colorScheme.error, style = ButtonDefaults.textStyleFor(ButtonDefaults.MediumContainerHeight))
-                }
-                Spacer(Modifier.height(20.dp))
-                ChildProcessHint(Modifier.fillMaxWidth())
-                Spacer(Modifier.height(12.dp))
-                LogBox(PhoneEngine.stripAnsi((state as RuntimeState.Failed).logTail).ifBlank { phone.logTail(60) }, Modifier.fillMaxWidth())
-            }
-            Spacer(Modifier.height(24.dp))
-            TextButton(onClick = { model.signOut() }) { Text("Use Zeron another way") }
-            Spacer(Modifier.height(24.dp))
-        }
-    }
-    if (confirmReset) ResetDialog(onDismiss = { confirmReset = false }) { model.resetEngine() }
-}
-
-/** Settings → On-device engine: state, start/stop/reset, keeping it alive, the log. */
-@Composable
-fun EngineScreen(model: AppModel, onBack: () -> Unit) {
-    val phone = model.phone
-    val state by phone.state.collectAsState()
-    val start = rememberEngineStarter(model)
+    val start = { model.startEngine() }
     val activity = LocalContext.current as Activity
     val clipboard = LocalClipboardManager.current
     var confirmReset by remember { mutableStateOf(false) }
@@ -199,7 +134,7 @@ fun EngineScreen(model: AppModel, onBack: () -> Unit) {
         }
     }
 
-    SubPage(title = "On-device engine", subtitle = "Linux guest · local edge", onBack = onBack) {
+    SubPage(title = "This phone", subtitle = "Its engine and coding agents", onBack = onBack) {
         item { EngineCard(phone, state, Modifier.padding(horizontal = 16.dp, vertical = 8.dp)) }
         item {
             Row(Modifier.padding(horizontal = 16.dp, vertical = 8.dp), horizontalArrangement = Arrangement.spacedBy(8.dp)) {
@@ -222,6 +157,18 @@ fun EngineScreen(model: AppModel, onBack: () -> Unit) {
                     Text("Reset…", color = MaterialTheme.colorScheme.error)
                 }
             }
+        }
+        sectionTitle("Agents")
+        item {
+            SegmentedListItem(
+                onClick = onAgents,
+                shapes = segmentedShapes(0, 1),
+                colors = ListItemDefaults.segmentedColors(containerColor = cardColor()),
+                leadingContent = { IconTile(ZIcons.Bot) },
+                supportingContent = { Text("Install agents on this phone and sign in to them") },
+                trailingContent = { ZIcon(ZIcons.ChevronRight, null, Modifier.size(20.dp)) },
+                modifier = Modifier.padding(horizontal = 16.dp),
+            ) { Text("Coding agents") }
         }
         sectionTitle("Keep it running")
         item {
@@ -282,11 +229,11 @@ fun EngineCard(phone: PhoneEngine, state: RuntimeState, modifier: Modifier = Mod
         else -> MaterialTheme.colorScheme.surfaceContainerHigh to MaterialTheme.colorScheme.onSurface
     }
     val detail = when (state) {
-        RuntimeState.NotInstalled -> "Sets up a small Linux system (Alpine) with git, Node and the engine. Nothing leaves this phone."
+        RuntimeState.NotInstalled -> "Sets up a small Linux system (Alpine) with git, Node and the engine."
         is RuntimeState.Bootstrapping -> state.step
         RuntimeState.Starting -> "Starting the engine…"
-        is RuntimeState.Running -> "${state.deviceName} · ${state.edgeUrl.removePrefix("http://")}"
-        RuntimeState.Stopped -> "Agents on this phone are paused."
+        is RuntimeState.Running -> "${state.deviceName} · ready to run agents"
+        RuntimeState.Stopped -> "Sessions on this phone are paused; your other devices still work."
         is RuntimeState.Failed -> state.reason
     }
     val busy = state is RuntimeState.Bootstrapping || state == RuntimeState.Starting
@@ -370,8 +317,8 @@ private fun ResetDialog(onDismiss: () -> Unit, onReset: () -> Unit) {
     AlertDialog(
         onDismissRequest = onDismiss,
         icon = { ZIcon(ZIcons.Delete, null) },
-        title = { Text("Reset the on-device engine?") },
-        text = { Text("Deletes the Linux guest with its projects, agents, sign-ins and sessions on this phone. Nothing else is touched.") },
+        title = { Text("Reset this phone's engine?") },
+        text = { Text("Deletes the Linux guest with its projects, agents and their sign-ins, this phone's local sessions and its Zeron sign-in. Sessions on your other devices aren't touched.") },
         confirmButton = {
             TextButton(onClick = {
                 onDismiss()
@@ -420,23 +367,4 @@ fun LazyListScope.sectionTitle(title: String) {
             modifier = Modifier.padding(start = 28.dp, top = 24.dp, bottom = 8.dp),
         )
     }
-}
-
-/** Where agents run, for the Settings switch and the sign-in screen. */
-fun AppMode.title(): String = when (this) {
-    AppMode.Phone -> "This phone"
-    AppMode.Account -> "Your computers"
-    AppMode.Demo -> "Demo"
-}
-
-fun AppMode.detail(): String = when (this) {
-    AppMode.Phone -> "The engine and the agents run on this device"
-    AppMode.Account -> "Drive agents on your computers with a Zeron account"
-    AppMode.Demo -> "An offline workspace with a simulated computer"
-}
-
-fun AppMode.icon(): Int = when (this) {
-    AppMode.Phone -> ZIcons.Phone
-    AppMode.Account -> ZIcons.Laptop
-    AppMode.Demo -> ZIcons.Magic
 }

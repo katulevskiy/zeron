@@ -26,11 +26,11 @@ const IPC_TOKEN: &str = "ipc-fedcba9876543210fedcba9876543210";
 const REPLY_MARK: &str = "Streaming pipeline";
 
 async fn start_edge(dir: &Path, port: u16) -> LocalEdge {
-    LocalEdge::start(LocalEdgeConfig {
-        data_dir: dir.join("local-edge"),
+    LocalEdge::start(LocalEdgeConfig::loopback(
+        dir.join("local-edge"),
         port,
-        token: TOKEN.into(),
-    })
+        TOKEN,
+    ))
     .await
     .expect("local edge starts")
 }
