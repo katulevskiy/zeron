@@ -246,6 +246,12 @@ jobs:
         with: {path: .lab-ci, sparse-checkout: scripts/ci}
       - name: Desktop entry validator
         run: |
+          if [ ! -f scripts/test-linux-desktop-entry.sh ]; then
+            echo "::notice::target predates scripts/test-linux-desktop-entry.sh; skipping (original workflow is path-filtered)"
+            exit 0
+          fi
           command -v desktop-file-validate || bash .lab-ci/scripts/ci/apt-install.sh desktop-file-utils
       - name: Installers write a valid launcher entry
-        run: scripts/test-linux-desktop-entry.sh
+        run: |
+          if [ ! -f scripts/test-linux-desktop-entry.sh ]; then echo "skipped"; exit 0; fi
+          scripts/test-linux-desktop-entry.sh
