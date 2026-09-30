@@ -249,6 +249,8 @@ fun AgentsScreen(model: AppModel, onBack: () -> Unit) {
 
     val installed = harnesses.orEmpty().filter { it.installed }.map { it.id }.toSet()
     val pending = versions.values.count { it.harness in installed && it.updatable }
+    /** Newer releases only the CLI's own package manager may apply. */
+    val manual = versions.values.count { it.harness in installed && it.available && !it.canApply }
     val busyNow = updatingAll || updates.isNotEmpty() || versions.values.any { it.busy }
     val status = when {
         device == null -> null
@@ -258,13 +260,15 @@ fun AgentsScreen(model: AppModel, onBack: () -> Unit) {
         checking -> "Checking for updates…"
         pending == 1 -> "1 update available"
         pending > 1 -> "$pending updates available"
+        manual == 1 -> "1 update to install on the device"
+        manual > 1 -> "$manual updates to install on the device"
         versions.isNotEmpty() && installed.isNotEmpty() -> "Up to date"
         else -> null
     }
 
     SubPage(
         title = "Coding agents",
-        subtitle = listOfNotNull(device?.name, status).joinToString(" · ").ifEmpty { null },
+        subtitle = device?.name,
         onBack = onBack,
         overlay = { SnackbarHost(snackbar, Modifier.align(Alignment.BottomCenter).navigationBarsPadding()) },
         actions = {
@@ -288,12 +292,34 @@ fun AgentsScreen(model: AppModel, onBack: () -> Unit) {
         refreshing = refreshing,
         onRefresh = {
             refreshing = true
+            // A fresh look: the engine's statuses replace this screen's notes.
+            notes.clear()
+            updateAllError = null
             reloads++
         },
     ) {
         if (device == null) {
             item { EmptyNote(ZIcons.Bot, "No engine to manage", "Agents install on a device running Zeron — this phone's engine or one of your computers.") }
             return@SubPage
+        }
+        // The update state under the header (the Update all button takes the
+        // header's right edge, so it gets its own line).
+        status?.let { line ->
+            item("update-status") {
+                Row(Modifier.padding(start = 24.dp, end = 24.dp, bottom = 8.dp), verticalAlignment = Alignment.CenterVertically) {
+                    if (checking && !updatingAll) {
+                        LoadingIndicator(Modifier.size(20.dp))
+                        Spacer(Modifier.width(8.dp))
+                    }
+                    Text(
+                        line,
+                        style = MaterialTheme.typography.bodyMedium,
+                        color = if (pending > 0 && !updatingAll) MaterialTheme.colorScheme.primary else MaterialTheme.colorScheme.onSurfaceVariant,
+                        maxLines = 1,
+                        overflow = TextOverflow.Ellipsis,
+                    )
+                }
+            }
         }
         if (devices.size > 1) {
             item {
@@ -506,14 +532,14 @@ private fun HarnessCard(
                     contentAlignment = Alignment.Center,
                 ) { HarnessMark(h.id, 24.dp, tint = MaterialTheme.colorScheme.onSecondaryContainer) }
                 Spacer(Modifier.width(14.dp))
-                Column(Modifier.weight(1f)) {
+                Column(Modifier.weight(1f).padding(end = 8.dp)) {
                     Text(h.name, style = MaterialTheme.typography.titleMedium, maxLines = 1)
                     Text(
                         when {
                             activity == Activity.Installing -> "Installing…"
                             activity == Activity.Uninstalling -> "Uninstalling…"
                             activity == Activity.Updating -> (phaseLabels[version?.phase] ?: "Updating") + "…"
-                            available -> "Update available · v${version?.installed} → v${version?.latest}"
+                            available -> "Update available" + (version?.latest?.let { latest -> "\n" + listOfNotNull(version.installed, latest).joinToString(" → ") { "v$it" } } ?: "")
                             h.installed && version?.phase == "updated" -> "Updated · v${version?.installed}"
                             h.installed -> listOfNotNull("Installed", version?.installed?.let { "v$it" }).joinToString(" · ")
                             h.canInstall -> "Not installed"
