@@ -59,6 +59,24 @@ enum Command {
         #[arg(long)]
         check: bool,
     },
+    /// Serve a standalone local edge (docs/android.md) that several
+    /// `zeron headless` engines share: start each with
+    /// `ZERON_LOCAL_EDGE_URL=http://<addr>:<port> ZERON_LOCAL_EDGE_TOKEN=<token>`.
+    #[command(name = "local-edge")]
+    LocalEdge {
+        #[arg(long, default_value_t = 27655)]
+        port: u16,
+        /// Shared secret (≥ 16 URL-safe characters).
+        #[arg(long)]
+        token: String,
+        /// Interface to listen on. Anything but loopback exposes the edge
+        /// (token-guarded, plain HTTP) to the network.
+        #[arg(long, default_value = "127.0.0.1")]
+        bind: std::net::IpAddr,
+        /// State directory (default `{data dir}/local-edge`).
+        #[arg(long)]
+        data_dir: Option<std::path::PathBuf>,
+    },
 }
 
 #[derive(Subcommand)]
@@ -133,7 +151,10 @@ fn main() -> anyhow::Result<()> {
     // journald on every snapshot export — enough to fill a disk on a
     // long-running headless host. Quiet them by default (RUST_LOG still
     // overrides the whole filter).
-    let long_running = matches!(&cli.command, None | Some(Command::Headless));
+    let long_running = matches!(
+        &cli.command,
+        None | Some(Command::Headless) | Some(Command::LocalEdge { .. })
+    );
     let default_filter = if long_running {
         "info,loro_internal=warn,loro=warn"
     } else {
@@ -205,7 +226,13 @@ fn main() -> anyhow::Result<()> {
             runtime.block_on(async {
                 let config = engine_config_from_env();
                 match local_edge_from_env()? {
-                    Some((port, token)) => headless_with_local_edge(config, port, token).await,
+                    Some(LocalEdgeEnv::Embedded(port, token)) => {
+                        headless_with_local_edge(config, port, token).await
+                    }
+                    Some(LocalEdgeEnv::Shared(url, token)) => {
+                        let config = config.with_local_edge(url, token);
+                        zeron_engine::Engine::new(config).run().await
+                    }
                     None => zeron_engine::Engine::new(config).run().await,
                 }
             })
@@ -221,8 +248,14 @@ fn main() -> anyhow::Result<()> {
         Some(Command::Status) => {
             let runtime = tokio::runtime::Runtime::new()?;
             let mut config = engine_config_from_env();
-            if let Some((port, token)) = local_edge_from_env()? {
-                config = config.with_local_edge(local_edge_url(port), token);
+            match local_edge_from_env()? {
+                Some(LocalEdgeEnv::Embedded(port, token)) => {
+                    config = config.with_local_edge(local_edge_url(port), token)
+                }
+                Some(LocalEdgeEnv::Shared(url, token)) => {
+                    config = config.with_local_edge(url, token)
+                }
+                None => {}
             }
             runtime.block_on(auth_cli::status(config))
         }
@@ -241,6 +274,29 @@ fn main() -> anyhow::Result<()> {
         }
         #[cfg(all(target_os = "linux", not(feature = "ui")))]
         Some(Command::Appshot) => anyhow::bail!("this build has no UI"),
+        Some(Command::LocalEdge {
+            port,
+            token,
+            bind,
+            data_dir,
+        }) => {
+            let runtime = tokio::runtime::Runtime::new()?;
+            runtime.block_on(async {
+                let edge = zeron_localedge::LocalEdge::start_on(
+                    zeron_localedge::LocalEdgeConfig {
+                        data_dir: data_dir.unwrap_or_else(|| paths::data_dir().join("local-edge")),
+                        port,
+                        token,
+                    },
+                    bind,
+                )
+                .await?;
+                println!("local edge listening on {}", edge.url());
+                tokio::signal::ctrl_c().await?;
+                edge.shutdown().await;
+                anyhow::Ok(())
+            })
+        }
         Some(Command::Update { check }) => {
             let runtime = tokio::runtime::Runtime::new()?;
             runtime.block_on(update_cli::update(&edge_url_from_env(), check))
@@ -328,9 +384,17 @@ fn engine_config_from_env() -> zeron_engine::EngineConfig {
     }
 }
 
+enum LocalEdgeEnv {
+    /// `zeron headless` hosts the edge itself on this loopback port.
+    Embedded(u16, String),
+    /// The engine joins a standalone edge (`zeron local-edge`) at this URL.
+    Shared(String, String),
+}
+
 /// `ZERON_LOCAL_EDGE_PORT` + `ZERON_LOCAL_EDGE_TOKEN` (docs/android.md): both
-/// set embeds a local edge in `zeron headless`; neither keeps the default.
-fn local_edge_from_env() -> anyhow::Result<Option<(u16, String)>> {
+/// set embeds a local edge in `zeron headless`; `ZERON_LOCAL_EDGE_URL` +
+/// the token joins a shared one instead; neither keeps the default.
+fn local_edge_from_env() -> anyhow::Result<Option<LocalEdgeEnv>> {
     let read = |key: &str| {
         std::env::var(key)
             .ok()
@@ -339,16 +403,32 @@ fn local_edge_from_env() -> anyhow::Result<Option<(u16, String)>> {
     };
     match (
         read("ZERON_LOCAL_EDGE_PORT"),
+        read("ZERON_LOCAL_EDGE_URL"),
         read("ZERON_LOCAL_EDGE_TOKEN"),
     ) {
-        (None, None) => Ok(None),
-        (Some(port), Some(token)) => {
+        (None, None, None) => Ok(None),
+        (Some(port), None, Some(token)) => {
             let port = port
                 .parse()
                 .map_err(|_| anyhow::anyhow!("ZERON_LOCAL_EDGE_PORT is not a port: {port}"))?;
-            Ok(Some((port, token)))
+            Ok(Some(LocalEdgeEnv::Embedded(port, token)))
         }
-        _ => anyhow::bail!("ZERON_LOCAL_EDGE_PORT and ZERON_LOCAL_EDGE_TOKEN must be set together"),
+        (None, Some(url), Some(token)) => {
+            let url = url.trim_end_matches('/').to_owned();
+            anyhow::ensure!(
+                url.starts_with("http://") || url.starts_with("https://"),
+                "ZERON_LOCAL_EDGE_URL must be an http(s) URL: {url}"
+            );
+            Ok(Some(LocalEdgeEnv::Shared(url, token)))
+        }
+        (Some(_), Some(_), _) => {
+            anyhow::bail!(
+                "set ZERON_LOCAL_EDGE_PORT (embedded edge) or ZERON_LOCAL_EDGE_URL (shared edge), not both"
+            )
+        }
+        _ => anyhow::bail!(
+            "ZERON_LOCAL_EDGE_TOKEN must be set with ZERON_LOCAL_EDGE_PORT or ZERON_LOCAL_EDGE_URL"
+        ),
     }
 }
 

@@ -20,7 +20,9 @@
 //!   token holder, so owner claims and `orgId`/`userId` room partitioning
 //!   collapse; `/auth/*` answers like a Worker without WorkOS configured.
 //!
-//! The listener binds 127.0.0.1 only.
+//! The listener binds 127.0.0.1 unless started with [`LocalEdge::start_on`]
+//! (`zeron local-edge --bind`: several engines on a LAN or an emulator
+//! sharing one development edge).
 
 // `Result<_, Reply>`: the error IS the HTTP answer (status + body), returned
 // straight to hyper on a cold path; boxing it buys nothing.
@@ -35,7 +37,7 @@ mod store;
 
 use std::collections::HashMap;
 use std::convert::Infallible;
-use std::net::{Ipv4Addr, SocketAddr};
+use std::net::{IpAddr, Ipv4Addr, SocketAddr};
 use std::path::PathBuf;
 use std::sync::atomic::{AtomicU64, Ordering};
 use std::sync::{Arc, Mutex, PoisonError};
@@ -94,13 +96,20 @@ impl LocalEdge {
     /// Open (or create) the state under `data_dir` and start serving on
     /// `127.0.0.1:{port}`. Returns once the listener is bound.
     pub async fn start(config: LocalEdgeConfig) -> Result<Self, LocalEdgeError> {
+        Self::start_on(config, IpAddr::V4(Ipv4Addr::LOCALHOST)).await
+    }
+
+    /// [`Self::start`] on another interface. Anything but loopback exposes
+    /// the edge to the network: only the token guards it, and it is plain
+    /// HTTP — a development and LAN tool.
+    pub async fn start_on(config: LocalEdgeConfig, bind: IpAddr) -> Result<Self, LocalEdgeError> {
         if !valid_token(&config.token) {
             return Err(LocalEdgeError::InvalidToken);
         }
         std::fs::create_dir_all(&config.data_dir)?;
         let mut db = store::open(&config.data_dir)?;
         registry::gc_tombstones(&mut db)?;
-        let listener = TcpListener::bind((Ipv4Addr::LOCALHOST, config.port)).await?;
+        let listener = TcpListener::bind((bind, config.port)).await?;
         let addr = listener.local_addr()?;
         let edge = Arc::new(Edge {
             token: config.token,
