@@ -11,6 +11,7 @@
 //! through [`CoreClient::session_handle`] → [`zeron_client::SessionHandle`]
 //! (`snapshot()` / `subscribe()`), never over FFI.
 
+mod demo_host;
 mod session;
 mod types;
 
@@ -55,6 +56,8 @@ where
 #[derive(uniffi::Object)]
 pub struct CoreClient {
     pub(crate) client: zc::Client,
+    /// Answers `host_call` in Demo mode (there is no engine to relay to).
+    demo_host: demo_host::DemoHost,
 }
 
 #[allow(dead_code)] // consumed in Rust by the layout engine
@@ -87,7 +90,10 @@ impl CoreClient {
             credentials.into(),
             Arc::new(ListenerBridge(listener)),
         )?;
-        Ok(Arc::new(Self { client }))
+        Ok(Arc::new(Self {
+            client,
+            demo_host: demo_host::DemoHost::default(),
+        }))
     }
 
     pub fn is_demo(&self) -> bool {
@@ -481,6 +487,32 @@ impl CoreClient {
         let bytes =
             on_runtime(async move { client.read_attachment(&device_id, &path).await }).await?;
         Ok(bytes.as_ref().clone())
+    }
+
+    /// Untyped host RPC to `device_id`'s engine: `method` with JSON
+    /// `params_json` (an object; empty = `{}`), returning the reply as JSON.
+    /// For engine surfaces the typed API doesn't wrap yet (harness installs,
+    /// agent sign-ins). Demo mode answers from a simulated engine.
+    pub async fn host_call(
+        &self,
+        device_id: String,
+        method: String,
+        params_json: String,
+    ) -> CoreResult<String> {
+        let params: serde_json::Value = if params_json.trim().is_empty() {
+            serde_json::json!({})
+        } else {
+            serde_json::from_str(&params_json).map_err(|e| CoreError::InvalidArgument {
+                message: format!("params: {e}"),
+            })?
+        };
+        let reply = if self.client.is_demo() {
+            self.demo_host.call(&method, params).await?
+        } else {
+            let client = self.client.clone();
+            on_runtime(async move { client.host_call(&device_id, &method, params).await }).await?
+        };
+        Ok(reply.to_string())
     }
 
     // ── lifecycle ──────────────────────────────────────────────────────────

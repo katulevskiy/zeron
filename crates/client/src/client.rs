@@ -1310,6 +1310,21 @@ impl Client {
         }
     }
 
+    /// Untyped relay call to `device_id`'s engine, for host RPCs the typed
+    /// surface doesn't wrap (Android settings: harness installs, agent
+    /// logins). Demo mode has no generic host: `Unsupported`.
+    pub async fn host_call(
+        &self,
+        device_id: &str,
+        method: &str,
+        params: serde_json::Value,
+    ) -> Result<serde_json::Value> {
+        match self.inner.backend() {
+            Backend::Demo(_) => Err(ClientError::Unsupported(method.to_owned())),
+            Backend::Live(live) => live.relay.call(device_id, method, params).await,
+        }
+    }
+
     /// `git checkout <ref>` in `repo_path` on the device.
     pub async fn switch_ref(&self, device_id: &str, repo_path: &str, ref_name: &str) -> Result<()> {
         match self.inner.backend() {
