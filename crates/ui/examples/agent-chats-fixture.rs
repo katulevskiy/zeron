@@ -231,8 +231,11 @@ fn main() -> anyhow::Result<()> {
                     "parts": [
                         { "id": "t0", "kind": "text", "text":
                             "I'll fan this out so the benchmark and the review run while I wire the new tokenizer in." },
+                        // As the doc fold keeps it: the call, resolved, and
+                        // the ids its result named (never the output).
                         { "id": "tool-create", "kind": "tool", "resolved": true, "isError": false,
-                          "call": { "kind": "mcp", "server": "zeron", "tool": "create_chats" } },
+                          "call": { "kind": "mcp", "server": "zeron", "tool": "create_chats" },
+                          "createdChatIds": ["worker-gpu", "side-review"] },
                         { "id": "t1", "kind": "text", "text":
                             "Both are running: the benchmark is a top-level chat on the GPU box, and the API review is a side chat under this one. I'll fold their results in as they report back." },
                     ],
