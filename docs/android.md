@@ -129,7 +129,9 @@ libproot.so --kill-on-exit --link2symlink -r rootfs -w /home/zeron \
     /opt/zeron/lib/libzeron.so headless
 ```
 With a custom server the last line is `ZERON_EDGE_URL=<url>
-ZERON_EDGE_TOKEN=<token> ZERON_USER_ID=local ZERON_ORG_ID=local` instead.
+ZERON_EDGE_TOKEN=<token> ZERON_USER_ID=local ZERON_ORG_ID=local` instead,
+with `ZERON_DATA_DIR=/home/zeron/.zeron-dev` (both workspaces are
+`local`/`local`; one store would re-seed each edge with the other's rows).
 Android's seccomp policy rejects `fork`/`vfork` from apps on x86_64 (arm64 has
 no such syscalls), which breaks every musl shell pipeline; `fetch-proot.sh`
 therefore rebuilds the x86_64 proot from source with a patch that rewrites

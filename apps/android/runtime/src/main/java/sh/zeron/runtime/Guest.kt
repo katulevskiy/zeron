@@ -61,7 +61,9 @@ internal class Guest(private val context: Context, private val paths: RuntimePat
      * The engine's environment. By default it embeds the local edge (serving
      * the signed-out workspace to the app; a saved sign-in makes it a synced
      * device and leaves the edge off); a [CustomServer] joins that edge in
-     * development scope as the single-tenant `local` identity instead.
+     * development scope as the single-tenant `local` identity instead, with
+     * its own data dir: both workspaces are `local`/`local`, and sharing one
+     * store would re-seed either edge with the other's devices and chats.
      */
     fun env(secrets: Secrets, server: CustomServer? = null): List<String> = listOf(
         "HOME=$GUEST_HOME",
@@ -72,7 +74,7 @@ internal class Guest(private val context: Context, private val paths: RuntimePat
         "TERM=xterm-256color",
         "TMPDIR=/tmp",
         "PATH=$GUEST_HOME/.local/bin:/usr/local/sbin:/usr/local/bin:/usr/sbin:/usr/bin:/sbin:/bin",
-        "ZERON_DATA_DIR=$GUEST_HOME/.zeron",
+        "ZERON_DATA_DIR=$GUEST_HOME/${if (server == null) ".zeron" else ".zeron-dev"}",
         "ZERON_DEVICE_NAME=$deviceName",
         "ZERON_DEVICE_PLATFORM=android",
         "ZERON_NO_LOGIN_SHELL=1",

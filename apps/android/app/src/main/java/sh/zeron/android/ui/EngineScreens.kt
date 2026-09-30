@@ -134,7 +134,7 @@ fun EngineScreen(model: AppModel, onBack: () -> Unit, onAgents: () -> Unit) {
         }
     }
 
-    SubPage(title = "This phone", subtitle = "Runs agents in a small Linux system on this device", onBack = onBack) {
+    SubPage(title = "This phone", subtitle = "Its engine and coding agents", onBack = onBack) {
         item { EngineCard(phone, state, Modifier.padding(horizontal = 16.dp, vertical = 8.dp)) }
         item {
             Row(Modifier.padding(horizontal = 16.dp, vertical = 8.dp), horizontalArrangement = Arrangement.spacedBy(8.dp)) {

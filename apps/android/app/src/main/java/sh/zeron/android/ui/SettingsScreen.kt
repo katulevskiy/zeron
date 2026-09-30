@@ -71,7 +71,8 @@ fun SettingsScreen(model: AppModel, onOpen: (String) -> Unit) {
     val client by model.client.collectAsState()
     val demo = client?.isDemo() == true
     val workspace by model.workspace.collectAsState()
-    val devices = workspace?.devices.orEmpty()
+    // This phone first, like the desktop's device list.
+    val devices = workspace?.devices.orEmpty().sortedByDescending { it.isSelf }
     val context = LocalContext.current
     val ask = rememberPermissionAsk()
     var editingServer by remember { mutableStateOf(false) }
@@ -208,7 +209,11 @@ fun SettingsScreen(model: AppModel, onOpen: (String) -> Unit) {
                                     listOfNotNull(
                                         if (device.isSelf) "This device" else if (device.online) "Online" else "Offline",
                                         device.version?.let { "v$it" },
-                                        if (device.sessionCount > 0u) "${device.sessionCount} sessions" else null,
+                                        when (device.sessionCount) {
+                                            0u -> null
+                                            1u -> "1 session"
+                                            else -> "${device.sessionCount} sessions"
+                                        },
                                     ).joinToString(" · "),
                                 )
                             },
