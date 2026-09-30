@@ -1213,6 +1213,7 @@ pub(super) fn flat_text_presented_element(
     let underlay = canvas(
         |bounds, window, _| window.insert_hitbox(bounds, gpui::HitboxBehavior::Normal),
         move |_, hitbox, window, _| {
+            let surface = PAINTING_SURFACE.with(Cell::get);
             for range in &code_ranges {
                 for rect in range_rects(&layout, range, INLINE_CODE_PAD_X, INLINE_CODE_INSET_Y) {
                     window.paint_quad(quad(
@@ -1225,7 +1226,7 @@ pub(super) fn flat_text_presented_element(
                     ));
                 }
             }
-            if let Some(range) = super::selection::wash_range(&sel_key) {
+            if let Some(range) = super::selection::wash_range(surface, &sel_key) {
                 let range = offsets
                     .as_ref()
                     .map_or_else(|| range.clone(), |map| map.displayed_range(range.clone()));
@@ -1245,7 +1246,7 @@ pub(super) fn flat_text_presented_element(
             // mouse listeners.
             REGISTRY.with(|r| {
                 r.borrow_mut().push(RegEntry {
-                    surface: PAINTING_SURFACE.with(Cell::get),
+                    surface,
                     key: sel_key.clone(),
                     text: flat_text.clone(),
                     layout: layout.clone(),
@@ -1256,7 +1257,7 @@ pub(super) fn flat_text_presented_element(
                 window,
                 hitbox,
                 &sel_key,
-                PAINTING_SURFACE.with(Cell::get),
+                surface,
                 &flat_text,
                 &layout,
                 offsets.clone(),
@@ -1356,7 +1357,8 @@ fn paint_text_selection_with_wash(
     layout: &gpui::TextLayout,
     wash: Hsla,
 ) {
-    if let Some(range) = super::selection::wash_range(key) {
+    let surface = PAINTING_SURFACE.with(Cell::get);
+    if let Some(range) = super::selection::wash_range(surface, key) {
         for rect in range_rects(layout, &range, 0.0, 0.0) {
             window.paint_quad(quad(
                 rect,
@@ -1368,7 +1370,6 @@ fn paint_text_selection_with_wash(
             ));
         }
     }
-    let surface = PAINTING_SURFACE.with(Cell::get);
     REGISTRY.with(|r| {
         r.borrow_mut().push(RegEntry {
             surface,
@@ -1436,9 +1437,8 @@ thread_local! {
     /// The surface currently painting: set by its reset canvas, which paints
     /// before any of its text, and stamped onto each entry it registers.
     static PAINTING_SURFACE: Cell<u64> = const { Cell::new(0) };
-    /// The surface the live drag started in. A drag only resolves against its
-    /// own surface, so a second transcript on screen can't capture it.
-    static ANCHOR_SURFACE: Cell<u64> = const { Cell::new(0) };
+    /// Surfaces whose reset painted since the latest one's previous reset.
+    static PAINTED_SURFACES: RefCell<Vec<u64>> = const { RefCell::new(Vec::new()) };
 }
 
 #[cfg(test)]
@@ -1486,15 +1486,31 @@ pub fn selection_frame_reset() -> impl IntoElement {
 /// frame (the main chat beside a side chat or subagent tab). It clears only
 /// its own surface's entries and stamps the text painted after it, so
 /// another transcript's reset can't wipe this one's drag anchor.
+///
+/// A surface that stops painting (closed side chat or subagent tab) never
+/// resets again, so its entries are dropped once a full cycle of this
+/// surface's resets passes without it.
 pub fn selection_frame_reset_for(surface: u64) -> impl IntoElement {
     canvas(
         |_, _, _| (),
         move |_, _, _, _| {
             PAINTING_SURFACE.with(|s| s.set(surface));
-            REGISTRY.with(|r| {
-                r.borrow_mut()
-                    .retain(|e| !selection_scope(&e.key).is_empty() || e.surface != surface)
-            })
+            PAINTED_SURFACES.with(|painted| {
+                let mut painted = painted.borrow_mut();
+                // Seeing this surface again closes a cycle: `painted` now
+                // holds every surface still on screen.
+                let cycle = painted.contains(&surface);
+                REGISTRY.with(|r| {
+                    r.borrow_mut().retain(|e| {
+                        !selection_scope(&e.key).is_empty()
+                            || (e.surface != surface && (!cycle || painted.contains(&e.surface)))
+                    })
+                });
+                if cycle {
+                    painted.clear();
+                }
+                painted.push(surface);
+            });
         },
     )
     .absolute()
@@ -1539,7 +1555,9 @@ fn registry_point(position: gpui::Point<gpui::Pixels>) -> Option<(usize, usize)>
     REGISTRY.with(|r| {
         let reg = r.borrow();
         let anchor = super::selection::anchor_key().unwrap_or_default();
-        let anchor_surface = ANCHOR_SURFACE.with(Cell::get);
+        // A drag only resolves against its own surface, so a second
+        // transcript on screen can't capture it.
+        let anchor_surface = super::selection::anchor_surface();
         let mut best: Option<(usize, f32, f32)> = None;
         for (ei, entry) in reg.iter().enumerate() {
             if selection_scope(&entry.key) != selection_scope(&anchor)
@@ -1643,16 +1661,15 @@ fn register_selection_listeners(
                     Ok(ix) | Err(ix) => ix,
                 };
                 let ix = offsets.as_ref().map_or(ix, |map| map.original(ix));
-                ANCHOR_SURFACE.with(|s| s.set(surface));
                 match e.click_count {
                     2 => {
                         let range = super::selection::word_range(&text, ix);
-                        super::selection::begin_with_span(&key, &text, range);
+                        super::selection::begin_with_span_in(surface, &key, &text, range);
                     }
                     n if n >= 3 => {
-                        super::selection::begin_with_span(&key, &text, 0..text.len());
+                        super::selection::begin_with_span_in(surface, &key, &text, 0..text.len());
                     }
-                    _ => super::selection::begin(&key, ix),
+                    _ => super::selection::begin_in(surface, &key, ix),
                 }
                 window.refresh();
             } else if super::selection::clear_if_owner(&key) {
@@ -2828,8 +2845,21 @@ mod tests {
     }
 
     /// Two transcripts painted side by side (main chat + side chat or subagent
-    /// tab), each opening with its own `selection_frame_reset()`.
-    struct TwoPaneSelectionHarness;
+    /// tab), each opening with its own `selection_frame_reset()`. A side
+    /// chat's forked history repeats its parent's row keys: `prefixes` equal.
+    struct TwoPaneSelectionHarness {
+        prefixes: [&'static str; 2],
+        second_pane: bool,
+    }
+
+    impl TwoPaneSelectionHarness {
+        fn new(prefixes: [&'static str; 2]) -> Self {
+            Self {
+                prefixes,
+                second_pane: true,
+            }
+        }
+    }
 
     impl Render for TwoPaneSelectionHarness {
         fn render(&mut self, _: &mut Window, cx: &mut Context<Self>) -> impl IntoElement {
@@ -2857,8 +2887,8 @@ mod tests {
             div()
                 .size_full()
                 .flex()
-                .child(pane("pane-a", 1))
-                .child(pane("pane-b", 2))
+                .child(pane(self.prefixes[0], 1))
+                .when(self.second_pane, |el| el.child(pane(self.prefixes[1], 2)))
         }
     }
 
@@ -2866,7 +2896,7 @@ mod tests {
     fn dragging_selects_text_in_every_pane_of_a_two_transcript_layout(cx: &mut TestAppContext) {
         let _selection = super::super::selection::test_state_lock();
         cx.update(|cx| cx.set_global(Theme::dark()));
-        let (_, cx) = cx.add_window_view(|_, _| TwoPaneSelectionHarness);
+        let (_, cx) = cx.add_window_view(|_, _| TwoPaneSelectionHarness::new(["pane-a", "pane-b"]));
         cx.simulate_resize(size(px(640.0), px(240.0)));
         cx.update(|window, cx| {
             window.refresh();
@@ -2896,6 +2926,85 @@ mod tests {
                 "a drag in {name} must select text"
             );
         }
+    }
+
+    #[gpui::test]
+    fn a_forked_pane_sharing_keys_keeps_its_selection_to_itself(cx: &mut TestAppContext) {
+        use super::super::selection;
+        let _selection = selection::test_state_lock();
+        cx.update(|cx| cx.set_global(Theme::dark()));
+        let (_, cx) = cx.add_window_view(|_, _| TwoPaneSelectionHarness::new(["fork", "fork"]));
+        cx.simulate_resize(size(px(640.0), px(240.0)));
+        cx.update(|window, cx| {
+            window.refresh();
+            let _ = window.draw(cx);
+        });
+
+        // Both panes paint `fork:0`. Whichever pane the drag starts in, it
+        // must select there (the other pane's same-key listener must not
+        // clear it) and wash only there.
+        for (surface, other, left) in [(1, 2, 0.0), (2, 1, 320.0)] {
+            let start = point(px(left + 1.0), px(9.0));
+            let end = start + point(px(60.0), px(0.0));
+            cx.simulate_event(gpui::MouseDownEvent {
+                button: gpui::MouseButton::Left,
+                position: start,
+                click_count: 1,
+                ..Default::default()
+            });
+            cx.simulate_event(gpui::MouseMoveEvent {
+                position: end,
+                pressed_button: Some(gpui::MouseButton::Left),
+                ..Default::default()
+            });
+            cx.simulate_event(gpui::MouseUpEvent {
+                button: gpui::MouseButton::Left,
+                position: end,
+                ..Default::default()
+            });
+            let selected = selection::selected_text();
+            let washed = selection::wash_range(surface, "fork:0");
+            let leaked = selection::wash_range(other, "fork:0");
+            selection::clear_if_owner("fork:0");
+            let selected = selected.unwrap_or_default();
+            assert!(
+                "alpha beta gamma delta".starts_with(&selected) && !selected.is_empty(),
+                "a drag in surface {surface} copies its own text, got {selected:?}"
+            );
+            assert_eq!(washed, Some(0..selected.len()), "surface {surface} washes");
+            assert_eq!(leaked, None, "surface {other} stays unwashed");
+        }
+    }
+
+    #[gpui::test]
+    fn a_closed_pane_leaves_no_registry_entries_behind(cx: &mut TestAppContext) {
+        let _selection = super::super::selection::test_state_lock();
+        cx.update(|cx| cx.set_global(Theme::dark()));
+        let (view, cx) =
+            cx.add_window_view(|_, _| TwoPaneSelectionHarness::new(["pane-a", "pane-b"]));
+        cx.simulate_resize(size(px(640.0), px(240.0)));
+        let entries = |surface: u64| {
+            REGISTRY.with(|r| r.borrow().iter().filter(|e| e.surface == surface).count())
+        };
+        cx.update(|window, cx| {
+            window.refresh();
+            let _ = window.draw(cx);
+        });
+        assert!(entries(2) > 0);
+
+        // The side chat closes: its reset never paints again.
+        view.update(cx, |harness, cx| {
+            harness.second_pane = false;
+            cx.notify();
+        });
+        for _ in 0..2 {
+            cx.update(|window, cx| {
+                window.refresh();
+                let _ = window.draw(cx);
+            });
+        }
+        assert_eq!(entries(2), 0, "the closed pane's text is dropped");
+        assert!(entries(1) > 0, "the open pane keeps its text");
     }
 
     #[gpui::test]
