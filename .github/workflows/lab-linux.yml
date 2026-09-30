@@ -87,17 +87,21 @@ jobs:
           shared-key: core
           add-job-id-key: false
           save-if: ${{ inputs.save_cache }}
-      - name: Build and run tests (harness, engine, sync, update, doc, preview)
+      - name: Build and run tests (harness, engine, sync, update, doc, preview, rpc)
         run: |
           tests=""
           for f in crates/harness/tests/*.rs; do tests="$tests --test $(basename "$f" .rs)"; done
           for f in crates/preview/tests/*.rs; do tests="$tests --test $(basename "$f" .rs)"; done
+          # Engine integration tests: the original workflows' explicit list (session-sync +
+          # cursor-compat).  `local_first` and `handoff_core` (+ `zeron-rpc --lib`) are what the
+          # live-updates PR appends to ui-tests.yml; they are listed here unconditionally
+          # (handoff_core only when present) so that PR's extra steps keep running.
+          engine="--test session_publication --test restart_resume --test codex_subagents --test local_profiles --test message_queue --test pi_resume --test local_first"
+          [ -f crates/engine/tests/handoff_core.rs ] && engine="$engine --test handoff_core"
           cargo nextest run --locked --no-fail-fast \
-            -p zeron-harness -p zeron-engine -p zeron-sync -p zeron-update -p zeron-doc -p zeron-preview \
+            -p zeron-harness -p zeron-engine -p zeron-sync -p zeron-update -p zeron-doc -p zeron-preview -p zeron-rpc \
             --features zeron-harness/native-fixture \
-            --lib --bins $tests \
-            --test session_publication --test restart_resume --test codex_subagents \
-            --test local_profiles --test message_queue --test pi_resume \
+            --lib --bins $tests $engine \
             --test attachments_roundtrip
 
   # -------------------------------------------------------------------------- ui
@@ -137,6 +141,14 @@ jobs:
           save-if: ${{ inputs.save_cache }}
       - name: UI and headless layout regressions
         run: cargo nextest run --config-file .lab-ci/scripts/ci/nextest.toml --locked --no-fail-fast -p zeron-ui --lib
+      # Added to the `ui-tests` job by the live-updates PR (only exists on that target).
+      - name: Live update end to end (real engine, shell and agent processes)
+        run: |
+          if [ -f apps/zeron/tests/live_handoff.rs ]; then
+            cargo nextest run --locked --no-fail-fast -p zeron --test live_handoff
+          else
+            echo "target has no apps/zeron/tests/live_handoff.rs; skipped"
+          fi
 
   # --------------------------------------------------------------------- browser
   browser:
