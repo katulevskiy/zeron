@@ -16,8 +16,9 @@ pub mod capabilities {
     pub const MESSAGE_QUEUE_EDIT_LEASE_V1: &str = "message-queue-edit-lease-v1";
     pub const HARNESS_UPDATES_V1: &str = "harness-updates-v1";
     /// The engine can replace itself in place (exec handoff) without stopping
-    /// running agents or terminals. Deliberately absent from [`CURRENT`] until
-    /// the handoff RPC exists, so no engine advertises a capability it lacks.
+    /// running agents or terminals (`HandoffEngine`). Deliberately NOT in
+    /// [`CURRENT`]: it is advertised only by the headless IPC owner that
+    /// serves that method, never by an embedded engine that shares `EngineRpc`.
     pub const HANDOFF_V1: &str = "handoff-v1";
 
     pub const CURRENT: &[&str] = &[
@@ -148,8 +149,9 @@ mod tests {
     }
 
     #[test]
-    fn handoff_capability_is_named_but_not_yet_advertised() {
-        // Advertised from the release that can actually hand off (see live-update plan, Task 9).
+    fn handoff_capability_is_advertised_only_by_the_headless_ipc_owner() {
+        // The headless IPC owner adds it to `EngineInfo` because only it serves
+        // `HandoffEngine`; an embedded engine sharing `EngineRpc` must not.
         assert_eq!(capabilities::HANDOFF_V1, "handoff-v1");
         assert!(!capabilities::CURRENT.contains(&capabilities::HANDOFF_V1));
     }

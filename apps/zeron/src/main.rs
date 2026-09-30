@@ -6,6 +6,8 @@
 
 mod auth_cli;
 mod daemon;
+#[cfg(unix)]
+mod handoff_cli;
 mod paths;
 mod update_cli;
 
@@ -32,6 +34,11 @@ struct Cli {
 enum Command {
     /// Run the engine without a UI (local-only unless a saved session enables sync).
     Headless,
+    /// Answer a live handoff's preflight (used by the running engine before it
+    /// replaces itself with this binary; not for direct use).
+    #[cfg(unix)]
+    #[command(hide = true)]
+    HandoffPreflight,
     /// Sign in and enable sync on the next engine start.
     Login,
     /// Remove the saved session and return to local-only on the next start.
@@ -54,7 +61,9 @@ enum Command {
         command: DaemonCommand,
     },
     /// Check for a newer release and apply it (download → verify → swap →
-    /// service restart). `--check` only reports (exits 1 when one is available).
+    /// the running engine hands itself over in place, keeping agents and
+    /// terminals running; only an engine that cannot is restarted).
+    /// `--check` only reports (exits 1 when one is available).
     Update {
         #[arg(long)]
         check: bool,
@@ -73,6 +82,13 @@ enum DaemonCommand {
     Stop,
     /// Restart the service.
     Restart,
+    /// Replace the running engine, in place, with a newer binary — agents and
+    /// terminals keep running. `--exe` picks the binary (default: this one).
+    #[cfg(unix)]
+    Handoff {
+        #[arg(long)]
+        exe: Option<std::path::PathBuf>,
+    },
     /// Show the service manager's view of the daemon.
     Status,
 }
@@ -144,10 +160,37 @@ fn spawn_malloc_trimmer() {
     }
 }
 
+/// The live handoff this process was exec'd to complete, if any. The engine
+/// that replaced itself with us left the manifest's fd number in the
+/// environment; read it and clear the variables first thing, while this is
+/// still the only thread, so agents and other children never inherit them.
+#[cfg(unix)]
+fn take_handoff_env()
+-> Result<Option<zeron_engine::handoff::Adoption>, zeron_engine::handoff::ManifestError> {
+    let adoption = zeron_engine::handoff::read_adoption_from_env();
+    // SAFETY: called at the very top of `main`, before any thread exists.
+    unsafe {
+        std::env::remove_var(zeron_engine::handoff::HANDOFF_FD_ENV);
+        std::env::remove_var(zeron_engine::handoff::HANDOFF_ATTEMPT_ENV);
+        std::env::remove_var(zeron_engine::handoff::HANDOFF_ROLLED_BACK_ENV);
+    }
+    adoption
+}
+
 fn main() -> anyhow::Result<()> {
     if std::env::args_os().nth(1).as_deref() == Some(std::ffi::OsStr::new("--noop-browser")) {
         return Ok(());
     }
+    #[cfg(unix)]
+    let adoption = match take_handoff_env() {
+        Ok(adoption) => adoption,
+        Err(error) => {
+            // Nothing to adopt and no way to hand back: stop, and the service
+            // manager restarts the engine through ordinary crash recovery.
+            eprintln!("zeron: cannot complete the live handoff: {error}");
+            std::process::exit(1);
+        }
+    };
     #[cfg(windows)]
     attach_parent_console();
     let cli = Cli::parse();
@@ -236,8 +279,17 @@ fn main() -> anyhow::Result<()> {
             let runtime = tokio::runtime::Runtime::new()?;
             runtime.block_on(async {
                 let engine = zeron_engine::Engine::new(engine_config_from_env());
+                #[cfg(unix)]
+                if let Some(adoption) = adoption {
+                    return engine.run_adopting(adoption).await;
+                }
                 engine.run().await
             })
+        }
+        #[cfg(unix)]
+        Some(Command::HandoffPreflight) => {
+            println!("handoff-ok {}", zeron_engine::handoff::MANIFEST_VERSION);
+            Ok(())
         }
         Some(Command::Login) => {
             let runtime = tokio::runtime::Runtime::new()?;
@@ -266,7 +318,11 @@ fn main() -> anyhow::Result<()> {
         }
         Some(Command::Update { check }) => {
             let runtime = tokio::runtime::Runtime::new()?;
-            runtime.block_on(update_cli::update(&edge_url_from_env(), check))
+            runtime.block_on(update_cli::update(
+                &edge_url_from_env(),
+                check,
+                engine_config_from_env().ipc_port,
+            ))
         }
         Some(Command::Daemon { command }) => match command {
             DaemonCommand::Install => daemon::install(&engine_config_from_env().data_dir),
@@ -274,6 +330,11 @@ fn main() -> anyhow::Result<()> {
             DaemonCommand::Start => daemon::start(),
             DaemonCommand::Stop => daemon::stop(),
             DaemonCommand::Restart => daemon::restart(),
+            #[cfg(unix)]
+            DaemonCommand::Handoff { exe } => {
+                let runtime = tokio::runtime::Runtime::new()?;
+                runtime.block_on(handoff_cli::handoff(engine_config_from_env().ipc_port, exe))
+            }
             DaemonCommand::Status => daemon::status(),
         },
         None => {

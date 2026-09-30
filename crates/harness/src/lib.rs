@@ -19,6 +19,11 @@ use futures::stream::BoxStream;
 use tokio::sync::{mpsc, oneshot};
 pub use tokio_util::sync::CancellationToken;
 
+pub use handoff::{
+    ChildHandle, ExitOutcome, FreezeRefusal, FreezeRequest, FrozenRun, HarnessHandoff,
+    PausedWriter, SteerRecord, WriteMsg, WriterFd,
+};
+
 use zeron_proto::{
     AgentEvent, HarnessId, Model, ReasoningLevel, RunRequest, SlashCommand, SteeringMode,
     UserInputAnswer, UserInputQuestion,
@@ -63,6 +68,48 @@ pub struct RunControls {
     /// interrupt, then escalates to SIGTERM/SIGKILL on the child after a grace
     /// period. The run's stream ends with `Done { status: Interrupted }`.
     pub interrupt: CancellationToken,
+    /// Live-update handoff requests. A run that never receives one behaves
+    /// exactly as before; the default has no sender, so `recv()` is `None`.
+    pub freeze: mpsc::Receiver<FreezeRequest>,
+    /// Re-attach a parked question after a handoff: the adopted run calls this
+    /// with the ENGINE request id the question already has, and gets the
+    /// answer without a second `InputRequested` being emitted. The default
+    /// returns a receiver whose sender is dropped.
+    pub rebind_input: RebindInput,
+}
+
+/// See [`RunControls::rebind_input`].
+pub type RebindInput = Box<dyn Fn(String) -> oneshot::Receiver<Vec<UserInputAnswer>> + Send + Sync>;
+
+impl RunControls {
+    /// A `freeze` channel that never yields a request.
+    pub fn no_freeze() -> mpsc::Receiver<FreezeRequest> {
+        mpsc::channel(1).1
+    }
+
+    /// A `rebind_input` that always returns an already-dead receiver.
+    pub fn no_rebind() -> RebindInput {
+        Box::new(|_| oneshot::channel().1)
+    }
+
+    /// Controls with the given input bridge, steering mailbox and interrupt
+    /// token, no execution lease, and inert handoff seams.
+    pub fn new(
+        request_input: Box<
+            dyn Fn(Vec<UserInputQuestion>) -> oneshot::Receiver<Vec<UserInputAnswer>> + Send + Sync,
+        >,
+        steering: mpsc::Receiver<SteerMessage>,
+        interrupt: CancellationToken,
+    ) -> Self {
+        Self {
+            execution_lease: None,
+            request_input,
+            steering,
+            interrupt,
+            freeze: Self::no_freeze(),
+            rebind_input: Self::no_rebind(),
+        }
+    }
 }
 
 /// Catalog provenance stays internal; RPC clients retain the Vec<Model> shape.
@@ -165,6 +212,25 @@ pub trait Harness: Send + Sync {
         request: RunRequest,
         controls: RunControls,
     ) -> Result<BoxStream<'static, Result<AgentEvent, HarnessError>>, HarnessError>;
+
+    /// Whether [`Self::adopt`] can resume a run exported by this harness on a
+    /// live update. The engine falls back per harness when this is false.
+    fn supports_adoption(&self) -> bool {
+        false
+    }
+
+    /// Rebuild a run loop around an already-running child described by a
+    /// [`HarnessHandoff`] a previous image exported.
+    async fn adopt(
+        &self,
+        _handoff: HarnessHandoff,
+        _controls: RunControls,
+        _request: RunRequest,
+    ) -> Result<BoxStream<'static, Result<AgentEvent, HarnessError>>, HarnessError> {
+        Err(HarnessError::Protocol(
+            "adoption is not supported by this harness".into(),
+        ))
+    }
 }
 
 pub mod acp;
@@ -179,8 +245,10 @@ pub mod claude;
 pub mod codex;
 pub mod cursor;
 pub(crate) mod executable;
+pub mod handoff;
 pub mod install;
 pub(crate) mod jsonrpc;
+pub mod line_reader;
 pub mod mock;
 mod model_context;
 pub mod opencode;

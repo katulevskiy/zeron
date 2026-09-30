@@ -747,6 +747,8 @@ async fn run_session(session: Session) {
         request_input,
         mut steering,
         interrupt,
+        freeze: _freeze,
+        rebind_input: _rebind_input,
     } = controls;
     let request_input = Arc::new(request_input);
 

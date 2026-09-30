@@ -272,6 +272,8 @@ impl TurnWire {
                 }),
                 steering,
                 interrupt: interrupt.clone(),
+                freeze: RunControls::no_freeze(),
+                rebind_input: RunControls::no_rebind(),
             },
             request: serde_json::from_value(request).unwrap(),
             interrupt_grace: Duration::from_secs(2),

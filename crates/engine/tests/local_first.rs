@@ -581,6 +581,109 @@ async fn headless_stop_rpc_drains_the_daemon_and_releases_ipc() {
         .expect("headless IPC port remained occupied after shutdown");
 }
 
+/// Only the headless IPC owner serves `HandoffEngine`, so only it advertises
+/// `handoff-v1`; an embedded engine's `EngineRpc` (the one headed apps and the
+/// relay share) must not claim a capability it cannot serve.
+#[cfg(unix)]
+#[tokio::test]
+async fn headless_ipc_owner_advertises_live_handoff_and_serves_its_status() {
+    let dir = tempfile::tempdir().unwrap();
+    let port = {
+        let listener = tokio::net::TcpListener::bind("127.0.0.1:0").await.unwrap();
+        listener.local_addr().unwrap().port()
+    };
+    let mut engine_config = config(
+        dir.path(),
+        "http://127.0.0.1:1".into(),
+        Some("client_test"),
+        None,
+    );
+    engine_config.ipc_port = port;
+    let daemon = tokio::spawn(Engine::new(engine_config).run());
+    let client = tokio::time::timeout(std::time::Duration::from_secs(20), async {
+        loop {
+            if let Ok(client) = connect_ws(&format!("ws://127.0.0.1:{port}")).await {
+                break client;
+            }
+            tokio::time::sleep(std::time::Duration::from_millis(20)).await;
+        }
+    })
+    .await
+    .expect("headless IPC did not start");
+
+    let info: EngineInfo = client
+        .call_as(methods::ENGINE_INFO, serde_json::json!({}))
+        .await
+        .unwrap();
+    assert!(info.supports(zeron_proto::capabilities::HANDOFF_V1));
+    assert_eq!(
+        info.version.as_deref(),
+        Some(zeron_update::current_version())
+    );
+    // Advertised once, however often it is asked.
+    let again: EngineInfo = client
+        .call_as(methods::ENGINE_INFO, serde_json::json!({}))
+        .await
+        .unwrap();
+    assert_eq!(
+        again
+            .capabilities
+            .iter()
+            .filter(|capability| *capability == zeron_proto::capabilities::HANDOFF_V1)
+            .count(),
+        1
+    );
+    let status = client
+        .call(methods::HANDOFF_STATUS, serde_json::json!({}))
+        .await
+        .unwrap();
+    assert_eq!(status["state"], "idle");
+    assert_eq!(status["busy"], false);
+    assert_eq!(status["version"], zeron_update::current_version());
+    // A relative or missing binary is refused before anything is touched.
+    client
+        .call(
+            methods::HANDOFF_ENGINE,
+            serde_json::json!({ "exe": "zeron-next" }),
+        )
+        .await
+        .unwrap();
+    let failed = tokio::time::timeout(std::time::Duration::from_secs(10), async {
+        loop {
+            let status = client
+                .call(methods::HANDOFF_STATUS, serde_json::json!({}))
+                .await
+                .unwrap();
+            if status["state"] == "failed" {
+                break status;
+            }
+            tokio::time::sleep(std::time::Duration::from_millis(50)).await;
+        }
+    })
+    .await
+    .expect("the refused handoff was never reported");
+    assert!(
+        failed["message"].as_str().unwrap().contains("absolute"),
+        "{failed}"
+    );
+    assert_eq!(failed["busy"], false);
+
+    // The engine is exactly as it was: still serving.
+    let _: EngineInfo = client
+        .call_as(methods::ENGINE_INFO, serde_json::json!({}))
+        .await
+        .unwrap();
+    client
+        .call(methods::STOP_ENGINE, serde_json::json!({}))
+        .await
+        .unwrap();
+    tokio::time::timeout(std::time::Duration::from_secs(10), daemon)
+        .await
+        .expect("headless engine did not stop")
+        .expect("headless task panicked")
+        .expect("headless shutdown failed");
+}
+
 #[tokio::test]
 async fn headless_sign_out_closes_joined_edge_rooms_and_stops_daemon() {
     let dir = tempfile::tempdir().unwrap();
