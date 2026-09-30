@@ -46,6 +46,7 @@ jobs:
       core: ${{ steps.p.outputs.core }}
       ui: ${{ steps.p.outputs.ui }}
       browser: ${{ steps.p.outputs.browser }}
+      ios: ${{ steps.p.outputs.ios }}
     steps:
       - uses: actions/checkout@v4
         with: {ref: "${{ inputs.target }}", fetch-depth: 0}
@@ -58,7 +59,7 @@ jobs:
           if [ "$SELECT" = true ]; then
             python3 .lab-ci/scripts/ci/affected.py origin/main HEAD
           else
-            printf 'core=true\nui=true\nbrowser=true\n' | tee -a "$GITHUB_OUTPUT"
+            printf 'core=true\nui=true\nbrowser=true\nios=true\n' | tee -a "$GITHUB_OUTPUT"
           fi
 
   # ------------------------------------------------------------------------ core

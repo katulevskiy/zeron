@@ -5,7 +5,7 @@ usage: affected.py BASE_REF   (compares BASE_REF...HEAD in the current checkout)
 
 Uses `cargo metadata --no-deps` for the workspace-internal dependency graph, maps
 changed files to workspace members, takes the reverse-dependency closure, and
-prints `core=`, `ui=`, `browser=` booleans plus `reason=` to stdout (and to
+prints `core=`, `ui=`, `browser=`, `ios=` booleans plus `reason=` to stdout (and to
 $GITHUB_OUTPUT when set).  ANY doubt (diff failure, toolchain/lock/profile/CI file
 changed, unmapped source file) falls back to running everything.
 """
@@ -66,8 +66,19 @@ def lock_changed(base, head, members):
     return out
 
 
-def emit(core, ui, browser, reason):
-    out = {"core": core, "ui": ui, "browser": browser, "reason": reason}
+# Mirrors the `changes` job of .github/workflows/ui-tests.yml (iOS gate), but from
+# the commit diff instead of the pulls.listFiles API.
+IOS_PREFIXES = ("apps/ios/", "crates/mobile/", "crates/client/", "crates/text/", "crates/markdown/",
+                "crates/doc/", "crates/sync/", "crates/proto/", "crates/rpc/", "crates/syntax/", "scripts/ios/")
+IOS_FILES = ("Cargo.lock", "Cargo.toml", "rust-toolchain.toml", ".github/workflows/ui-tests.yml")
+
+
+def affects_ios(files):
+    return any(f.startswith(IOS_PREFIXES) or f in IOS_FILES for f in files)
+
+
+def emit(core, ui, browser, reason, ios=True):
+    out = {"core": core, "ui": ui, "browser": browser, "ios": ios, "reason": reason}
     for k, v in out.items():
         line = f"{k}={str(v).lower() if isinstance(v, bool) else v}"
         print(line)
@@ -81,13 +92,15 @@ def main():
     head = sys.argv[2] if len(sys.argv) > 2 else "HEAD"
     try:
         base = run("git", "merge-base", base, head).strip()
-        files = run("git", "diff", "--name-only", base, head).split()
+        # --no-renames: list both the old and the new path of a rename (the old path matters too)
+        files = run("git", "diff", "--name-only", "--no-renames", base, head).split()
         meta = json.loads(run("cargo", "metadata", "--no-deps", "--format-version", "1", "--locked"))
     except Exception as e:  # noqa: BLE001 - any failure => run everything
         return emit(True, True, True, f"fallback: {e}")
     if not files:
         return emit(True, True, True, "fallback: empty diff")
 
+    ios = affects_ios(files)
     root = meta["workspace_root"].rstrip("/") + "/"
     dirs = {}
     deps = {}
@@ -103,7 +116,7 @@ def main():
         try:
             changed |= lock_changed(base, head, names)
         except Exception as e:  # noqa: BLE001
-            return emit(True, True, True, f"fallback: Cargo.lock diff failed: {e}")
+            return emit(True, True, True, f"fallback: Cargo.lock diff failed: {e}", ios)
         files = [f for f in files if f != "Cargo.lock"]
     if "Cargo.toml" in files:
         # A root manifest change that only touches [workspace.dependencies] is fully
@@ -120,7 +133,7 @@ def main():
             pass
     for f in files:
         if f.startswith(GLOBAL):
-            return emit(True, True, True, f"fallback: global file {f}")
+            return emit(True, True, True, f"fallback: global file {f}", ios)
         hit = [n for n, d in dirs.items() if d and f.startswith(d + "/")]
         if hit:
             changed.update(hit)
@@ -131,7 +144,7 @@ def main():
         elif f.startswith(INERT) or f.startswith("edge/"):
             continue  # edge/ is covered by the no-rust preview-coordinator job, which always runs
         else:
-            return emit(True, True, True, f"fallback: unmapped file {f}")
+            return emit(True, True, True, f"fallback: unmapped file {f}", ios)
 
     affected = set(changed)
     grew = True
@@ -144,7 +157,7 @@ def main():
     core = bool(affected & CORE_PKGS) or core_files
     ui = bool(affected & UI_PKGS)
     browser = ui or browser_files
-    emit(core, ui, browser, "changed=" + ",".join(sorted(changed)) + " affected=" + ",".join(sorted(affected)))
+    emit(core, ui, browser, "changed=" + ",".join(sorted(changed)) + " affected=" + ",".join(sorted(affected)), ios)
 
 
 if __name__ == "__main__":
