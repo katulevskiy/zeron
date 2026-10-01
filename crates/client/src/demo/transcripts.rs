@@ -342,6 +342,7 @@ fn picker(host: &str, now: i64) -> Vec<SessionMessageEntry> {
                     request_id: "req-1".into(),
                     questions: vec![
                         UserInputQuestion {
+                            meta: None,
                             id: "q1".into(),
                             header: "Catalog source".into(),
                             question:
@@ -357,6 +358,7 @@ fn picker(host: &str, now: i64) -> Vec<SessionMessageEntry> {
                             multi_select: false,
                         },
                         UserInputQuestion {
+                            meta: None,
                             id: "q2".into(),
                             header: "Harnesses".into(),
                             question: "Which harnesses should the picker offer on phones?".into(),
@@ -785,6 +787,7 @@ pub(crate) fn asking() -> Vec<Step> {
     vec![
         Step::Text("Before I continue I need one decision:".into()),
         Step::Question(vec![UserInputQuestion {
+            meta: None,
             id: "q1".into(),
             header: "Scope".into(),
             question: "Should the fix cover Android too?".into(),

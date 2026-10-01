@@ -482,6 +482,26 @@ pub enum MessageOrigin {
         #[serde(default, skip_serializing_if = "Option::is_none")]
         verifier_chat_id: Option<String>,
     },
+    /// The completion message of a workflow run, queued into the parent chat
+    /// as a machine-origin user turn. The text part is the full body the
+    /// agent reads; UIs show a compact "Workflow completed" row instead.
+    Workflow {
+        run_id: String,
+        #[serde(default)]
+        name: String,
+        status: crate::WorkflowStatus,
+    },
+    /// A workflow lifecycle marker (system-role transcript entry): started,
+    /// settled, stopped, denied, resumed. Same fallback rule as
+    /// [`MessageOrigin::GoalEvent`].
+    WorkflowEvent {
+        run_id: String,
+        marker: crate::WorkflowEventMarker,
+        #[serde(default)]
+        name: String,
+        #[serde(default)]
+        detail: String,
+    },
     #[serde(other)]
     Unknown,
 }
@@ -717,7 +737,7 @@ mod tests {
             }
         );
         let future: MessageOrigin =
-            serde_json::from_str(r#"{"kind":"workflow","runId":"r"}"#).unwrap();
+            serde_json::from_str(r#"{"kind":"teleport","runId":"r"}"#).unwrap();
         assert_eq!(future, MessageOrigin::Unknown);
     }
 }

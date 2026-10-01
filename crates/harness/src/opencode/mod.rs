@@ -3528,6 +3528,7 @@ fn map_questions(props: &Value) -> Vec<UserInputQuestion> {
                 .filter_map(|(ix, q)| {
                     let question = q.get("question").and_then(Value::as_str)?;
                     Some(UserInputQuestion {
+                        meta: None,
                         id: format!("q{ix}"),
                         header: q
                             .get("header")

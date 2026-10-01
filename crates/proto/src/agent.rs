@@ -526,6 +526,10 @@ pub struct UserInputQuestion {
     pub prefill: Option<String>,
     #[serde(default)]
     pub multiline: bool,
+    /// Structured payload for UIs that know its `kind` (a workflow approval
+    /// carries its graph here); additive, ignored by everything else.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub meta: Option<serde_json::Value>,
 }
 
 #[derive(Debug, Clone, PartialEq, Serialize, Deserialize)]

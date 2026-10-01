@@ -380,6 +380,7 @@ async fn a_child_that_asks_a_question_fails_at_once_instead_of_hanging() {
         let count = count.clone();
         tokio::spawn(async move {
             let _answer = (controls.request_input)(vec![zeron_proto::UserInputQuestion {
+                meta: None,
                 id: "q".into(),
                 header: "Q".into(),
                 question: "Which file should I read?".into(),
