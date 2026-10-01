@@ -217,9 +217,9 @@ export function providerAccounts(snapshot: AgentAccountsSnapshot, harness: Harne
 export function providerEmptyCopy(provider: ProviderDescriptor): string {
   if (provider.harness === "cursor") {
     // Cursor's app login is separate from `cursor-agent login`.
-    return `${provider.name} isn't connected on this device — connect it to run Cursor sessions.`;
+    return `${provider.name} isn't connected on the selected engine — connect it to run Cursor sessions.`;
   }
-  return `No ${provider.name} login detected on this device — sign in with “${provider.cli}” or add an account.`;
+  return `No ${provider.name} login detected on the selected engine — sign in with “${provider.cli}” or add an account.`;
 }
 
 /** The row's primary label (email, else display name, else the fallback). */

@@ -160,7 +160,7 @@ export function DevicesSettingsPage() {
               key={device.id}
               device={device}
               first={ix === 0}
-              isLocal={device.id === localDeviceId}
+              isSelectedEngine={device.id === localDeviceId}
               connection={rowConnection(device.id)}
               online={lastSeenOnline(device.lastSeenAt, now)}
               copied={copied === device.id}
@@ -182,7 +182,7 @@ export function DevicesSettingsPage() {
 function DeviceRow(props: {
   readonly device: Device;
   readonly first: boolean;
-  readonly isLocal: boolean;
+  readonly isSelectedEngine: boolean;
   readonly connection: EngineConnection | null;
   readonly online: boolean;
   readonly copied: boolean;
@@ -244,7 +244,7 @@ function DeviceRow(props: {
           </button>
         </span>
       </div>
-      {props.isLocal && <span className="badge">This device</span>}
+      {props.isSelectedEngine && <span className="badge">Selected engine</span>}
       <button type="button" className="btn btn-ghost device-rename" onClick={props.onRename}>
         <Icon name="pen" size={14} />
         Rename

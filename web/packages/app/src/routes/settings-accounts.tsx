@@ -243,8 +243,8 @@ function EngineAccountsSettings({ session }: { session: ReturnType<typeof useEng
         </div>
       </div>
       <p className="settings-subtitle">
-        The Claude Code, Codex, and Cursor logins on this device. Zeron detects the live session, keeps each account
-        backed up, and can swap between them.
+        The Claude Code, Codex, and Cursor logins on the selected engine. Zeron detects the live session, keeps each account
+          backed up, and can swap between them.
       </p>
 
       {actionError !== null && (

@@ -31,7 +31,7 @@ import { PickerCard } from "./ui/PickerCard";
  * `trigger-press` reason exactly like every other anchored menu.
  *
  * The menu carries exactly two things — desktop parity (`shell.rs`): the
- * muted "Stored on this device" identity line, then the single "Settings"
+ * muted "Stored in this browser" identity line, then the single "Settings"
  * row, which lands on the Devices section (`SettingsSection::Devices`),
  * the desktop's landing row. Engine management lives in Settings →
  * Devices (ticket 45 folded the old web-only Engines drawer there).
@@ -114,7 +114,7 @@ export function AccountRow() {
         }
       >
         {profile === undefined ? (
-          <div className="user-menu-identity">Stored on this device</div>
+          <div className="user-menu-identity">Stored in this browser</div>
         ) : (
           <div className="user-menu-account">
             <div className="user-menu-account-name">{name}</div>

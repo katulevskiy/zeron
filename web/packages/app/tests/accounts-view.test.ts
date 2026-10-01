@@ -70,10 +70,14 @@ describe("providers", () => {
     expect(PROVIDERS.map((provider) => provider.cli)).toEqual(["claude", "codex", "cursor-agent"]);
   });
 
-  it("names the CLI in the empty-state copy, except Cursor", () => {
+  it("names the CLI in the empty-state copy, except Cursor, and identifies the selected engine", () => {
     expect(providerEmptyCopy(PROVIDERS[0]!)).toContain("claude");
+    expect(providerEmptyCopy(PROVIDERS[0]!)).toContain("selected engine");
     expect(providerEmptyCopy(PROVIDERS[2]!)).toContain("isn't connected");
+    expect(providerEmptyCopy(PROVIDERS[2]!)).toContain("selected engine");
     expect(providerEmptyCopy(PROVIDERS[2]!)).not.toContain("cursor-agent login — sign in");
+    expect(providerEmptyCopy(PROVIDERS[0]!)).not.toContain("this device");
+    expect(providerEmptyCopy(PROVIDERS[2]!)).not.toContain("this device");
   });
 });
 

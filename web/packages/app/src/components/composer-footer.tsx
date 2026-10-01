@@ -193,7 +193,7 @@ export interface DeviceChipProps {
   readonly effectiveDevice: Device | null;
   readonly ownDeviceId: string | null;
   readonly now: number;
-  /** The label with no device row — "Select device" in the footer, "This device" on the canvas (pickers.rs:2426). */
+  /** Browser-safe label when no execution engine is known. */
   readonly fallbackLabel?: string;
 }
 
@@ -202,12 +202,12 @@ export function DeviceChip({
   effectiveDevice,
   ownDeviceId,
   now,
-  fallbackLabel = "Select device",
+  fallbackLabel = "Select engine",
 }: DeviceChipProps) {
   const [open, setOpen] = useState(false);
   const engineStates = engineStatesOf(useFleetRegistry());
 
-  // Device order: this device first, then by lowercased name, then by id.
+  // Keep the connected engine first, then sort by lowercased name and id.
   const rows = useMemo(() => {
     return [...devices].sort((a, b) => {
       const aLocal = a.id === ownDeviceId ? 0 : 1;
@@ -247,7 +247,6 @@ export function DeviceChip({
         open={open}
         onClose={() => setOpen(false)}
         rows={rows}
-        ownDeviceId={ownDeviceId}
         effectiveDeviceId={effectiveDevice?.id ?? null}
         now={now}
         engineStates={engineStates}
@@ -260,7 +259,6 @@ function DeviceCard({
   open,
   onClose,
   rows,
-  ownDeviceId,
   effectiveDeviceId,
   now,
   engineStates,
@@ -268,7 +266,6 @@ function DeviceCard({
   readonly open: boolean;
   readonly onClose: () => void;
   readonly rows: readonly Device[];
-  readonly ownDeviceId: string | null;
   readonly effectiveDeviceId: string | null;
   readonly now: number;
   readonly engineStates: ReadonlyMap<string, "connected" | "reconnecting" | "off">;
@@ -338,7 +335,7 @@ function DeviceCard({
               onClick={() => pick(device)}
             >
               <span className="menu-row-label">{device.name}</span>
-              {device.id === ownDeviceId && <span className="picker-row-tag">You</span>}
+              {device.id === effectiveDeviceId && <span className="picker-row-tag">Selected engine</span>}
               {!deviceOnline(device, now, engineStates) && <Icon name="wifiOff" size={12} className="picker-row-offline" />}
             </MenuRowNav>
           ))}

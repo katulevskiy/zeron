@@ -228,7 +228,7 @@ describe("AccountRow — the user menu escapes the clipping sidebar (bug 2)", ()
     expect(trigger.getAttribute("aria-expanded")).toBe("true");
     // Desktop parity, unchanged content: the muted identity line, then the
     // single Settings row.
-    expect(card!.querySelector(".user-menu-identity")!.textContent).toBe("Stored on this device");
+    expect(card!.querySelector(".user-menu-identity")!.textContent).toBe("Stored in this browser");
     expect(card!.querySelector(".menu-item")!.textContent).toContain("Settings");
   });
 
@@ -341,7 +341,7 @@ describe("AccountRow — phone arm", () => {
     expect(sheet).not.toBeNull();
     expect(handle.sidebar.contains(sheet!)).toBe(false);
     expect(document.body.contains(sheet!)).toBe(true);
-    expect(sheet!.querySelector(".user-menu-identity")!.textContent).toBe("Stored on this device");
+    expect(sheet!.querySelector(".user-menu-identity")!.textContent).toBe("Stored in this browser");
     expect(sheet!.querySelector(".menu-item")).not.toBeNull();
     expect(handle.trigger().getAttribute("aria-expanded")).toBe("true");
   });
