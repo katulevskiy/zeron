@@ -293,6 +293,7 @@ pub enum WorkflowEntry {
     Report(WorkflowReport),
     Artifact(ArtifactSummary),
     Question(WorkflowQuestion),
+    Graph(WorkflowGraph),
 }
 
 impl WorkflowEntry {
@@ -303,9 +304,13 @@ impl WorkflowEntry {
             Self::Report(e) => e.key(),
             Self::Artifact(e) => e.key(),
             Self::Question(e) => e.key(),
+            Self::Graph(_) => GRAPH_KEY.to_owned(),
         }
     }
 }
+
+/// Entry key of a run's static graph.
+pub const GRAPH_KEY: &str = "g";
 
 pub fn entry_key(prefix: char, site_id: &str, ordinal: u32) -> String {
     format!("{prefix}:{site_id}#{ordinal}")
@@ -417,9 +422,6 @@ pub struct WorkflowRunHeader {
     /// Highest event folded into this state (idempotence guard).
     #[serde(default)]
     pub last_event_sequence: u64,
-    /// The static graph of the script, for the card skeleton.
-    #[serde(default, skip_serializing_if = "Option::is_none")]
-    pub graph: Option<WorkflowGraph>,
     /// Totals the lists above may have shed.
     #[serde(default)]
     pub reports_total: u32,
@@ -443,6 +445,10 @@ pub struct WorkflowRun {
     pub artifacts: Vec<ArtifactSummary>,
     #[serde(default)]
     pub pending_questions: Vec<WorkflowQuestion>,
+    /// The static graph of the script, for the card skeleton. Its own entry
+    /// (not part of the header) so it is written once.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub graph: Option<WorkflowGraph>,
 }
 
 impl WorkflowRun {
@@ -452,6 +458,7 @@ impl WorkflowRun {
             + self.reports.len()
             + self.artifacts.len()
             + self.pending_questions.len()
+            + usize::from(self.graph.is_some())
     }
 
     /// Every entry, keyed.
@@ -467,6 +474,7 @@ impl WorkflowRun {
                 .cloned()
                 .map(WorkflowEntry::Question),
         );
+        out.extend(self.graph.iter().cloned().map(WorkflowEntry::Graph));
         out
     }
 
@@ -498,6 +506,7 @@ impl WorkflowRun {
                 let key = q.key();
                 put(&mut self.pending_questions, q, |x| x.key() == key);
             }
+            WorkflowEntry::Graph(g) => self.graph = Some(g),
         }
     }
 
@@ -507,6 +516,9 @@ impl WorkflowRun {
         self.reports.retain(|x| x.key() != key);
         self.artifacts.retain(|x| x.key() != key);
         self.pending_questions.retain(|x| x.key() != key);
+        if key == GRAPH_KEY {
+            self.graph = None;
+        }
     }
 }
 
@@ -778,6 +790,9 @@ pub enum WorkflowEventKind {
         actor_ordinal: u32,
         #[serde(default)]
         instructions_head: String,
+        /// The phase the script was in when it dispatched the node.
+        #[serde(default)]
+        phase_name: Option<String>,
     },
     NodeDispatched {
         site_id: String,
