@@ -6,6 +6,7 @@ import androidx.compose.runtime.Composable
 import androidx.compose.runtime.LaunchedEffect
 import androidx.compose.runtime.mutableFloatStateOf
 import androidx.compose.runtime.remember
+import kotlinx.coroutines.delay
 import androidx.compose.ui.Modifier
 import androidx.compose.ui.geometry.Offset
 import androidx.compose.ui.graphics.BlendMode
@@ -138,51 +139,57 @@ internal val FastAnchorFromRight: Dp = 14.dp + 26.dp
 internal val FastAnchorFromTop: Dp = 14.dp + FastButtonTopPad + 26.dp
 
 /**
- * Fast mode's backdrop: a branching bolt that strikes from the fast button
- * through the panel every 0.8 to 1.8 s, blooming (layered strokes of falling
- * alpha, added to the panel in the dark theme) and flickering out. It lives at
- * the bottom of the card's content, never takes touches, and idles with no
- * redraws between strikes. With reduced motion it is one still frame.
+ * Fast mode's backdrop: when fast mode is switched ON, one branching bolt strikes from the fast button through the
+ * panel, blooms (layered strokes of falling alpha, added to the panel in the dark theme), flickers and fades out
+ * over [LightningFx.LIFE_SECONDS]. Then nothing: no redraw loop, no timer, zero cost until the next switch-on.
+ * Switching it off and on strikes again; opening the picker with fast already on shows nothing. It lives at the
+ * bottom of the card's content and never takes touches. With reduced motion it is a single still frame at the
+ * flash's peak that disappears after [LightningFx.STILL_MILLIS].
  */
 @Composable
 fun FastLightning(active: Boolean, modifier: Modifier = Modifier) {
-    if (!active) return
     val reduceMotion = rememberReduceMotion()
     val dark = LocalDarkTheme.current
     val density = LocalDensity.current
     val buffer = remember { BoltBuffer() }
     val paths = remember { arrayOf(Path(), Path(), Path()) }
     val strokes = remember(density) { Strokes(density.density) }
-    val age = remember { mutableFloatStateOf(if (reduceMotion) STILL_AGE else 1f) }
-    // The panel's [width, height] and the current strike's seed, shared by the clock (new strike) and the drawing (resize).
+    // 1 = nothing showing. Only moves while a strike is being played.
+    val age = remember { mutableFloatStateOf(1f) }
+    // The panel's [width, height] and the current strike's seed, shared by the strike and the drawing (resize).
     val panel = remember { floatArrayOf(0f, 0f) }
     val seed = remember { longArrayOf(STILL_SEED) }
+    // [first composition, previous value of active, strikes so far]
+    val memory = remember { longArrayOf(1L, if (active) 1L else 0L, 0L) }
 
-    LaunchedEffect(reduceMotion) {
-        if (reduceMotion) return@LaunchedEffect
-        val rng = Random(System.nanoTime())
-        var nextAt = 0L
-        var startedAt = 0L
-        var struck = false
-        while (true) {
-            androidx.compose.runtime.withFrameNanos { now ->
-                if (panel[0] <= 0f) return@withFrameNanos
-                if (nextAt == 0L) nextAt = now + 250_000_000L
-                if (now >= nextAt) {
-                    startedAt = now
-                    nextAt = now + (LightningFx.gapSeconds(rng.nextFloat()) * 1e9f).toLong()
-                    seed[0] = rng.nextLong()
-                    regenerate(seed[0], panel, buffer, paths, strokes.density)
-                    struck = true
-                }
-                if (!struck) return@withFrameNanos
-                val a = ((now - startedAt) / 1e9f / LightningFx.LIFE_SECONDS).coerceAtMost(1f)
-                // Only invalidate drawing while a strike is visible (and once more to clear it).
-                if (a < 1f || age.floatValue < 1f) age.floatValue = a
-            }
+    LaunchedEffect(active) {
+        val first = memory[0] == 1L
+        val was = memory[1] == 1L
+        memory[0] = 0L
+        memory[1] = if (active) 1L else 0L
+        if (!LightningFx.strikes(first, was, active)) {
+            age.floatValue = 1f
+            return@LaunchedEffect
         }
+        memory[2]++
+        seed[0] = LightningFx.seedFor(memory[2].toInt(), System.nanoTime())
+        regenerate(seed[0], panel, buffer, paths, strokes.density)
+        if (reduceMotion) {
+            age.floatValue = STILL_AGE
+            delay(LightningFx.STILL_MILLIS)
+            age.floatValue = 1f
+            return@LaunchedEffect
+        }
+        var startedAt = -1L
+        do {
+            androidx.compose.runtime.withFrameNanos { now ->
+                if (startedAt < 0) startedAt = now
+                age.floatValue = LightningFx.ageAt(now - startedAt)
+            }
+        } while (age.floatValue < 1f)
     }
     Canvas(modifier.fillMaxSize()) {
+        if (age.floatValue >= 1f) return@Canvas
         if (panel[0] != size.width || panel[1] != size.height) {
             panel[0] = size.width
             panel[1] = size.height

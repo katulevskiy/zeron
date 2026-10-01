@@ -171,6 +171,40 @@ The provider rail answers a tap with `Select` + `Cue.forProvider(harness)`, movi
 the finger onto the next provider (or scrolling the list across a section) with
 `RailTick` (plus the provider's cue when scrubbing). Arrival and lightning effects
 are skipped, not the feedback, when animations are off.
+
+Fast mode's lightning **strikes once**, when fast is switched on: one bolt with forks,
+a bright flash, two restrikes and a bloom that fades out over 0.9 s
+(`LightningFx.LIFE_SECONDS`), starting on the same frame the `Lightning` haptic and
+`FastOn` cue fire. After the fade nothing is drawn or animated (no redraw loop, no
+timer); switching fast off and on strikes again, and opening the picker with fast
+already on shows nothing. With reduced motion it is one still frame at the flash's
+peak for 450 ms. It sits at the bottom of the card and never takes touches.
+
+The effort bar has **friction**. The thumb does not track the finger: each level is a
+magnetic well (`EffortTuning.WELL_FRACTION = 0.38` of a step each side of the level)
+that the finger has to pull out of before the thumb leaves, after which it springs to
+the next level (a staircase of smoothsteps, `EffortDrag.target`). The finger itself is
+speed-limited to `MAX_STEPS_PER_SECOND = 7.5` (one level per 133 ms), so a quick flick
+moves one or two levels, never from Low to Ultrathink, while a deliberate drag across
+the bar (1 to 2 s) still gets there. A release carries the thumb at most half a step
+(`RELEASE_CARRY_STEPS`) and springs it to the nearest level; there is no fling. A tap on
+the track jumps straight to its level. The thumb is a spring (`FOLLOW_*` while dragging,
+`SETTLE_*` into a level, `REBOUND_*` after a stretch), and it is the single state the
+fill, dots and halo derive from. `EffortStep` fires when the thumb itself crosses over
+to the next level, so the haptic lands with the spring snapping in. The end rubber band
+starts only once the finger is past the last level's well. Measured on an emulator with
+`adb shell input swipe` and the `ZeronFeedback` log (Low to Ultrathink is six steps):
+a 100 ms swipe moves one level, 150 ms one or two, 250 ms two, 500 ms four, 1000 ms
+and 1500 ms the whole bar.
+
+Stretch past an end (frames: `docs/media/android/picker-stretch-*-before.png` and
+`-after.png`, recorded at animator scale 10): the old bar drew a flat bulge past the
+rail and a rectangular, rail-clipped fill whose end was cut at the un-stretched
+position, so it showed a lighter coloured block past the thumb and then, as the rebound
+spring swung inward, a square-ended fill with the grey track end exposed. The fill is
+now a capsule whose right end sits between the thumb's centre and its far edge
+(`EffortGeometry.fillRight`), derived from the one thumb position, so it stays round
+and under the thumb through stretch and rebound.
 Not every vocabulary entry is wired by this layer: `Star`, `Pop` for favorites and
 the model chip are used by the model picker, `Press` is reserved.
 
