@@ -722,6 +722,19 @@ impl WorkflowRunsState {
     }
 }
 
+/// Stamped on a workflow actor's child chat (`meta.workflowActor`) so clients
+/// can tell it from a verifier or a person's chat and open it read-only.
+#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
+#[serde(rename_all = "camelCase")]
+pub struct WorkflowActorTag {
+    pub run_id: String,
+    pub site_id: String,
+    #[serde(default)]
+    pub ordinal: u32,
+    #[serde(default)]
+    pub name: String,
+}
+
 // ── events (the journal's vocabulary) ─────────────────────────────────────
 
 /// One thing that happened in a run. Events are the journal's spine and the

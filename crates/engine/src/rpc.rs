@@ -1908,6 +1908,21 @@ impl RpcService for EngineRpc {
                     .ok_or_else(|| RpcError::Failed("no such ask in this chat".into()))?;
                 RpcReply::value(&spec)
             }
+            methods::ASK_ESCALATE => {
+                #[derive(Deserialize)]
+                #[serde(rename_all = "camelCase")]
+                struct Params {
+                    chat_id: String,
+                    #[serde(flatten)]
+                    request: zeron_proto::EscalateRequest,
+                }
+                let p: Params = parse_params(params)?;
+                let asks = self
+                    .doc_host
+                    .asks()
+                    .ok_or_else(|| RpcError::Failed("asks are not available".into()))?;
+                RpcReply::value(&asks.escalate(&p.chat_id, p.request).await)
+            }
             methods::SUBMIT_ASK_RESULT => {
                 let p: SubmitAskParams = parse_params(params)?;
                 let asks = self

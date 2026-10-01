@@ -407,7 +407,9 @@ impl Tools {
                 .into_iter()
                 .filter(|t| crate::ask::ASK_READ_TOOLS.contains(&t.name))
                 .collect();
-            defs.push(self.ask_tool().await.def());
+            let tool = self.ask_tool().await;
+            defs.push(tool.def());
+            defs.extend(tool.escalate_def());
             return defs;
         }
         catalog()
@@ -415,7 +417,9 @@ impl Tools {
 
     pub fn has(&self, name: &str) -> bool {
         if self.zeron.origin().ask_id.is_some() {
-            return name == crate::ask::SUBMIT_RESULT || crate::ask::ASK_READ_TOOLS.contains(&name);
+            return name == crate::ask::SUBMIT_RESULT
+                || name == crate::ask::ESCALATE
+                || crate::ask::ASK_READ_TOOLS.contains(&name);
         }
         catalog().iter().any(|t| t.name == name)
     }
@@ -428,6 +432,9 @@ impl Tools {
         }
         if name == crate::ask::SUBMIT_RESULT {
             return self.submit_result(args).await;
+        }
+        if name == crate::ask::ESCALATE {
+            return self.escalate(args).await;
         }
         let result = match name {
             "get_goal" => self.get_goal(parse(args)?).await,

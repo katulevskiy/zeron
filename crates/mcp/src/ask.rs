@@ -10,6 +10,7 @@ use serde_json::{Value, json};
 use crate::tools::{ToolDef, Tools};
 
 pub(crate) const SUBMIT_RESULT: &str = "submit_result";
+pub(crate) const ESCALATE: &str = "escalate";
 
 /// The read-only tools an ask's chat keeps. `read_chat` is how a verifier
 /// reads the transcript of the chat it judges.
@@ -19,6 +20,12 @@ const DESCRIPTION: &str = "Deliver your final structured result for this request
 once, when you are done: its arguments ARE the result and must match this tool's input schema. \
 If the call is rejected, the error lists what to fix; fix it and call again.";
 
+const ESCALATE_DESCRIPTION: &str = "Last resort: ask the agent that started this work a question \
+you cannot decide yourself and that blocks the task. A question written in prose reaches nobody. \
+At most 3 per request; they do not count against your time. The call waits for the answer; if it \
+returns `pending`, call it again with the returned `question_id` to keep waiting (that does not use \
+another escalation). Prefer deciding, stating your assumption, and submitting.";
+
 /// The advertised `submit_result`.
 #[derive(Debug, Clone)]
 pub(crate) struct AskTool {
@@ -26,6 +33,8 @@ pub(crate) struct AskTool {
     /// The ask's schema is not an object, so the result travels under
     /// `result` (MCP tool inputs must be objects).
     wrapped: bool,
+    /// The ask's child may call `escalate` (workflow actors).
+    pub(crate) escalation: bool,
 }
 
 impl AskTool {
@@ -43,6 +52,7 @@ impl AskTool {
             Self {
                 schema,
                 wrapped: false,
+                escalation: spec.escalation,
             }
         } else {
             Self {
@@ -53,6 +63,7 @@ impl AskTool {
                     "additionalProperties": false,
                 }),
                 wrapped: true,
+                escalation: spec.escalation,
             }
         }
     }
@@ -63,6 +74,7 @@ impl AskTool {
         Self {
             schema: json!({ "type": "object", "additionalProperties": true }),
             wrapped: false,
+            escalation: false,
         }
     }
 
@@ -72,6 +84,21 @@ impl AskTool {
             description: DESCRIPTION,
             input_schema: self.schema.clone(),
         }
+    }
+
+    pub(crate) fn escalate_def(&self) -> Option<ToolDef> {
+        self.escalation.then(|| ToolDef {
+            name: ESCALATE,
+            description: ESCALATE_DESCRIPTION,
+            input_schema: json!({
+                "type": "object",
+                "properties": {
+                    "question": { "type": "string", "description": "What you need decided, specific enough to answer in a sentence or two." },
+                    "context": { "type": "string", "description": "What you found and why it blocks you (short)." },
+                    "question_id": { "type": "string", "description": "Set only to keep waiting for an answer already requested." }
+                }
+            }),
+        })
     }
 
     fn unwrap(&self, args: Value) -> Value {
@@ -115,6 +142,39 @@ impl Tools {
     }
 }
 
+impl Tools {
+    /// `escalate`: `Ok` carries the answer or a pending notice; `Err` is a
+    /// refusal the model reads.
+    pub(crate) async fn escalate(&self, args: Value) -> Result<Value, String> {
+        if !self.ask_tool().await.escalation {
+            return Err("escalate is not available in this request: decide, then submit_result".into());
+        }
+        let reply = self
+            .zeron
+            .escalate(
+                args.get("question").and_then(Value::as_str),
+                args.get("context").and_then(Value::as_str),
+                args.get("question_id").and_then(Value::as_str),
+            )
+            .await
+            .map_err(|e| e.to_string())?;
+        match reply.status {
+            zeron_proto::EscalateStatus::Refused => Err(reply.message),
+            zeron_proto::EscalateStatus::Answered => Ok(json!({
+                "status": "answered",
+                "answer": reply.answer,
+                "escalationsLeft": reply.left,
+                "message": reply.message,
+            })),
+            zeron_proto::EscalateStatus::Pending => Ok(json!({
+                "status": "pending",
+                "question_id": reply.question_id,
+                "message": reply.message,
+            })),
+        }
+    }
+}
+
 #[cfg(test)]
 mod tests {
     use super::*;
@@ -124,6 +184,7 @@ mod tests {
             ask_id: "a".into(),
             result_schema: schema,
             result_description: "the verdict".into(),
+            escalation: false,
         }
     }
 

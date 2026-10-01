@@ -340,6 +340,29 @@ impl Zeron {
         serde_json::from_value(value).context("SubmitAskResult: unexpected shape")
     }
 
+    /// `escalate`: raise a question (or keep waiting for `question_id`).
+    pub async fn escalate(
+        &self,
+        question: Option<&str>,
+        context: Option<&str>,
+        question_id: Option<&str>,
+    ) -> anyhow::Result<zeron_proto::EscalateReply> {
+        let (chat_id, ask_id) = self.ask_ids()?;
+        let value = self
+            .call(
+                methods::ASK_ESCALATE,
+                json!({
+                    "chatId": chat_id,
+                    "askId": ask_id,
+                    "question": question,
+                    "context": context,
+                    "questionId": question_id,
+                }),
+            )
+            .await?;
+        serde_json::from_value(value).context("AskEscalate: unexpected shape")
+    }
+
     fn ask_ids(&self) -> anyhow::Result<(&str, &str)> {
         match (&self.origin.chat_id, &self.origin.ask_id) {
             (Some(chat), Some(ask)) => Ok((chat, ask)),

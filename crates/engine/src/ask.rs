@@ -22,6 +22,20 @@
 //! Callers depend on the [`AskBackend`] trait, not on [`AskService`], so
 //! schedulers can be tested against [`FakeAsk`].
 //!
+//! # Persistent children (workflow actors)
+//!
+//! One ask normally owns one short-lived child. A workflow *actor* instead
+//! keeps one child across many asks: [`AskSpec::persistent`] hides the child
+//! the moment it is created and stops the ask from archiving it, and
+//! [`AskSpec::reuse_child`] points a later ask at that child — the new prompt
+//! is another turn of the same conversation with a fresh `submit_result` slot
+//! (the harness restarts with the stored session id to pick up the new ask's
+//! MCP server, so the context carries over through the harness's own resume).
+//! Such a child may also be offered the actor-only `escalate` tool
+//! ([`AskSpec::escalation`]): a question for the parent agent that parks only
+//! that ask, never counts against its timeout, and returns the parent's answer
+//! as the tool result.
+//!
 //! # Permissions of a headless child
 //!
 //! The child inherits the parent's `auto_approve` and may never run with a
@@ -44,8 +58,9 @@ use tokio::sync::Notify;
 use tokio_util::sync::CancellationToken;
 use zeron_doc::{MessagePart, MessageRole};
 use zeron_proto::{
-    AgentEvent, AskSpecInfo, AskSubmitReply, ChatConfig, HarnessId, ReasoningLevel, RunRequest,
-    SandboxLevel, SchemaViolation, SessionStatus,
+    AgentEvent, AskSpecInfo, AskSubmitReply, ChatConfig, EscalateReply, EscalateRequest,
+    EscalateStatus, HarnessId, ReasoningLevel, RunRequest, SandboxLevel, SchemaViolation,
+    SessionStatus, WorkflowActorTag,
 };
 
 use crate::sessions::SessionsEngine;
@@ -63,6 +78,64 @@ pub const DEFAULT_MAX_NUDGES: u32 = 1;
 const ACCEPTED_GRACE: Duration = Duration::from_secs(20);
 /// Violations echoed back to the model per rejected submission.
 const MAX_VIOLATIONS_SHOWN: usize = 12;
+/// Escalations one ask may raise.
+pub const DEFAULT_MAX_ESCALATIONS: u32 = 3;
+/// How long one `escalate` call waits for an answer before reporting
+/// `pending` (kept under the tool-call timeouts of the strictest harnesses).
+const ESCALATE_WAIT: Duration = Duration::from_secs(45);
+/// Journal polling for tool-call progress.
+const PROGRESS_EVERY: Duration = Duration::from_millis(900);
+
+/// What an ask reports while it runs (workflow nodes show it).
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub enum AskProgress {
+    /// The child chat exists (new, or the reused one).
+    Child(String),
+    /// The first turn was dispatched.
+    Executing,
+    /// A submission was rejected; the model is repairing it.
+    Repairing { attempt: u32 },
+    /// The turn ended without a submission; nudged.
+    Nudged,
+    /// Parked on an escalation.
+    Waiting,
+    /// An escalation was answered.
+    Resumed,
+    /// Tool calls the child made during this ask so far.
+    Turn {
+        turns: u32,
+        tool_calls: u32,
+        last_tool: Option<String>,
+    },
+}
+
+/// A question an actor raised for the parent agent.
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub struct EscalationRaised {
+    pub qid: String,
+    pub child_chat_id: String,
+    pub question: String,
+    pub context: String,
+}
+
+/// Callback bundles carried by an [`AskSpec`] (they keep it `Clone + Debug`).
+#[derive(Clone)]
+pub struct ProgressHook(pub Arc<dyn Fn(AskProgress) + Send + Sync>);
+
+#[derive(Clone)]
+pub struct EscalationHook(pub Arc<dyn Fn(EscalationRaised) + Send + Sync>);
+
+impl std::fmt::Debug for ProgressHook {
+    fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
+        f.write_str("ProgressHook")
+    }
+}
+
+impl std::fmt::Debug for EscalationHook {
+    fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
+        f.write_str("EscalationHook")
+    }
+}
 
 /// What to ask, of whom, and how.
 #[derive(Debug, Clone)]
@@ -92,6 +165,17 @@ pub struct AskSpec {
     pub timeout: Duration,
     pub max_repairs: u32,
     pub max_nudges: u32,
+    /// Continue this existing child chat instead of creating one.
+    pub reuse_child: Option<String>,
+    /// The child outlives the ask: hidden (archived) when created, never
+    /// archived or interrupted-and-forgotten by the ask's cleanup.
+    pub persistent: bool,
+    /// Offer the child the `escalate` tool; called for each question.
+    pub escalation: Option<EscalationHook>,
+    pub max_escalations: u32,
+    pub progress: Option<ProgressHook>,
+    /// Stamps a created child as a workflow actor's.
+    pub workflow_actor: Option<WorkflowActorTag>,
 }
 
 impl AskSpec {
@@ -109,6 +193,12 @@ impl AskSpec {
             timeout: DEFAULT_ASK_TIMEOUT,
             max_repairs: DEFAULT_MAX_REPAIRS,
             max_nudges: DEFAULT_MAX_NUDGES,
+            reuse_child: None,
+            persistent: false,
+            escalation: None,
+            max_escalations: DEFAULT_MAX_ESCALATIONS,
+            progress: None,
+            workflow_actor: None,
         }
     }
 
@@ -246,6 +336,12 @@ pub trait AskBackend: Send + Sync {
         spec: AskSpec,
         cancel: CancellationToken,
     ) -> Result<AskOutcome, AskFailure>;
+
+    /// Deliver the parent agent's answer to an escalation `qid` raised by the
+    /// ask running in `child_chat_id`. `false` when no such question waits.
+    async fn answer_escalation(&self, _child_chat_id: &str, _qid: &str, _answer: String) -> bool {
+        false
+    }
 }
 
 /// [`AskBackend::ask`] with the result decoded into `T`.
@@ -364,6 +460,12 @@ pub fn validate_result(schema: &Value, value: &Value) -> Result<(), Vec<SchemaVi
 
 // ── the engine-backed implementation ───────────────────────────────────────
 
+/// One parked `escalate` question.
+struct EscalationSlot {
+    answer: Option<String>,
+    notify: Arc<Notify>,
+}
+
 struct AskState {
     ask_id: String,
     schema: Value,
@@ -373,6 +475,36 @@ struct AskState {
     accepted: Option<Value>,
     exhausted: Vec<SchemaViolation>,
     notify: Arc<Notify>,
+    child_chat_id: String,
+    escalation: Option<EscalationHook>,
+    max_escalations: u32,
+    escalations_used: u32,
+    pending: HashMap<String, EscalationSlot>,
+    /// Time spent parked on answered escalations (the timeout excludes it).
+    parked_total: Duration,
+    parked_since: Option<Instant>,
+    progress: Option<ProgressHook>,
+}
+
+impl AskState {
+    fn report(&self, progress: AskProgress) {
+        if let Some(hook) = &self.progress {
+            (hook.0)(progress);
+        }
+    }
+
+    /// Time that does not count against the ask's timeout.
+    fn parked(&self) -> Duration {
+        self.parked_total + self.parked_since.map_or(Duration::ZERO, |t| t.elapsed())
+    }
+
+    fn settle_park(&mut self) {
+        if self.pending.is_empty()
+            && let Some(since) = self.parked_since.take()
+        {
+            self.parked_total += since.elapsed();
+        }
+    }
 }
 
 fn lock<T>(mutex: &Mutex<T>) -> MutexGuard<'_, T> {
@@ -407,6 +539,7 @@ impl AskService {
             ask_id: state.ask_id.clone(),
             result_schema: state.schema.clone(),
             result_description: state.description.clone(),
+            escalation: state.escalation.is_some(),
         })
     }
 
@@ -448,6 +581,11 @@ impl AskService {
             Err(violations) => {
                 state.repairs_used += 1;
                 let repairs_left = state.max_repairs.saturating_sub(state.repairs_used - 1);
+                if repairs_left > 0 {
+                    state.report(AskProgress::Repairing {
+                        attempt: state.repairs_used,
+                    });
+                }
                 if repairs_left == 0 {
                     state.exhausted = violations.clone();
                     state.notify.notify_one();
@@ -499,40 +637,72 @@ impl AskService {
             .map_err(|e| AskError::Setup(e.to_string()))?
             .ok_or_else(|| AskError::Setup(format!("no such chat: {parent_chat_id}")))?;
         let parent_config = parent.config.clone();
+        // A reused child keeps the configuration and cwd it was created with.
+        let reused = match &spec.reuse_child {
+            Some(id) => Some(
+                self.workspace
+                    .chat(id)
+                    .map_err(|e| AskError::Setup(e.to_string()))?
+                    .ok_or_else(|| AskError::Setup(format!("no such child chat: {id}")))?,
+            ),
+            None => None,
+        };
         // One level of nesting: a child of a child hangs off the root chat, so
         // the sidebar's "chats created by this chat" list stays flat.
         let attach_to = parent
             .parent_chat_id
             .clone()
             .unwrap_or_else(|| parent.id.clone());
+        let base_config = reused
+            .as_ref()
+            .and_then(|c| c.config.clone())
+            .or(parent_config.clone());
         let harness = spec
             .harness
-            .or(parent_config.as_ref().map(|c| c.harness))
+            .filter(|_| reused.is_none())
+            .or(base_config.as_ref().map(|c| c.harness))
             .unwrap_or_else(|| self.doc_host.harness_for(parent_chat_id));
-        let same_harness = parent_config.as_ref().map(|c| c.harness) == Some(harness);
-        let (model, reasoning, model_options) = match (&parent_config, same_harness) {
-            (Some(config), true) => (
+        let same_harness = base_config.as_ref().map(|c| c.harness) == Some(harness);
+        let (model, reasoning, model_options) = match (&base_config, same_harness, &reused) {
+            (Some(config), true, Some(_)) => (
+                config.model.clone(),
+                config.reasoning,
+                config.model_options.clone(),
+            ),
+            (Some(config), true, None) => (
                 spec.model.clone().or_else(|| config.model.clone()),
                 spec.reasoning.or(config.reasoning),
                 config.model_options.clone(),
             ),
             _ => (spec.model.clone(), spec.reasoning, Default::default()),
         };
+        let base_sandbox = base_config
+            .as_ref()
+            .map_or(SandboxLevel::WorkspaceWrite, |c| c.sandbox);
+        // A child never runs wider than its requester.
         let parent_sandbox = parent_config
             .as_ref()
             .map_or(SandboxLevel::WorkspaceWrite, |c| c.sandbox);
+        let sandbox = capped_sandbox(base_sandbox, parent_sandbox);
         let sandbox = if spec.read_only {
-            capped_sandbox(parent_sandbox, SandboxLevel::ReadOnly)
+            capped_sandbox(sandbox, SandboxLevel::ReadOnly)
         } else {
-            parent_sandbox
+            sandbox
         };
         let auto_approve = self
             .sessions
             .last_request(parent_chat_id)
             .is_some_and(|r| r.auto_approve);
-        let cwd = parent.cwd.clone().unwrap_or_else(|| "~".into());
+        let cwd = reused
+            .as_ref()
+            .and_then(|c| c.cwd.clone())
+            .or_else(|| parent.cwd.clone())
+            .unwrap_or_else(|| "~".into());
 
-        let child_id = new_id();
+        let child_id = spec
+            .reuse_child
+            .clone()
+            .unwrap_or_else(new_id);
         let ask_id = new_id();
         let mcp = self
             .sessions
@@ -542,32 +712,46 @@ impl AskService {
                     "the engine serves no IPC port, so submit_result is unreachable".into(),
                 )
             })?;
-        let config = ChatConfig {
-            harness,
-            model: model.clone(),
-            reasoning,
-            model_options: model_options.clone(),
-            sandbox,
-        };
-        self.workspace
-            .create_chat_with_parent(
-                &child_id,
-                parent.space_id.as_deref(),
-                Some(&parent.device_id),
-                Some(config),
-                Some(cwd.clone()),
-                Some(attach_to),
-            )
-            .map_err(|e| AskError::Setup(e.to_string()))?;
+        if reused.is_none() {
+            let config = ChatConfig {
+                harness,
+                model: model.clone(),
+                reasoning,
+                model_options: model_options.clone(),
+                sandbox,
+            };
+            self.workspace
+                .create_chat_with_parent(
+                    &child_id,
+                    parent.space_id.as_deref(),
+                    Some(&parent.device_id),
+                    Some(config),
+                    Some(cwd.clone()),
+                    Some(attach_to),
+                )
+                .map_err(|e| AskError::Setup(e.to_string()))?;
+        }
         // From here on the child exists and must be cleaned up.
         *child_slot = Some(child_id.clone());
-        // Titling it also keeps the auto-titler off it.
-        let _ = self.workspace.rename_chat(&child_id, &spec.chat_title());
+        if reused.is_none() {
+            // Titling it also keeps the auto-titler off it.
+            let _ = self.workspace.rename_chat(&child_id, &spec.chat_title());
+            if spec.persistent {
+                // Hidden from the first moment (archived chats stay readable
+                // by id): a workflow can own hundreds of these.
+                let _ = self.workspace.set_chat_archived(&child_id, true);
+            }
+        }
         let handle = self
             .doc_host
             .open(&child_id)
             .map_err(|e| AskError::Setup(e.to_string()))?;
-        let _ = handle.doc().set_ask_child(&ask_id);
+        if reused.is_none() {
+            let _ = handle.doc().set_ask_child(&ask_id);
+            if let Some(tag) = &spec.workflow_actor {
+                let _ = handle.doc().set_workflow_actor(tag);
+            }
+        }
 
         let state = Arc::new(Mutex::new(AskState {
             ask_id: ask_id.clone(),
@@ -578,9 +762,20 @@ impl AskService {
             accepted: None,
             exhausted: Vec::new(),
             notify: Arc::new(Notify::new()),
+            child_chat_id: child_id.clone(),
+            escalation: spec.escalation.clone(),
+            max_escalations: spec.max_escalations,
+            escalations_used: 0,
+            pending: HashMap::new(),
+            parked_total: Duration::ZERO,
+            parked_since: None,
+            progress: spec.progress.clone(),
         }));
         let notify = lock(&state).notify.clone();
         lock(&self.live).insert(child_id.clone(), state.clone());
+        lock(&state).report(AskProgress::Child(child_id.clone()));
+        let base_seq = self.journal_head(&child_id);
+        let mut progress = ProgressTracker::default();
 
         let request = RunRequest {
             prompt: String::new(),
@@ -596,7 +791,6 @@ impl AskService {
             worktree: None,
             mcp: Some(mcp),
         };
-        let deadline = tokio::time::Instant::from_std(started + spec.timeout);
         let mut statuses = self.sessions.watch_sessions();
         let mut nudged = false;
         let mut nudges_used = 0u32;
@@ -615,17 +809,25 @@ impl AskService {
                 .await
                 .map_err(|e| AskError::Setup(format!("could not start the child: {e}")))?;
             turns += 1;
+            if turns == 1 {
+                lock(&state).report(AskProgress::Executing);
+            }
             loop {
                 // Copy out under the lock: a guard held across the branches
                 // below would deadlock the re-locks inside them.
-                let (accepted, repairs, exhausted) = {
+                let (accepted, repairs, exhausted, parked_now, parked) = {
                     let state = lock(&state);
                     (
                         state.accepted.clone(),
                         state.repairs_used,
                         state.exhausted.clone(),
+                        !state.pending.is_empty(),
+                        state.parked(),
                     )
                 };
+                // Escalation waits are the parent agent's time, not the child's.
+                let deadline =
+                    tokio::time::Instant::from_std(started + spec.timeout + parked);
                 if let Some(result) = accepted.clone() {
                     // Let the child's closing remark land; never wait on it
                     // beyond the grace period.
@@ -666,15 +868,21 @@ impl AskService {
                         }
                         nudges_used += 1;
                         nudged = true;
+                        lock(&state).report(AskProgress::Nudged);
                         prompt = NUDGE_PROMPT.to_owned();
                         continue 'turns;
                     }
                 }
-                let wake = accepted_deadline.unwrap_or(deadline).min(deadline);
+                self.emit_progress(&state, &child_id, base_seq, turns, &mut progress);
+                let wake = if parked_now {
+                    tokio::time::Instant::now() + Duration::from_secs(1)
+                } else {
+                    accepted_deadline.unwrap_or(deadline).min(deadline)
+                };
                 tokio::select! {
                     _ = cancel.cancelled() => return Err(AskError::Cancelled),
                     _ = tokio::time::sleep_until(wake) => {
-                        if tokio::time::Instant::now() >= deadline {
+                        if !parked_now && tokio::time::Instant::now() >= deadline {
                             return Err(AskError::Timeout(spec.timeout));
                         }
                     }
@@ -683,6 +891,172 @@ impl AskService {
                 }
             }
         }
+    }
+
+    /// The newest journal sequence of a chat (0 when none).
+    fn journal_head(&self, chat_id: &str) -> u64 {
+        self.sessions
+            .subscribe(chat_id, 0)
+            .ok()
+            .and_then(|(replay, _)| replay.last().map(|e| e.seq))
+            .unwrap_or(0)
+    }
+
+    /// Report the child's tool-call count since this ask began, at most
+    /// once per [`PROGRESS_EVERY`] and only when it changed.
+    fn emit_progress(
+        &self,
+        state: &Arc<Mutex<AskState>>,
+        child_id: &str,
+        base_seq: u64,
+        turns: u32,
+        tracker: &mut ProgressTracker,
+    ) {
+        if lock(state).progress.is_none() || tracker.at.is_some_and(|t| t.elapsed() < PROGRESS_EVERY)
+        {
+            return;
+        }
+        tracker.at = Some(Instant::now());
+        let Ok((replay, _rx)) = self.sessions.subscribe(child_id, base_seq) else {
+            return;
+        };
+        let mut calls = 0u32;
+        let mut last = None;
+        for e in &replay {
+            if let AgentEvent::ToolCall { call, .. } = &e.event {
+                calls += 1;
+                last = Some(tool_label(call));
+            }
+        }
+        if (calls, turns) != (tracker.calls, tracker.turns) {
+            tracker.calls = calls;
+            tracker.turns = turns;
+            lock(state).report(AskProgress::Turn {
+                turns,
+                tool_calls: calls,
+                last_tool: last,
+            });
+        }
+    }
+
+    /// The actor's `escalate` tool: raise a question for the parent agent
+    /// (first call) or keep waiting for one already raised (`question_id`).
+    pub async fn escalate(&self, chat_id: &str, request: EscalateRequest) -> EscalateReply {
+        let refused = |message: &str, left: u32| EscalateReply {
+            status: EscalateStatus::Refused,
+            question_id: String::new(),
+            answer: None,
+            message: message.to_owned(),
+            left,
+        };
+        let Some(state) = lock(&self.live).get(chat_id).cloned() else {
+            return refused("This request is no longer collecting results.", 0);
+        };
+        let (qid, slot_notify, left) = {
+            let mut st = lock(&state);
+            if st.ask_id != request.ask_id {
+                return refused("This question was meant for a different request.", 0);
+            }
+            let left = st.max_escalations.saturating_sub(st.escalations_used);
+            match &request.question_id {
+                Some(qid) => match st.pending.get(qid) {
+                    Some(slot) => (qid.clone(), slot.notify.clone(), left),
+                    None => return refused("No such question is waiting.", left),
+                },
+                None => {
+                    let Some(hook) = st.escalation.clone() else {
+                        return refused(
+                            "Escalation is not available here: decide, then submit_result.",
+                            0,
+                        );
+                    };
+                    let question = request.question.clone().unwrap_or_default();
+                    if question.trim().is_empty() {
+                        return refused("Say what you need answered in `question`.", left);
+                    }
+                    if left == 0 {
+                        return refused(
+                            "You have no escalations left for this request: decide on your own, say what you assumed, and submit_result.",
+                            0,
+                        );
+                    }
+                    st.escalations_used += 1;
+                    let qid = new_id();
+                    let notify = Arc::new(Notify::new());
+                    st.pending.insert(
+                        qid.clone(),
+                        EscalationSlot {
+                            answer: None,
+                            notify: notify.clone(),
+                        },
+                    );
+                    st.parked_since.get_or_insert_with(Instant::now);
+                    st.report(AskProgress::Waiting);
+                    st.notify.notify_one();
+                    let raised = EscalationRaised {
+                        qid: qid.clone(),
+                        child_chat_id: st.child_chat_id.clone(),
+                        question,
+                        context: request.context.clone().unwrap_or_default(),
+                    };
+                    let left = st.max_escalations - st.escalations_used;
+                    drop(st);
+                    (hook.0)(raised);
+                    (qid, notify, left)
+                }
+            }
+        };
+        let wait = request
+            .max_wait_ms
+            .map_or(ESCALATE_WAIT, Duration::from_millis)
+            .min(ESCALATE_WAIT);
+        let deadline = tokio::time::Instant::now() + wait;
+        loop {
+            {
+                let mut st = lock(&state);
+                if let Some(answer) = st.pending.get(&qid).and_then(|s| s.answer.clone()) {
+                    st.pending.remove(&qid);
+                    st.settle_park();
+                    st.report(AskProgress::Resumed);
+                    st.notify.notify_one();
+                    return EscalateReply {
+                        status: EscalateStatus::Answered,
+                        question_id: qid,
+                        answer: Some(answer.clone()),
+                        message: format!("Answer from the parent agent:\n{answer}"),
+                        left,
+                    };
+                }
+            }
+            tokio::select! {
+                _ = slot_notify.notified() => {}
+                _ = tokio::time::sleep_until(deadline) => {
+                    return EscalateReply {
+                        status: EscalateStatus::Pending,
+                        question_id: qid.clone(),
+                        answer: None,
+                        message: format!(
+                            "No answer yet. Your question is still pending (question_id {qid}); call `escalate` again with that question_id to keep waiting. It does not use another escalation. Do any independent work meanwhile."
+                        ),
+                        left,
+                    };
+                }
+            }
+        }
+    }
+
+    /// Hand the parent agent's answer to a parked escalation.
+    pub fn answer_escalation(&self, child_chat_id: &str, qid: &str, answer: String) -> bool {
+        let Some(state) = lock(&self.live).get(child_chat_id).cloned() else {
+            return false;
+        };
+        let mut st = lock(&state);
+        let Some(slot) = st.pending.get_mut(qid) else {
+            return false;
+        };
+        slot.answer = Some(answer);
+        slot.notify.notify_one();
+        true
     }
 
     fn last_error(&self, chat_id: &str) -> String {
@@ -738,6 +1112,41 @@ impl AskService {
     }
 }
 
+#[derive(Default)]
+struct ProgressTracker {
+    at: Option<Instant>,
+    calls: u32,
+    turns: u32,
+}
+
+/// A short human label of a tool call ("Read src/lib.rs", "Exec: cargo test").
+pub fn tool_label(call: &zeron_proto::ToolCall) -> String {
+    use zeron_proto::ToolCall as T;
+    fn clip(text: &str) -> String {
+        let one_line = text.lines().next().unwrap_or_default();
+        if one_line.chars().count() > 80 {
+            let cut: String = one_line.chars().take(79).collect();
+            format!("{cut}…")
+        } else {
+            one_line.to_owned()
+        }
+    }
+    match call {
+        T::Exec { command } => format!("Exec: {}", clip(command)),
+        T::ReadFile { path } => format!("Read {}", clip(path)),
+        T::WriteFile { path, .. } => format!("Write {}", clip(path)),
+        T::EditFile { path, .. } => format!("Edit {}", clip(path)),
+        T::ApplyPatch { path } => format!("Patch {}", path.as_deref().map_or_else(String::new, clip)),
+        T::Search { pattern, .. } => format!("Search {}", clip(pattern)),
+        T::Glob { pattern } => format!("Glob {}", clip(pattern)),
+        T::WebFetch { url, .. } => format!("Fetch {}", clip(url)),
+        T::WebSearch { query } => format!("Web search {}", clip(query)),
+        T::Todo { .. } => "Todo".to_owned(),
+        T::Mcp { server, tool, .. } => format!("{server}: {tool}"),
+        T::Unknown { name, .. } => clip(name),
+    }
+}
+
 #[async_trait]
 impl AskBackend for AskService {
     async fn ask(
@@ -748,6 +1157,11 @@ impl AskBackend for AskService {
     ) -> Result<AskOutcome, AskFailure> {
         let started = Instant::now();
         let mut child: Option<String> = None;
+        // A reused child's journal holds its earlier asks: count only this one.
+        let usage_before = spec
+            .reuse_child
+            .as_deref()
+            .map_or((0, 0), |id| self.journal_usage(id));
         let result = self
             .run(parent_chat_id, &spec, &cancel, started, &mut child)
             .await;
@@ -760,9 +1174,11 @@ impl AskBackend for AskService {
             }
             lock(&self.live).remove(child_id);
             let (input_tokens, output_tokens) = self.journal_usage(child_id);
-            usage.input_tokens = input_tokens;
-            usage.output_tokens = output_tokens;
-            if let Err(err) = self.workspace.set_chat_archived(child_id, true) {
+            usage.input_tokens = input_tokens.saturating_sub(usage_before.0);
+            usage.output_tokens = output_tokens.saturating_sub(usage_before.1);
+            if !spec.persistent
+                && let Err(err) = self.workspace.set_chat_archived(child_id, true)
+            {
                 tracing::warn!(chat = %child_id, error = %err, "ask child archive failed");
             }
         }
@@ -784,6 +1200,10 @@ impl AskBackend for AskService {
                 usage,
             }),
         }
+    }
+
+    async fn answer_escalation(&self, child_chat_id: &str, qid: &str, answer: String) -> bool {
+        AskService::answer_escalation(self, child_chat_id, qid, answer)
     }
 }
 
@@ -808,12 +1228,24 @@ read-only commands (tests included, if they leave no changes behind) is fine."
     } else {
         ""
     };
+    let people = if spec.escalation.is_some() {
+        format!(
+            "There is no person in this conversation: never ask a question in prose. If you are \
+genuinely blocked and cannot decide on your own, call the `escalate` tool (at most {} times; it \
+reaches the agent that started this work) and continue with the answer; otherwise decide, then \
+submit.",
+            spec.max_escalations
+        )
+    } else {
+        "There is no person in this conversation: never ask a question and never wait for \
+approval; decide, then submit."
+            .to_owned()
+    };
     format!(
         "{}\n\n---\nHow to answer: call the `submit_result` tool of the `zeron` MCP server \
 exactly once with your result; its arguments are the result and must match the tool's schema. \
 Only that tool call is read — an answer written as prose is lost. If the tool rejects \
-your submission, it lists what to fix: fix it and call it again. There is no person in this \
-conversation: never ask a question and never wait for approval; decide, then submit.{guard}",
+your submission, it lists what to fix: fix it and call it again. {people}{guard}",
         spec.prompt
     )
 }
@@ -833,6 +1265,13 @@ pub enum FakeReply {
     After(Duration, Box<FakeReply>),
     /// Never answer; resolves only when cancelled or the spec's timeout hits.
     Hang,
+    /// Raise an escalation (needs [`AskSpec::escalation`]), wait for
+    /// [`AskBackend::answer_escalation`], then play the inner reply.
+    Escalate {
+        question: String,
+        context: String,
+        then: Box<FakeReply>,
+    },
 }
 
 /// A recorded [`FakeAsk::ask`] call.
@@ -855,6 +1294,9 @@ pub struct FakeAsk {
     calls: Mutex<Vec<FakeCall>>,
     next_child: Mutex<u32>,
     cancelled: std::sync::atomic::AtomicUsize,
+    waiting: Mutex<HashMap<(String, String), tokio::sync::oneshot::Sender<String>>>,
+    answers: Mutex<Vec<String>>,
+    next_question: Mutex<u32>,
 }
 
 impl FakeAsk {
@@ -892,6 +1334,18 @@ impl FakeAsk {
         *n += 1;
         format!("fake-child-{n}")
     }
+
+    /// Answers escalations received so far, in order.
+    pub fn escalation_answers(&self) -> Vec<String> {
+        lock(&self.answers).clone()
+    }
+
+    /// Escalations currently waiting for an answer: `(child, qid)`.
+    pub fn open_escalations(&self) -> Vec<(String, String)> {
+        let mut open: Vec<_> = lock(&self.waiting).keys().cloned().collect();
+        open.sort();
+        open
+    }
 }
 
 #[async_trait]
@@ -907,7 +1361,12 @@ impl AskBackend for FakeAsk {
             spec: spec.clone(),
         };
         lock(&self.calls).push(call.clone());
-        let child = self.child_id();
+        // A persistent actor's later asks continue its one child.
+        let child = spec.reuse_child.clone().unwrap_or_else(|| self.child_id());
+        if let Some(hook) = &spec.progress {
+            (hook.0)(AskProgress::Child(child.clone()));
+            (hook.0)(AskProgress::Executing);
+        }
         let failure = |error: AskError| {
             if error == AskError::Cancelled {
                 self.cancelled
@@ -941,6 +1400,48 @@ impl AskBackend for FakeAsk {
                         }
                     }
                 }
+                FakeReply::Escalate {
+                    question,
+                    context,
+                    then,
+                } => {
+                    let Some(hook) = &spec.escalation else {
+                        return Err(failure(AskError::Setup(
+                            "FakeAsk: the spec offers no escalation".into(),
+                        )));
+                    };
+                    let qid = {
+                        let mut n = lock(&self.next_question);
+                        *n += 1;
+                        format!("fake-q-{n}")
+                    };
+                    let (tx, rx) = tokio::sync::oneshot::channel();
+                    lock(&self.waiting).insert((child.clone(), qid.clone()), tx);
+                    if let Some(p) = &spec.progress {
+                        (p.0)(AskProgress::Waiting);
+                    }
+                    (hook.0)(EscalationRaised {
+                        qid: qid.clone(),
+                        child_chat_id: child.clone(),
+                        question,
+                        context,
+                    });
+                    tokio::select! {
+                        _ = cancel.cancelled() => {
+                            lock(&self.waiting).remove(&(child.clone(), qid));
+                            return Err(failure(AskError::Cancelled));
+                        }
+                        answer = rx => {
+                            if let Ok(answer) = answer {
+                                lock(&self.answers).push(answer);
+                            }
+                        }
+                    }
+                    if let Some(p) = &spec.progress {
+                        (p.0)(AskProgress::Resumed);
+                    }
+                    reply = *then;
+                }
                 FakeReply::Fail(error) => return Err(failure(error)),
                 FakeReply::Result(result) => {
                     reply = FakeReply::ResultWithUsage(
@@ -964,6 +1465,13 @@ impl AskBackend for FakeAsk {
                     });
                 }
             }
+        }
+    }
+
+    async fn answer_escalation(&self, child_chat_id: &str, qid: &str, answer: String) -> bool {
+        match lock(&self.waiting).remove(&(child_chat_id.to_owned(), qid.to_owned())) {
+            Some(tx) => tx.send(answer).is_ok(),
+            None => false,
         }
     }
 }

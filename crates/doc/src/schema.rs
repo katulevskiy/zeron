@@ -432,6 +432,27 @@ impl SessionDoc {
         Ok(())
     }
 
+    /// Marks a workflow actor's child chat (`meta.workflowActor`): which run
+    /// and call site it belongs to. One JSON value; unreadable reads as none.
+    pub fn workflow_actor(&self) -> Option<zeron_proto::WorkflowActorTag> {
+        let loro::ValueOrContainer::Value(LoroValue::String(value)) =
+            self.doc.get_map("meta").get("workflowActor")?
+        else {
+            return None;
+        };
+        serde_json::from_str(&value).ok()
+    }
+
+    pub fn set_workflow_actor(&self, tag: &zeron_proto::WorkflowActorTag) -> Result<(), DocError> {
+        if self.workflow_actor().as_ref() != Some(tag) {
+            self.doc
+                .get_map("meta")
+                .insert("workflowActor", serde_json::to_string(tag)?)?;
+            self.doc.commit();
+        }
+        Ok(())
+    }
+
     /// The provider session that received a fork's copied history — a side
     /// chat's bootstrap is owed to any other session it continues in.
     pub fn fork_history_session(&self) -> Option<String> {

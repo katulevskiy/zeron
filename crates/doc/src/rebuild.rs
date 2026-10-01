@@ -63,6 +63,9 @@ pub fn rebuild_thin_doc(source: &SessionDoc) -> Result<ThinRebuild, DocError> {
     if let Some(ask) = source.ask_child() {
         thin.set_ask_child(&ask)?;
     }
+    if let Some(tag) = source.workflow_actor() {
+        thin.set_workflow_actor(&tag)?;
+    }
     let mut sidecar = Vec::new();
     let entries = source.read_entries()?;
     let entry_count = entries.len();

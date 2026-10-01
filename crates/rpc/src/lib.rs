@@ -66,6 +66,10 @@ pub mod methods {
     /// `submit_result`: validate and accept (or bounce with violations) a
     /// child ask's typed result. Params `{chatId, askId, result}`; IPC-only.
     pub const SUBMIT_ASK_RESULT: &str = "SubmitAskResult";
+    /// `escalate` (workflow actors): raise a question for the parent agent or
+    /// keep waiting for one. Params `{chatId, askId, question?, context?,
+    /// questionId?, maxWaitMs?}`; IPC-only.
+    pub const ASK_ESCALATE: &str = "AskEscalate";
     pub const WATCH_DOC_MESSAGES: &str = "WatchDocMessages";
     /// Explicit user navigation, `{chatId}`. Prioritizes this device's sync
     /// connection; automatic subscriptions and retries must not call it.
