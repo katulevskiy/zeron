@@ -250,8 +250,9 @@ are the defaults in the UI and `max_rounds` / `token_budget` /
 (`docs/mcp.md`). No tool completes a goal, and an agent cannot pause, resume, clear or
 replace the goal verifying its own chat.
 
-**Mobile**: out of scope here. The additive types (`Goal`, `MessageOrigin`,
-`TranscriptUpdate.goal`) live in `zeron-proto` / `zeron-doc` for the follow-up.
+**Mobile**: the iOS transcript shows a goal strip and compact markers, `/goal` works from the composer
+(`docs/workflows-mobile.md`). The pure parts (`/goal` parsing, chip, header text, markers) are
+`zeron_proto::goal_view`, shared with the desktop tray.
 
 ## Verifier prompt
 

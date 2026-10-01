@@ -372,7 +372,7 @@ pub(crate) fn workflow_card(ctx: &mut Ctx, run: &WorkflowRun, rc: &RunContext) -
     }
 
     // Waiting for the person: visible even when the card is folded.
-    if card.questions > 0 {
+    if card.questions > 0 && !open {
         items.push(Item::Space(8.0));
         let word = if card.questions == 1 { "1 agent is waiting for your answer" } else { &format!("{} agents are waiting for your answer", card.questions) };
         items.push(Item::Text { text: st.text(ctx, word, ColorRole::Warning), lines: 2, lead: Glyph::Icon("questionmark.bubble", ColorRole::Warning) });

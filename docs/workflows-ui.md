@@ -222,3 +222,8 @@ cargo test -p zeron-engine --lib workflow::demo  # scripted agents
   events and by the engine's own tests; they were **not** clicked by hand on the screenshot machine
   (an input injector aimed at a desktop session shared with other windows is not safe), so the
   screenshots show states driven by the engine and by the capture knobs above.
+
+## Mobile
+
+The phone shows the same card, run detail, markers and result row through the Rust layout core; see
+[`workflows-mobile.md`](workflows-mobile.md). The view model is shared (`zeron_proto::workflow_view`).

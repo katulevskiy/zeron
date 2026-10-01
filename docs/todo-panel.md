@@ -95,6 +95,7 @@ Live: `ZERON_HARNESS=mock ZERON_MOCK_TODO=1 ZERON_MOCK_DELAY_MS=900` (see
 
 ## Not done
 
-- Mobile (iOS/Android) panel: a later PR in the stack.
-- The `[x]` / `[ ]` rendering in MCP `read_chat` and the mobile transcript does not
-  yet distinguish in-progress.
+- Mobile: done for iOS in [`workflows-mobile.md`](workflows-mobile.md) (a strip at the end of the
+  transcript sharing this fold logic, `zeron_proto::todo_view`); Android needs only a painter.
+- The `[x]` / `[ ]` rendering in MCP `read_chat` does not yet distinguish in-progress (the mobile
+  transcript does).

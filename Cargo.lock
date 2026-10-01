@@ -13644,6 +13644,8 @@ dependencies = [
  "serde_json",
  "similar",
  "thiserror 2.0.20",
+ "tiny-skia",
+ "ttf-parser",
  "uniffi",
  "zeron-client",
  "zeron-doc",
