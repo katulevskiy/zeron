@@ -139,6 +139,7 @@ adb shell am start -n sh.zeron.android/.MainActivity \
 | `--es route chat:<id>` / `new` / `search` / `settings` / `engine` / `agents` / `transfers` / `sounds` | Open a screen at launch |
 | `--es route subagents:<chat>` / `subagent:<chat>\|<doc>` | Open the Subagents panel / a subagent (Demo: `chat-fanout`) |
 | `--es route files:<chat>` / `terminal:<chat>` / `file:<chat>\|<path>` / `browser:<chat>\|<url>` | Open a developer tool at launch (`space:<id>` instead of a chat id for a project) |
+| `--es route badges` / `badges:rows` | Debug builds only: the subagent count badges on the real tile / in real rows and header buttons (`scripts/android/measure-badges.py` measures a screenshot) |
 | `--ez signedout true` | Back to the first-run screen (the engine keeps its sign-in) |
 | `--es wallpaper <path>` / `none` | Set (or clear) the wallpaper from a file the app can read, e.g. `adb push art.jpg /data/local/tmp/ && adb shell run-as sh.zeron.android cp /data/local/tmp/art.jpg files/` then `--es wallpaper /data/user/0/sh.zeron.android/files/art.jpg` |
 | `--es wallpaper-effect <none\|dither\|ascii\|halftone\|scanlines>` | Wallpaper effect |

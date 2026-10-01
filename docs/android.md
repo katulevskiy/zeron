@@ -474,24 +474,61 @@ The desktop's Subagents view (#638, #647), on the phone:
   and grouping are the desktop's and live in Rust so iOS can reuse them:
   running first, longest-running on top, then unstamped; finished ones split
   into Completed and Failed, newest first.
-- **Sessions list**: a purple badge at the provider tile's top-right shows
-  the active subagent count in bold, centered numerals. Shape mapping: Pill
-  (1), Arch (2), Triangle (3), Diamond (4), Pentagon (5), Gem (6), 7-sided
-  Cookie (7), 8-leaf Clover (8), Puffy Diamond (9), Clam Shell (10–20), and
-  Puffy (21–99). Above 99, a Heart contains Material's standard rounded
-  `AllInclusive` infinity icon; accessibility still announces the actual count.
-  The badge is hidden at zero. Every shape uses a square viewport and uniform
-  scaling to preserve its original proportions, grows with accessibility text,
-  and reserves space above the provider logo. `ActivityBadgePreview` shows all
-  shapes, the range boundaries, and overflow. The rotating Material activity
-  shape is purple while the main thread runs, yellow when the main thread is
-  idle with running subagents, and blue
+- **Sessions list**: the activity badge is a pure overlay on the harness
+  tile (`ui/ActivityBadge.kt`). The tile is exactly what it was before badges
+  existed (a 48 dp square at the row's 16 dp content padding) and stays put
+  whether or not subagents run: `CornerBadge` lays out as the tile alone and
+  places the badge's centre 4 dp inside the tile's top-right corner, so it
+  overhangs the tile by 8 dp up and right (a third of its size) without
+  moving, resizing or reserving anything. The row's own padding leaves room
+  for the overhang, so the card's clip never cuts it. Every count has the same
+  24 dp square footprint, fixed in dp; the Material shape is scaled
+  uniformly into it, never stretched. Shape mapping: Pill (1), Arch (2),
+  Triangle (3), Diamond (4), Pentagon (5), Gem (6), 7-sided Cookie (7),
+  8-leaf Clover (8), Puffy Diamond (9), Clam Shell (10-20), Puffy (21-99),
+  Heart with the rounded `AllInclusive` icon above 99 (TalkBack still reads
+  the real count: "3 subagents running"). Hidden at zero.
+  **Label placement** is computed from each polygon, not from its bounding
+  box (`ui/BadgeGeometry.kt`, JVM-tested): the polygon is sampled, and the
+  label (one digit height per digit count, 44 % of the footprint for one
+  digit and 34 % for two, in every shape) goes where the largest margin
+  around it fits inside the outline, ties broken towards the area centroid.
+  So the triangle's number sits in its wide lower body, the heart's icon
+  below the lobes, and a symmetric shape's on its axis. The digits are drawn
+  from the face's real outline (Geist Bold glyph paths, `LabelInk`): the
+  digit box (baseline to cap height) is centred vertically on the anchor and
+  the label's ink centred horizontally, not a text line box. The badge is a
+  canvas in dp, so **it ignores the system font size**: at 200 % text it is
+  pixel-identical to 100 %. Colours: white on purple (`#5B43E8` light,
+  `#7C61DB` dark: 6.2:1 and 4.6:1); the chat header's button wears the
+  subagent yellow with dark digits (5.5:1 light, 11.7:1 dark).
+  Debug builds have the contact sheet as a real route:
+  `--es route badges` (every count on the real tile) and `--es route
+  badges:rows` (real session rows and header buttons). The rotating Material
+  activity shape is purple while the main thread runs, yellow when the main
+  thread is idle with running subagents, and blue
   when an idle main thread has a confirmed background callback. Input and
   Failed labels remain visible when the main thread needs attention.
   Chats with active subagents or callbacks count toward **Working**, including
   the filter, its count, and the bottom summary. Each activity shape runs its
   own Material animation; starts are staggered by a frame rather than phase
   locked. The count shapes themselves stay still so the number stays readable.
+- **One count rule** (`SessionActivity.mergedSubagents`). Two things know how
+  many subagents a chat has running, and they used to disagree. The hosting
+  engine publishes a count on the chat's status row, but only once a subagent
+  has streamed (a chip that is still starting counts nothing), older engines
+  publish nothing at all, and the phone zeroes a row nobody has refreshed in
+  45 s. The open chat's own subagent chips (`CoreClient.subagents`) know about
+  every running child. The badge shows the **larger of the two**, everywhere:
+  the session rows' tile badge, the **Working** filter and its count, the
+  bottom summary, the activity shape (`SessionActivity.shape` still lets an
+  attention state hide the shape), and the chat header. `SessionScreen`
+  reports the chips' count to `AppModel.liveSubagents` while the chat is open
+  (`core/LiveSubagents.kt`); a chat that closes keeps its count 20 s, and a
+  transient zero read 3 s, so nothing flickers and the Sessions list the user
+  lands on says what the thread did. After that the engine's row is the only
+  source, so an old engine's count shows in the list while the chat is open
+  and for 20 s after, not indefinitely.
 - **Lifecycle identity**: Claude task IDs and Codex child thread IDs retain
   their original spawn identity across resumes. Completion and interruption
   settle that original child even without a fresh transcript sink; engine
@@ -506,7 +543,11 @@ The desktop's Subagents view (#638, #647), on the phone:
   same heartbeat staleness check as subagent counts.
 - **Session header**: a subagents button (the bot glyph) appears once the
   chat has any; while some run its face breathes in the activity colour and
-  a badge shows the count. It opens the **Subagents** sheet: the running
+  the same Material count badge (yellow, dark digits, the same 24 dp
+  footprint and geometry) is pinned over its corner as an overlay that leaves
+  the button where it was. Beside it the header draws the same activity shape
+  as the list row: purple while the turn runs, yellow when only subagents
+  run, blue for a confirmed callback.  It opens the **Subagents** sheet: the running
   count beside the title, running rows on top, then **Finished (N)** — closed
   by default — holding **Completed (n)** and **Failed (n)**, each collapsible
   and paging at ten with "Show more". Empty lists are not drawn. The panel
@@ -529,6 +570,52 @@ The desktop's Subagents view (#638, #647), on the phone:
   (the list shows its last update instead).
 
 Tab-switch and screen-open performance (the Sessions/Settings pages stay composed, hidden pages hold still, wireframes, measuring): [`android-perf.md`](android-perf.md).
+
+
+**Badge alignment, measured** (`scripts/android/measure-badges.py`, on 1080x2400 emulator
+screenshots at 420 dpi where the footprint is 63 px, so one pixel is 1.6 %;
+the fits come from `BadgeGeometryTest`). The numbers are identical in light
+and dark and at font scale 1.0 and 2.0 (the badge does not scale):
+
+| Count | Shape | Shape box (px) | Label centre vs optical centre (dx / dy, % of footprint) | vs box centre (dx / dy) | Digit height (% of footprint) | Ink box / shape area |
+|---|---|---|---|---|---|---|
+| 1 | Pill | 63x63 | +0.0 / +0.0 | +0.0 / +0.0 | 42.9 | 10.1% |
+| 2 | Arch | 63x63 | +0.0 / -0.0 | +0.0 / +7.1 | 44.4 | 16.9% |
+| 3 | Triangle | 63x57 | +0.0 / +0.0 | +0.0 / +14.3 | 46.0 | 26.4% |
+| 4 | Diamond | 51x63 | +0.0 / +0.0 | +0.0 / +0.0 | 42.9 | 30.3% |
+| 5 | Pentagon | 63x59 | +0.0 / +0.9 | +0.0 / +7.1 | 44.4 | 21.3% |
+| 6 | Gem | 61x63 | +0.0 / -0.2 | +0.0 / +1.6 | 46.0 | 21.3% |
+| 7 | Cookie7Sided | 63x61 | +0.0 / -0.2 | +0.0 / +1.6 | 42.9 | 19.6% |
+| 8 | Clover8Leaf | 63x63 | +0.0 / +0.0 | +0.0 / +0.0 | 46.0 | 21.3% |
+| 9 | PuffyDiamond | 63x63 | +0.0 / +0.0 | +0.0 / +0.0 | 46.0 | 27.8% |
+| 10 | ClamShell | 63x43 | +0.0 / +0.0 | +0.0 / +0.0 | 36.5 | 31.6% |
+| 11 | ClamShell | 63x43 | +0.0 / +0.0 | +0.0 / +0.0 | 33.3 | 19.6% |
+| 12 | ClamShell | 63x43 | +0.0 / -0.8 | +0.0 / -0.8 | 34.9 | 28.3% |
+| 20 | ClamShell | 63x43 | +0.0 / +0.0 | +0.0 / +0.0 | 36.5 | 37.7% |
+| 21 | Puffy | 63x49 | +0.0 / -0.8 | +0.0 / -0.8 | 34.9 | 26.0% |
+| 67 | Puffy | 63x49 | +0.0 / +0.0 | +0.0 / +0.0 | 36.5 | 33.3% |
+| 99 | Puffy | 63x49 | +0.0 / +0.0 | +0.0 / +0.0 | 36.5 | 35.3% |
+| 100 | Heart | 63x55 | -0.8 / +0.9 | -0.8 / -7.1 | 22.2 (icon) | 21.6% |
+| max | Heart | 63x55 | -0.8 / +0.9 | -0.8 / -7.1 | 22.2 (icon) | 21.6% |
+
+- Label centre vs the polygon's optical centre: |dx| at most 0.8 %, |dy| at most 0.9 % (one pixel is 1.6 %), against a +/-3 % budget.
+- Symmetric shapes (Pill, Diamond, Clover, Puffy Diamond, Clam Shell, Puffy) sit within 0.8 % of the box centre; the arch, pentagon, gem, triangle and heart are deliberately off their box centre by their optical offset.
+- One digit height per digit count: 42.9-46.0 % of the footprint for one digit, 33.3-36.5 % for two (pixel rounding).
+- The glyph ink box takes 10.1-37.7 % of the shape's area (min "1", max "20"). That spread is the glyphs' own width ("1" is a third as wide as "20") and the shapes' areas (0.53-0.88 of their footprint): with a fixed digit height per digit count it can only be narrowed by shrinking the digits.
+- Tile boxes, measured on the rows route (`--tiles`): rows with 0, 1, 2, 3, 99, 100 and infinity subagents all have a 126 x 126 px (48 x 48 dp) tile at x = 84 px (32 dp), centred on the mark, with a constant 183 px row pitch at 100 % text and 266 px at 200 %.
+
+![counts-light](screenshots/android-subagent-activity/material-counts-light.png)
+![counts-dark](screenshots/android-subagent-activity/material-counts-dark.png)
+![counts-large-text](screenshots/android-subagent-activity/material-counts-large-text.png)
+![counts-large-text-dark](screenshots/android-subagent-activity/material-counts-large-text-dark.png)
+![rows-light](screenshots/android-subagent-activity/material-rows-light.png)
+![rows-dark](screenshots/android-subagent-activity/material-rows-dark.png)
+![rows-large-text](screenshots/android-subagent-activity/material-rows-large-text.png)
+![working-light](screenshots/android-subagent-activity/material-working-light.png)
+![working-dark](screenshots/android-subagent-activity/material-working-dark.png)
+![working-large-text](screenshots/android-subagent-activity/material-working-large-text.png)
+![working-large-text-dark](screenshots/android-subagent-activity/material-working-large-text-dark.png)
+![chat-header](screenshots/android-subagent-activity/material-chat-header.png)
 
 ## Sounds and haptics
 

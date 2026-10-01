@@ -6,7 +6,7 @@
 
 Per badge: the shape's bounding box, the glyph ink box (threshold halfway between the fill and the label
 colour), the ink centre's offset from the shape's optical centre (the fit computed from the polygon, dumped
-by BadgeGeometryTest into --fits) and from the bounding-box centre, the digit height and the ink-box area as
+by BadgeGeometryTest into --fits: `ZERON_BADGE_FITS=/tmp/fits.json ./gradlew :app:testDebugUnitTest --tests '*BadgeGeometryTest*'`) and from the bounding-box centre, the digit height and the ink-box area as
 shares of the footprint and of the shape.
 """
 import json, sys
