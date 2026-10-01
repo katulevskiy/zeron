@@ -55,7 +55,7 @@ val CountBadgeSize = 24.dp
  * How far in from the tile's corner the badge's centre sits: on the diagonal through the rounded corner's arc,
  * so the badge reads as pinned to the visible corner and overhangs the tile by about 40% of its size, up and right.
  */
-val BadgeCornerInset = 3.dp
+val BadgeCornerInset = 4.dp
 
 /** Which colours a count badge wears. */
 enum class CountBadgeTone {
@@ -192,7 +192,7 @@ internal fun badgePlan(count: UInt): BadgePlan {
     val fit = fits.getOrPut(key) {
         val aspect = if (label == null) OverflowInk.bounds.width / OverflowInk.bounds.height else LabelInk.aspect(label.length)
         // Digits share one height per digit count in every shape; the overflow icon takes the room the shape has.
-        BadgeGeometry.fit(art.outline, aspect, height = label?.let { BadgeGeometry.digitHeight(it.length) })
+        BadgeGeometry.fit(art.outline, aspect, height = label?.let { BadgeGeometry.digitHeight(it.length) }, clearance = if (label == null) BadgeGeometry.ICON_CLEARANCE else BadgeGeometry.CLEARANCE)
     }
     return BadgePlan(art, fit, label)
 }

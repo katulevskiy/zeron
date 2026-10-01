@@ -120,6 +120,9 @@ object BadgeGeometry {
     /** Space kept free around the label inside the shape, as a share of the footprint. */
     const val CLEARANCE = 0.05f
 
+    /** The overflow icon is open line work, so it can sit closer to the edge than a digit. */
+    const val ICON_CLEARANCE = 0.035f
+
     /** No label is taller than this share of the footprint, however roomy the shape. */
     const val MAX_HEIGHT = 0.5f
 
