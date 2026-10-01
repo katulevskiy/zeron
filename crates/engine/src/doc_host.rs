@@ -1139,7 +1139,7 @@ impl DocHost {
         Ok(())
     }
 
-    fn move_held(&self, chat_id: &str) -> bool {
+    pub(crate) fn move_held(&self, chat_id: &str) -> bool {
         lock(&self.inner.move_holds).contains(chat_id)
     }
 
@@ -5659,6 +5659,7 @@ impl DocHost {
         request: zeron_proto::RunRequest,
         message_id: Option<String>,
     ) -> Result<String, EngineError> {
+        sessions.prepare_cwd(&request.cwd).await;
         if let Some(workspace) = self.workspace()
             && let Some(context) = self.capture_source_context(&request.cwd).await
             && let Err(err) = workspace.set_chat_source_context(chat_id, &context)
@@ -5689,6 +5690,9 @@ impl DocHost {
         {
             tracing::info!(chat = %chat_id, cwd = %cwd, "worktree spec: reusing the chat's existing worktree");
             return Ok((cwd, None));
+        }
+        if let Some(sessions) = self.sessions() {
+            sessions.prepare_cwd(&spec.repo_path).await;
         }
         let repos = self
             .inner
