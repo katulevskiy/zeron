@@ -1828,6 +1828,7 @@ impl RpcService for EngineRpc {
                     let deleted = store.delete(&p.id).map_err(RpcError::Failed)?;
                     RpcReply::value(&serde_json::json!({ "deleted": deleted }))
                 }
+            }
             methods::LIST_POLICY_RULES
             | methods::ADD_POLICY_RULE
             | methods::REMOVE_POLICY_RULE => {

@@ -335,7 +335,12 @@ impl Render for PolicyRulesCard {
                             })
                             .render(&self.kind_select, cx),
                         )
-                        .child(div().flex_1().min_w(px(180.0)).child(self.pattern.clone()))
+                        .child(
+                            div()
+                                .flex_1()
+                                .min_w(px(180.0))
+                                .child(crate::popover::dialog_field(self.pattern.clone().into_any_element())),
+                        )
                         .child(
                             widgets::text_action(&theme, widgets::ActionTone::Solid, "Add")
                                 .id("rule-add")

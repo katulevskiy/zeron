@@ -138,6 +138,7 @@ impl ShortcutsPage {
             presets: {
                 let state = state.clone();
                 cx.new(|cx| crate::settings::presets::PresetsCard::new(state, cx))
+            },
             policy_rules: {
                 let state = state.clone();
                 cx.new(|cx| crate::settings::permissions::PolicyRulesCard::new(state, cx))
