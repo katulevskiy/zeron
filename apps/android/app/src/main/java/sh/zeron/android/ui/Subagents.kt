@@ -1,5 +1,10 @@
 package sh.zeron.android.ui
 
+import sh.zeron.android.feedback.tapAction
+import sh.zeron.android.feedback.feedbackClickable
+import sh.zeron.android.feedback.OpenCloseFeedback
+import sh.zeron.android.feedback.Haptic
+import sh.zeron.android.feedback.Cue
 import androidx.compose.animation.animateContentSize
 import androidx.compose.animation.core.FastOutSlowInEasing
 import androidx.compose.animation.core.RepeatMode
@@ -184,6 +189,7 @@ fun SubagentsSheet(groups: SubagentGroups, onOpen: (SubagentView) -> Unit, onDis
     val now = rememberNow(running > 0)
     val slots = remember(groups, state) { Subagents.slots(groups, state) }
     ModalBottomSheet(onDismissRequest = onDismiss) {
+        OpenCloseFeedback()
         Row(
             Modifier.fillMaxWidth().padding(start = 24.dp, end = 24.dp, bottom = 4.dp),
             verticalAlignment = Alignment.CenterVertically,
@@ -228,7 +234,7 @@ fun SubagentsSheet(groups: SubagentGroups, onOpen: (SubagentView) -> Unit, onDis
                     is SubagentSlot.Item -> SubagentRow(slot.view, slot.nested, now) { onOpen(slot.view) }
                     is SubagentSlot.Header -> GroupHeader(slot) { state = state.toggled(slot.group) }
                     is SubagentSlot.ShowMore -> TextButton(
-                        onClick = { state = state.pagedUp(slot.group) },
+                        onClick = tapAction { state = state.pagedUp(slot.group) },
                         modifier = Modifier.padding(start = 48.dp).animateItem(),
                     ) { Text(slot.label) }
                 }
@@ -244,7 +250,7 @@ private fun GroupHeader(slot: SubagentSlot.Header, onToggle: () -> Unit) {
         Modifier
             .fillMaxWidth()
             .clip(RoundedCornerShape(16.dp))
-            .clickable(onClickLabel = if (slot.open) "Collapse" else "Expand", onClick = onToggle)
+            .feedbackClickable(Haptic.Tick, if (slot.open) Cue.Close else Cue.Open, onClickLabel = if (slot.open) "Collapse" else "Expand", onClick = onToggle)
             .padding(start = if (slot.nested) 28.dp else 12.dp, end = 12.dp)
             .heightIn(min = 44.dp),
         verticalAlignment = Alignment.CenterVertically,

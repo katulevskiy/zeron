@@ -131,17 +131,6 @@ class PhoneEngineTest {
     }
 }
 
-class NotifierTest {
-    @Test fun transitions() {
-        assertEquals(Notifier.Kind.Done, Notifier.transition(ChatIndicator.WORKING, ChatIndicator.IDLE))
-        assertEquals(Notifier.Kind.Done, Notifier.transition(ChatIndicator.WORKING, ChatIndicator.COMPLETED))
-        assertEquals(Notifier.Kind.Input, Notifier.transition(ChatIndicator.WORKING, ChatIndicator.AWAITING_INPUT))
-        assertEquals(Notifier.Kind.Failed, Notifier.transition(ChatIndicator.IDLE, ChatIndicator.ERRORED))
-        assertNull(Notifier.transition(ChatIndicator.IDLE, ChatIndicator.WORKING))
-        assertNull(Notifier.transition(ChatIndicator.IDLE, ChatIndicator.IDLE))
-    }
-}
-
 class DeviceModelTest {
     private fun device(id: String, name: String, platform: String, online: Boolean = true, self: Boolean = false, host: Boolean = true) =
         DeviceView(id, name, platform, online, null, null, if (host) listOf("cap") else emptyList(), host, self, 0u)

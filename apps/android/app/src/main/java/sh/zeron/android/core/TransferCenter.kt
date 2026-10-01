@@ -26,6 +26,7 @@ import kotlinx.coroutines.withTimeoutOrNull
 import org.json.JSONArray
 import org.json.JSONObject
 import sh.zeron.android.core.Transfers.Transfer
+import sh.zeron.android.feedback.TransferEvent
 import uniffi.zeron_core.DeviceView
 import java.io.File
 import java.nio.file.Files
@@ -61,6 +62,12 @@ class TransferCenter(private val app: Application, private val model: AppModel) 
     private val watchers = MutableStateFlow(0)
     private val kick = Channel<Unit>(Channel.CONFLATED)
     private val seenLive = HashSet<String>()
+
+    /** Outgoing transfers seen live (or started here): their end is an event. */
+    private val sending = HashSet<String>()
+
+    /** Transfers this user cancelled or declined: their end is no news. */
+    private val mine = HashSet<String>()
     private val asked = HashSet<String>()
     private val exporting = HashSet<String>()
     private val cleaned = HashSet<String>()
@@ -147,7 +154,10 @@ class TransferCenter(private val app: Application, private val model: AppModel) 
                 when {
                     t.state == Transfers.State.AwaitingAcceptance -> {
                         seenLive += t.id
-                        if (asked.add(t.id)) model.notifier.transferAsk(t)
+                        if (asked.add(t.id)) {
+                            model.notifier.transferAsk(t)
+                            model.deviceFeedback.transfer(t.id, TransferEvent.Asked)
+                        }
                     }
                     t.state.live -> {
                         seenLive += t.id
@@ -160,13 +170,26 @@ class TransferCenter(private val app: Application, private val model: AppModel) 
                             scope.launch { export(t, notify = fresh) }
                         } else if (seenLive.remove(t.id)) {
                             model.notifier.transferReceived(t, openIntent(t))
+                            model.deviceFeedback.transfer(t.id, TransferEvent.Received)
                         }
                     }
-                    else -> if (seenLive.remove(t.id)) model.notifier.transferEnded(t)
+                    else -> if (seenLive.remove(t.id)) {
+                        if (t.id in mine) {
+                            // Declined or cancelled here: the user knows; drop the ask.
+                            model.notifier.cancelTransfer(t.id)
+                        } else {
+                            model.notifier.transferEnded(t)
+                            Transfers.finishedEvent(true, t.state, false)?.let { model.deviceFeedback.transfer(t.id, it) }
+                        }
+                    }
                 }
-            } else if (t.state.terminal && t.id !in cleaned) {
-                cleaned += t.id
-                cleanOutbox(t)
+            } else {
+                if (t.state.live) sending += t.id
+                else if (sending.remove(t.id)) Transfers.finishedEvent(false, t.state, t.id in mine)?.let { model.deviceFeedback.transfer(t.id, it) }
+                if (t.state.terminal && t.id !in cleaned) {
+                    cleaned += t.id
+                    cleanOutbox(t)
+                }
             }
         }
         // Rows the engine forgot (cleared, aged out) keep no export record.
@@ -191,6 +214,7 @@ class TransferCenter(private val app: Application, private val model: AppModel) 
     }
 
     private suspend fun act(method: String, id: String) {
+        if (method == Transfers.CANCEL || method == Transfers.DECLINE) mine += id
         call(method, JSONObject().put("transferId", id))
         model.notifier.cancelTransfer(id)
         refresh()
@@ -216,7 +240,9 @@ class TransferCenter(private val app: Application, private val model: AppModel) 
     suspend fun send(toDeviceId: String, paths: List<String>): String {
         val reply = call(Transfers.SEND, JSONObject().put("toDeviceId", toDeviceId).put("paths", JSONArray(paths))) as? JSONObject
         refresh()
-        return reply?.optString("transferId")?.ifEmpty { null } ?: error("The engine didn't start the transfer.")
+        val id = reply?.optString("transferId")?.ifEmpty { null } ?: error("The engine didn't start the transfer.")
+        sending += id
+        return id
     }
 
     /** Devices that can receive from this phone: other engines advertising the capability. */
@@ -318,10 +344,14 @@ class TransferCenter(private val app: Application, private val model: AppModel) 
             }
             saveExports(_exports.value + (t.id to record))
             seenLive.remove(t.id)
-            if (notify) model.notifier.transferReceived(t, openIntent(t))
+            if (notify) {
+                model.notifier.transferReceived(t, openIntent(t))
+                model.deviceFeedback.transfer(t.id, TransferEvent.Received)
+            }
         } catch (e: Exception) {
             Log.w("Zeron", "export of transfer ${t.id} to Downloads failed", e)
             model.notifier.transferReceived(t, null, "Couldn't copy to Downloads: ${e.message}")
+            model.deviceFeedback.transfer(t.id, TransferEvent.Failed)
         } finally {
             exporting.remove(t.id)
         }

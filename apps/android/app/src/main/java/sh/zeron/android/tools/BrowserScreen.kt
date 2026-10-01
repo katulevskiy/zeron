@@ -1,5 +1,7 @@
 package sh.zeron.android.tools
 
+import sh.zeron.android.feedback.tapAction
+import sh.zeron.android.feedback.feedbackAction
 import android.annotation.SuppressLint
 import android.content.Context
 import android.content.Intent
@@ -243,9 +245,9 @@ fun BrowserScreen(model: AppModel, ref: WorkspaceRef?, initialUrl: String?, onBa
                     { overflow = false },
                     listOfNotNull(
                         if (!Browser.isWorkspace(url) && url.startsWith("http")) MenuAction("Open in another app", ZIcons.Link) { openExternally(context, url) } else null,
-                        MenuAction("Copy link", ZIcons.Copy) { clipboard.setText(AnnotatedString(url)) },
+                        MenuAction("Copy link", ZIcons.Copy, haptic = sh.zeron.android.feedback.Haptic.Confirm, cue = sh.zeron.android.feedback.Cue.Copy) { clipboard.setText(AnnotatedString(url)) },
                         MenuAction("Print or save as PDF", ZIcons.Save) { print(context, web, title ?: Browser.display(url)) },
-                        MenuAction("Reload", ZIcons.Refresh) { web.reload() },
+                        MenuAction("Reload", ZIcons.Refresh, haptic = sh.zeron.android.feedback.Haptic.Select, cue = sh.zeron.android.feedback.Cue.Refresh) { web.reload() },
                     ),
                 )
             }
@@ -273,18 +275,18 @@ fun BrowserScreen(model: AppModel, ref: WorkspaceRef?, initialUrl: String?, onBa
                 modifier = Modifier.align(Alignment.BottomCenter).imePadding().navigationBarsPadding().padding(bottom = 12.dp),
                 colors = FloatingToolbarDefaults.standardFloatingToolbarColors(),
             ) {
-                IconButton(onClick = { web.goBack() }, enabled = canBack) { ZIcon(ZIcons.Back, "Back", Modifier.size(22.dp)) }
-                IconButton(onClick = { web.goForward() }, enabled = canForward) { ZIcon(ZIcons.Forward, "Forward", Modifier.size(22.dp)) }
-                IconButton(onClick = { if (loading) web.stopLoading() else web.reload() }) {
+                IconButton(onClick = tapAction { web.goBack() }, enabled = canBack) { ZIcon(ZIcons.Back, "Back", Modifier.size(22.dp)) }
+                IconButton(onClick = tapAction { web.goForward() }, enabled = canForward) { ZIcon(ZIcons.Forward, "Forward", Modifier.size(22.dp)) }
+                IconButton(onClick = sh.zeron.android.feedback.feedbackAction(sh.zeron.android.feedback.Haptic.Select, if (loading) sh.zeron.android.feedback.Cue.Close else sh.zeron.android.feedback.Cue.Refresh) { if (loading) web.stopLoading() else web.reload() }) {
                     ZIcon(if (loading) ZIcons.Stop else ZIcons.Refresh, if (loading) "Stop" else "Reload", Modifier.size(22.dp))
                 }
                 if (ref?.chatId != null) {
-                    IconButton(onClick = { showPreviews = true }) {
+                    IconButton(onClick = tapAction { showPreviews = true }) {
                         val count = previews?.services?.size ?: 0
                         BadgedBox(badge = { if (count > 0) Badge { Text("$count") } }) { ZIcon(ZIcons.Play, "Previews", Modifier.size(22.dp)) }
                     }
                 }
-                IconButton(onClick = { openExternally(context, url) }, enabled = url.startsWith("http") && !Browser.isWorkspace(url)) {
+                IconButton(onClick = tapAction { openExternally(context, url) }, enabled = url.startsWith("http") && !Browser.isWorkspace(url)) {
                     ZIcon(ZIcons.Link, "Open in another app", Modifier.size(22.dp))
                 }
             }
@@ -305,6 +307,7 @@ fun BrowserScreen(model: AppModel, ref: WorkspaceRef?, initialUrl: String?, onBa
 
     if (showPreviews) {
         ModalBottomSheet(onDismissRequest = { showPreviews = false }) {
+            sh.zeron.android.feedback.OpenCloseFeedback()
             PreviewsSheet(previews, ref, model) { target ->
                 showPreviews = false
                 go(target)
@@ -367,7 +370,7 @@ private fun PreviewsSheet(previews: Browser.Previews?, ref: WorkspaceRef?, model
         val onPhone = ref != null && ref.deviceId == model.engineDeviceId.value
         services.forEachIndexed { i, s ->
             Surface(
-                onClick = { open(s.url(previews!!.proxyPort)) },
+                onClick = tapAction { open(s.url(previews!!.proxyPort)) },
                 shape = sh.zeron.android.ui.segmentShape(i, services.size),
                 color = MaterialTheme.colorScheme.surfaceContainerHigh,
                 modifier = Modifier.fillMaxWidth().padding(vertical = 1.dp),

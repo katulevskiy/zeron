@@ -7,78 +7,170 @@ import android.app.PendingIntent
 import android.content.Context
 import android.content.Intent
 import android.content.pm.PackageManager
+import android.media.AudioAttributes
+import android.net.Uri
 import android.os.Build
 import androidx.core.app.NotificationCompat
 import androidx.core.app.NotificationManagerCompat
 import androidx.core.content.ContextCompat
 import sh.zeron.android.MainActivity
 import sh.zeron.android.R
-import uniffi.zeron_core.ChatIndicator
-import uniffi.zeron_core.SessionRow
-import uniffi.zeron_core.WorkspaceSnapshot
+import sh.zeron.android.feedback.CueCategory
+import sh.zeron.android.feedback.FeedbackSettings
+import sh.zeron.android.feedback.SessionAlerts
+import sh.zeron.android.feedback.SessionEvent
 
 /**
- * Local session notifications (Android has no push; the device's client keeps
- * syncing while its engine runs): the desktop's rule — a run finished, needs
- * your input, or failed — posted only while Zeron is in the background.
- * Tapping one opens the session.
+ * Local notifications, posted only when Android permits them:
+ *
+ *  - Save to Downloads progress from the developer tools, and the progress of
+ *    an incoming file transfer (silent, ongoing).
+ *  - Session events while the app is in the background (finished, needs your
+ *    input, failed), sounding the same cues the app plays in front: the
+ *    desktop's done / request / attention chimes as channel sounds, with
+ *    vibration patterns matching the in-app haptics.
+ *  - File-transfer events (another device asks to send, a file arrived, a
+ *    transfer failed), which reuse the request / done / attention cues. They
+ *    are posted in front as well (they carry Accept / Decline and open the
+ *    file), but silently there: the app plays its own cue.
+ *
+ * Channel sounds are immutable once a channel exists, so alert channels
+ * carry a version in their id ([CHANNEL_VERSION]); [migrateChannels] deletes
+ * the ones from other versions. One channel exists per kind and per
+ * sound / vibration combination the in-app switches ask for, created lazily.
  */
-class Notifier(private val context: Context) {
-    enum class Kind { Done, Input, Failed }
+class Notifier(
+    private val context: Context,
+    private val settings: () -> FeedbackSettings = { FeedbackSettings() },
+    private val foreground: () -> Boolean = { false },
+) : SessionAlerts {
+    private val manager = context.getSystemService(NotificationManager::class.java)
 
     init {
-        val manager = context.getSystemService(NotificationManager::class.java)
         manager.createNotificationChannel(
-            NotificationChannel(CHANNEL, "Sessions", NotificationManager.IMPORTANCE_HIGH).apply {
-                description = "When a session finishes, needs you or fails"
+            NotificationChannel(DOWNLOADS_CHANNEL, "Downloads and transfers", NotificationManager.IMPORTANCE_LOW).apply {
+                description = "Progress of files saved to Downloads and of incoming transfers"
             },
         )
-        manager.createNotificationChannel(
-            NotificationChannel(TRANSFERS_CHANNEL, "File transfers", NotificationManager.IMPORTANCE_DEFAULT).apply {
-                description = "Files your other devices send to this phone"
-            },
-        )
+        migrateChannels()
     }
+
+    /** Notification kinds: wording, channel importance, chime and vibration. */
+    enum class Kind(
+        val key: String,
+        val label: String,
+        val description: String,
+        val importance: Int,
+        val sound: String,
+        val category: CueCategory,
+        /** Off / on pairs in ms, matching the in-app haptic of the same moment. */
+        val pattern: LongArray,
+        val event: SessionEvent?,
+        val prefix: String = SESSION_PREFIX,
+    ) {
+        Done("done", "Task completed", "A session finished its turn", NotificationManager.IMPORTANCE_DEFAULT, "fx_done", CueCategory.Completion, longArrayOf(0, 24, 40, 30), SessionEvent.Done),
+        Input("input", "Input required", "A session is waiting on your answer or approval", NotificationManager.IMPORTANCE_HIGH, "fx_request", CueCategory.Input, longArrayOf(0, 18, 90, 18), SessionEvent.NeedsInput),
+        Failed("failed", "Errors", "A session failed", NotificationManager.IMPORTANCE_HIGH, "fx_attention", CueCategory.Errors, longArrayOf(0, 35, 55, 45), SessionEvent.Failed),
+
+        /** Another device asks to send this phone files (request chime). */
+        TransferAsk("ask", "Transfer requests", "Another device wants to send you files", NotificationManager.IMPORTANCE_HIGH, "fx_request", CueCategory.Input, longArrayOf(0, 18, 90, 18), null, TRANSFER_PREFIX),
+
+        /** Files arrived (done chime). */
+        TransferReceived("received", "Files received", "Files from your other devices arrived", NotificationManager.IMPORTANCE_DEFAULT, "fx_done", CueCategory.Completion, longArrayOf(0, 24, 40, 30), null, TRANSFER_PREFIX),
+
+        /** A transfer failed, was cancelled or declined by the other side (attention chime). */
+        TransferFailed("failed", "Transfer problems", "A file transfer failed or was declined", NotificationManager.IMPORTANCE_HIGH, "fx_attention", CueCategory.Errors, longArrayOf(0, 35, 55, 45), null, TRANSFER_PREFIX),
+    }
+
+    /** A channel id, e.g. `session-done-v1-sv` (sound + vibration), `-s`, `-v` or `-q` (silent). */
+    fun channelId(kind: Kind, sound: Boolean, vibrate: Boolean): String =
+        "${kind.prefix}${kind.key}-v$CHANNEL_VERSION-" + (if (sound) "s" else "") + (if (vibrate) "v" else "") + (if (!sound && !vibrate) "q" else "")
+
+    private fun ensureChannel(kind: Kind, sound: Boolean, vibrate: Boolean): String {
+        val id = channelId(kind, sound, vibrate)
+        if (manager.getNotificationChannel(id) != null) return id
+        val suffix = when {
+            sound && vibrate -> ""
+            sound -> " (sound only)"
+            vibrate -> " (vibration only)"
+            else -> " (silent)"
+        }
+        val channel = NotificationChannel(id, kind.label + suffix, if (sound || vibrate) kind.importance else NotificationManager.IMPORTANCE_LOW)
+        channel.description = kind.description
+        if (sound) {
+            channel.setSound(
+                Uri.parse("android.resource://${context.packageName}/raw/${kind.sound}"),
+                AudioAttributes.Builder().setUsage(AudioAttributes.USAGE_NOTIFICATION).setContentType(AudioAttributes.CONTENT_TYPE_SONIFICATION).build(),
+            )
+        } else {
+            channel.setSound(null, null)
+        }
+        channel.enableVibration(vibrate)
+        if (vibrate) channel.vibrationPattern = kind.pattern
+        manager.createNotificationChannel(channel)
+        return id
+    }
+
+    /**
+     * Remove alert channels left by other versions (their sounds cannot be
+     * edited in place), and the unversioned `sessions` / `transfers` channels
+     * of earlier builds.
+     */
+    fun migrateChannels() {
+        val current = "-v$CHANNEL_VERSION-"
+        manager.notificationChannels
+            .filter { (it.id.startsWith(SESSION_PREFIX) || it.id.startsWith(TRANSFER_PREFIX)) && !it.id.contains(current) || it.id in LEGACY_CHANNELS }
+            .forEach { manager.deleteNotificationChannel(it.id) }
+    }
+
+    /** A session event while the app is in the background; the in-app switches pick the channel. */
+    override fun alert(chatId: String, event: SessionEvent) {
+        if (!permitted) {
+            android.util.Log.d("ZeronFeedback", "notification $event for $chatId skipped: notifications not allowed")
+            return
+        }
+        val kind = Kind.entries.first { it.event == event }
+        val s = settings()
+        val sound = s.allows(kind.category)
+        val vibrate = s.haptics
+        val row = runCatching { (context.applicationContext as sh.zeron.android.ZeronApplication).model.row(chatId) }.getOrNull()
+        val title = row?.title ?: "Zeron"
+        val text = when (event) {
+            SessionEvent.Done -> "Finished"
+            SessionEvent.NeedsInput -> "Needs your input"
+            SessionEvent.Failed -> "Something went wrong"
+        }
+        val open = Intent(context, MainActivity::class.java)
+            .putExtra("route", "chat:$chatId")
+            .addFlags(Intent.FLAG_ACTIVITY_NEW_TASK or Intent.FLAG_ACTIVITY_SINGLE_TOP)
+        val tap = PendingIntent.getActivity(context, "session:$chatId".hashCode(), open, PendingIntent.FLAG_IMMUTABLE or PendingIntent.FLAG_UPDATE_CURRENT)
+        val n = NotificationCompat.Builder(context, ensureChannel(kind, sound, vibrate))
+            .setSmallIcon(R.drawable.ic_stat_zeron)
+            .setContentTitle(title)
+            .setContentText(text)
+            .setCategory(if (event == SessionEvent.NeedsInput) NotificationCompat.CATEGORY_MESSAGE else NotificationCompat.CATEGORY_STATUS)
+            .setContentIntent(tap)
+            .setAutoCancel(true)
+            .build()
+        android.util.Log.d("ZeronFeedback", "notification $event for $chatId on channel ${n.channelId}")
+        try {
+            NotificationManagerCompat.from(context).notify("session:$chatId".hashCode(), n)
+        } catch (_: SecurityException) {
+        }
+    }
+
+    /** The app came to the front: its sessions are on screen, clear the alerts. */
+    fun clearSessionAlerts() = manager.activeNotifications.filter { it.notification.channelId?.startsWith(SESSION_PREFIX) == true }.forEach { manager.cancel(it.id) }
 
     val permitted: Boolean
         get() = Build.VERSION.SDK_INT < 33 ||
             ContextCompat.checkSelfPermission(context, Manifest.permission.POST_NOTIFICATIONS) == PackageManager.PERMISSION_GRANTED
 
-    fun onWorkspace(previous: WorkspaceSnapshot?, next: WorkspaceSnapshot, foreground: Boolean) {
-        if (previous == null || foreground || !permitted) return
-        val before = previous.allRows().associate { it.id to it.hostIndicator }
-        for (row in next.allRows()) {
-            val kind = transition(before[row.id] ?: continue, row.hostIndicator) ?: continue
-            post(row, kind)
-        }
-    }
-
-    private fun post(row: SessionRow, kind: Kind) {
-        val open = Intent(context, MainActivity::class.java)
-            .putExtra("route", "chat:${row.id}")
-            .addFlags(Intent.FLAG_ACTIVITY_NEW_TASK or Intent.FLAG_ACTIVITY_SINGLE_TOP)
-        val pending = PendingIntent.getActivity(context, row.id.hashCode(), open, PendingIntent.FLAG_IMMUTABLE or PendingIntent.FLAG_UPDATE_CURRENT)
-        val body = when (kind) {
-            Kind.Done -> "Finished"
-            Kind.Input -> "Needs your input"
-            Kind.Failed -> "Run failed"
-        }
-        val n = NotificationCompat.Builder(context, CHANNEL)
-            .setSmallIcon(R.drawable.ic_stat_zeron)
-            .setContentTitle(row.title)
-            .setContentText(listOfNotNull(body, row.project?.name).joinToString(" · "))
-            .setAutoCancel(true)
-            .setContentIntent(pending)
-            .setCategory(NotificationCompat.CATEGORY_MESSAGE)
-            .build()
-        try {
-            NotificationManagerCompat.from(context).notify(row.id.hashCode(), n)
-        } catch (_: SecurityException) {
-            // Permission revoked between the check and the post.
-        }
-    }
-
-    // ── file transfers (always posted: like downloads, not session chatter) ──
+    // ── file transfers ─────────────────────────────────────────────────────
+    // Progress is silent. The ask / received / ended notifications are posted
+    // in front and behind (they carry actions and open the file); only behind
+    // do they sound (the channel's chime): in front the app plays the same
+    // cue itself (feedback/TransferFeedback), so the notification stays quiet.
 
     private fun transferId(id: String) = "transfer:$id".hashCode()
 
@@ -89,10 +181,17 @@ class Notifier(private val context: Context) {
         return PendingIntent.getActivity(context, transferId(id), open, PendingIntent.FLAG_IMMUTABLE or PendingIntent.FLAG_UPDATE_CURRENT)
     }
 
-    private fun transferBuilder(t: Transfers.Transfer) = NotificationCompat.Builder(context, TRANSFERS_CHANNEL)
-        .setSmallIcon(R.drawable.ic_stat_zeron)
-        .setContentIntent(openTransfers(t.id))
-        .setCategory(NotificationCompat.CATEGORY_PROGRESS)
+    private fun transferBuilder(t: Transfers.Transfer, kind: Kind?): NotificationCompat.Builder {
+        val channel = if (kind == null) DOWNLOADS_CHANNEL else {
+            val s = settings()
+            ensureChannel(kind, s.allows(kind.category), s.haptics)
+        }
+        return NotificationCompat.Builder(context, channel)
+            .setSmallIcon(R.drawable.ic_stat_zeron)
+            .setContentIntent(openTransfers(t.id))
+            .setCategory(NotificationCompat.CATEGORY_PROGRESS)
+            .apply { if (kind != null && foreground()) setSilent(true) }
+    }
 
     private fun notify(id: String, n: android.app.Notification) {
         if (!permitted) return
@@ -104,7 +203,7 @@ class Notifier(private val context: Context) {
 
     /** An incoming transfer in flight: one ongoing notification with its progress. */
     fun transferProgress(t: Transfers.Transfer) {
-        val n = transferBuilder(t)
+        val n = transferBuilder(t, null)
             .setContentTitle("Receiving ${t.title}")
             .setContentText(listOf("From ${t.peerDeviceName}", Transfers.detail(t)).joinToString(" · "))
             .setProgress(100, (t.fraction * 100).toInt(), t.state != Transfers.State.Transferring || t.totalBytes == 0L)
@@ -123,7 +222,7 @@ class Notifier(private val context: Context) {
                 .putExtra(TransferActionReceiver.EXTRA_ID, t.id)
             return PendingIntent.getBroadcast(context, transferId(t.id) + if (accept) 1 else 2, intent, PendingIntent.FLAG_IMMUTABLE or PendingIntent.FLAG_UPDATE_CURRENT)
         }
-        val n = transferBuilder(t)
+        val n = transferBuilder(t, Kind.TransferAsk)
             .setContentTitle("${t.peerDeviceName} wants to send you ${t.title}")
             .setContentText("${Transfers.files(t.fileCount)} · ${Transfers.bytes(t.totalBytes)}")
             .setCategory(NotificationCompat.CATEGORY_MESSAGE)
@@ -139,7 +238,7 @@ class Notifier(private val context: Context) {
         val tap = open?.let {
             PendingIntent.getActivity(context, transferId(t.id), it.addFlags(Intent.FLAG_ACTIVITY_NEW_TASK), PendingIntent.FLAG_IMMUTABLE or PendingIntent.FLAG_UPDATE_CURRENT)
         }
-        val n = transferBuilder(t)
+        val n = transferBuilder(t, if (problem == null) Kind.TransferReceived else Kind.TransferFailed)
             .setContentTitle("Received ${t.title}")
             .setContentText(problem ?: listOf("From ${t.peerDeviceName}", Transfers.files(t.fileCount), Transfers.bytes(t.totalBytes), "In Downloads").joinToString(" · "))
             .apply { if (tap != null) setContentIntent(tap) }
@@ -151,7 +250,7 @@ class Notifier(private val context: Context) {
 
     /** Failed, cancelled or declined after we showed it. */
     fun transferEnded(t: Transfers.Transfer) {
-        val n = transferBuilder(t)
+        val n = transferBuilder(t, Kind.TransferFailed)
             .setContentTitle("${Transfers.stateLabel(t)}: ${t.title}")
             .setContentText(t.error ?: "From ${t.peerDeviceName}")
             .setCategory(NotificationCompat.CATEGORY_STATUS)
@@ -169,7 +268,7 @@ class Notifier(private val context: Context) {
         val tap = open?.let {
             PendingIntent.getActivity(context, "download:$id".hashCode(), it.addFlags(Intent.FLAG_ACTIVITY_NEW_TASK), PendingIntent.FLAG_IMMUTABLE or PendingIntent.FLAG_UPDATE_CURRENT)
         }
-        val n = NotificationCompat.Builder(context, TRANSFERS_CHANNEL)
+        val n = NotificationCompat.Builder(context, DOWNLOADS_CHANNEL)
             .setSmallIcon(R.drawable.ic_stat_zeron)
             .setContentTitle(title)
             .setContentText(text)
@@ -188,19 +287,14 @@ class Notifier(private val context: Context) {
     }
 
     companion object {
-        const val CHANNEL = "sessions"
-        const val TRANSFERS_CHANNEL = "transfers"
+        const val DOWNLOADS_CHANNEL = "downloads"
+        const val SESSION_PREFIX = "session-"
+        const val TRANSFER_PREFIX = "transfer-"
 
-        /** Which notification (if any) a host status change deserves. */
-        fun transition(before: ChatIndicator, after: ChatIndicator): Kind? = when {
-            before == after -> null
-            after == ChatIndicator.AWAITING_INPUT -> Kind.Input
-            after == ChatIndicator.ERRORED -> Kind.Failed
-            before == ChatIndicator.WORKING && (after == ChatIndicator.IDLE || after == ChatIndicator.COMPLETED) -> Kind.Done
-            else -> null
-        }
+        /** Channels of builds before the versioned ones. */
+        private val LEGACY_CHANNELS = setOf("sessions", "transfers")
+
+        /** Bump when a session channel's sound or pattern changes: channel sounds are immutable once created. */
+        const val CHANNEL_VERSION = 1
     }
 }
-
-fun WorkspaceSnapshot.allRows(): List<SessionRow> =
-    (front.pinned + front.sections.flatMap { it.sessions } + front.recent + projects.flatMap { it.sessions } + projectless).distinctBy { it.id }

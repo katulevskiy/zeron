@@ -1,8 +1,12 @@
 package sh.zeron.android.tools
 
+import sh.zeron.android.feedback.tapAction
+import sh.zeron.android.feedback.LocalFeedback
+import sh.zeron.android.feedback.Haptic
+import sh.zeron.android.feedback.Cue
+import sh.zeron.android.feedback.AppFeedback
 import android.content.ClipData
 import android.content.ClipboardManager
-import android.view.HapticFeedbackConstants
 import androidx.annotation.DrawableRes
 import androidx.compose.animation.AnimatedVisibility
 import androidx.compose.animation.animateColorAsState
@@ -116,19 +120,25 @@ fun TerminalScreen(model: AppModel, ref: WorkspaceRef, onBack: () -> Unit) {
             runCatching { Terminals.open(model, ref, cols, rows) }
                 .onSuccess { tab ->
                     if (replacing == null) {
+                        // Another tab (the first one opens with the page, which has already sounded).
+                        if (tabs.isNotEmpty()) AppFeedback.current.both(Haptic.Select, Cue.Open)
                         Terminals.add(key, tab)
                     } else {
                         Terminals.replace(key, replacing, tab)
                         Terminals.forget(model, ref.deviceId, replacing)
                     }
                 }
-                .onFailure { error = it.userMessage() }
+                .onFailure {
+                    error = it.userMessage()
+                    AppFeedback.current.both(Haptic.Error, Cue.Error)
+                }
             opening = false
         }
     }
 
     fun kill(id: String) {
         val last = tabs.size <= 1
+        AppFeedback.current.both(Haptic.Confirm, Cue.Close)
         Terminals.scope.launch { Terminals.kill(model, ref, id) }
         if (last) onBack()
     }
@@ -155,13 +165,19 @@ fun TerminalScreen(model: AppModel, ref: WorkspaceRef, onBack: () -> Unit) {
     LaunchedEffect(session, sessionTitle) { session?.let { Terminals.rename(key, it.id, sessionTitle) } }
 
     fun copy(text: String?) {
-        if (!text.isNullOrEmpty()) clipboard?.setPrimaryClip(ClipData.newPlainText("Terminal", text))
+        if (!text.isNullOrEmpty()) {
+            clipboard?.setPrimaryClip(ClipData.newPlainText("Terminal", text))
+            AppFeedback.current.both(Haptic.Confirm, Cue.Copy)
+        }
     }
 
     fun paste() {
         val text = clipboard?.primaryClip?.takeIf { it.itemCount > 0 }?.getItemAt(0)?.coerceToText(context)?.toString()
         val s = session
-        if (!text.isNullOrEmpty() && s != null && s.isAttached) s.screen.paste(text)
+        if (!text.isNullOrEmpty() && s != null && s.isAttached) {
+            s.screen.paste(text)
+            AppFeedback.current.both(Haptic.Select, Cue.Select)
+        }
     }
 
     fun copySelection() {
@@ -256,7 +272,7 @@ fun TerminalScreen(model: AppModel, ref: WorkspaceRef, onBack: () -> Unit) {
                 modifier = Modifier.align(Alignment.BottomEnd).padding(12.dp),
             ) {
                 SmallFloatingActionButton(
-                    onClick = { session?.takeIf { it.isAttached }?.screen?.scrollToBottom() },
+                    onClick = tapAction { session?.takeIf { it.isAttached }?.screen?.scrollToBottom() },
                     shape = CircleShape,
                     containerColor = MaterialTheme.colorScheme.surfaceContainerHigh,
                     contentColor = MaterialTheme.colorScheme.onSurface,
@@ -310,7 +326,7 @@ private fun TabStrip(tabs: List<TerminalTab>, selected: String?, onSelect: (Stri
                 label = "tab",
             )
             Surface(
-                onClick = { onSelect(tab.id) },
+                onClick = tapAction { onSelect(tab.id) },
                 shape = RoundedCornerShape(50),
                 color = container,
                 contentColor = if (active) MaterialTheme.colorScheme.onSecondaryContainer else MaterialTheme.colorScheme.onSurfaceVariant,
@@ -387,15 +403,16 @@ private fun ExtraKey(
     @DrawableRes icon: Int? = null,
     onClick: () -> Unit,
 ) {
-    val view = LocalView.current
+    val fb = LocalFeedback.current
     val container by animateColorAsState(
         if (armed) MaterialTheme.colorScheme.primary else MaterialTheme.colorScheme.surfaceContainerHighest,
         MaterialTheme.motionScheme.defaultEffectsSpec(),
         label = "key",
     )
     Surface(
+        // Keys tick but do not click: a sound per key press would turn into typing noise.
         onClick = {
-            view.performHapticFeedback(HapticFeedbackConstants.KEYBOARD_TAP)
+            fb.haptic(Haptic.Tick)
             onClick()
         },
         shape = KeyShape,
@@ -408,7 +425,7 @@ private fun ExtraKey(
 /** A key that fires on press and repeats while held (the arrows). */
 @Composable
 private fun RepeatKey(@DrawableRes icon: Int, label: String, onPress: () -> Unit) {
-    val view = LocalView.current
+    val fb = LocalFeedback.current
     val fire by rememberUpdatedState(onPress)
     var pressed by remember { mutableStateOf(false) }
     Surface(
@@ -427,11 +444,12 @@ private fun RepeatKey(@DrawableRes icon: Int, label: String, onPress: () -> Unit
                     awaitEachGesture {
                         awaitFirstDown()
                         pressed = true
-                        view.performHapticFeedback(HapticFeedbackConstants.KEYBOARD_TAP)
+                        fb.haptic(Haptic.Tick)
                         fire()
                         val repeat = launch {
                             delay(400)
                             while (true) {
+                                fb.haptic(Haptic.Tick)
                                 fire()
                                 delay(50)
                             }

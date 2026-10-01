@@ -2,6 +2,7 @@ package sh.zeron.android.core
 
 import org.json.JSONArray
 import org.json.JSONObject
+import sh.zeron.android.feedback.TransferEvent
 import java.io.File
 import java.util.Locale
 
@@ -46,6 +47,17 @@ object Transfers {
         companion object {
             fun of(wire: String): State = entries.firstOrNull { it.wire == wire } ?: Failed
         }
+    }
+
+    /**
+     * The feedback event a transfer that just reached [state] deserves, or null.
+     * [mine]: the user cancelled or declined it here, so its end is no news.
+     */
+    fun finishedEvent(incoming: Boolean, state: State, mine: Boolean): TransferEvent? = when {
+        state == State.Completed -> if (incoming) TransferEvent.Received else TransferEvent.Sent
+        mine -> null
+        state == State.Failed || state == State.Cancelled || state == State.Declined -> TransferEvent.Failed
+        else -> null
     }
 
     enum class Kind { File, Folder, Symlink }

@@ -1,5 +1,11 @@
 package sh.zeron.android.ui
 
+import sh.zeron.android.feedback.tapAction
+import sh.zeron.android.feedback.toggleAction
+import sh.zeron.android.feedback.feedbackAction
+import sh.zeron.android.feedback.LocalFeedback
+import sh.zeron.android.feedback.Haptic
+import sh.zeron.android.feedback.Cue
 import android.net.Uri
 import androidx.browser.customtabs.CustomTabsIntent
 import androidx.compose.animation.AnimatedContent
@@ -87,6 +93,7 @@ import androidx.compose.ui.text.style.TextOverflow
 import androidx.compose.ui.unit.dp
 import kotlinx.coroutines.launch
 import sh.zeron.android.core.AppModel
+import sh.zeron.android.core.userMessage
 import uniffi.zeron_core.BusyPolicy
 import uniffi.zeron_core.ChatConfig
 import uniffi.zeron_core.ComposerState
@@ -121,6 +128,8 @@ fun Composer(
     transcript: TranscriptState,
 ) {
     val draft = remember(c.chatId) { ComposerModel() }
+    val fb = LocalFeedback.current
+    val notifications = rememberNotificationAccess(model)
     val scope = rememberCoroutineScope()
     val focus = remember { FocusRequester() }
     var error by remember { mutableStateOf<String?>(null) }
@@ -207,7 +216,10 @@ fun Composer(
         val body = draft.encoded()
         try {
             val queued = running && delivery == Delivery.Queue
-            if (delivery == Delivery.Interrupt && running) handle.interrupt()
+            if (delivery == Delivery.Interrupt && running) {
+                model.noteInterrupted(c.chatId)
+                handle.interrupt()
+            }
             handle.send(
                 SendRequest(
                     body,
@@ -219,11 +231,13 @@ fun Composer(
             draft.clear()
             error = null
             delivery = Delivery.Queue
+            notifications.askOnce() // the first message: the moment background alerts make sense
             // An immediate send gets the runway; one queued behind a live turn
             // takes it over once its bubble lands.
             if (queued) transcript.expectQueuedTurn() else transcript.beginOwnTurn()
         } catch (e: Exception) {
             error = "Couldn't send: ${e.message}"
+            fb.both(Haptic.Error, Cue.Error)
         }
     }
 
@@ -253,7 +267,12 @@ fun Composer(
                 running -> ComposerAction.Queue
                 else -> ComposerAction.Send
             },
-            onAction = { if (editingId == null && running && !draft.hasContent) runCatching { handle.interrupt() } else send() },
+            onAction = {
+                if (editingId == null && running && !draft.hasContent) {
+                    model.noteInterrupted(c.chatId)
+                    runCatching { handle.interrupt() }
+                } else send()
+            },
             attach = editingId == null,
             focusRequester = focus,
         ) {
@@ -306,14 +325,21 @@ private fun SessionChips(app: AppModel, client: CoreClient, c: ComposerState, ro
     val deviceId = c.host.deviceId
     val favorites by app.favorites.favorites.collectAsState()
     val workspace by app.workspace.collectAsState()
-    // The harness's models: the device's list (the picker shows a loader until it lands).
+    // The harness's models: the built-in catalog at once, then the device's list.
     var models by remember(deviceId, harness) { mutableStateOf<List<ModelInfo>?>(null) }
-    var menu by remember { mutableStateOf<String?>(null) }
+    var loading by remember(deviceId, harness) { mutableStateOf(false) }
+    var loadError by remember(deviceId, harness) { mutableStateOf<String?>(null) }
+    // The session's model options (fast mode, context window…), as last set from here.
+    var options by remember(c.chatId) { mutableStateOf(runCatching { client.sessionConfig(c.chatId)?.modelOptions }.getOrNull().orEmpty()) }
 
-    fun open(which: String) {
-        menu = which
-        if (models == null) scope.launch {
-            models = runCatching { client.listModels(deviceId, harness) }.getOrNull() ?: fallbackModels(harness)
+    fun load() {
+        loading = true
+        loadError = null
+        scope.launch {
+            val result = runCatching { client.listModels(deviceId, harness) }
+            models = result.getOrNull() ?: fallbackModels(harness)
+            loadError = result.exceptionOrNull()?.userMessage()
+            loading = false
         }
     }
 
@@ -325,39 +351,43 @@ private fun SessionChips(app: AppModel, client: CoreClient, c: ComposerState, ro
     val modelLabel = row?.modelLabel ?: row?.harnessLabel
     if (modelLabel != null) {
         val label = row?.harnessLabel ?: harnessLabel(harness)
-        val catalog = models.orEmpty().map { ModelChoice(harness, label, it) }
+        // The built-in catalog stands in until the device's list lands, so the chip
+        // and the card show the right effort ladder straight away.
+        val builtIn = remember(harness) { fallbackModels(harness) }
+        val catalog = (models ?: builtIn).map { ModelChoice(harness, label, it) }
         val current = row?.model?.let { id ->
             catalog.firstOrNull { it.model.id == id }
                 ?: ModelChoice(harness, label, ModelInfo(id, row.modelLabel ?: id, "Selected in this session; not in the device's model list", emptyList(), emptyList(), null))
+        } ?: catalog.firstOrNull()
+        val statuses = when {
+            loadError != null -> listOf(CatalogStatus(harness, label, loadError))
+            loading -> listOf(CatalogStatus(harness, label))
+            else -> emptyList()
         }
-        ContextChip(modelLabel, leading = { HarnessMark(harness, 14.dp) }, onClick = { open("model") }) {
-            // A session keeps its harness (as on the desktop): its own provider and its favorites.
-            ModelPickerPopover(
-                expanded = menu == "model",
-                onDismiss = { menu = null },
-                catalog = catalog,
-                current = current,
-                favorites = favorites,
-                onToggleFavorite = app.favorites::toggle,
-                onPick = { m -> setConfig { it.copy(model = m.model.id) } },
-                locked = true,
-                loading = models == null,
-                labelFor = { harnessLabel(it) },
-            )
-        }
-    }
-    // Effort: the device's ladder once loaded, the built-in catalog's until then
-    // (never an empty menu); shown whenever the model has one.
-    val builtIn = remember(harness) { fallbackModels(harness) }
-    val ladder = (models ?: builtIn).let { list -> list.firstOrNull { it.id == row?.model } ?: list.firstOrNull() }
-    val levels = ladder?.reasoningLevels.orEmpty()
-    val level = row?.reasoning?.takeIf { it.isNotEmpty() } ?: ladder?.defaultReasoning?.takeIf { it in levels }
-    if (row != null && level != null && levels.isNotEmpty()) {
-        ContextChip(reasoningLabel(level), leading = { ZIcon(ZIcons.Effort, null, Modifier.size(16.dp)) }, onClick = { open("effort") }) {
-            ChoiceMenu(menu == "effort", { menu = null }, listOf(MenuSection("Reasoning effort", levels.map { l ->
-                MenuChoice(reasoningLabel(l), l == level) { setConfig { it.copy(reasoning = l) } }
-            })))
-        }
+        // A session keeps its harness (as on the desktop): its own provider and its favorites.
+        ModelPickerChip(
+            catalog = catalog,
+            current = current,
+            harness = harness,
+            fallbackLabel = modelLabel,
+            favorites = favorites,
+            onToggleFavorite = app.favorites::toggle,
+            onPick = { m ->
+                options = emptyMap()
+                setConfig { it.copy(model = m.model.id, modelOptions = emptyMap()) }
+            },
+            effort = row?.reasoning?.takeIf { it.isNotEmpty() },
+            onEffort = { level -> setConfig { it.copy(reasoning = level) } },
+            options = options,
+            onOptions = { next ->
+                options = next
+                setConfig { it.copy(modelOptions = next) }
+            },
+            locked = true,
+            statuses = statuses,
+            onRetry = { load() },
+            onOpen = { if (models == null && !loading) load() },
+        )
     }
     val pr = row?.pullRequest
     if (pr != null) {
@@ -382,7 +412,7 @@ fun StatusBanner(text: String, action: Pair<String, () -> Unit>?) {
     ) {
         Row(Modifier.padding(start = 16.dp, end = if (action != null) 4.dp else 16.dp), verticalAlignment = Alignment.CenterVertically) {
             Text(text, style = MaterialTheme.typography.labelLarge, modifier = Modifier.padding(vertical = 10.dp).weight(1f, fill = false))
-            action?.let { (label, run) -> TextButton(onClick = run) { Text(label) } }
+            action?.let { (label, run) -> TextButton(onClick = tapAction(action = run)) { Text(label) } }
         }
     }
 }
@@ -407,7 +437,7 @@ fun QuestionPanel(input: InputRequest, onSubmit: (List<UserInputAnswer>) -> Unit
                         for (option in q.options) {
                             ToggleButton(
                                 checked = option in selection,
-                                onCheckedChange = { on ->
+                                onCheckedChange = toggleAction { on ->
                                     if (!q.multiSelect) selection.clear()
                                     if (on) selection.add(option) else selection.remove(option)
                                 },
@@ -418,7 +448,7 @@ fun QuestionPanel(input: InputRequest, onSubmit: (List<UserInputAnswer>) -> Unit
             }
             val ready = input.questions.all { picked.getValue(it.id).isNotEmpty() }
             Button(
-                onClick = { onSubmit(input.questions.map { UserInputAnswer(it.id, picked.getValue(it.id).toList()) }) },
+                onClick = feedbackAction(Haptic.Confirm, Cue.Send) { onSubmit(input.questions.map { UserInputAnswer(it.id, picked.getValue(it.id).toList()) }) },
                 enabled = ready,
                 shapes = ButtonDefaults.shapes(),
                 modifier = Modifier.align(Alignment.End),
@@ -460,16 +490,16 @@ fun QueuePanel(queue: List<QueueItem>, handle: SessionHandle, editingId: String?
                     }
                     var menu by remember { mutableStateOf(false) }
                     Box {
-                        IconButton(onClick = { menu = true }) { ZIcon(ZIcons.More, "Queued message actions", Modifier.size(20.dp)) }
+                        IconButton(onClick = tapAction { menu = true }) { ZIcon(ZIcons.More, "Queued message actions", Modifier.size(20.dp)) }
                         ActionMenu(
                             menu,
                             { menu = false },
                             listOfNotNull(
-                                MenuAction("Send now", ZIcons.Send) { scope.launch { runCatching { handle.deliverQueuedNow(item.id) } } },
+                                MenuAction("Send now", ZIcons.Send, haptic = Haptic.Confirm, cue = Cue.Send) { scope.launch { runCatching { handle.deliverQueuedNow(item.id) } } },
                                 if (!editing && item.gate == null) MenuAction("Edit", ZIcons.Rename) { onEdit(item.id) } else null,
                                 if (i > 0) MenuAction("Move up", ZIcons.ChevronUp) { runCatching { handle.moveQueuedBy(item.id, -1) } } else null,
                                 if (i < queue.size - 1) MenuAction("Move down", ZIcons.ChevronDown) { runCatching { handle.moveQueuedBy(item.id, 1) } } else null,
-                                MenuAction("Remove", ZIcons.Delete, destructive = true) { scope.launch { runCatching { handle.removeQueued(item.id) } } },
+                                MenuAction("Remove", ZIcons.Delete, destructive = true, haptic = Haptic.Confirm, cue = Cue.Delete) { scope.launch { runCatching { handle.removeQueued(item.id) } } },
                             ),
                         )
                     }

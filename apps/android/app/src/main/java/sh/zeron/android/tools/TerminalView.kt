@@ -341,7 +341,7 @@ class TerminalView(context: Context, private val sticky: StickyKeys) : View(cont
             val (row, col, right) = cellAt(e.x, e.y)
             s.screen.selectStart(row, col, right, TerminalSelection.WORD)
             selecting = true
-            performHapticFeedback(HapticFeedbackConstants.LONG_PRESS)
+            sh.zeron.android.feedback.AppFeedback.current.haptic(sh.zeron.android.feedback.Haptic.LongPress)
         }
     })
 

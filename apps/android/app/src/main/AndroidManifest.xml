@@ -5,6 +5,10 @@
     <uses-permission android:name="android.permission.ACCESS_NETWORK_STATE" />
     <!-- Opening a received APK hands it to the package installer. -->
     <uses-permission android:name="android.permission.REQUEST_INSTALL_PACKAGES" />
+    <!-- Haptics (VibrationEffect / composition primitives); a normal permission, granted at install. -->
+    <uses-permission android:name="android.permission.VIBRATE" />
+    <!-- Session alerts (finished, needs input, failed) while the app is in the background; asked once, in context. -->
+    <uses-permission android:name="android.permission.POST_NOTIFICATIONS" />
 
     <application
         android:name=".ZeronApplication"

@@ -1,5 +1,10 @@
 package sh.zeron.android.ui
 
+import sh.zeron.android.feedback.tapAction
+import sh.zeron.android.feedback.feedbackAction
+import sh.zeron.android.feedback.Haptic
+import sh.zeron.android.feedback.Cue
+import sh.zeron.android.feedback.OpenCloseFeedback
 import android.net.Uri
 import androidx.browser.customtabs.CustomTabsIntent
 import androidx.compose.animation.AnimatedVisibility
@@ -89,7 +94,7 @@ fun SignInScreen(model: AppModel) {
         Spacer(Modifier.height(48.dp))
         val tall = ButtonDefaults.MediumContainerHeight
         Button(
-            onClick = { ask(false) { model.signIn(openBrowser) } },
+            onClick = tapAction { ask(false) { model.signIn(openBrowser) } },
             enabled = !busy,
             modifier = Modifier.fillMaxWidth().heightIn(min = tall),
             shapes = ButtonDefaults.shapes(),
@@ -111,7 +116,7 @@ fun SignInScreen(model: AppModel) {
         Spacer(Modifier.height(12.dp))
         // No account: this phone's own workspace, like the desktop's local profile.
         FilledTonalButton(
-            onClick = { ask(true) { model.continueLocally() } },
+            onClick = feedbackAction(Haptic.Confirm, Cue.Open) { ask(true) { model.continueLocally() } },
             enabled = !busy && model.phone.isSupportedAbi,
             modifier = Modifier.fillMaxWidth().heightIn(min = tall),
             shapes = ButtonDefaults.shapes(),
@@ -121,7 +126,7 @@ fun SignInScreen(model: AppModel) {
         }
         Spacer(Modifier.height(12.dp))
         OutlinedButton(
-            onClick = { model.startDemo() },
+            onClick = feedbackAction(Haptic.Confirm, Cue.Open) { model.startDemo() },
             enabled = !busy,
             modifier = Modifier.fillMaxWidth().heightIn(min = tall),
             shapes = ButtonDefaults.shapes(),
@@ -174,7 +179,7 @@ fun EngineStatusStrip(model: AppModel, state: RuntimeState, modifier: Modifier =
                     maxLines = 2,
                 )
                 if (failed || state == RuntimeState.Stopped) {
-                    TextButton(onClick = { model.startEngine() }) { Text(if (failed) "Try again" else "Start") }
+                    TextButton(onClick = feedbackAction(Haptic.Confirm, if (failed) Cue.Refresh else Cue.ToggleOn) { model.startEngine() }) { Text(if (failed) "Try again" else "Start") }
                 }
             }
             AnimatedVisibility(state is RuntimeState.Bootstrapping) {
@@ -208,18 +213,19 @@ fun OrgDialog(list: List<uniffi.zeron_core.AuthOrg>, onPick: (uniffi.zeron_core.
         onDismissRequest = { onPick(null) },
         title = { Text("Choose an organization") },
         text = {
+            OpenCloseFeedback()
             Column {
                 for (org in list) {
                     ListItem(
                         headlineContent = { Text(org.name) },
                         trailingContent = {
-                            TextButton(onClick = { onPick(org) }) { Text("Open") }
+                            TextButton(onClick = tapAction { onPick(org) }) { Text("Open") }
                         },
                     )
                 }
             }
         },
         confirmButton = {},
-        dismissButton = { TextButton(onClick = { onPick(null) }) { Text("Cancel") } },
+        dismissButton = { TextButton(onClick = tapAction { onPick(null) }) { Text("Cancel") } },
     )
 }

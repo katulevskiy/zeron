@@ -1,5 +1,6 @@
 package sh.zeron.android.ui
 
+import sh.zeron.android.feedback.OpenCloseFeedback
 import android.content.Intent
 import android.graphics.BitmapFactory
 import android.net.Uri
@@ -172,6 +173,7 @@ fun SubagentScreen(model: AppModel, chatId: String, docId: String, onBack: () ->
 
     if (report && view?.summary != null) {
         ModalBottomSheet(onDismissRequest = { report = false }) {
+            OpenCloseFeedback()
             Text("Report to the parent", style = MaterialTheme.typography.titleMedium, modifier = Modifier.padding(horizontal = 24.dp))
             SelectionContainer {
                 Text(

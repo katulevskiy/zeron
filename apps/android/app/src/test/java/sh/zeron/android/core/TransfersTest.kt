@@ -7,6 +7,7 @@ import org.junit.Assert.assertNull
 import org.junit.Assert.assertTrue
 import org.junit.Rule
 import org.junit.Test
+import sh.zeron.android.feedback.TransferEvent
 import org.junit.rules.TemporaryFolder
 import java.io.File
 import java.nio.file.Files
@@ -124,5 +125,18 @@ class TransfersTest {
         for (s in Transfers.State.entries) assertEquals(s.terminal, !s.live)
         assertFalse(Transfers.State.Reconnecting.terminal)
         assertTrue(Transfers.State.Declined.terminal)
+    }
+
+    @Test fun finishedTransfersMapToFeedbackEvents() {
+        val f = Transfers::finishedEvent
+        assertEquals(TransferEvent.Received, f(true, Transfers.State.Completed, false))
+        assertEquals(TransferEvent.Sent, f(false, Transfers.State.Completed, false))
+        assertEquals(TransferEvent.Failed, f(true, Transfers.State.Failed, false))
+        assertEquals(TransferEvent.Failed, f(false, Transfers.State.Declined, false))
+        assertEquals(TransferEvent.Failed, f(true, Transfers.State.Cancelled, false))
+        // The user's own cancel / decline is no news; a live state is no event.
+        assertNull(f(true, Transfers.State.Declined, true))
+        assertNull(f(false, Transfers.State.Cancelled, true))
+        assertNull(f(false, Transfers.State.Transferring, false))
     }
 }

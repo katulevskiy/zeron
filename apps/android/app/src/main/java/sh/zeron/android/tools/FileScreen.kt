@@ -1,5 +1,11 @@
 package sh.zeron.android.tools
 
+import sh.zeron.android.feedback.tapAction
+import sh.zeron.android.feedback.feedbackAction
+import sh.zeron.android.feedback.OpenCloseFeedback
+import sh.zeron.android.feedback.LocalFeedback
+import sh.zeron.android.feedback.Haptic
+import sh.zeron.android.feedback.Cue
 import android.annotation.SuppressLint
 import android.webkit.WebResourceRequest
 import android.webkit.WebResourceResponse
@@ -98,7 +104,7 @@ fun FileScreen(model: AppModel, ref: WorkspaceRef, path: String, onBack: () -> U
         MenuAction("Save to Downloads", ZIcons.Save) { model.downloads.saveFile(ref, path) },
         MenuAction("Open with…", ZIcons.Link) { scope.launch { runCatching { openWith(context, model, ref, path) }.onFailure { toast(context, it.userMessage()) } } },
         if (kind == FileKind.Html || kind == FileKind.Svg) MenuAction("Open in browser", ZIcons.Globe) { onBrowser(Browser.workspaceUrl(ref, path)) } else null,
-        MenuAction("Copy path", ZIcons.Copy) { clipboard.setText(AnnotatedString(ref.absolute(path) ?: path)) },
+        MenuAction("Copy path", ZIcons.Copy, haptic = sh.zeron.android.feedback.Haptic.Confirm, cue = sh.zeron.android.feedback.Cue.Copy) { clipboard.setText(AnnotatedString(ref.absolute(path) ?: path)) },
     )
 
     when (kind) {
@@ -212,6 +218,7 @@ private fun TextFile(
         }
     }
 
+    val fb = LocalFeedback.current
     fun save(overwrite: Boolean = false) {
         val base = file ?: return
         saving = true
@@ -222,9 +229,13 @@ private fun TextFile(
                     is SaveResult.Written -> {
                         loaded = Loaded.Ready(base.copy(text = buffer.text, contentHash = r.contentHash, checkoutId = target.checkoutId))
                         changedOnDisk = false
-                        toast(context, "Saved $name")
+                        fb.both(Haptic.Confirm, Cue.Select)
+                        toast(context, "Saved $name", error = false)
                     }
-                    is SaveResult.Conflict -> conflict = r.reason
+                    is SaveResult.Conflict -> {
+                        conflict = r.reason
+                        fb.both(Haptic.Error, Cue.Error)
+                    }
                 }
             } catch (e: Exception) {
                 toast(context, "Couldn't save: ${e.userMessage()}")
@@ -291,7 +302,7 @@ private fun TextFile(
                 Loaded.Loading -> Box(Modifier.fillMaxSize(), contentAlignment = Alignment.Center) { LoadingIndicator() }
                 is Loaded.Failed -> Column(Modifier.fillMaxSize().padding(32.dp), horizontalAlignment = Alignment.CenterHorizontally) {
                     Hint(l.message)
-                    TextButton(onClick = { load() }) { Text("Try again") }
+                    TextButton(onClick = tapAction { load() }) { Text("Try again") }
                 }
                 is Loaded.Ready -> when {
                     l.file.binary || l.file.text == null -> BinaryInfo(name, l.file.size, onSave = { model.downloads.saveFile(ref, path) }, onOpenWith = {
@@ -311,18 +322,19 @@ private fun TextFile(
             onDismissRequest = { conflict = null },
             title = { Text(if (reason == "deleted") "File was deleted" else "File changed on the device") },
             text = {
+                OpenCloseFeedback()
                 Text(
                     if (reason == "deleted") "$name no longer exists on ${ref.deviceName ?: "the device"}. Your edits are still here."
                     else "Someone (maybe the agent) changed $name after you opened it. Overwrite their version with yours, or reload theirs?",
                 )
             },
             confirmButton = {
-                if (reason != "deleted") TextButton(onClick = { conflict = null; save(overwrite = true) }) { Text("Overwrite") }
+                if (reason != "deleted") TextButton(onClick = tapAction { conflict = null; save(overwrite = true) }) { Text("Overwrite") }
             },
             dismissButton = {
                 Row {
-                    TextButton(onClick = { conflict = null; editing = false; load() }) { Text("Reload") }
-                    TextButton(onClick = { conflict = null }) { Text("Keep editing") }
+                    TextButton(onClick = tapAction { conflict = null; editing = false; load() }) { Text("Reload") }
+                    TextButton(onClick = tapAction { conflict = null }) { Text("Keep editing") }
                 }
             },
         )
@@ -331,16 +343,19 @@ private fun TextFile(
         AlertDialog(
             onDismissRequest = { confirmDiscard = false },
             title = { Text("Discard your changes?") },
-            text = { Text("$name has unsaved edits.") },
-            confirmButton = { TextButton(onClick = { confirmDiscard = false; save() }) { Text("Save") } },
+            text = {
+                OpenCloseFeedback()
+                Text("$name has unsaved edits.")
+            },
+            confirmButton = { TextButton(onClick = tapAction { confirmDiscard = false; save() }) { Text("Save") } },
             dismissButton = {
                 Row {
-                    TextButton(onClick = {
+                    TextButton(onClick = feedbackAction(Haptic.Heavy, Cue.Delete) {
                         confirmDiscard = false
                         editing = false
                         buffer = TextFieldValue(file?.text ?: "")
                     }) { Text("Discard") }
-                    TextButton(onClick = { confirmDiscard = false }) { Text("Cancel") }
+                    TextButton(onClick = tapAction { confirmDiscard = false }) { Text("Cancel") }
                 }
             },
         )

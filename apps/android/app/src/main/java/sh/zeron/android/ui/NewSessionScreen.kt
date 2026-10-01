@@ -1,5 +1,11 @@
 package sh.zeron.android.ui
 
+import sh.zeron.android.feedback.tapAction
+import sh.zeron.android.feedback.feedbackAction
+import sh.zeron.android.feedback.LocalFeedback
+import sh.zeron.android.feedback.Haptic
+import sh.zeron.android.feedback.Cue
+import sh.zeron.android.feedback.OpenCloseFeedback
 import androidx.compose.foundation.layout.Arrangement
 import androidx.compose.foundation.layout.Box
 import androidx.compose.foundation.layout.Column
@@ -32,6 +38,7 @@ import androidx.compose.runtime.Composable
 import androidx.compose.runtime.LaunchedEffect
 import androidx.compose.runtime.collectAsState
 import androidx.compose.runtime.getValue
+import androidx.compose.runtime.mutableIntStateOf
 import androidx.compose.runtime.mutableStateOf
 import androidx.compose.runtime.remember
 import androidx.compose.runtime.rememberCoroutineScope
@@ -87,6 +94,7 @@ fun NewSessionScreen(model: AppModel, onClose: () -> Unit, onCreated: (String) -
     val focus = remember { FocusRequester() }
     val snackbar = remember { SnackbarHostState() }
     val scope = rememberCoroutineScope()
+    val fb = LocalFeedback.current
 
     val projects = workspace?.projects.orEmpty()
     val hosts = workspace?.devices.orEmpty().filter { it.isExecutionHost }
@@ -107,13 +115,27 @@ fun NewSessionScreen(model: AppModel, onClose: () -> Unit, onCreated: (String) -
 
     // Models for the draft's host: cached (or the built-in catalog) at once, then the host's own list.
     var models by remember(deviceId) { mutableStateOf(modelCache[deviceId] ?: catalogModels()) }
-    LaunchedEffect(deviceId, client) {
+    var modelsLoading by remember(deviceId) { mutableStateOf(false) }
+    var modelsError by remember(deviceId) { mutableStateOf<String?>(null) }
+    var reload by remember(deviceId) { mutableIntStateOf(0) }
+    LaunchedEffect(deviceId, client, reload) {
         val c = client ?: return@LaunchedEffect
         if (deviceId.isEmpty()) return@LaunchedEffect
-        val harnesses = runCatching { c.listHarnesses(deviceId) }.getOrNull() ?: return@LaunchedEffect
-        val fresh = harnesses.filter { it.offered }.flatMap { h ->
-            (runCatching { c.listModels(deviceId, h.id) }.getOrNull() ?: fallbackModels(h.id)).map { ModelChoice(h.id, h.label, it) }
+        modelsLoading = true
+        modelsError = null
+        val harnesses = runCatching { c.listHarnesses(deviceId) }.getOrElse {
+            modelsError = it.userMessage()
+            modelsLoading = false
+            return@LaunchedEffect
         }
+        val failures = mutableListOf<String>()
+        val fresh = harnesses.filter { it.offered }.flatMap { h ->
+            val result = runCatching { c.listModels(deviceId, h.id) }
+            result.exceptionOrNull()?.let { failures += "${h.label}: ${it.userMessage()}" }
+            (result.getOrNull() ?: fallbackModels(h.id)).map { ModelChoice(h.id, h.label, it) }
+        }
+        modelsError = failures.firstOrNull()
+        modelsLoading = false
         if (fresh.isNotEmpty()) {
             modelCache[deviceId] = fresh
             models = fresh
@@ -122,7 +144,7 @@ fun NewSessionScreen(model: AppModel, onClose: () -> Unit, onCreated: (String) -
             // default, and sending to a missing harness just fails the turn.
             if (fresh.none { it.harness == draft.harness }) {
                 val first = fresh.first()
-                draft = draft.copy(harness = first.harness, model = first.model.id, effort = null)
+                draft = draft.copy(harness = first.harness, model = first.model.id, effort = null, options = emptyMap())
             }
         }
     }
@@ -146,7 +168,10 @@ fun NewSessionScreen(model: AppModel, onClose: () -> Unit, onCreated: (String) -
         // No pick: the session runs on (and is labelled with) the checked-out branch.
         val branch = draft.branch ?: currentBranch.takeIf { latestProject?.gitDetected == true }
         val id = model.createSession(draft.copy(model = draft.model ?: latestChoice?.model?.id, branch = branch), composer.encoded(), composer.images.map { it.outgoing })
-        if (id != null) onCreated(id) else scope.launch { snackbar.showSnackbar("Choose a project or a host that can run it.") }
+        if (id != null) onCreated(id) else {
+            fb.both(Haptic.Error, Cue.Error)
+            scope.launch { snackbar.showSnackbar("Choose a project or a host that can run it.") }
+        }
     }
 
     var composerBounds by remember { mutableStateOf<androidx.compose.ui.geometry.Rect?>(null) }
@@ -217,18 +242,22 @@ fun NewSessionScreen(model: AppModel, onClose: () -> Unit, onCreated: (String) -
                 } else {
                     HostChip(draft, hosts) { draft = it }
                 }
-                ModelChip(model, draft, choice, models) { draft = it }
-                val efforts = choice?.model?.reasoningLevels.orEmpty()
-                if (efforts.isNotEmpty()) {
-                    val effort = draft.effort?.takeIf { it in efforts } ?: choice?.model?.defaultReasoning ?: efforts[efforts.size / 2]
-                    EffortChip(effort, efforts) { draft = draft.copy(effort = it) }
-                }
+                ModelChip(
+                    model, draft, choice, models,
+                    statuses = when {
+                        modelsError != null -> listOf(CatalogStatus("", "Models", modelsError))
+                        modelsLoading -> listOf(CatalogStatus("", "models"))
+                        else -> emptyList()
+                    },
+                    onRetry = { reload++ },
+                ) { change -> draft = change(draft) }
             }
         }
     }
     adding?.let { source ->
         NewProjectDialog(source, target, onDismiss = { adding = null }) { input ->
             model.addProject(targetDevice, source, input).onSuccess { id ->
+                fb.both(Haptic.Success, Cue.UploadReady)
                 adding = null
                 draft = draft.copy(projectId = id, hostId = null, branch = null, cwd = null)
             }.exceptionOrNull()?.userMessage()
@@ -264,6 +293,7 @@ private fun NewProjectDialog(source: ProjectSource, device: DeviceView?, onDismi
         icon = { ZIcon(if (clone) ZIcons.Branch else ZIcons.Folder, null) },
         title = { Text(if (clone) "Clone a repository" else "New project") },
         text = {
+            OpenCloseFeedback()
             Column {
                 Text(
                     projectDestination(source, device),
@@ -298,9 +328,9 @@ private fun NewProjectDialog(source: ProjectSource, device: DeviceView?, onDismi
             }
         },
         confirmButton = {
-            androidx.compose.material3.TextButton(onClick = ::go, enabled = valid && !busy) { Text(if (clone) "Clone" else "Create") }
+            androidx.compose.material3.TextButton(onClick = feedbackAction(Haptic.Confirm, Cue.Select, ::go), enabled = valid && !busy) { Text(if (clone) "Clone" else "Create") }
         },
-        dismissButton = { androidx.compose.material3.TextButton(onClick = onDismiss, enabled = !busy) { Text("Cancel") } },
+        dismissButton = { androidx.compose.material3.TextButton(onClick = tapAction(action = onDismiss), enabled = !busy) { Text("Cancel") } },
     )
 }
 
@@ -370,6 +400,7 @@ private fun ProjectSheet(
         sheetState = sheet,
         containerColor = MaterialTheme.colorScheme.surfaceContainerLow,
     ) {
+        OpenCloseFeedback()
         androidx.compose.foundation.lazy.LazyColumn(contentPadding = androidx.compose.foundation.layout.PaddingValues(bottom = 24.dp)) {
             item {
                 Text(
@@ -471,7 +502,7 @@ private fun ProjectRow(
     onClick: () -> Unit,
 ) {
     androidx.compose.material3.SegmentedListItem(
-        onClick = onClick,
+        onClick = tapAction(action = onClick),
         shapes = segmentedShapes(index, count),
         colors = androidx.compose.material3.ListItemDefaults.segmentedColors(
             containerColor = if (selected) MaterialTheme.colorScheme.secondaryContainer else cardColor(),
@@ -530,34 +561,28 @@ private fun ModelChip(
     draft: sh.zeron.android.core.NewSessionDraft,
     choice: ModelChoice?,
     models: List<ModelChoice>,
-    onPick: (sh.zeron.android.core.NewSessionDraft) -> Unit,
+    statuses: List<CatalogStatus>,
+    onRetry: () -> Unit,
+    update: ((sh.zeron.android.core.NewSessionDraft) -> sh.zeron.android.core.NewSessionDraft) -> Unit,
 ) {
-    var open by remember { mutableStateOf(false) }
     val favorites by app.favorites.favorites.collectAsState()
-    val latest by androidx.compose.runtime.rememberUpdatedState(draft)
     // Never the harness name in place of a model.
     val title = choice?.model?.label ?: draft.model?.let { modelLabel(draft.harness, it) }
         ?: fallbackModels(draft.harness).firstOrNull()?.label ?: harnessLabel(draft.harness)
-    ContextChip(title, leading = { HarnessMark(draft.harness, 14.dp) }, onClick = { open = true }) {
-        ModelPickerPopover(
-            expanded = open,
-            onDismiss = { open = false },
-            catalog = models,
-            current = choice,
-            favorites = favorites,
-            onToggleFavorite = app.favorites::toggle,
-            onPick = { m -> onPick(latest.copy(harness = m.harness, model = m.model.id, effort = null)) },
-            labelFor = { harnessLabel(it) },
-        )
-    }
-}
-
-@Composable
-private fun EffortChip(effort: String, efforts: List<String>, onPick: (String) -> Unit) {
-    var open by remember { mutableStateOf(false) }
-    ContextChip(reasoningLabel(effort), leading = { ZIcon(ZIcons.Effort, null, Modifier.size(16.dp)) }, onClick = { open = true }) {
-        ChoiceMenu(open, { open = false }, listOf(MenuSection("Reasoning effort", efforts.map { e ->
-            MenuChoice(reasoningLabel(e), e == effort) { onPick(e) }
-        })))
-    }
+    ModelPickerChip(
+        catalog = models,
+        current = choice,
+        harness = choice?.harness ?: draft.harness,
+        fallbackLabel = title,
+        favorites = favorites,
+        onToggleFavorite = app.favorites::toggle,
+        // A new model starts from its own defaults.
+        onPick = { m -> update { it.copy(harness = m.harness, model = m.model.id, effort = null, options = emptyMap()) } },
+        effort = draft.effort,
+        onEffort = { level -> update { it.copy(effort = level) } },
+        options = draft.options,
+        onOptions = { picks -> update { it.copy(options = picks) } },
+        statuses = statuses,
+        onRetry = { onRetry() },
+    )
 }

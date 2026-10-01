@@ -1,5 +1,11 @@
 package sh.zeron.android.ui
 
+import sh.zeron.android.feedback.tapAction
+import sh.zeron.android.feedback.LocalFeedback
+import sh.zeron.android.feedback.feedbackAction
+import sh.zeron.android.feedback.OpenCloseFeedback
+import sh.zeron.android.feedback.Haptic
+import sh.zeron.android.feedback.Cue
 import android.content.Context
 import android.net.Uri
 import androidx.browser.customtabs.CustomTabsIntent
@@ -107,6 +113,9 @@ fun AgentsScreen(model: AppModel, onBack: () -> Unit) {
     var pickDevice by remember { mutableStateOf(false) }
     val snackbar = remember { SnackbarHostState() }
     val scope = rememberCoroutineScope()
+    val fb = LocalFeedback.current
+    fun succeeded() = fb.both(Haptic.Success, Cue.UploadReady)
+    fun failed() = fb.both(Haptic.Error, Cue.Error)
 
     LaunchedEffect(device?.id, reloads, client) {
         val d = device ?: return@LaunchedEffect
@@ -137,19 +146,26 @@ fun AgentsScreen(model: AppModel, onBack: () -> Unit) {
     fun install(h: Agents.Harness) {
         val d = device ?: return
         notes.remove(h.id)
+        fb.haptic(Haptic.Confirm)
         installs[h.id] = scope.launch {
             try {
                 harnesses = Agents.harnesses(model.hostCall(d.id, Agents.INSTALL_HARNESS, JSONObject().put("harness", h.id)))
+                succeeded()
                 snackbar.showSnackbar("${h.name} installed")
             } catch (e: CancellationException) {
                 throw e
             } catch (e: Exception) {
                 if (e is CoreException.HostUnavailable && Agents.isTimeout(e.reason)) {
                     // Still installing on the device: watch the catalog instead.
-                    snackbar.showSnackbar(if (awaitInstalled(model, d.id, h.id, true)) "${h.name} installed" else "${h.name} didn't finish installing. Check the engine log.")
+                    val ok = awaitInstalled(model, d.id, h.id, true)
+                    if (ok) succeeded() else failed()
+                    snackbar.showSnackbar(if (ok) "${h.name} installed" else "${h.name} didn't finish installing. Check the engine log.")
                 } else {
                     val msg = e.userMessage()
-                    if (!msg.contains("cancelled", ignoreCase = true)) notes[h.id] = "Couldn't install: $msg"
+                    if (!msg.contains("cancelled", ignoreCase = true)) {
+                        notes[h.id] = "Couldn't install: $msg"
+                        failed()
+                    }
                 }
             } finally {
                 installs.remove(h.id)
@@ -177,9 +193,13 @@ fun AgentsScreen(model: AppModel, onBack: () -> Unit) {
                 throw e
             } catch (e: Exception) {
                 if (e is CoreException.HostUnavailable && Agents.isTimeout(e.reason)) {
-                    if (!awaitInstalled(model, d.id, h.id, false)) notes[h.id] = "The device didn't finish uninstalling ${h.name}."
+                    if (!awaitInstalled(model, d.id, h.id, false)) {
+                        notes[h.id] = "The device didn't finish uninstalling ${h.name}."
+                        failed()
+                    }
                 } else {
                     notes[h.id] = e.userMessage()
+                    failed()
                 }
             } finally {
                 uninstalls.remove(h.id)
@@ -191,10 +211,12 @@ fun AgentsScreen(model: AppModel, onBack: () -> Unit) {
     fun update(h: Agents.Harness) {
         val d = device ?: return
         notes.remove(h.id)
+        fb.haptic(Haptic.Confirm)
         updates[h.id] = scope.launch {
             val poll = launch { followUpdates(d.id) { true } }
             try {
                 val reply = model.hostCall(d.id, Agents.APPLY_UPDATE, JSONObject().put("harness", h.id)) as? JSONObject
+                succeeded()
                 snackbar.showSnackbar(reply?.optString("version")?.ifEmpty { null }?.let { "${h.name} updated to v$it" } ?: "${h.name} updated")
             } catch (e: CancellationException) {
                 throw e
@@ -203,7 +225,10 @@ fun AgentsScreen(model: AppModel, onBack: () -> Unit) {
                     followUpdates(d.id) { versions[h.id]?.busy == true }
                 } else {
                     val msg = e.userMessage()
-                    if (!msg.contains("cancelled", ignoreCase = true)) notes[h.id] = "Couldn't update: $msg"
+                    if (!msg.contains("cancelled", ignoreCase = true)) {
+                        notes[h.id] = "Couldn't update: $msg"
+                        failed()
+                    }
                 }
             } finally {
                 poll.cancel()
@@ -217,6 +242,7 @@ fun AgentsScreen(model: AppModel, onBack: () -> Unit) {
         val d = device ?: return
         updatingAll = true
         updateAllError = null
+        fb.haptic(Haptic.Confirm)
         scope.launch {
             val poll = launch { followUpdates(d.id) { true } }
             try {
@@ -225,6 +251,7 @@ fun AgentsScreen(model: AppModel, onBack: () -> Unit) {
                 val names = harnesses.orEmpty().associate { it.id to it.name }
                 result.failed.forEach { (id, message) -> notes[id] = "Couldn't update: $message" }
                 val updated = result.updated.size
+                if (result.failed.isNotEmpty()) failed() else if (updated > 0) succeeded()
                 snackbar.showSnackbar(
                     when {
                         result.failed.isNotEmpty() -> "${result.failed.size} of ${updated + result.failed.size} updates failed"
@@ -240,6 +267,7 @@ fun AgentsScreen(model: AppModel, onBack: () -> Unit) {
                     followUpdates(d.id) { versions.values.any { it.busy || it.updatable } }
                 } else {
                     updateAllError = "Couldn't update all: ${e.userMessage()}"
+                    failed()
                 }
             } finally {
                 poll.cancel()
@@ -276,7 +304,7 @@ fun AgentsScreen(model: AppModel, onBack: () -> Unit) {
         actions = {
             if (device != null && !harnesses.isNullOrEmpty()) {
                 FilledTonalButton(
-                    onClick = { updateAll() },
+                    onClick = tapAction { updateAll() },
                     enabled = pending > 0 && !busyNow,
                     shapes = ButtonDefaults.shapes(),
                     contentPadding = ButtonDefaults.SmallContentPadding,
@@ -350,7 +378,7 @@ fun AgentsScreen(model: AppModel, onBack: () -> Unit) {
             }
             list.isEmpty() -> item {
                 EmptyNote(ZIcons.Warning, "Couldn't load the agents", error ?: "The device didn't answer.") {
-                    FilledTonalButton(onClick = { reloads++ }, shapes = ButtonDefaults.shapes()) { Text("Try again") }
+                    FilledTonalButton(onClick = tapAction { reloads++ }, shapes = ButtonDefaults.shapes()) { Text("Try again") }
                 }
             }
             else -> {
@@ -396,11 +424,14 @@ fun AgentsScreen(model: AppModel, onBack: () -> Unit) {
             onDismissRequest = { signingOut = null },
             icon = { ZIcon(ZIcons.Logout, null) },
             title = { Text("Sign out of ${a.title}?") },
-            text = { Text("${h.name} on ${device?.name ?: "this device"} forgets this account.") },
+            text = {
+                OpenCloseFeedback()
+                Text("${h.name} on ${device?.name ?: "this device"} forgets this account.")
+            },
             confirmButton = {
-                TextButton(onClick = {
+                TextButton(onClick = feedbackAction(Haptic.Heavy, Cue.Delete) {
                     signingOut = null
-                    val d = device ?: return@TextButton
+                    val d = device ?: return@feedbackAction
                     scope.launch {
                         runCatching {
                             accounts = Agents.accounts(model.hostCall(d.id, Agents.FORGET_ACCOUNT, JSONObject().put("harness", h.id).put("accountId", a.id)))
@@ -408,7 +439,7 @@ fun AgentsScreen(model: AppModel, onBack: () -> Unit) {
                     }
                 }) { Text("Sign out", color = MaterialTheme.colorScheme.error) }
             },
-            dismissButton = { TextButton(onClick = { signingOut = null }) { Text("Cancel") } },
+            dismissButton = { TextButton(onClick = tapAction { signingOut = null }) { Text("Cancel") } },
         )
     }
     uninstalling?.let { h ->
@@ -437,6 +468,7 @@ private fun UninstallDialog(model: AppModel, device: String, deviceName: String,
         icon = { ZIcon(ZIcons.Delete, null) },
         title = { Text("Uninstall ${h.name}?") },
         text = {
+            OpenCloseFeedback()
             Column(Modifier.animateContentSize()) {
                 when {
                     preview == null -> Waiting("Checking what to remove…")
@@ -464,10 +496,10 @@ private fun UninstallDialog(model: AppModel, device: String, deviceName: String,
         },
         confirmButton = {
             if (plan != null) {
-                TextButton(onClick = onConfirm) { Text("Uninstall", color = MaterialTheme.colorScheme.error) }
+                TextButton(onClick = feedbackAction(Haptic.Heavy, Cue.Delete, onConfirm)) { Text("Uninstall", color = MaterialTheme.colorScheme.error) }
             }
         },
-        dismissButton = { TextButton(onClick = onDismiss) { Text(if (preview?.isFailure == true) "Close" else "Cancel") } },
+        dismissButton = { TextButton(onClick = tapAction(action = onDismiss)) { Text(if (preview?.isFailure == true) "Close" else "Cancel") } },
     )
 }
 
@@ -554,14 +586,14 @@ private fun HarnessCard(
                     )
                 }
                 when {
-                    activity == Activity.Installing -> OutlinedButton(onClick = onCancel, shapes = ButtonDefaults.shapes()) { Text("Cancel") }
+                    activity == Activity.Installing -> OutlinedButton(onClick = tapAction(action = onCancel), shapes = ButtonDefaults.shapes()) { Text("Cancel") }
                     activity != null -> {}
-                    !h.installed && h.canInstall -> Button(onClick = onInstall, shapes = ButtonDefaults.shapes()) { Text("Install") }
-                    available && version?.canApply == true -> Button(onClick = onUpdate, enabled = canUpdate, shapes = ButtonDefaults.shapes()) { Text("Update") }
+                    !h.installed && h.canInstall -> Button(onClick = tapAction(action = onInstall), shapes = ButtonDefaults.shapes()) { Text("Install") }
+                    available && version?.canApply == true -> Button(onClick = tapAction(action = onUpdate), enabled = canUpdate, shapes = ButtonDefaults.shapes()) { Text("Update") }
                 }
                 if (h.installed && activity == null) {
                     Box {
-                        IconButton(onClick = { menu = true }) {
+                        IconButton(onClick = tapAction { menu = true }) {
                             ZIcon(ZIcons.More, "More for ${h.name}", Modifier.size(22.dp), tint = MaterialTheme.colorScheme.onSurfaceVariant)
                         }
                         ActionMenu(menu, { menu = false }, listOf(MenuAction("Uninstall", ZIcons.Delete, destructive = true, onClick = onUninstall)))
@@ -600,7 +632,7 @@ private fun HarnessCard(
                                     maxLines = 1,
                                 )
                             }
-                            TextButton(onClick = { onSignOut(a) }) { Text("Sign out") }
+                            TextButton(onClick = tapAction { onSignOut(a) }) { Text("Sign out") }
                         }
                     }
                 }
@@ -609,7 +641,7 @@ private fun HarnessCard(
                     Text(warning, style = MaterialTheme.typography.bodySmall, color = MaterialTheme.colorScheme.error)
                 }
                 Spacer(Modifier.height(12.dp))
-                FilledTonalButton(onClick = onSignIn, modifier = Modifier.fillMaxWidth(), shapes = ButtonDefaults.shapes()) {
+                FilledTonalButton(onClick = tapAction(action = onSignIn), modifier = Modifier.fillMaxWidth(), shapes = ButtonDefaults.shapes()) {
                     ZIcon(if (accounts.isEmpty()) ZIcons.Key else ZIcons.Plus, null, Modifier.size(ButtonDefaults.IconSize))
                     Spacer(Modifier.size(ButtonDefaults.IconSpacing))
                     Text(if (accounts.isEmpty()) "Sign in" else "Add account")
@@ -678,6 +710,7 @@ private fun SignInSheet(model: AppModel, device: String, h: Agents.Harness, scop
     }
 
     ModalBottomSheet(onDismissRequest = onDismiss, sheetState = sheet, containerColor = MaterialTheme.colorScheme.surfaceContainerLow) {
+        OpenCloseFeedback()
         Column(Modifier.padding(horizontal = 24.dp).padding(bottom = 24.dp)) {
             Row(verticalAlignment = Alignment.CenterVertically) {
                 HarnessMark(h.id, 28.dp, tint = MaterialTheme.colorScheme.onSurface)
@@ -711,12 +744,12 @@ private fun SignInSheet(model: AppModel, device: String, h: Agents.Harness, scop
                 }
                 Spacer(Modifier.height(10.dp))
                 Row(horizontalArrangement = Arrangement.spacedBy(8.dp)) {
-                    FilledTonalButton(onClick = { openPage(context, model, url, force = true) }, modifier = Modifier.weight(1f), shapes = ButtonDefaults.shapes()) {
+                    FilledTonalButton(onClick = tapAction { openPage(context, model, url, force = true) }, modifier = Modifier.weight(1f), shapes = ButtonDefaults.shapes()) {
                         ZIcon(ZIcons.Link, null, Modifier.size(ButtonDefaults.IconSize))
                         Spacer(Modifier.size(ButtonDefaults.IconSpacing))
                         Text("Open page")
                     }
-                    FilledTonalButton(onClick = { clipboard.setText(AnnotatedString(url)) }, modifier = Modifier.weight(1f), shapes = ButtonDefaults.shapes()) {
+                    FilledTonalButton(onClick = feedbackAction(Haptic.Confirm, Cue.Copy) { clipboard.setText(AnnotatedString(url)) }, modifier = Modifier.weight(1f), shapes = ButtonDefaults.shapes()) {
                         ZIcon(ZIcons.Copy, null, Modifier.size(ButtonDefaults.IconSize))
                         Spacer(Modifier.size(ButtonDefaults.IconSpacing))
                         Text("Copy link")
@@ -726,7 +759,7 @@ private fun SignInSheet(model: AppModel, device: String, h: Agents.Harness, scop
             Spacer(Modifier.height(20.dp))
             if (s?.mode == Agents.LoginMode.PasteCode && failure == null) {
                 Button(
-                    onClick = {
+                    onClick = tapAction {
                         busy = true
                         scope.launch {
                             runCatching { model.hostCall(device, Agents.COMPLETE_LOGIN, JSONObject().put("loginId", s.loginId).put("code", code.trim())) }
@@ -741,7 +774,7 @@ private fun SignInSheet(model: AppModel, device: String, h: Agents.Harness, scop
                 ) { Text("Finish sign-in") }
                 Spacer(Modifier.height(8.dp))
             }
-            TextButton(onClick = onDismiss, modifier = Modifier.fillMaxWidth()) { Text(if (failure != null) "Close" else "Cancel") }
+            TextButton(onClick = tapAction(action = onDismiss), modifier = Modifier.fillMaxWidth()) { Text(if (failure != null) "Close" else "Cancel") }
         }
     }
 }

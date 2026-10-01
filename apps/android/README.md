@@ -53,6 +53,29 @@ which the build runs only while their outputs are missing
 (needs `rsvg-convert`). The Geist fonts are read straight from the iOS app's
 `Fonts/` folder, so both platforms measure and draw the same bytes.
 
+## Sounds and haptics
+
+`feedback/` is the app's sensory layer: `Feedback.kt` is the vocabulary
+(`Haptic`, `Cue`) every screen speaks, `AndroidFeedback` plays it (platform
+haptic constants, `VibrationEffect` primitives, a preloaded `SoundPool`),
+`FeedbackGate` decides whether and when (switches, system touch / silent / DND,
+foreground only, rate limits), and `FeedbackCompose` holds the hooks
+(`LocalFeedback`, `tapAction`, `feedbackAction`, `toggleAction`,
+`OpenCloseFeedback`, `feedbackClickable`). Non-Compose code uses
+`AppFeedback.current`. Settings, Sounds & haptics has the switches and previews.
+
+```sh
+adb logcat -s ZeronFeedback          # one line per haptic / cue, or why it was skipped
+adb shell dumpsys vibrator_manager   # what the motor was asked to play
+adb shell am broadcast -a sh.zeron.android.DEBUG_EVENT -p sh.zeron.android \
+  --es kind done|input|failed [--ez background true]   # debug builds: a session event
+python3 scripts/generate-android-sounds.py && python3 scripts/audit-android-sounds.py
+```
+
+Full design, tables and policy: [`docs/sound-design/android.md`](../../docs/sound-design/android.md).
+The session chimes come from `crates/ui/assets/sounds` through the Gradle
+`genSounds` task; the rest are committed under `app/src/main/res/raw`.
+
 ## Layout
 
 ```
@@ -62,9 +85,13 @@ core/        AppModel (the device's CoreClient built from its engine via
              AndroidMeasurer (Minikin fallback measurement for glyphs Geist
              lacks), PhoneEngine (the :runtime engine as the UI sees it),
              Agents (harness install and agent sign-in over host_call),
-             Notifier (local session and file-transfer notifications),
+             Favorites (starred models), Notifier (local session and
+             file-transfer notifications: channels with the app's chimes),
              Transfers + TransferCenter (device file transfer: polling,
              Downloads copies, the share outbox)
+feedback/    Haptics and sound: vocabulary, engine, gate, SoundPool bank,
+             Compose hooks, settings, session-event and transfer-event
+             policies, engine-state transitions
 design/      ZeronTheme (Material 3 Expressive), transcript palette
 transcript/  TranscriptState (layout engine + viewport: anchoring, follow the
              tail), Transcript (virtualized rows over LayoutFrame), RowModel
@@ -99,7 +126,8 @@ adb shell am start -n sh.zeron.android/.MainActivity \
 | `--ez big true` / `--ez huge true` | Demo transcripts with 120 / 600 turns |
 | `--ez local true` | Skip the first-run screen: continue without an account |
 | `--es server <url> --es server-token <t>` | Developer custom server (`zeron local-edge`); `--es server none` clears it |
-| `--es route chat:<id>` / `new` / `search` / `settings` / `engine` / `agents` / `transfers` | Open a screen at launch |
+| `--es route chat:<id>` / `new` / `search` / `settings` / `engine` / `agents` / `transfers` / `sounds` | Open a screen at launch |
+| `--es route subagents:<chat>` / `subagent:<chat>\|<doc>` | Open the Subagents panel / a subagent (Demo: `chat-fanout`) |
 | `--es route files:<chat>` / `terminal:<chat>` / `file:<chat>\|<path>` / `browser:<chat>\|<url>` | Open a developer tool at launch (`space:<id>` instead of a chat id for a project) |
 | `--ez signedout true` | Back to the first-run screen (the engine keeps its sign-in) |
 | `--es wallpaper <path>` / `none` | Set (or clear) the wallpaper from a file the app can read, e.g. `adb push art.jpg /data/local/tmp/ && adb shell run-as sh.zeron.android cp /data/local/tmp/art.jpg files/` then `--es wallpaper /data/user/0/sh.zeron.android/files/art.jpg` |

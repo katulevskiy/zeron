@@ -253,7 +253,9 @@ data class ExecResult(val exitCode: Int, val output: String)
   computers — each with "No project" (its home folder); "New project" clones
   or creates on the chosen device through its engine (`CloneRepo` /
   `CreateRepo`; on the phone into `/home/zeron/projects`). Harnesses and
-  models come from the chosen device.
+  models come from the chosen device, through the
+  [compact model picker](#compact-model-picker) (the draft's working branch
+  and context-usage chips sit beside it).
 - **Coding agents** (any engine device, this phone first) speaks `host_call`:
   `ListHarnesses`, `InstallHarness` / `CancelInstall` (a relay timeout falls
   back to polling the catalog), `CheckHarnessUpdates` on open and
@@ -305,6 +307,50 @@ data dir. Guest paths map to host paths through the rootfs (`/tmp` →
   The batch is deleted when the transfer ends, when the sheet is left before
   sending, and (as a sweep) after a day. Before the first run is finished it
   asks to open Zeron.
+
+### Compact model picker
+
+The composer's model chip (New session and an open session) is the desktop's
+compact picker adapted to touch: **provider mark, model and the dim effort**
+("GPT-5.4  High", a small bolt when fast mode is on). Tapping it opens a card
+over the chip:
+
+- the big **effort name**, the model under it with a chevron (tap for the
+  model list) and, for models with a fast tier, a square **fast** button;
+- the **effort slider** (`ui/EffortSlider.kt`): a pill rail with a dot per
+  level, an accent fill to a springy pill thumb you drag, tap or fling, snapping
+  to the levels. The top of the ladder (`xhigh`, `max`, `ultra*`) shimmers, fast
+  mode adds speed streaks and a halo. One detent per level crossed, not per
+  frame: position to step goes through `EffortScale.snap` with hysteresis
+  (`ui/EffortScale.kt`), so jitter at a boundary does not re-fire. For
+  TalkBack it is a slider (state "High, 3 of 6", set-progress and
+  increase/decrease actions); hardware keys step it;
+- a row per other model option ("Context Window  200K ›", opening its
+  choices), and **Reset to defaults** when anything differs from the model's
+  defaults. Fast mode, the effort and the option rows are driven by the model's
+  real options (`ModelOptions` in `ui/ModelPickerRules.kt`, ported from the
+  desktop's `fast_mode_values`, `compact_fast_choice`, `compact_option_visible`).
+
+The **model list** is one page deeper (animated, the card's height eases):
+search over model name, id, provider and description; one list with the
+provider mark on each row, **starred models first** (stars are device-local,
+`core/Favorites.kt`; rows keep their identity when a star re-sorts the list and
+the list follows a row that leaves the screen), the current model checked,
+a loading skeleton, "No models match", and a per-catalog "unavailable — Retry"
+row beside the models that did load. An open session lists only its own
+harness; choosing a model returns to the card to set its effort.
+
+Feedback goes through `LocalFeedback` (`feedback/Feedback.kt`): a detent per
+step (`Haptic.Tick`, `Haptic.Threshold` at the ends, with `Cue.Detent`), a
+release `Select`, fast `ToggleOn/Off`, star `Pop` with `Star/Unstar`, choosing a
+model or option `Select`, opening/closing `Open/Close` + `Tick`, Reset `Confirm`.
+
+![Card](media/android/compact-picker-card.png)
+![Fast mode on](media/android/compact-picker-fast.png)
+![Model list](media/android/compact-picker-models.png)
+![No match](media/android/compact-picker-no-match.png)
+![Dark card](media/android/compact-picker-card-dark.png)
+![Dark list](media/android/compact-picker-models-dark.png)
 
 ### Developer tools
 
@@ -444,6 +490,18 @@ The desktop's Subagents view (#638, #647), on the phone:
   `--es route 'subagent:chat-fanout|chat-fanout--sub--fo-soak'`.
 - Not recorded on the chip, so not shown: when a finished subagent ended
   (the list shows its last update instead).
+
+## Sounds and haptics
+
+Every tap, toggle, sheet, swipe and session event has a considered haptic and a
+soft sound, played only while the app is open and in your control: Settings,
+**Sounds & haptics** has the master switches, interface and session sounds
+(completion, input required, errors, like the desktop), volume, haptic strength
+(Subtle / Standard / Strong) and a Try them list. The desktop's done / request /
+attention chimes are reused byte for byte; the interface cues are generated in the
+same family. When the app is in the background, session events arrive as
+notifications with the same sounds and matching vibration. Design, the cue and
+haptic tables and the policy: [`sound-design/android.md`](sound-design/android.md).
 
 ## Development: several devices without WorkOS
 

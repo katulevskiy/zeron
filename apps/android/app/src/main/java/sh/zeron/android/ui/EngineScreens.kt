@@ -79,6 +79,7 @@ import sh.zeron.android.core.PhoneEngine
 import sh.zeron.android.design.GeistMono
 import sh.zeron.android.design.ZIcon
 import sh.zeron.android.design.ZIcons
+import sh.zeron.android.feedback.pullFeedback
 import sh.zeron.runtime.RuntimePermissions
 import sh.zeron.runtime.RuntimeState
 
@@ -371,7 +372,7 @@ fun SubPage(
             val pull = rememberPullToRefreshState()
             PullToRefreshBox(
                 isRefreshing = refreshing,
-                onRefresh = onRefresh,
+                onRefresh = pullFeedback(pull, onRefresh),
                 state = pull,
                 modifier = Modifier.fillMaxSize(),
                 indicator = {

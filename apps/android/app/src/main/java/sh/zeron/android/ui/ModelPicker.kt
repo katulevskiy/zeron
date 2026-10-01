@@ -1,9 +1,25 @@
 package sh.zeron.android.ui
 
+import androidx.compose.animation.AnimatedContent
+import androidx.compose.animation.AnimatedVisibility
+import androidx.compose.animation.SizeTransform
 import androidx.compose.animation.animateColorAsState
+import androidx.compose.animation.animateContentSize
 import androidx.compose.animation.core.animateDpAsState
+import androidx.compose.animation.core.animateFloatAsState
+import androidx.compose.animation.core.tween
+import androidx.compose.animation.expandVertically
+import androidx.compose.animation.fadeIn
+import androidx.compose.animation.fadeOut
+import androidx.compose.animation.shrinkVertically
+import androidx.compose.animation.slideInHorizontally
+import androidx.compose.animation.slideOutHorizontally
+import androidx.compose.animation.togetherWith
 import androidx.compose.foundation.background
+import androidx.compose.foundation.border
 import androidx.compose.foundation.clickable
+import androidx.compose.foundation.interaction.MutableInteractionSource
+import androidx.compose.foundation.interaction.collectIsPressedAsState
 import androidx.compose.foundation.layout.Arrangement
 import androidx.compose.foundation.layout.Box
 import androidx.compose.foundation.layout.Column
@@ -14,20 +30,27 @@ import androidx.compose.foundation.layout.Spacer
 import androidx.compose.foundation.layout.fillMaxWidth
 import androidx.compose.foundation.layout.height
 import androidx.compose.foundation.layout.heightIn
+import androidx.compose.foundation.layout.offset
 import androidx.compose.foundation.layout.padding
 import androidx.compose.foundation.layout.size
 import androidx.compose.foundation.layout.width
+import androidx.compose.foundation.layout.widthIn
 import androidx.compose.foundation.lazy.LazyColumn
-import androidx.compose.foundation.lazy.LazyRow
 import androidx.compose.foundation.lazy.items
 import androidx.compose.foundation.lazy.rememberLazyListState
+import androidx.compose.foundation.selection.toggleable
+import androidx.compose.foundation.shape.CircleShape
 import androidx.compose.foundation.shape.RoundedCornerShape
+import androidx.compose.foundation.text.BasicTextField
+import androidx.compose.foundation.text.KeyboardActions
+import androidx.compose.foundation.text.KeyboardOptions
 import androidx.compose.material3.HorizontalDivider
 import androidx.compose.material3.IconButton
 import androidx.compose.material3.LoadingIndicator
 import androidx.compose.material3.MaterialTheme
 import androidx.compose.material3.Surface
 import androidx.compose.material3.Text
+import androidx.compose.material3.TextButton
 import androidx.compose.runtime.Composable
 import androidx.compose.runtime.LaunchedEffect
 import androidx.compose.runtime.getValue
@@ -37,106 +60,63 @@ import androidx.compose.runtime.setValue
 import androidx.compose.ui.Alignment
 import androidx.compose.ui.Modifier
 import androidx.compose.ui.draw.clip
+import androidx.compose.ui.draw.drawWithContent
+import androidx.compose.ui.geometry.Offset
+import androidx.compose.ui.graphics.Brush
 import androidx.compose.ui.graphics.Color
-import androidx.compose.ui.hapticfeedback.HapticFeedbackType
-import androidx.compose.ui.platform.LocalHapticFeedback
+import androidx.compose.ui.graphics.SolidColor
+import androidx.compose.ui.platform.LocalFocusManager
+import androidx.compose.ui.platform.LocalSoftwareKeyboardController
 import androidx.compose.ui.semantics.Role
 import androidx.compose.ui.semantics.contentDescription
 import androidx.compose.ui.semantics.selected
 import androidx.compose.ui.semantics.semantics
+import androidx.compose.ui.semantics.stateDescription
+import androidx.compose.ui.text.font.FontWeight
+import androidx.compose.ui.text.input.ImeAction
 import androidx.compose.ui.text.style.TextAlign
 import androidx.compose.ui.text.style.TextOverflow
+import androidx.compose.ui.unit.IntOffset
 import androidx.compose.ui.unit.dp
+import androidx.compose.ui.unit.sp
 import sh.zeron.android.core.FavoriteModel
 import sh.zeron.android.design.HarnessMark
 import sh.zeron.android.design.LocalDarkTheme
 import sh.zeron.android.design.ZIcon
 import sh.zeron.android.design.ZIcons
+import sh.zeron.android.feedback.Cue
+import sh.zeron.android.feedback.Haptic
+import sh.zeron.android.feedback.LocalFeedback
+import sh.zeron.android.feedback.tapAction
 import uniffi.zeron_core.ModelInfo
+import uniffi.zeron_core.ModelOption
+import uniffi.zeron_core.reasoningLabel
 
-/** One model a device offers, with the harness (provider) it runs under. */
-data class ModelChoice(val harness: String, val harnessLabel: String, val model: ModelInfo) {
-    val key get() = FavoriteModel(harness, model.id)
-}
-
-/** What the picker's list shows: starred models across providers, or one provider's catalog. */
-sealed interface ModelRail {
-    data object Favorites : ModelRail
-    data class Provider(val harness: String) : ModelRail
-}
-
-/** A provider on the rail: its harness id and name. */
-data class PickerProvider(val harness: String, val label: String)
-
-/**
- * The picker's pure rules (mirroring the desktop's pickers.rs where it has
- * one): which providers the rail shows, where it opens, which rows a view
- * lists and how many before "More models".
- */
-object ModelPickerRules {
-    /** Rows listed before the "More models" expander. */
-    const val COLLAPSED_ROWS = 5
-
-    /**
-     * The rail's providers in catalog order — the catalog only holds harnesses
-     * offered by the target device, so missing ones are simply absent. A
-     * locked chat (an open session can't change harness) shows only its own.
-     */
-    fun providers(catalog: List<ModelChoice>, current: String?, locked: Boolean, labelFor: (String) -> String): List<PickerProvider> {
-        val all = catalog.distinctBy { it.harness }.map { PickerProvider(it.harness, it.harnessLabel) }
-        if (!locked) return all
-        val own = current ?: return all
-        return listOf(all.firstOrNull { it.harness == own } ?: PickerProvider(own, labelFor(own)))
-    }
-
-    /**
-     * Where the rail opens: Favorites when the current model is starred (so
-     * the selection is in view), else the current model's provider. Locked
-     * chats stay on their own harness, as on the desktop.
-     */
-    fun defaultRail(favorites: List<FavoriteModel>, current: FavoriteModel?, locked: Boolean, providers: List<PickerProvider>): ModelRail {
-        if (!locked && current != null && current in favorites) return ModelRail.Favorites
-        val harness = current?.harness?.takeIf { h -> providers.any { it.harness == h } } ?: providers.firstOrNull()?.harness
-        return if (harness != null) ModelRail.Provider(harness) else ModelRail.Favorites
-    }
-
-    /**
-     * The view's rows. Favorites: every starred model the rail's providers
-     * still offer, in starring order. A provider: its catalog in order — rows
-     * never jump under a finger when starred — with the current model first
-     * if the catalog doesn't list it (the desktop's "selected only" row).
-     */
-    fun rows(rail: ModelRail, catalog: List<ModelChoice>, favorites: List<FavoriteModel>, providers: List<PickerProvider>, current: ModelChoice?): List<ModelChoice> {
-        val offered = providers.map { it.harness }.toSet()
-        return when (rail) {
-            ModelRail.Favorites -> favorites.mapNotNull { f ->
-                if (f.harness !in offered) null else catalog.firstOrNull { it.harness == f.harness && it.model.id == f.model }
-            }
-            is ModelRail.Provider -> {
-                val list = catalog.filter { it.harness == rail.harness }
-                if (current != null && current.harness == rail.harness && list.none { it.model.id == current.model.id }) listOf(current) + list else list
-            }
-        }
-    }
-
-    /** The rows to show and how many are tucked behind "More models". */
-    fun visible(rows: List<ModelChoice>, expanded: Boolean): Pair<List<ModelChoice>, Int> =
-        if (expanded || rows.size <= COLLAPSED_ROWS) rows to 0 else rows.take(COLLAPSED_ROWS) to rows.size - COLLAPSED_ROWS
-
-    /** Open expanded when the current model would otherwise hide behind "More models". */
-    fun startsExpanded(rows: List<ModelChoice>, current: FavoriteModel?): Boolean =
-        current != null && rows.indexOfFirst { it.key == current } >= COLLAPSED_ROWS
-}
-
-/** The desktop's warning amber (favorite stars, filling context). */
+/** The desktop's warning amber (filling context). */
 @Composable
 fun warningColor(): Color = if (LocalDarkTheme.current) Color(0xFFFBBF24) else Color(0xFFB45309)
 
+private val CardWidth = 344.dp
+private val RowHeight = 52.dp
+
+/** What the card is showing: its controls, the model list, or one option's choices. */
+private sealed interface PickerView {
+    data object Settings : PickerView
+    data object Models : PickerView
+    data class Choices(val optionId: String) : PickerView
+}
+
 /**
- * The model picker: a wide popover over the chip. The current provider's
- * models scroll vertically (five, then "More models"); below them a rail of
- * provider marks — Favorites first — switches the list. Stars persist
- * device-locally in starring order.
+ * The compact model picker (the desktop's compact picker, adapted to touch):
+ * a small card over the chip with the effort name big, the model beneath it
+ * (tap for the model list), a fast-mode button, an effort slider and rows for
+ * the model's other options. Everything the picker changes is reported as it
+ * happens; nothing waits for a Done.
+ *
+ * [effort] and [options] are the explicit picks (null / absent = the model's
+ * defaults). A [locked] picker belongs to an open session, which keeps its
+ * harness. [statuses] are catalogs still loading or failed ([onRetry] is
+ * called with the failed one's harness).
  */
 @Composable
 fun ModelPickerPopover(
@@ -147,87 +127,411 @@ fun ModelPickerPopover(
     favorites: List<FavoriteModel>,
     onToggleFavorite: (FavoriteModel) -> Unit,
     onPick: (ModelChoice) -> Unit,
+    effort: String?,
+    onEffort: (String?) -> Unit,
+    options: Map<String, String>,
+    onOptions: (Map<String, String>) -> Unit,
     locked: Boolean = false,
-    loading: Boolean = false,
-    labelFor: (String) -> String = { it },
+    statuses: List<CatalogStatus> = emptyList(),
+    onRetry: (String) -> Unit = {},
 ) {
-    AnchoredPopover(expanded, onDismiss) {
-        ModelPickerContent(catalog, current, favorites, onToggleFavorite, { onPick(it); onDismiss() }, locked, loading, labelFor)
+    val feedback = LocalFeedback.current
+    // Open / Close feedback comes from AnchoredPopover itself (ExpandedFeedback).
+    AnchoredPopover(expanded, onDismiss, width = CardWidth, maxHeight = 560.dp) {
+        var view by remember { mutableStateOf<PickerView>(if (current == null) PickerView.Models else PickerView.Settings) }
+        val spatial = MaterialTheme.motionScheme.defaultSpatialSpec<IntOffset>()
+        val sizeSpec = MaterialTheme.motionScheme.defaultSpatialSpec<androidx.compose.ui.unit.IntSize>()
+        val effects = MaterialTheme.motionScheme.fastEffectsSpec<Float>()
+        AnimatedContent(
+            targetState = view,
+            transitionSpec = {
+                // Sub-pages slide in from the right (back reverses it); the card's height eases between them.
+                val sign = if (targetState is PickerView.Settings) -1 else 1
+                (slideInHorizontally(spatial) { sign * it / 5 } + fadeIn(effects)) togetherWith
+                    (slideOutHorizontally(spatial) { -sign * it / 5 } + fadeOut(effects)) using
+                    SizeTransform(clip = true) { _, _ -> sizeSpec }
+            },
+            label = "picker view",
+        ) { shown ->
+            Column {
+                when (shown) {
+                    PickerView.Settings -> SettingsCard(
+                        current = current,
+                        effort = effort,
+                        options = options,
+                        onEffort = onEffort,
+                        onOptions = onOptions,
+                        onModels = { feedback.haptic(Haptic.Tick); view = PickerView.Models },
+                        onChoices = { feedback.haptic(Haptic.Tick); view = PickerView.Choices(it) },
+                    )
+                    PickerView.Models -> ModelList(
+                        catalog = catalog,
+                        current = current,
+                        favorites = favorites,
+                        locked = locked,
+                        statuses = statuses,
+                        onBack = { feedback.haptic(Haptic.Tick); if (current != null) view = PickerView.Settings else onDismiss() },
+                        onToggleFavorite = onToggleFavorite,
+                        onRetry = onRetry,
+                        onPick = {
+                            feedback.both(Haptic.Select, Cue.Select)
+                            onPick(it)
+                            view = PickerView.Settings
+                        },
+                    )
+                    is PickerView.Choices -> {
+                        val option = current?.model?.options?.firstOrNull { it.id == shown.optionId }
+                        if (option == null) {
+                            LaunchedEffect(Unit) { view = PickerView.Settings }
+                        } else {
+                            OptionChoices(
+                                option = option,
+                                picks = options,
+                                onBack = { feedback.haptic(Haptic.Tick); view = PickerView.Settings },
+                                onPick = { choice ->
+                                    feedback.both(Haptic.Select, Cue.Select)
+                                    onOptions(ModelOptions.with(options, option, choice))
+                                    view = PickerView.Settings
+                                },
+                            )
+                        }
+                    }
+                }
+            }
+        }
+    }
+}
+
+// ---------------------------------------------------------------------------
+// Settings card
+// ---------------------------------------------------------------------------
+
+@Composable
+private fun ColumnScope.SettingsCard(
+    current: ModelChoice?,
+    effort: String?,
+    options: Map<String, String>,
+    onEffort: (String?) -> Unit,
+    onOptions: (Map<String, String>) -> Unit,
+    onModels: () -> Unit,
+    onChoices: (String) -> Unit,
+) {
+    val feedback = LocalFeedback.current
+    val model = current?.model
+    val levels = model?.reasoningLevels.orEmpty()
+    val shownEffort = ModelOptions.effort(model, effort)
+    val fastMode = ModelOptions.fastMode(model)
+    val fast = ModelOptions.isFast(model, options)
+    val rows = ModelOptions.rows(model)
+    val differs = ModelOptions.differsFromDefaults(model, effort, options)
+
+    Row(
+        Modifier.fillMaxWidth().padding(start = 20.dp, end = 14.dp, top = 14.dp, bottom = 4.dp),
+        verticalAlignment = Alignment.Top,
+    ) {
+        Column(Modifier.weight(1f)) {
+            val title = if (shownEffort != null) reasoningLabel(shownEffort) else model?.label.orEmpty()
+            AnimatedContent(
+                targetState = title,
+                transitionSpec = { fadeIn(tween(120)) togetherWith fadeOut(tween(90)) },
+                label = "title",
+            ) { text ->
+                Text(text, style = MaterialTheme.typography.headlineSmallEmphasized.copy(lineHeight = 30.sp), maxLines = 1, overflow = TextOverflow.Ellipsis)
+            }
+            Row(
+                Modifier
+                    .offset(y = (-4).dp)
+                    .clip(RoundedCornerShape(12.dp))
+                    .heightIn(min = 36.dp)
+                    .clickable(role = Role.Button, onClickLabel = "Choose a model", onClick = onModels)
+                    .padding(end = 8.dp),
+                verticalAlignment = Alignment.CenterVertically,
+            ) {
+                Text(
+                    if (shownEffort != null) model?.label.orEmpty() else current?.harnessLabel.orEmpty(),
+                    style = MaterialTheme.typography.titleSmall,
+                    color = MaterialTheme.colorScheme.onSurfaceVariant,
+                    maxLines = 1,
+                    overflow = TextOverflow.Ellipsis,
+                    modifier = Modifier.weight(1f, fill = false),
+                )
+                ZIcon(ZIcons.ChevronRight, null, Modifier.padding(start = 2.dp).size(16.dp), tint = MaterialTheme.colorScheme.onSurfaceVariant)
+            }
+        }
+        if (fastMode != null) {
+            Spacer(Modifier.width(12.dp))
+            FastButton(fast) { on ->
+                feedback.both(if (on) Haptic.ToggleOn else Haptic.ToggleOff, if (on) Cue.ToggleOn else Cue.ToggleOff)
+                ModelOptions.fastToggle(model, options)?.let { (id, choice) ->
+                    model?.options?.firstOrNull { it.id == id }?.let { onOptions(ModelOptions.with(options, it, choice)) }
+                }
+            }
+        }
+    }
+    if (levels.size > 1 && shownEffort != null) {
+        EffortSlider(
+            levels = levels.map { EffortLevel(it, reasoningLabel(it)) },
+            selected = levels.indexOf(shownEffort).coerceAtLeast(0),
+            onSelected = { onEffort(levels[it]) },
+            fast = fast,
+            modifier = Modifier.padding(horizontal = 20.dp, vertical = 4.dp),
+        )
+    }
+    if (rows.isNotEmpty() || differs) Spacer(Modifier.size(4.dp))
+    for (option in rows) {
+        OptionRow(option.label, ModelOptions.valueLabel(option, options)) { onChoices(option.id) }
+    }
+    AnimatedVisibility(differs, enter = expandVertically() + fadeIn(), exit = shrinkVertically() + fadeOut()) {
+        TextButton(
+            onClick = {
+                feedback.haptic(Haptic.Confirm)
+                onEffort(null)
+                onOptions(emptyMap())
+            },
+            modifier = Modifier.padding(horizontal = 12.dp),
+        ) {
+            ZIcon(ZIcons.Restart, null, Modifier.size(16.dp))
+            Spacer(Modifier.width(8.dp))
+            Text("Reset to defaults")
+        }
+    }
+    Spacer(Modifier.size(10.dp))
+}
+
+/** The square fast-mode toggle: a bolt that lights up and, on, gives off a slow sheen. */
+@Composable
+private fun FastButton(on: Boolean, onToggle: (Boolean) -> Unit) {
+    val interaction = remember { MutableInteractionSource() }
+    val pressed by interaction.collectIsPressedAsState()
+    val corner by animateDpAsState(if (pressed) 26.dp else 18.dp, MaterialTheme.motionScheme.fastSpatialSpec(), label = "fast corner")
+    val container by animateColorAsState(
+        if (on) MaterialTheme.colorScheme.primaryContainer else MaterialTheme.colorScheme.surfaceContainerHighest,
+        MaterialTheme.motionScheme.fastEffectsSpec(),
+        label = "fast container",
+    )
+    val tint by animateColorAsState(
+        if (on) MaterialTheme.colorScheme.primary else MaterialTheme.colorScheme.onSurfaceVariant,
+        MaterialTheme.motionScheme.fastEffectsSpec(),
+        label = "fast tint",
+    )
+    val power by animateFloatAsState(if (on) 1f else 0f, tween(300), label = "fast power")
+    val reduceMotion = rememberReduceMotion()
+    val phase = if (on && !reduceMotion) rememberPhase(2600).value else 0.5f
+    val shape = RoundedCornerShape(corner)
+    Box(
+        Modifier
+            .size(52.dp)
+            .clip(shape)
+            .background(container)
+            .border(1.dp, if (on) MaterialTheme.colorScheme.primary.copy(alpha = 0.45f) else MaterialTheme.colorScheme.outlineVariant, shape)
+            .drawWithContent {
+                drawContent()
+                if (power > 0.01f) {
+                    val band = size.width * 0.9f
+                    val x = -band + (size.width + 2 * band) * phase
+                    drawRect(
+                        Brush.linearGradient(
+                            listOf(Color.Transparent, Color.White.copy(alpha = 0.22f * power), Color.Transparent),
+                            start = Offset(x - band / 2, 0f),
+                            end = Offset(x + band / 2, size.height),
+                        ),
+                    )
+                }
+            }
+            .toggleable(on, interaction, null, role = Role.Switch, onValueChange = onToggle)
+            .semantics {
+                contentDescription = "Fast mode"
+                stateDescription = if (on) "On" else "Off"
+            },
+        contentAlignment = Alignment.Center,
+    ) {
+        ZIcon(ZIcons.FastTier, null, Modifier.size(24.dp), tint = tint)
     }
 }
 
 @Composable
-private fun ColumnScope.ModelPickerContent(
+private fun OptionRow(label: String, value: String, onClick: () -> Unit) {
+    Row(
+        Modifier
+            .fillMaxWidth()
+            .heightIn(min = 52.dp)
+            .clickable(role = Role.Button, onClickLabel = "Change $label", onClick = onClick)
+            .padding(start = 20.dp, end = 14.dp)
+            .semantics(mergeDescendants = true) { stateDescription = value },
+        verticalAlignment = Alignment.CenterVertically,
+    ) {
+        Text(label, style = MaterialTheme.typography.titleSmallEmphasized, modifier = Modifier.weight(1f), maxLines = 1, overflow = TextOverflow.Ellipsis)
+        Text(value, style = MaterialTheme.typography.titleSmall, color = MaterialTheme.colorScheme.onSurfaceVariant, maxLines = 1)
+        ZIcon(ZIcons.ChevronRight, null, Modifier.padding(start = 6.dp).size(18.dp), tint = MaterialTheme.colorScheme.onSurfaceVariant)
+    }
+}
+
+/** An option's choices: back, then a radio-style list with the current one checked. */
+@Composable
+private fun ColumnScope.OptionChoices(option: ModelOption, picks: Map<String, String>, onBack: () -> Unit, onPick: (String) -> Unit) {
+    PageHeader(option.label, onBack)
+    val current = picks[option.id] ?: option.defaultChoice
+    Column(Modifier.padding(horizontal = 8.dp).padding(bottom = 10.dp)) {
+        for (choice in option.choices) {
+            val selected = choice.id == current
+            val container by animateColorAsState(
+                if (selected) MaterialTheme.colorScheme.secondaryContainer else Color.Transparent,
+                MaterialTheme.motionScheme.fastEffectsSpec(),
+                label = "choice",
+            )
+            Row(
+                Modifier
+                    .fillMaxWidth()
+                    .heightIn(min = 52.dp)
+                    .clip(RoundedCornerShape(20.dp))
+                    .background(container)
+                    .semantics { this.selected = selected }
+                    .clickable(role = Role.RadioButton) { onPick(choice.id) }
+                    .padding(horizontal = 14.dp),
+                verticalAlignment = Alignment.CenterVertically,
+            ) {
+                Text(choice.label, style = MaterialTheme.typography.bodyLargeEmphasized, modifier = Modifier.weight(1f))
+                if (selected) ZIcon(ZIcons.Check, "Selected", Modifier.size(20.dp), tint = MaterialTheme.colorScheme.primary)
+            }
+        }
+    }
+}
+
+@Composable
+private fun PageHeader(title: String, onBack: () -> Unit) {
+    Row(Modifier.fillMaxWidth().padding(start = 6.dp, end = 20.dp, top = 6.dp), verticalAlignment = Alignment.CenterVertically) {
+        IconButton(onClick = onBack) {
+            ZIcon(ZIcons.ChevronLeft, "Back", Modifier.size(22.dp), tint = MaterialTheme.colorScheme.onSurfaceVariant)
+        }
+        Text(title, style = MaterialTheme.typography.titleMediumEmphasized, maxLines = 1, overflow = TextOverflow.Ellipsis)
+    }
+}
+
+// ---------------------------------------------------------------------------
+// Model list
+// ---------------------------------------------------------------------------
+
+@Composable
+private fun ColumnScope.ModelList(
     catalog: List<ModelChoice>,
     current: ModelChoice?,
     favorites: List<FavoriteModel>,
-    onToggleFavorite: (FavoriteModel) -> Unit,
-    onPick: (ModelChoice) -> Unit,
     locked: Boolean,
-    loading: Boolean,
-    labelFor: (String) -> String,
+    statuses: List<CatalogStatus>,
+    onBack: () -> Unit,
+    onToggleFavorite: (FavoriteModel) -> Unit,
+    onRetry: (String) -> Unit,
+    onPick: (ModelChoice) -> Unit,
 ) {
-    val providers = ModelPickerRules.providers(catalog, current?.harness, locked, labelFor)
-    // Chosen once per opening; later stars don't yank the view away.
-    var rail by remember { mutableStateOf(ModelPickerRules.defaultRail(favorites, current?.key, locked, providers)) }
-    val rows = ModelPickerRules.rows(rail, catalog, favorites, providers, current)
-    var expanded by remember(rail) { mutableStateOf(ModelPickerRules.startsExpanded(rows, current?.key)) }
-    val (shown, hidden) = ModelPickerRules.visible(rows, expanded)
-    val favoritesView = rail == ModelRail.Favorites
-    val list = rememberLazyListState()
-    LaunchedEffect(rail, rows.size) {
-        val at = shown.indexOfFirst { it.key == current?.key }
-        if (at > 0) list.scrollToItem(at)
+    val feedback = LocalFeedback.current
+    var query by remember { mutableStateOf("") }
+    val entries = ModelPickerRules.entries(catalog, favorites, query, current, locked)
+    val ambiguous = ModelPickerRules.ambiguousLabels(entries)
+    val list = rememberLazyListState(
+        initialFirstVisibleItemIndex = remember { ModelPickerRules.initialScrollIndex(entries.indexOfFirst { it.choice.key == current?.key }) },
+    )
+    // A starred row moves; follow it only if it leaves the screen.
+    var follow by remember { mutableStateOf<String?>(null) }
+    LaunchedEffect(entries.map { it.key }, follow) {
+        val key = follow ?: return@LaunchedEffect
+        // Let the list lay the reordered rows out before reading where they sit.
+        androidx.compose.runtime.withFrameNanos { }
+        androidx.compose.runtime.withFrameNanos { }
+        val at = entries.indexOfFirst { it.key == key }
+        val visible = list.layoutInfo.visibleItemsInfo
+        ModelPickerRules.followScroll(at, visible.firstOrNull()?.index ?: 0, visible.lastOrNull()?.index ?: 0)?.let { list.animateScrollToItem(it) }
+        follow = null
     }
 
-    val title = when (val r = rail) {
-        ModelRail.Favorites -> "Favorites"
-        is ModelRail.Provider -> providers.firstOrNull { it.harness == r.harness }?.label ?: labelFor(r.harness)
-    }
-    Row(Modifier.fillMaxWidth().padding(start = 20.dp, end = 20.dp, top = 16.dp, bottom = 6.dp), verticalAlignment = Alignment.CenterVertically) {
-        Text(title, style = MaterialTheme.typography.titleSmallEmphasized, modifier = Modifier.weight(1f), maxLines = 1, overflow = TextOverflow.Ellipsis)
-        if (rows.isNotEmpty()) {
-            Text(
-                if (rows.size == 1) "1 model" else "${rows.size} models",
-                style = MaterialTheme.typography.labelMedium,
-                color = MaterialTheme.colorScheme.onSurfaceVariant,
-            )
-        }
-    }
-    LazyColumn(
-        state = list,
-        contentPadding = PaddingValues(horizontal = 8.dp, vertical = 4.dp),
-        verticalArrangement = Arrangement.spacedBy(2.dp),
-        modifier = Modifier.weight(1f, fill = false),
-    ) {
-        when {
-            rows.isEmpty() && favoritesView -> item("empty") { FavoritesEmpty() }
-            rows.isEmpty() && loading -> item("loading") {
-                Box(Modifier.fillMaxWidth().padding(vertical = 24.dp), contentAlignment = Alignment.Center) { LoadingIndicator(Modifier.size(32.dp)) }
-            }
-            rows.isEmpty() -> item("none") { EmptyNote("No models reported by this device yet.") }
-        }
-        items(shown, key = { "${it.harness}/${it.model.id}" }) { choice ->
-            ModelRow(
-                choice,
-                selected = choice.key == current?.key,
-                starred = choice.key in favorites,
-                showProvider = favoritesView,
-                onClick = { onPick(choice) },
-                onStar = { onToggleFavorite(choice.key) },
-            )
-        }
-        if (hidden > 0 || (expanded && rows.size > ModelPickerRules.COLLAPSED_ROWS)) {
-            item("more") { MoreRow(hidden, onClick = { expanded = !expanded }) }
-        }
-    }
+    // A new search starts from its best match.
+    LaunchedEffect(query) { list.scrollToItem(0) }
+    PageHeader("Models", onBack)
+    SearchField(query, onChange = { query = it })
     HorizontalDivider(color = MaterialTheme.colorScheme.outlineVariant.copy(alpha = 0.6f))
-    ProviderRail(providers, rail, favoritesCount = favorites.count { f -> providers.any { it.harness == f.harness } }) { rail = it }
+    val loading = statuses.any { it.error == null }
+    Box(
+        Modifier.weight(1f, fill = false)
+            .animateContentSize(MaterialTheme.motionScheme.defaultSpatialSpec())
+            .heightIn(max = RowHeight * ModelPickerRules.VISIBLE_ROWS + 12.dp),
+    ) {
+        LazyColumn(
+            state = list,
+            contentPadding = PaddingValues(horizontal = 8.dp, vertical = 6.dp),
+            verticalArrangement = Arrangement.spacedBy(2.dp),
+        ) {
+            if (entries.isEmpty() && loading && query.isBlank()) {
+                items(4, key = { "skeleton$it" }) { SkeletonRow() }
+            } else if (entries.isEmpty() && statuses.isEmpty()) {
+                item("empty") {
+                    EmptyNote(
+                        if (query.isBlank()) "No models reported by this device yet." else "No models match",
+                        if (query.isBlank()) null else "Try another name or provider.",
+                    )
+                }
+            }
+            items(entries, key = { it.key }) { entry ->
+                ModelRow(
+                    entry,
+                    selected = entry.choice.key == current?.key,
+                    detail = entry.choice.model.description?.trim()?.takeIf { it.isNotEmpty() && entry.choice.model.label in ambiguous },
+                    onClick = { if (!entry.selectedOnly) onPick(entry.choice) },
+                    onStar = {
+                        feedback.both(Haptic.Pop, if (entry.starred) Cue.Unstar else Cue.Star)
+                        follow = entry.key
+                        onToggleFavorite(entry.choice.key)
+                    },
+                    modifier = Modifier.animateItem(),
+                )
+            }
+            items(statuses.filter { entries.isNotEmpty() || it.error != null || query.isNotBlank() }, key = { "status/${it.harness}" }) { status ->
+                StatusRow(status, onRetry = { feedback.both(Haptic.Tick, Cue.Refresh); onRetry(status.harness) }, modifier = Modifier.animateItem())
+            }
+        }
+    }
 }
 
 @Composable
-private fun ModelRow(choice: ModelChoice, selected: Boolean, starred: Boolean, showProvider: Boolean, onClick: () -> Unit, onStar: () -> Unit) {
-    val haptics = LocalHapticFeedback.current
+private fun SearchField(query: String, onChange: (String) -> Unit) {
+    val keyboard = LocalSoftwareKeyboardController.current
+    val focus = LocalFocusManager.current
+    Row(
+        Modifier.fillMaxWidth().heightIn(min = 52.dp).padding(start = 20.dp, end = 8.dp),
+        verticalAlignment = Alignment.CenterVertically,
+    ) {
+        ZIcon(ZIcons.Search, null, Modifier.size(20.dp), tint = MaterialTheme.colorScheme.onSurfaceVariant)
+        Box(Modifier.weight(1f).padding(horizontal = 12.dp), contentAlignment = Alignment.CenterStart) {
+            if (query.isEmpty()) {
+                Text("Search models…", style = MaterialTheme.typography.bodyLarge, color = MaterialTheme.colorScheme.onSurfaceVariant, maxLines = 1)
+            }
+            BasicTextField(
+                value = query,
+                onValueChange = onChange,
+                singleLine = true,
+                textStyle = MaterialTheme.typography.bodyLarge.copy(color = MaterialTheme.colorScheme.onSurface),
+                cursorBrush = SolidColor(MaterialTheme.colorScheme.primary),
+                keyboardOptions = KeyboardOptions(imeAction = ImeAction.Search),
+                keyboardActions = KeyboardActions(onSearch = { keyboard?.hide(); focus.clearFocus() }),
+                modifier = Modifier.fillMaxWidth().semantics { contentDescription = "Search models" },
+            )
+        }
+        AnimatedVisibility(query.isNotEmpty(), enter = fadeIn(), exit = fadeOut()) {
+            IconButton(onClick = { onChange("") }) {
+                ZIcon(ZIcons.Close, "Clear search", Modifier.size(18.dp), tint = MaterialTheme.colorScheme.onSurfaceVariant)
+            }
+        }
+    }
+}
+
+@Composable
+private fun ModelRow(
+    entry: ModelPickerRules.Entry,
+    selected: Boolean,
+    detail: String?,
+    onClick: () -> Unit,
+    onStar: () -> Unit,
+    modifier: Modifier = Modifier,
+) {
+    val choice = entry.choice
     val container by animateColorAsState(
         if (selected) MaterialTheme.colorScheme.secondaryContainer else Color.Transparent,
         MaterialTheme.motionScheme.fastEffectsSpec(),
@@ -235,163 +539,176 @@ private fun ModelRow(choice: ModelChoice, selected: Boolean, starred: Boolean, s
     )
     val content = if (selected) MaterialTheme.colorScheme.onSecondaryContainer else MaterialTheme.colorScheme.onSurface
     val muted = if (selected) MaterialTheme.colorScheme.onSecondaryContainer.copy(alpha = 0.75f) else MaterialTheme.colorScheme.onSurfaceVariant
-    val subline = listOfNotNull(
-        if (showProvider) choice.harnessLabel else null,
-        choice.model.description?.trim()?.takeIf { it.isNotEmpty() && !it.equals(choice.harnessLabel, ignoreCase = true) },
-    ).joinToString(" · ").ifEmpty { null }
     Row(
-        Modifier
+        modifier
             .fillMaxWidth()
-            .heightIn(min = 52.dp)
+            .heightIn(min = RowHeight)
             .clip(RoundedCornerShape(20.dp))
             .background(container)
-            .semantics { this.selected = selected }
+            .semantics { this.selected = selected; contentDescription = "${choice.model.label}, ${choice.harnessLabel}" }
             .clickable(role = Role.RadioButton, onClick = onClick)
             .padding(start = 14.dp, end = 2.dp),
         verticalAlignment = Alignment.CenterVertically,
     ) {
-        if (showProvider) {
-            HarnessMark(choice.harness, 18.dp, tint = content)
-            Spacer(Modifier.width(12.dp))
-        }
+        HarnessMark(choice.harness, 18.dp, tint = content)
+        Spacer(Modifier.width(12.dp))
         Column(Modifier.weight(1f).padding(vertical = 8.dp)) {
             Text(choice.model.label, style = MaterialTheme.typography.bodyLargeEmphasized, color = content, maxLines = 1, overflow = TextOverflow.Ellipsis)
-            subline?.let { Text(it, style = MaterialTheme.typography.bodySmall, color = muted, maxLines = 1, overflow = TextOverflow.Ellipsis) }
+            if (detail != null) Text(detail, style = MaterialTheme.typography.bodySmall, color = muted, maxLines = 1, overflow = TextOverflow.Ellipsis)
         }
         if (selected) {
             Spacer(Modifier.width(8.dp))
-            ZIcon(ZIcons.Check, "Selected", Modifier.size(20.dp), tint = content)
+            ZIcon(ZIcons.Check, "Selected", Modifier.size(20.dp), tint = MaterialTheme.colorScheme.primary)
         }
-        IconButton(onClick = {
-            haptics.performHapticFeedback(HapticFeedbackType.ToggleOn)
-            onStar()
-        }) {
+        IconButton(onClick = onStar) {
             ZIcon(
-                if (starred) ZIcons.StarFilled else ZIcons.Star,
-                if (starred) "Remove ${choice.model.label} from favorites" else "Add ${choice.model.label} to favorites",
+                if (entry.starred) ZIcons.StarFilled else ZIcons.Star,
+                if (entry.starred) "Remove ${choice.model.label} from favorites" else "Add ${choice.model.label} to favorites",
                 Modifier.size(20.dp),
-                tint = if (starred) warningColor() else muted,
+                tint = if (entry.starred) MaterialTheme.colorScheme.primary else muted,
             )
         }
     }
 }
 
 @Composable
-private fun MoreRow(hidden: Int, onClick: () -> Unit) {
+private fun StatusRow(status: CatalogStatus, onRetry: () -> Unit, modifier: Modifier = Modifier) {
+    val failed = status.error != null
     Row(
-        Modifier
-            .fillMaxWidth()
-            .clip(RoundedCornerShape(20.dp))
-            .clickable(onClick = onClick)
-            .padding(horizontal = 14.dp, vertical = 12.dp),
+        modifier.fillMaxWidth().heightIn(min = RowHeight).padding(start = 14.dp, end = 6.dp),
         verticalAlignment = Alignment.CenterVertically,
     ) {
-        Text(
-            if (hidden > 0) "More models ($hidden)" else "Fewer models",
-            style = MaterialTheme.typography.labelLarge,
-            color = MaterialTheme.colorScheme.primary,
-            modifier = Modifier.weight(1f),
-        )
-        ZIcon(if (hidden > 0) ZIcons.ChevronDown else ZIcons.ChevronUp, null, Modifier.size(18.dp), tint = MaterialTheme.colorScheme.primary)
+        if (status.harness.isNotEmpty()) {
+            HarnessMark(status.harness, 18.dp, tint = MaterialTheme.colorScheme.onSurfaceVariant)
+            Spacer(Modifier.width(12.dp))
+        }
+        Column(Modifier.weight(1f).padding(vertical = 8.dp)) {
+            val name = status.label.ifEmpty { "models" }
+            Text(
+                if (failed) "$name unavailable" else "Loading $name…",
+                style = MaterialTheme.typography.bodyMedium,
+                color = MaterialTheme.colorScheme.onSurface,
+                maxLines = 1,
+                overflow = TextOverflow.Ellipsis,
+            )
+            status.error?.let {
+                Text(it, style = MaterialTheme.typography.bodySmall, color = MaterialTheme.colorScheme.onSurfaceVariant, maxLines = 2, overflow = TextOverflow.Ellipsis)
+            }
+        }
+        if (failed) {
+            TextButton(onClick = onRetry, modifier = Modifier.semantics { contentDescription = "Retry ${status.label} models" }) { Text("Retry") }
+        } else {
+            LoadingIndicator(Modifier.padding(end = 10.dp).size(28.dp))
+        }
     }
 }
 
 @Composable
-private fun FavoritesEmpty() {
+private fun SkeletonRow() {
+    val reduceMotion = rememberReduceMotion()
+    val phase = if (reduceMotion) 0.25f else rememberPhase(1400).value
+    val base = MaterialTheme.colorScheme.onSurface
+    val wave = 0.5f + 0.5f * kotlin.math.sin(phase * 2f * Math.PI.toFloat())
+    val alpha = 0.06f + 0.05f * wave
+    Row(Modifier.fillMaxWidth().heightIn(min = RowHeight).padding(horizontal = 14.dp), verticalAlignment = Alignment.CenterVertically) {
+        Box(Modifier.size(18.dp).clip(CircleShape).background(base.copy(alpha = alpha)))
+        Spacer(Modifier.width(12.dp))
+        Box(Modifier.height(14.dp).width(150.dp).clip(RoundedCornerShape(7.dp)).background(base.copy(alpha = alpha)))
+    }
+}
+
+@Composable
+private fun EmptyNote(title: String, hint: String?) {
     Column(
-        Modifier.fillMaxWidth().padding(horizontal = 24.dp, vertical = 20.dp),
+        Modifier.fillMaxWidth().padding(horizontal = 24.dp, vertical = 24.dp),
         horizontalAlignment = Alignment.CenterHorizontally,
-        verticalArrangement = Arrangement.spacedBy(8.dp),
+        verticalArrangement = Arrangement.spacedBy(4.dp),
     ) {
-        Box(
-            Modifier.size(44.dp).clip(RoundedCornerShape(16.dp)).background(MaterialTheme.colorScheme.surfaceContainerHighest),
-            contentAlignment = Alignment.Center,
-        ) { ZIcon(ZIcons.Star, null, Modifier.size(22.dp), tint = warningColor()) }
-        Text("No favorites yet", style = MaterialTheme.typography.titleSmallEmphasized)
-        Text(
-            "Pick a provider below and tap the star next to a model to keep it here.",
-            style = MaterialTheme.typography.bodyMedium,
-            color = MaterialTheme.colorScheme.onSurfaceVariant,
-            textAlign = TextAlign.Center,
-        )
+        Text(title, style = MaterialTheme.typography.titleSmallEmphasized, textAlign = TextAlign.Center)
+        hint?.let { Text(it, style = MaterialTheme.typography.bodyMedium, color = MaterialTheme.colorScheme.onSurfaceVariant, textAlign = TextAlign.Center) }
     }
 }
 
+// ---------------------------------------------------------------------------
+// The chip
+// ---------------------------------------------------------------------------
+
+/**
+ * The composer's model chip: provider mark, model name and the dim effort
+ * ("GPT-5.4  High"), a small bolt when fast mode is on. Tapping opens the
+ * compact picker over it.
+ */
 @Composable
-private fun EmptyNote(text: String) {
-    Text(
-        text,
-        style = MaterialTheme.typography.bodyMedium,
-        color = MaterialTheme.colorScheme.onSurfaceVariant,
-        textAlign = TextAlign.Center,
-        modifier = Modifier.fillMaxWidth().padding(horizontal = 24.dp, vertical = 24.dp),
+fun ModelPickerChip(
+    catalog: List<ModelChoice>,
+    current: ModelChoice?,
+    harness: String,
+    fallbackLabel: String,
+    favorites: List<FavoriteModel>,
+    onToggleFavorite: (FavoriteModel) -> Unit,
+    onPick: (ModelChoice) -> Unit,
+    effort: String?,
+    onEffort: (String?) -> Unit,
+    options: Map<String, String>,
+    onOptions: (Map<String, String>) -> Unit,
+    modifier: Modifier = Modifier,
+    locked: Boolean = false,
+    statuses: List<CatalogStatus> = emptyList(),
+    onRetry: (String) -> Unit = {},
+    onOpen: () -> Unit = {},
+) {
+    var open by remember { mutableStateOf(false) }
+    val model: ModelInfo? = current?.model
+    val parts = ChipText.parts(
+        model?.label ?: fallbackLabel,
+        ModelOptions.effort(model, effort),
+        ModelOptions.isFast(model, options),
+        ::reasoningLabel,
     )
-}
-
-/** Favorites, a hairline, then one brand mark per provider; the viewed one is a filled, squarer tile. */
-@Composable
-private fun ProviderRail(providers: List<PickerProvider>, rail: ModelRail, favoritesCount: Int, onSelect: (ModelRail) -> Unit) {
-    val state = rememberLazyListState()
-    LaunchedEffect(Unit) {
-        val at = (rail as? ModelRail.Provider)?.let { r -> providers.indexOfFirst { it.harness == r.harness } } ?: -1
-        // The viewed provider's tile (index at + 2, after favorites and the
-        // hairline) scrolls into view with two neighbours before it.
-        if (at >= 3) state.scrollToItem(at)
-    }
-    LazyRow(
-        state = state,
-        contentPadding = PaddingValues(horizontal = 10.dp, vertical = 10.dp),
-        horizontalArrangement = Arrangement.spacedBy(6.dp),
-        verticalAlignment = Alignment.CenterVertically,
-        modifier = Modifier.fillMaxWidth(),
-    ) {
-        item("favorites") {
-            RailTile(
-                selected = rail == ModelRail.Favorites,
-                description = if (favoritesCount > 0) "Favorites, $favoritesCount starred" else "Favorites",
-                onClick = { onSelect(ModelRail.Favorites) },
-            ) { tint ->
-                ZIcon(if (rail == ModelRail.Favorites) ZIcons.StarFilled else ZIcons.Star, null, Modifier.size(20.dp), tint = if (rail == ModelRail.Favorites) tint else warningColor())
-            }
-        }
-        item("divider") {
-            Box(Modifier.padding(horizontal = 2.dp).size(width = 1.dp, height = 24.dp).background(MaterialTheme.colorScheme.outlineVariant))
-        }
-        items(providers, key = { it.harness }) { p ->
-            RailTile(selected = rail == ModelRail.Provider(p.harness), description = p.label, onClick = { onSelect(ModelRail.Provider(p.harness)) }) { tint ->
-                HarnessMark(p.harness, 20.dp, tint = tint)
-            }
-        }
-    }
-}
-
-@Composable
-private fun RailTile(selected: Boolean, description: String, onClick: () -> Unit, content: @Composable (Color) -> Unit) {
-    val corner by animateDpAsState(if (selected) 14.dp else 22.dp, MaterialTheme.motionScheme.fastSpatialSpec(), label = "corner")
-    val container by animateColorAsState(
-        if (selected) MaterialTheme.colorScheme.secondaryContainer else chipContainer(),
-        MaterialTheme.motionScheme.fastEffectsSpec(),
-        label = "tile",
-    )
-    val tint = if (selected) MaterialTheme.colorScheme.onSecondaryContainer else MaterialTheme.colorScheme.onSurfaceVariant
-    Column(horizontalAlignment = Alignment.CenterHorizontally) {
+    Box(modifier) {
         Surface(
-            onClick = onClick,
-            shape = RoundedCornerShape(corner),
-            color = container,
-            modifier = Modifier.size(44.dp).semantics {
-                contentDescription = description
-                this.selected = selected
+            onClick = tapAction { open = true; onOpen() },
+            shape = RoundedCornerShape(50),
+            color = chipContainer(),
+            contentColor = MaterialTheme.colorScheme.onSurface,
+            modifier = Modifier.semantics {
+                contentDescription = ChipText.describe(parts)
+                stateDescription = if (open) "Expanded" else "Collapsed"
             },
         ) {
-            Box(contentAlignment = Alignment.Center) { content(tint) }
+            Row(
+                Modifier.heightIn(min = 34.dp).padding(start = 10.dp, end = 12.dp),
+                verticalAlignment = Alignment.CenterVertically,
+                horizontalArrangement = Arrangement.spacedBy(6.dp),
+            ) {
+                HarnessMark(harness, 16.dp)
+                Text(parts.model, style = MaterialTheme.typography.labelLarge, maxLines = 1, overflow = TextOverflow.Ellipsis, modifier = Modifier.widthIn(max = 168.dp))
+                parts.effort?.let {
+                    Text(
+                        it,
+                        style = MaterialTheme.typography.labelLarge.copy(fontWeight = FontWeight.Normal),
+                        color = MaterialTheme.colorScheme.onSurfaceVariant.copy(alpha = 0.8f),
+                        maxLines = 1,
+                    )
+                }
+                if (parts.fast) ZIcon(ZIcons.FastTier, null, Modifier.size(14.dp), tint = MaterialTheme.colorScheme.primary)
+            }
         }
-        Spacer(Modifier.height(4.dp))
-        Box(
-            Modifier
-                .size(width = 16.dp, height = 3.dp)
-                .clip(RoundedCornerShape(2.dp))
-                .background(if (selected) MaterialTheme.colorScheme.primary else Color.Transparent),
+        ModelPickerPopover(
+            expanded = open,
+            onDismiss = { open = false },
+            catalog = catalog,
+            current = current,
+            favorites = favorites,
+            onToggleFavorite = onToggleFavorite,
+            onPick = onPick,
+            effort = effort,
+            onEffort = onEffort,
+            options = options,
+            onOptions = onOptions,
+            locked = locked,
+            statuses = statuses,
+            onRetry = onRetry,
         )
     }
 }
