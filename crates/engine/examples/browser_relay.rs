@@ -226,6 +226,24 @@ async fn main() -> anyhow::Result<()> {
                     relay = Some(core.start_host_relay(&edge_url));
                 }
             }
+            // The two fixture engines may create their distinct chat rows before
+            // their workspace peers have converged. Re-assert only the seeded
+            // presentation fields after both real relays are online; this is the
+            // same native mutation dispatcher the initial seed uses.
+            Some("reseed") => {
+                service
+                    .handle(
+                        zeron_rpc::methods::MUTATE,
+                        serde_json::json!({"op": "renameChat", "chatId": chat_id, "title": format!("Chat on {label}")}),
+                    )
+                    .await?;
+                service
+                    .handle(
+                        zeron_rpc::methods::MUTATE,
+                        serde_json::json!({"op": "setChatCwd", "chatId": chat_id, "cwd": project_root}),
+                    )
+                    .await?;
+            }
             Some("shutdown") | None => break,
             Some(other) => anyhow::bail!("unknown fixture command: {other}"),
         }

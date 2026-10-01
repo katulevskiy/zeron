@@ -45,7 +45,7 @@ class FixtureProcess {
 
   diagnostics(): string { return this.#output; }
 
-  async command(command: "disconnect" | "reconnect"): Promise<void> {
+  async command(command: "disconnect" | "reconnect" | "reseed"): Promise<void> {
     const failure = this.failure();
     if (failure) throw failure;
     await new Promise<void>((resolve, reject) => {
@@ -118,6 +118,8 @@ export interface BrowserRelayEngine {
   readonly child: ChildProcessWithoutNullStreams;
   disconnect(): Promise<void>;
   reconnect(): Promise<void>;
+  /** Re-assert fixture seed fields through the native mutation dispatcher. */
+  reseed(): Promise<void>;
   stop(): Promise<void>;
   restart(): Promise<void>;
 }
@@ -284,6 +286,7 @@ export async function startBrowserRelayFixture(options: BrowserRelayOptions = {}
       get child() { return process.child; },
       disconnect: () => process.command("disconnect"),
       reconnect: () => process.command("reconnect"),
+      reseed: () => process.command("reseed"),
       stop: () => process.stop(),
       restart: async () => {
         const deviceId = info.deviceId;
@@ -301,6 +304,9 @@ export async function startBrowserRelayFixture(options: BrowserRelayOptions = {}
     await loginAs(owner, org);
     for (const label of options.engineLabels ?? ["engine-a", "engine-b"]) await addEngine({ label });
     for (const engine of engines) await waitForDevice(currentSession!, engine);
+    // The initial seeds can race the two peers' first workspace merge. Reapply
+    // their titles only after both actual relay links are registered.
+    for (const engine of engines) await engine.reseed();
     return {
       origin, root, engines,
       get session() { return currentSession; },
