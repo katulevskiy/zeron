@@ -87,6 +87,7 @@ import sh.zeron.android.design.ZIcons
 import sh.zeron.android.feedback.Cue
 import sh.zeron.android.feedback.Haptic
 import sh.zeron.android.feedback.LocalFeedback
+import sh.zeron.android.feedback.tapAction
 import uniffi.zeron_core.ModelInfo
 import uniffi.zeron_core.ModelOption
 import uniffi.zeron_core.reasoningLabel
@@ -666,7 +667,7 @@ fun ModelPickerChip(
     )
     Box(modifier) {
         Surface(
-            onClick = { open = true; onOpen() },
+            onClick = tapAction { open = true; onOpen() },
             shape = RoundedCornerShape(50),
             color = chipContainer(),
             contentColor = MaterialTheme.colorScheme.onSurface,

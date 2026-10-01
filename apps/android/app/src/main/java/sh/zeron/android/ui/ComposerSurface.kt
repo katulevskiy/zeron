@@ -1,5 +1,6 @@
 package sh.zeron.android.ui
 
+import sh.zeron.android.feedback.tapAction
 import sh.zeron.android.feedback.ExpandedFeedback
 import sh.zeron.android.feedback.TapFeedback
 import sh.zeron.android.feedback.play
@@ -134,7 +135,7 @@ fun ContextChip(
 ) {
     Box {
         Surface(
-            onClick = onClick,
+            onClick = tapAction(action = onClick),
             shape = RoundedCornerShape(50),
             color = chipContainer(),
             contentColor = tint,
