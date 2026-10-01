@@ -544,6 +544,18 @@ Custom server `http://10.0.2.2:27700` (the emulator's host) + the token, or
   Custom Tab opens, which also leaves background notifications unverified); a
   real phantom-process kill (simulated SIGKILL only); release builds (per-ABI
   splits, Play's 16 KB alignment for `libproot-loader32.so`).
+- Sensory layer on the on-device screens, verified on the Android 16 x86_64
+  emulator (2026-09-30, `ZeronFeedback` log + `dumpsys vibrator_manager` +
+  `dumpsys notification`): engine setup finished once (first run and after a
+  reset), Continue / Settings / Engine page / Reset (`Heavy` + `Delete`) /
+  Custom server (refusal `Error`, save `Confirm`), a free OpenCode session
+  (`Send`, then `Done` once), computer to phone and phone to computer
+  transfers (ask, accept, decline, received, sent) with the
+  `transfer-ask-v1-sv` / `transfer-received-v1-sv` channels created and the
+  notifications posted silent in front. Not verified: how it feels and sounds
+  (needs a phone), transfer notifications sounding from the background (the
+  emulator's task-switch abort), the effort slider's detents on a model with
+  effort levels (OpenCode's free models have none).
 - Verified on the Android 16 x86_64 emulator (2026-09-29, combined build),
   with a computer's `zeron local-edge` + a `zeron headless` joined in
   Development scope and the phone on Custom server: first run without a
