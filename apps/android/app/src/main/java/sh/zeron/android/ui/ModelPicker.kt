@@ -26,6 +26,7 @@ import androidx.compose.runtime.rememberCoroutineScope
 import androidx.compose.runtime.rememberUpdatedState
 import androidx.compose.runtime.snapshotFlow
 import androidx.compose.runtime.derivedStateOf
+import androidx.compose.ui.layout.layout
 import androidx.compose.ui.layout.onGloballyPositioned
 import androidx.compose.ui.platform.LocalDensity
 import kotlinx.coroutines.launch
@@ -185,17 +186,14 @@ fun ModelPickerPopover(
                                     options = options,
                                     onEffort = onEffort,
                                     onOptions = onOptions,
+                                    onReset = {
+                                        feedback.haptic(Haptic.Confirm)
+                                        onEffort(null)
+                                        onOptions(emptyMap())
+                                    },
                                     onModels = { feedback.haptic(Haptic.Tick); view = PickerView.Models },
                                     onChoices = { feedback.haptic(Haptic.Tick); view = PickerView.Choices(it) },
                                 )
-                            }
-                            ResetButton(
-                                visible = ModelOptions.differsFromDefaults(model, effort, options),
-                                modifier = Modifier.align(Alignment.TopEnd),
-                            ) {
-                                feedback.haptic(Haptic.Confirm)
-                                onEffort(null)
-                                onOptions(emptyMap())
                             }
                         }
                     }
@@ -249,6 +247,7 @@ private fun ColumnScope.SettingsCard(
     options: Map<String, String>,
     onEffort: (String?) -> Unit,
     onOptions: (Map<String, String>) -> Unit,
+    onReset: () -> Unit,
     onModels: () -> Unit,
     onChoices: (String) -> Unit,
 ) {
@@ -264,15 +263,23 @@ private fun ColumnScope.SettingsCard(
         Modifier.fillMaxWidth().padding(start = 20.dp, end = 14.dp, top = 14.dp, bottom = 4.dp),
         verticalAlignment = Alignment.Top,
     ) {
-        // The reset button floats in the card's top-right corner; without a fast button beside it the title keeps clear.
-        Column(Modifier.weight(1f).padding(end = if (fastMode == null) 34.dp else 0.dp)) {
+        Column(Modifier.weight(1f)) {
             val title = if (shownEffort != null) reasoningLabel(shownEffort) else model?.label.orEmpty()
-            AnimatedContent(
-                targetState = title,
-                transitionSpec = { fadeIn(tween(120)) togetherWith fadeOut(tween(90)) },
-                label = "title",
-            ) { text ->
-                Text(text, style = MaterialTheme.typography.headlineSmallEmphasized.copy(lineHeight = 30.sp), maxLines = 1, overflow = TextOverflow.Ellipsis)
+            // The reset button sits right after the title and takes no height, so it never moves anything.
+            Row(verticalAlignment = Alignment.CenterVertically) {
+                AnimatedContent(
+                    targetState = title,
+                    transitionSpec = { fadeIn(tween(120)) togetherWith fadeOut(tween(90)) },
+                    label = "title",
+                    modifier = Modifier.weight(1f, fill = false),
+                ) { text ->
+                    Text(text, style = MaterialTheme.typography.headlineSmallEmphasized.copy(lineHeight = 30.sp), maxLines = 1, overflow = TextOverflow.Ellipsis)
+                }
+                ResetButton(
+                    visible = ModelOptions.differsFromDefaults(model, effort, options),
+                    modifier = Modifier.padding(start = 10.dp),
+                    onClick = onReset,
+                )
             }
             Row(
                 Modifier
@@ -296,7 +303,7 @@ private fun ColumnScope.SettingsCard(
         }
         if (fastMode != null) {
             Spacer(Modifier.width(12.dp))
-            FastButton(fast, Modifier.padding(top = FastButtonTopPad)) { on ->
+            FastButton(fast) { on ->
                 // A bolt cracks on; the charge drains off.
                 if (on) {
                     feedback.haptic(Haptic.Lightning)
@@ -328,28 +335,31 @@ private fun ColumnScope.SettingsCard(
 }
 
 /**
- * "Reset to defaults": an icon in the card's top-right corner. It fades and
- * scales in only while something differs from the defaults and is overlaid, so
- * its coming and going never moves the layout.
+ * "Reset to defaults": an icon right of the effort name. It fades and scales in
+ * only while something differs from the defaults. Its slot is measured with zero
+ * height and centred on the title line, so its coming and going moves nothing.
  */
 @Composable
 private fun ResetButton(visible: Boolean, modifier: Modifier = Modifier, onClick: () -> Unit) {
     AnimatedVisibility(
         visible,
-        modifier = modifier.padding(top = 4.dp, end = 6.dp),
+        modifier = modifier.layout { measurable, constraints ->
+            val placeable = measurable.measure(constraints)
+            layout(placeable.width, 0) { placeable.place(0, -placeable.height / 2) }
+        },
         enter = fadeIn(MaterialTheme.motionScheme.fastEffectsSpec()) + scaleIn(MaterialTheme.motionScheme.fastSpatialSpec(), initialScale = 0.5f),
         exit = fadeOut(MaterialTheme.motionScheme.fastEffectsSpec()) + scaleOut(MaterialTheme.motionScheme.fastSpatialSpec(), targetScale = 0.5f),
     ) {
         Box(
             Modifier
-                .size(32.dp)
+                .size(38.dp)
                 .clip(CircleShape)
                 .background(MaterialTheme.colorScheme.surfaceContainerHighest.copy(alpha = 0.85f))
                 .clickable(role = Role.Button, onClickLabel = "Reset to defaults", onClick = tapAction(onClick))
                 .semantics { contentDescription = "Reset to defaults" },
             contentAlignment = Alignment.Center,
         ) {
-            ZIcon(ZIcons.Restart, null, Modifier.size(16.dp), tint = MaterialTheme.colorScheme.onSurfaceVariant)
+            ZIcon(ZIcons.Restart, null, Modifier.size(20.dp), tint = MaterialTheme.colorScheme.onSurfaceVariant)
         }
     }
 }

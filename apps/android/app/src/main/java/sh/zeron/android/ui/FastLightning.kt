@@ -133,7 +133,7 @@ object Lightning {
 }
 
 /** Where the fast button's centre sits in the settings card, from its top-right corner. */
-internal val FastButtonTopPad: Dp = 22.dp
+internal val FastButtonTopPad: Dp = 0.dp
 internal val FastAnchorFromRight: Dp = 14.dp + 26.dp
 internal val FastAnchorFromTop: Dp = 14.dp + FastButtonTopPad + 26.dp
 
