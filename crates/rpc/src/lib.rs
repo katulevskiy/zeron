@@ -246,6 +246,23 @@ pub mod methods {
     /// eof?}` carries the sender's, reordered by `seq`.
     pub const FILE_TRANSFER_PIPE: &str = "FileTransferPipe";
     pub const FILE_TRANSFER_PIPE_WRITE: &str = "FileTransferPipeWrite";
+
+    // Moving a chat to another device (docs/session-move.md). The first four
+    // are forwardable to the chat's host; the rest are engine ⇄ engine.
+    /// `{chatId, toDeviceId, when?}` → `{moveId}`; progress lands on the chat
+    /// row's `move` field.
+    pub const START_MOVE: &str = "StartMove";
+    /// `{chatId}`: stop waiting for a safe point and move now.
+    pub const MOVE_NOW: &str = "MoveNow";
+    /// `{chatId}`: cancel a move before the handover.
+    pub const CANCEL_MOVE: &str = "CancelMove";
+    /// `{chatId}` → `MoveCandidate[]`: devices the chat could move to.
+    pub const MOVE_CANDIDATES: &str = "MoveCandidates";
+    pub const MOVE_PROBE: &str = "MoveProbe";
+    pub const MOVE_PREPARE: &str = "MovePrepare";
+    pub const MOVE_STAGE: &str = "MoveStage";
+    pub const MOVE_COMMIT: &str = "MoveCommit";
+    pub const MOVE_ABORT: &str = "MoveAbort";
 }
 
 #[derive(Debug, thiserror::Error)]
