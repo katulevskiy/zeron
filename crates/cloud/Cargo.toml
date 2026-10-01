@@ -1,0 +1,36 @@
+[package]
+name = "zeron-cloud"
+version.workspace = true
+edition.workspace = true
+license.workspace = true
+publish.workspace = true
+
+[features]
+# An in-process HTTP server that records requests, for tests that point a
+# provider (or the engine) at a fake Cloudflare API / Worker.
+mock = ["dep:hyper", "dep:hyper-util", "dep:http-body-util", "dep:bytes"]
+
+[dependencies]
+zeron-proto.workspace = true
+async-trait.workspace = true
+serde.workspace = true
+serde_json.workspace = true
+thiserror.workspace = true
+tracing.workspace = true
+tokio.workspace = true
+reqwest.workspace = true
+sha2.workspace = true
+hmac = "0.12"
+hex = "0.4"
+base64 = "0.22"
+getrandom = "0.2"
+hyper = { version = "1", features = ["server", "http1"], optional = true }
+hyper-util = { version = "0.1", features = ["tokio"], optional = true }
+http-body-util = { version = "0.1", optional = true }
+bytes = { version = "1", optional = true }
+
+[dev-dependencies]
+hyper = { version = "1", features = ["server", "http1"] }
+hyper-util = { version = "0.1", features = ["tokio"] }
+http-body-util = "0.1"
+bytes = "1"

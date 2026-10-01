@@ -12147,6 +12147,29 @@ dependencies = [
 ]
 
 [[package]]
+name = "zeron-cloud"
+version = "0.2.99"
+dependencies = [
+ "async-trait",
+ "base64 0.22.1",
+ "bytes",
+ "getrandom 0.2.17",
+ "hex",
+ "hmac",
+ "http-body-util",
+ "hyper",
+ "hyper-util",
+ "reqwest",
+ "serde",
+ "serde_json",
+ "sha2",
+ "thiserror 2.0.20",
+ "tokio",
+ "tracing",
+ "zeron-proto",
+]
+
+[[package]]
 name = "zeron-doc"
 version = "0.2.99"
 dependencies = [
