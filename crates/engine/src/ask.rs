@@ -968,6 +968,47 @@ impl AskBackend for FakeAsk {
     }
 }
 
+/// The scripted verifier behind `ZERON_MOCK_GOAL=1`: two not-satisfied
+/// verdicts (a few seconds apart, like a real check) and then a pass.
+pub fn demo_verifier() -> Arc<FakeAsk> {
+    let fake = FakeAsk::new();
+    let round = Arc::new(Mutex::new(0u32));
+    fake.on_call(move |_| {
+        let mut n = lock(&round);
+        *n += 1;
+        let (passed, reason, next) = match *n {
+            1 => (
+                false,
+                "Ran the build: it still fails in the manifest parser, and no regression test covers it.",
+                "Fix the manifest parser and add a regression test",
+            ),
+            2 => (
+                false,
+                "The parser is fixed and tested, but the full suite and the changelog were not run or updated.",
+                "Run the full test suite and update the changelog",
+            ),
+            _ => (
+                true,
+                "cargo test passes (214 tests); the changelog entry is present; the build is green.",
+                "",
+            ),
+        };
+        Some(FakeReply::After(
+            Duration::from_secs(3),
+            Box::new(FakeReply::ResultWithUsage(
+                serde_json::json!({"passed": passed, "reason": reason, "nextAction": next}),
+                AskUsage {
+                    input_tokens: 4_200,
+                    output_tokens: 600,
+                    elapsed_ms: 3_000,
+                    turns: 1,
+                },
+            )),
+        ))
+    });
+    fake
+}
+
 #[cfg(test)]
 mod tests {
     use super::*;

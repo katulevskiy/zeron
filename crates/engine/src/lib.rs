@@ -259,6 +259,10 @@ impl EngineCore {
             Err(err) => tracing::error!(error = %err, "stale-session recovery failed"),
         }
         doc_host.spawn_transcript_salvage(profile.store_root().join("journals"));
+        // Dev knob: a scripted verifier for demos with the mock harness.
+        if std::env::var("ZERON_MOCK_GOAL").is_ok_and(|v| !v.is_empty() && v != "0") {
+            doc_host.set_ask_backend(ask::demo_verifier());
+        }
         // Goals that were running when the engine last stopped resume here.
         doc_host.set_goal_index(profile.store_root().join("goals.json"));
         let repos = Repos::new(data_dir, &device_id);
