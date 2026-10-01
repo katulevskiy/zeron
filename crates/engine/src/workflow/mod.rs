@@ -127,6 +127,10 @@ pub struct EngineCatalog {
 #[async_trait]
 impl Catalog for EngineCatalog {
     async fn check(&self, harness: HarnessId, model: Option<&str>) -> Result<(), String> {
+        // The test/demo harness is never offered in pickers; it always runs.
+        if harness == HarnessId::Mock {
+            return Ok(());
+        }
         let descriptors = self.sessions.harness_descriptors();
         match descriptors.iter().find(|d| d.id == harness) {
             None => return Err(format!("harness {harness:?} is not available on this device")),

@@ -1517,6 +1517,76 @@ pub fn demo_verifier() -> Arc<FakeAsk> {
     fake
 }
 
+/// A value that satisfies `schema` (objects get every property, lists one
+/// item, strings a short phrase): what the demo agents answer typed asks with.
+pub fn sample_value(schema: &Value, hint: &str) -> Value {
+    if let Some(options) = schema.get("enum").and_then(Value::as_array)
+        && let Some(first) = options.first()
+    {
+        return first.clone();
+    }
+    match schema.get("type").and_then(Value::as_str) {
+        Some("object") => {
+            let mut out = serde_json::Map::new();
+            if let Some(props) = schema.get("properties").and_then(Value::as_object) {
+                for (name, sub) in props {
+                    out.insert(name.clone(), sample_value(sub, name));
+                }
+            }
+            Value::Object(out)
+        }
+        Some("array") => {
+            let item = schema.get("items").cloned().unwrap_or(Value::Null);
+            Value::Array(vec![sample_value(&item, hint)])
+        }
+        Some("boolean") => Value::Bool(true),
+        Some("integer") => Value::from(1),
+        Some("number") => Value::from(1.5),
+        Some("string") => Value::String(format!("sample {hint}")),
+        _ => Value::Null,
+    }
+}
+
+/// The scripted agents behind `ZERON_MOCK_WORKFLOW=1`: every ask takes a few
+/// seconds (spread by the agent's name, so the card shows agents in different
+/// states) and answers a schema-valid sample. An agent named `flaky` hits an
+/// authentication error, which stops the run (`stopped(provider)`).
+pub fn demo_workflow_agents() -> Arc<FakeAsk> {
+    let fake = FakeAsk::new();
+    fake.on_call(|call| {
+        if call.spec.label.starts_with("flaky") {
+            return Some(FakeReply::After(
+                Duration::from_secs(2),
+                Box::new(FakeReply::Fail(AskError::TurnFailed(
+                    "401 Unauthorized: invalid API key".into(),
+                ))),
+            ));
+        }
+        let spread = call.spec.label.bytes().fold(0u64, |a, b| a.wrapping_add(b as u64)) % 5;
+        let schema = &call.spec.result_schema;
+        let is_text = schema["properties"].get("text").is_some()
+            && schema["properties"].as_object().is_some_and(|p| p.len() == 1);
+        let result = if is_text {
+            serde_json::json!({"text": format!("{} looked at the change and found nothing blocking.", call.spec.label)})
+        } else {
+            sample_value(schema, &call.spec.label)
+        };
+        Some(FakeReply::After(
+            Duration::from_millis(1500 + spread * 900),
+            Box::new(FakeReply::ResultWithUsage(
+                result,
+                AskUsage {
+                    input_tokens: 3_000 + spread * 700,
+                    output_tokens: 400 + spread * 90,
+                    elapsed_ms: 2_000,
+                    turns: 1,
+                },
+            )),
+        ))
+    });
+    fake
+}
+
 #[cfg(test)]
 mod tests {
     use super::*;
@@ -1681,5 +1751,38 @@ mod tests {
         assert!(!verdict.passed);
         assert_eq!(verdict.reason, "not yet");
         assert_eq!(outcome.child_chat_id, "fake-child-1");
+    }
+
+    #[test]
+    fn sample_values_satisfy_their_schema() {
+        let schema = json!({
+            "type": "object",
+            "properties": {
+                "verdict": {"type": "string", "enum": ["pass", "fail"]},
+                "findings": {"type": "array", "items": {"type": "object", "properties": {
+                    "where": {"type": "string"}, "line": {"type": "integer"}, "ok": {"type": "boolean"}
+                }, "required": ["where", "line", "ok"]}},
+                "score": {"type": "number"}
+            },
+            "required": ["verdict", "findings", "score"]
+        });
+        assert!(validate_result(&schema, &sample_value(&schema, "x")).is_ok());
+    }
+
+    #[tokio::test(start_paused = true)]
+    async fn the_demo_agents_answer_valid_results_and_flaky_ones_fail() {
+        let fake = demo_workflow_agents();
+        let ask = |label: &str| {
+            let fake = fake.clone();
+            let spec = AskSpec::new(label, "p", json!({
+                "type": "object", "properties": {"text": {"type": "string"}}, "required": ["text"]
+            }));
+            async move { fake.ask("c", spec, CancellationToken::new()).await }
+        };
+        let ok = ask("reviewer").await.unwrap();
+        assert!(ok.result["text"].as_str().unwrap().contains("reviewer"));
+        assert!(ok.usage.total_tokens() > 0);
+        let err = ask("flaky agent").await.unwrap_err();
+        assert!(matches!(err.error, AskError::TurnFailed(m) if m.contains("401")));
     }
 }

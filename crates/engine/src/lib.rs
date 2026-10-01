@@ -263,6 +263,9 @@ impl EngineCore {
         // Dev knob: a scripted verifier for demos with the mock harness.
         if std::env::var("ZERON_MOCK_GOAL").is_ok_and(|v| !v.is_empty() && v != "0") {
             doc_host.set_ask_backend(ask::demo_verifier());
+        } else if std::env::var("ZERON_MOCK_WORKFLOW").is_ok_and(|v| !v.is_empty() && v != "0") {
+            // Dev knob: workflow agents are scripted (no model, no child chats).
+            doc_host.set_ask_backend(ask::demo_workflow_agents());
         }
         let workflows = workflow::WorkflowService::new(
             doc_host.clone(),
