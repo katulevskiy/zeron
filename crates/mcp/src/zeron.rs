@@ -72,6 +72,10 @@ pub struct HarnessInfo {
     pub installed: bool,
     #[serde(default)]
     pub enabled: Option<bool>,
+    /// The permission modes the harness honours on the listing device
+    /// (bypass-only from engines predating policies).
+    #[serde(default)]
+    pub policy: zeron_proto::PolicyCaps,
 }
 
 fn default_true() -> bool {
@@ -250,6 +254,35 @@ impl Zeron {
     pub async fn harnesses(&self) -> anyhow::Result<Vec<HarnessInfo>> {
         let value = self.call(methods::LIST_HARNESSES, json!({})).await?;
         serde_json::from_value(value).context("ListHarnesses: unexpected shape")
+    }
+
+    /// `ListHarnesses` of `device` (its own catalog: the CLIs and what
+    /// they can honour live there). Falls back to this device's catalog
+    /// when the target can't be reached.
+    pub async fn harnesses_on(&self, device: &str) -> anyhow::Result<Vec<HarnessInfo>> {
+        match self
+            .call(methods::LIST_HARNESSES, json!({ "targetDeviceId": device }))
+            .await
+            .and_then(|value| {
+                serde_json::from_value(value).context("ListHarnesses: unexpected shape")
+            }) {
+            Ok(list) => Ok(list),
+            Err(_) => self.harnesses().await,
+        }
+    }
+
+    /// The permission mode new chats on `device` start in (Bypass when the
+    /// device can't say — an engine predating the setting).
+    pub async fn default_mode(&self, device: &str) -> zeron_proto::PermissionMode {
+        self.call(
+            methods::GET_POLICY_SETTINGS,
+            json!({ "targetDeviceId": device }),
+        )
+        .await
+        .ok()
+        .and_then(|value| value.get("defaultMode").cloned())
+        .and_then(|mode| serde_json::from_value(mode).ok())
+        .unwrap_or_default()
     }
 
     pub async fn models(&self, harness: HarnessId) -> anyhow::Result<Vec<Model>> {

@@ -13,8 +13,8 @@ use serde::{Deserialize, Serialize};
 use serde_json::{Value, json};
 use zeron_doc::SessionCommandPayload;
 use zeron_proto::{
-    Chat, ChatConfig, HarnessId, ReasoningLevel, RunRequest, SandboxLevel, Session, SessionStatus,
-    Space, UserInputAnswer,
+    AgentPolicy, Chat, ChatConfig, HarnessId, PermissionMode, ReasoningLevel, RunRequest,
+    SandboxLevel, Session, SessionStatus, Space, UserInputAnswer,
 };
 
 use crate::transcript::{RenderOptions, RenderedMessage, render_entries};
@@ -122,6 +122,7 @@ pub(crate) fn catalog() -> Vec<ToolDef> {
                     "model": { "type": "string", "description": "Model id from list_models. Omit for the harness default." },
                     "reasoning": { "type": "string", "description": "Reasoning level the model supports (e.g. low, medium, high, max)." },
                     "sandbox": { "type": "string", "enum": ["read-only", "workspace-write", "danger-full-access"], "default": "workspace-write" },
+                    "mode": { "type": "string", "enum": ["bypass", "auto", "acceptEdits", "ask", "plan"], "description": "Permission mode (list_harnesses shows each harness's modes). Defaults to the host device's default mode. A chat you create is never more permissive than yours." },
                     "title": { "type": "string", "description": "Sidebar title. Otherwise the engine titles it from the first exchange." },
                     "branch": { "type": "string", "description": "Branch label to record on the chat." },
                     "cwd": { "type": "string", "description": "Working directory override (an existing worktree path). Defaults to the project folder." },
@@ -256,6 +257,7 @@ struct CreateChatArgs {
     model: Option<String>,
     reasoning: Option<String>,
     sandbox: Option<String>,
+    mode: Option<String>,
     title: Option<String>,
     branch: Option<String>,
     cwd: Option<String>,
@@ -327,6 +329,31 @@ fn now_millis() -> i64 {
         .duration_since(UNIX_EPOCH)
         .map(|d| d.as_millis() as i64)
         .unwrap_or_default()
+}
+
+/// A chat's permission policy (absent config = Bypass, the old behaviour).
+fn chat_policy(chat: &Chat) -> AgentPolicy {
+    chat.config
+        .as_ref()
+        .map(|c| c.policy.clone())
+        .unwrap_or_default()
+}
+
+/// The policy of a chat created in `mode` under `ceilings` (its spawner and
+/// parent): never more permissive than any of them.
+fn spawned_policy<'a>(
+    mode: PermissionMode,
+    ceilings: impl IntoIterator<Item = &'a AgentPolicy>,
+) -> AgentPolicy {
+    ceilings
+        .into_iter()
+        .fold(AgentPolicy::with_mode(mode), |policy, ceiling| {
+            let mut capped = policy.capped_by(ceiling);
+            // The spawner's standing rules are its own; the host merges the
+            // user's and the project's into every run anyway.
+            capped.rules.clear();
+            capped
+        })
 }
 
 fn parse_enum<T: serde::de::DeserializeOwned>(what: &str, raw: &str) -> Result<T, String> {
@@ -556,6 +583,8 @@ impl Tools {
                 "installed": h.installed,
                 "steersMidTurn": h.steers_mid_turn(),
                 "reasoningLevels": h.reasoning_levels,
+                // Permission modes create_chat's `mode` may pick for it.
+                "modes": h.policy.modes,
             })).collect::<Vec<_>>()
         }))
     }
@@ -634,7 +663,23 @@ impl Tools {
                 "Side chats cannot create chats. Ask your parent chat to create another side chat."
             );
         }
-        let harnesses = self.zeron.harnesses().await?;
+        let requested_mode: Option<PermissionMode> = match args.mode.as_deref() {
+            Some(raw) => Some(parse_enum("mode", raw).map_err(anyhow::Error::msg)?),
+            None => None,
+        };
+        let (space, device_id) = match args.project.as_deref() {
+            Some(project) => {
+                let space = self.zeron.resolve_space(project).await?;
+                let device_id = space.device_id.clone();
+                (Some(space), device_id)
+            }
+            None => (
+                None,
+                self.zeron.resolve_device_id(args.device.as_deref()).await?,
+            ),
+        };
+        // The host's catalog: what's installed and what it can honour there.
+        let harnesses = self.zeron.harnesses_on(&device_id).await?;
         let harness = match args.harness.as_deref() {
             Some(raw) => {
                 let id: HarnessId = parse_enum("harness", raw).map_err(anyhow::Error::msg)?;
@@ -671,26 +716,6 @@ impl Tools {
             Some(raw) => parse_enum("sandbox", raw).map_err(anyhow::Error::msg)?,
             None => SandboxLevel::WorkspaceWrite,
         };
-        let config = ChatConfig {
-            policy: Default::default(),
-            harness,
-            model: args.model.clone(),
-            reasoning,
-            model_options: Default::default(),
-            sandbox,
-        };
-
-        let (space, device_id) = match args.project.as_deref() {
-            Some(project) => {
-                let space = self.zeron.resolve_space(project).await?;
-                let device_id = space.device_id.clone();
-                (Some(space), device_id)
-            }
-            None => (
-                None,
-                self.zeron.resolve_device_id(args.device.as_deref()).await?,
-            ),
-        };
 
         // Parent: the explicit `parent` argument, else the chat this server
         // speaks for. Resolved so a prefix/title works and a typo fails loud.
@@ -704,13 +729,48 @@ impl Tools {
             None => self.zeron.origin().chat_id.clone(),
         };
 
+        // Ceilings: the chat speaking (the spawner) and the recorded parent.
+        // A chat an agent creates is never more permissive than either.
+        let mut ceilings: Vec<(String, AgentPolicy)> = Vec::new();
         if let Some(parent) = parent_chat_id.as_deref() {
             let chat = self.zeron.resolve_chat(parent).await?;
             anyhow::ensure!(
                 chat.parent_chat_id.is_none(),
                 "Cannot create a child of a side chat. Choose a top-level parent chat."
             );
+            ceilings.push((chat.id.clone(), chat_policy(&chat)));
         }
+        if let Some(origin) = self.zeron.origin().chat_id.as_deref()
+            && Some(origin) != parent_chat_id.as_deref()
+            && let Ok(chat) = self.zeron.resolve_chat(origin).await
+        {
+            ceilings.push((chat.id.clone(), chat_policy(&chat)));
+        }
+        let mode = match requested_mode {
+            Some(mode) => mode,
+            None => self.zeron.default_mode(&device_id).await,
+        };
+        let policy = spawned_policy(mode, ceilings.iter().map(|(_, p)| p));
+        if let Some(info) = harnesses.iter().find(|h| h.id == harness)
+            && let Some(refusal) = info.policy.refusal(&info.name, policy.mode)
+        {
+            if policy.mode != mode {
+                anyhow::bail!(
+                    "{refusal} (this chat runs in {} mode, and a chat it creates can't be more \
+                     permissive)",
+                    policy.mode.label()
+                );
+            }
+            anyhow::bail!(refusal);
+        }
+        let config = ChatConfig {
+            policy: policy.clone(),
+            harness,
+            model: args.model.clone(),
+            reasoning,
+            model_options: Default::default(),
+            sandbox,
+        };
         let chat_id = uuid::Uuid::new_v4().to_string();
         let mut mutate = json!({
             "op": "createChat",
@@ -754,6 +814,7 @@ impl Tools {
             "harness": harness,
             "model": args.model,
             "reasoning": reasoning,
+            "mode": policy.mode,
             "title": args.title,
             "parentChatId": parent_chat_id,
         });
@@ -1008,7 +1069,7 @@ impl Tools {
                     .or_else(|| space.map(|s| s.path.clone()))
                     .unwrap_or_else(|| "~".into());
                 let request = RunRequest {
-                    policy: Default::default(),
+                    policy: config.as_ref().map(|c| c.policy.clone()).unwrap_or_default(),
                     mcp: None,
                     prompt: text,
                     harness: Some(harness),
@@ -1142,6 +1203,10 @@ mod tests {
         goal_on_command: Mutex<Option<Value>>,
         /// What `SubmitAskResult` answers.
         submit_reply: Mutex<Option<Value>>,
+        /// Alpha's permission mode (absent = no policy on its config).
+        alpha_mode: Option<&'static str>,
+        /// The device's default mode (absent = an engine predating it).
+        default_mode: Option<&'static str>,
     }
 
     fn stream(item: Value) -> RpcReply {
@@ -1168,7 +1233,10 @@ mod tests {
                     {
                         "id": "chat-alpha-1", "deviceId": "dev-local", "title": "Alpha",
                         "archived": false, "spaceId": "space-1",
-                        "config": { "harness": "claude-code", "model": "opus", "reasoning": null, "sandbox": "workspace-write" },
+                        "config": match self.alpha_mode {
+                            Some(mode) => json!({ "harness": "claude-code", "model": "opus", "reasoning": null, "sandbox": "workspace-write", "policy": { "mode": mode } }),
+                            None => json!({ "harness": "claude-code", "model": "opus", "reasoning": null, "sandbox": "workspace-write" }),
+                        },
                         "createdAt": "2026-09-01T00:00:00Z"
                     },
                     {
@@ -1179,8 +1247,14 @@ mod tests {
                     }
                 ])),
                 methods::WATCH_SESSIONS => stream(json!([])),
+                methods::GET_POLICY_SETTINGS if self.default_mode.is_some() => {
+                    RpcReply::Value(json!({ "defaultMode": self.default_mode }))
+                }
                 methods::LIST_HARNESSES => RpcReply::Value(json!([
                     { "id": "claude-code", "name": "Claude Code", "supportsSteering": true,
+                      "steeringMode": "step-boundary", "reasoningLevels": [], "installed": true, "enabled": true,
+                      "policy": { "modes": ["bypass", "auto", "acceptEdits", "ask", "plan"], "sandboxes": ["off"] } },
+                    { "id": "cursor", "name": "Cursor", "supportsSteering": true,
                       "steeringMode": "step-boundary", "reasoningLevels": [], "installed": true, "enabled": true },
                     { "id": "codex", "name": "Codex", "supportsSteering": true,
                       "steeringMode": "turn-boundary", "reasoningLevels": [], "installed": false, "enabled": true }
@@ -1436,6 +1510,110 @@ mod tests {
             .await
             .unwrap_err();
         assert!(err.contains("no chat matches"), "{err}");
+    }
+
+    fn last_config(world: &World) -> Value {
+        world
+            .writes
+            .lock()
+            .unwrap()
+            .iter()
+            .rev()
+            .find(|(_, p)| p["op"] == "createChat")
+            .map(|(_, p)| p["config"].clone())
+            .unwrap()
+    }
+
+    #[tokio::test]
+    async fn list_harnesses_reports_modes() {
+        let tools = tools(Arc::new(World::default()), Origin::default());
+        let listed = tools.call("list_harnesses", json!({})).await.unwrap();
+        let rows = listed["harnesses"].as_array().unwrap();
+        assert_eq!(rows[0]["modes"].as_array().unwrap().len(), 5);
+        // A catalog row without caps (an old engine) can only bypass.
+        assert_eq!(rows[1]["id"], "cursor");
+        assert_eq!(rows[1]["modes"], json!(["bypass"]));
+    }
+
+    #[tokio::test]
+    async fn create_chat_takes_a_mode_and_the_device_default() {
+        let world = Arc::new(World {
+            default_mode: Some("acceptEdits"),
+            ..World::default()
+        });
+        let tools = tools(world.clone(), Origin::default());
+        let created = tools
+            .call("create_chat", json!({ "project": "/repo/comet", "mode": "plan" }))
+            .await
+            .unwrap();
+        assert_eq!(created["mode"], "plan");
+        assert_eq!(last_config(&world)["policy"]["mode"], "plan");
+
+        tools
+            .call("create_chat", json!({ "project": "/repo/comet" }))
+            .await
+            .unwrap();
+        assert_eq!(last_config(&world)["policy"]["mode"], "acceptEdits");
+
+        let err = tools
+            .call("create_chat", json!({ "project": "/repo/comet", "mode": "yolo" }))
+            .await
+            .unwrap_err();
+        assert!(err.contains("unknown mode"), "{err}");
+        // A harness that can't honour the mode is refused, not loosened.
+        let err = tools
+            .call(
+                "create_chat",
+                json!({ "project": "/repo/comet", "harness": "cursor", "mode": "ask" }),
+            )
+            .await
+            .unwrap_err();
+        assert!(err.contains("Cursor runs without asking"), "{err}");
+        tools
+            .call(
+                "create_chat",
+                json!({ "project": "/repo/comet", "harness": "cursor", "mode": "bypass" }),
+            )
+            .await
+            .unwrap();
+        assert_eq!(last_config(&world)["policy"]["mode"], "bypass");
+    }
+
+    #[tokio::test]
+    async fn a_spawned_chat_is_capped_by_its_spawner() {
+        let world = Arc::new(World {
+            alpha_mode: Some("ask"),
+            ..World::default()
+        });
+        let tools = tools(
+            world.clone(),
+            Origin {
+                chat_id: Some("chat-alpha-1".into()),
+                device_id: None,
+            },
+        );
+        // Asking for Bypass under an Ask spawner yields Ask.
+        let created = tools
+            .call("create_chat", json!({ "project": "/repo/comet", "mode": "bypass" }))
+            .await
+            .unwrap();
+        assert_eq!(created["mode"], "ask");
+        assert_eq!(last_config(&world)["policy"]["mode"], "ask");
+        // Stricter than the spawner is fine.
+        tools
+            .call("create_chat", json!({ "project": "/repo/comet", "mode": "plan" }))
+            .await
+            .unwrap();
+        assert_eq!(last_config(&world)["policy"]["mode"], "plan");
+        // A bypass-only harness can't be spawned under it at all.
+        let err = tools
+            .call(
+                "create_chat",
+                json!({ "project": "/repo/comet", "harness": "cursor", "mode": "bypass" }),
+            )
+            .await
+            .unwrap_err();
+        assert!(err.contains("can't be more permissive"), "{err}");
     }
 
     #[tokio::test]

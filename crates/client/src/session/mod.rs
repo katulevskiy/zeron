@@ -1043,8 +1043,14 @@ impl SessionHandle {
                 SendOutcome::Steered { message_id }
             } else {
                 let config = chat.config.as_ref();
+                // The chat's permission policy (absent = Bypass, which is
+                // what mobile always ran with).
+                let policy = config.map(|c| c.policy.clone()).unwrap_or_default();
                 let request = RunRequest {
-                    policy: Default::default(),
+                    // Older harness drivers read only this flag: keep it in
+                    // step with the policy instead of forcing it on.
+                    auto_approve: policy.mode == zeron_proto::PermissionMode::Bypass,
+                    policy,
                     prompt: content,
                     harness: config.map(|c| c.harness),
                     model: config.and_then(|c| c.model.clone()),
@@ -1052,7 +1058,6 @@ impl SessionHandle {
                     model_options: config.map(|c| c.model_options.clone()).unwrap_or_default(),
                     cwd: chat.cwd.clone().unwrap_or_else(|| "~".into()),
                     sandbox: config.map_or(SandboxLevel::WorkspaceWrite, |c| c.sandbox),
-                    auto_approve: true,
                     resume: None,
                     attachments: refs.clone(),
                     worktree: request.worktree.clone(),
