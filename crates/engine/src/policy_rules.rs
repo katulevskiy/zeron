@@ -71,6 +71,44 @@ impl PolicyRules {
         out
     }
 
+    /// Put a rule the user wrote in front of the others, so it wins over the
+    /// broader ones before it (the first matching rule decides). Returns
+    /// whether the file changed; a rule already present moves to the front.
+    pub fn add(&self, rule: PolicyRule) -> std::io::Result<bool> {
+        let Some(path) = self.user_path.as_deref() else {
+            return Ok(false);
+        };
+        let _guard = self.write.lock().unwrap_or_else(PoisonError::into_inner);
+        let mut file = RulesFile {
+            rules: read_rules(path),
+        };
+        if file.rules.first() == Some(&rule) {
+            return Ok(false);
+        }
+        file.rules.retain(|existing| *existing != rule);
+        file.rules.insert(0, rule);
+        write_rules(path, &file)?;
+        Ok(true)
+    }
+
+    /// Forget `rule`. Returns whether it was there.
+    pub fn remove(&self, rule: &PolicyRule) -> std::io::Result<bool> {
+        let Some(path) = self.user_path.as_deref() else {
+            return Ok(false);
+        };
+        let _guard = self.write.lock().unwrap_or_else(PoisonError::into_inner);
+        let mut file = RulesFile {
+            rules: read_rules(path),
+        };
+        let before = file.rules.len();
+        file.rules.retain(|existing| existing != rule);
+        if file.rules.len() == before {
+            return Ok(false);
+        }
+        write_rules(path, &file)?;
+        Ok(true)
+    }
+
     /// Keep `rule` in the user file (an "Always allow" answer). Returns
     /// whether the file changed; a rule already present is not added twice.
     pub fn remember(&self, rule: PolicyRule) -> std::io::Result<bool> {
@@ -139,6 +177,25 @@ mod tests {
             pattern: pattern.into(),
             effect,
         }
+    }
+
+    #[test]
+    fn rules_the_user_adds_go_first_and_can_be_removed() {
+        let data = tempfile::tempdir().unwrap();
+        let rules = PolicyRules::new(data.path());
+        let allow = rule(Some(ActionKind::Exec), "cargo *", RuleEffect::Allow);
+        let deny = rule(Some(ActionKind::Exec), "cargo publish*", RuleEffect::Deny);
+        assert!(rules.remember(allow.clone()).unwrap());
+        // A narrower deny added later must beat the broader allow.
+        assert!(rules.add(deny.clone()).unwrap());
+        assert_eq!(rules.user_rules(), vec![deny.clone(), allow.clone()]);
+        // Adding it again changes nothing; adding an existing one moves it up.
+        assert!(!rules.add(deny.clone()).unwrap());
+        assert!(rules.add(allow.clone()).unwrap());
+        assert_eq!(rules.user_rules(), vec![allow.clone(), deny.clone()]);
+        assert!(rules.remove(&allow).unwrap());
+        assert!(!rules.remove(&allow).unwrap());
+        assert_eq!(rules.user_rules(), vec![deny]);
     }
 
     #[test]

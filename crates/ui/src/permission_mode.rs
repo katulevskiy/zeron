@@ -6,7 +6,7 @@
 //! Rendering lives with the other composer pickers (`pickers.rs`).
 
 use zeron_proto::policy::{APPROVAL_ALLOW_ALWAYS, APPROVAL_ALLOW_ONCE, APPROVAL_DENY};
-use zeron_proto::{PermissionMode, PolicyCaps};
+use zeron_proto::{ActionKind, PermissionMode, PolicyCaps, PolicyRule, RuleEffect};
 
 /// The device's default permission mode (Settings → General), once known.
 /// Composers seed new chats from it; the settings card updates it on save.
@@ -67,6 +67,61 @@ pub fn mode_rows(
             unsupported: caps.and_then(|caps| caps.unsupported_reason(harness, mode)),
         })
         .collect()
+}
+
+/// The effects a rule can have, in menu order.
+pub const RULE_EFFECTS: [RuleEffect; 3] = [RuleEffect::Allow, RuleEffect::Ask, RuleEffect::Deny];
+
+/// What a rule applies to, in menu order (`None` = anything).
+pub const RULE_KINDS: [Option<ActionKind>; 6] = [
+    None,
+    Some(ActionKind::Exec),
+    Some(ActionKind::Edit),
+    Some(ActionKind::Read),
+    Some(ActionKind::Network),
+    Some(ActionKind::Mcp),
+];
+
+pub fn effect_label(effect: RuleEffect) -> &'static str {
+    match effect {
+        RuleEffect::Allow => "Allow",
+        RuleEffect::Ask => "Ask",
+        RuleEffect::Deny => "Deny",
+    }
+}
+
+pub fn effect_description(effect: RuleEffect) -> &'static str {
+    match effect {
+        RuleEffect::Allow => "runs without asking, in every mode that asks",
+        RuleEffect::Ask => "always asks, even where the mode would allow it",
+        RuleEffect::Deny => "is refused, even in Bypass",
+    }
+}
+
+pub fn kind_label(kind: Option<ActionKind>) -> &'static str {
+    match kind {
+        None => "Anything",
+        Some(ActionKind::Exec) => "Commands",
+        Some(ActionKind::Edit) => "Edits",
+        Some(ActionKind::Read) => "Reads",
+        Some(ActionKind::Network) => "Network",
+        Some(ActionKind::Mcp) => "Tools",
+        Some(ActionKind::Other) => "Other",
+    }
+}
+
+/// A rule as the user wrote it, or `None` while the pattern is blank.
+pub fn new_rule(
+    effect: RuleEffect,
+    kind: Option<ActionKind>,
+    pattern: &str,
+) -> Option<PolicyRule> {
+    let pattern = pattern.trim();
+    (!pattern.is_empty()).then(|| PolicyRule {
+        kind,
+        pattern: pattern.to_string(),
+        effect,
+    })
 }
 
 /// Shift+Tab: the next mode the harness offers after `current`, wrapping.
@@ -172,6 +227,25 @@ mod tests {
         assert!(rows.iter().all(ModeRow::enabled));
         assert_eq!(rows.iter().filter(|r| r.selected).count(), 1);
         assert!(rows[4].selected);
+    }
+
+    #[test]
+    fn rules_read_back_in_plain_words() {
+        assert_eq!(effect_label(RuleEffect::Deny), "Deny");
+        assert!(effect_description(RuleEffect::Deny).contains("Bypass"));
+        assert_eq!(kind_label(None), "Anything");
+        assert_eq!(kind_label(Some(ActionKind::Mcp)), "Tools");
+        let kinds: std::collections::HashSet<_> = RULE_KINDS.iter().map(|k| kind_label(*k)).collect();
+        assert_eq!(kinds.len(), RULE_KINDS.len(), "each kind reads differently");
+        assert_eq!(new_rule(RuleEffect::Allow, None, "   "), None);
+        assert_eq!(
+            new_rule(RuleEffect::Deny, Some(ActionKind::Exec), "  rm -rf *  "),
+            Some(PolicyRule {
+                kind: Some(ActionKind::Exec),
+                pattern: "rm -rf *".into(),
+                effect: RuleEffect::Deny,
+            })
+        );
     }
 
     #[test]

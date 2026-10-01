@@ -1362,6 +1362,9 @@ fn forwardable(method: &str) -> bool {
             | methods::LIST_PRESETS
             | methods::UPSERT_PRESET
             | methods::DELETE_PRESET
+            | methods::LIST_POLICY_RULES
+            | methods::ADD_POLICY_RULE
+            | methods::REMOVE_POLICY_RULE
             | methods::SET_HARNESS_ENABLED
             | methods::LIST_MODELS
             | methods::LIST_SKILLS
@@ -1825,6 +1828,33 @@ impl RpcService for EngineRpc {
                     let deleted = store.delete(&p.id).map_err(RpcError::Failed)?;
                     RpcReply::value(&serde_json::json!({ "deleted": deleted }))
                 }
+            methods::LIST_POLICY_RULES
+            | methods::ADD_POLICY_RULE
+            | methods::REMOVE_POLICY_RULE => {
+                #[derive(Deserialize)]
+                struct RuleParams {
+                    rule: zeron_proto::PolicyRule,
+                }
+                let sessions = self.sessions.clone();
+                let store = sessions
+                    .policy_rules()
+                    .ok_or_else(|| RpcError::Failed("permission rules are not available".into()))?;
+                let failed = |e: std::io::Error| RpcError::Failed(e.to_string());
+                match method {
+                    methods::ADD_POLICY_RULE => {
+                        let p: RuleParams = parse_params(params)?;
+                        if p.rule.pattern.trim().is_empty() {
+                            return Err(RpcError::Failed("A rule needs a pattern.".into()));
+                        }
+                        store.add(p.rule).map_err(failed)?;
+                    }
+                    methods::REMOVE_POLICY_RULE => {
+                        let p: RuleParams = parse_params(params)?;
+                        store.remove(&p.rule).map_err(failed)?;
+                    }
+                    _ => {}
+                }
+                RpcReply::value(&serde_json::json!({ "rules": store.user_rules() }))
             }
             methods::SET_HARNESS_ENABLED => {
                 let p: SetHarnessEnabledParams = parse_params(params)?;

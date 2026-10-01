@@ -83,6 +83,19 @@ fn main() -> anyhow::Result<()> {
             "---\nname: Migrator\ndescription: Writes and checks database migrations.\nharness: claude-code\nmode: accept-edits\nworktree: yes\n---\nAlways write a down migration.\n",
         )?;
     }
+    // Standing rules for the Settings scene.
+    {
+        use zeron_proto::{ActionKind, PolicyRule, RuleEffect};
+        let rules = core.sessions.policy_rules().expect("rules store");
+        for (kind, pattern, effect) in [
+            (ActionKind::Exec, "cargo test*", RuleEffect::Allow),
+            (ActionKind::Exec, "npm install*", RuleEffect::Allow),
+            (ActionKind::Exec, "git push*", RuleEffect::Ask),
+            (ActionKind::Exec, "cargo publish*", RuleEffect::Deny),
+        ] {
+            rules.add(PolicyRule { kind: Some(kind), pattern: pattern.into(), effect })?;
+        }
+    }
     let ipc_port = port();
     let _ipc = runtime.block_on(zeron_engine::serve_ipc(ipc_port, core.rpc_service()))?;
     let data = temp.path().join("ui");
@@ -315,6 +328,13 @@ fn main() -> anyhow::Result<()> {
                 })?;
                 pause(cx, 1800).await;
                 capture(window.into(), cx, &output, "settings-presets")?;
+                // Settings → General with the standing rules.
+                window.update(cx, |s, w, cx| {
+                    w.resize(size(px(1100.), px(1000.)));
+                    s.fixture_open_general_settings(cx);
+                })?;
+                pause(cx, 1800).await;
+                capture(window.into(), cx, &output, "settings-rules")?;
                 window.update(cx, |s, w, cx| {
                     w.resize(size(px(1100.), px(1900.)));
                     s.fixture_open_preset_editor(cx);

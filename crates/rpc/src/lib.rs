@@ -52,6 +52,12 @@ pub mod methods {
     pub const LIST_PRESETS: &str = "ListPresets";
     pub const UPSERT_PRESET: &str = "UpsertPreset";
     pub const DELETE_PRESET: &str = "DeletePreset";
+    /// The device's standing permission rules, first match wins:
+    /// `ListPolicyRules` → `{rules}`; `AddPolicyRule {rule}` puts one in
+    /// front; `RemovePolicyRule {rule}`. The last two reply like the first.
+    pub const LIST_POLICY_RULES: &str = "ListPolicyRules";
+    pub const ADD_POLICY_RULE: &str = "AddPolicyRule";
+    pub const REMOVE_POLICY_RULE: &str = "RemovePolicyRule";
     pub const SET_HARNESS_ENABLED: &str = "SetHarnessEnabled";
     pub const LIST_MODELS: &str = "ListModels";
     pub const LIST_SKILLS: &str = "ListSkills";

@@ -86,6 +86,8 @@ pub struct ShortcutsPage {
     default_mode: Entity<crate::settings::permissions::DefaultModeCard>,
     /// Settings → General's agent presets.
     presets: Entity<crate::settings::presets::PresetsCard>,
+    /// Settings → General's standing permission rules.
+    policy_rules: Entity<crate::settings::permissions::PolicyRulesCard>,
     _state: Entity<AppState>,
 }
 
@@ -136,6 +138,9 @@ impl ShortcutsPage {
             presets: {
                 let state = state.clone();
                 cx.new(|cx| crate::settings::presets::PresetsCard::new(state, cx))
+            policy_rules: {
+                let state = state.clone();
+                cx.new(|cx| crate::settings::permissions::PolicyRulesCard::new(state, cx))
             },
             _state: state,
         }
@@ -677,6 +682,7 @@ impl Render for ShortcutsPage {
                                     )
                                     .child(self.default_mode.clone())
                                     .child(self.presets.clone())
+                                    .child(self.policy_rules.clone())
                                     .child(self.thread_naming.clone()),
                             ),
                     )
