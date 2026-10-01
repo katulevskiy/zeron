@@ -359,7 +359,7 @@ private fun ResetButton(visible: Boolean, modifier: Modifier = Modifier, onClick
                 .semantics { contentDescription = "Reset to defaults" },
             contentAlignment = Alignment.Center,
         ) {
-            ZIcon(ZIcons.Restart, null, Modifier.size(20.dp), tint = MaterialTheme.colorScheme.onSurfaceVariant)
+            ZIcon(sh.zeron.android.R.drawable.ic_reset_defaults, null, Modifier.size(20.dp), tint = MaterialTheme.colorScheme.onSurfaceVariant)
         }
     }
 }

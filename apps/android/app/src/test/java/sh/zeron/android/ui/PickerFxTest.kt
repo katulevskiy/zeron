@@ -353,108 +353,38 @@ class EffortDragTest {
     private val n = 5
     private val maxStretch = 0.1f
 
-    private fun target(p: Float) = EffortDrag.target(p, n, maxStretch)
+    private fun follow(p: Float) = EffortDrag.follow(p, n, maxStretch)
 
-    @Test fun theThumbIsAtTheLevelAtEveryLevelAndMidwayAtEveryMidpoint() {
-        for (i in 0 until n) assertEquals(i.toFloat(), target(i.toFloat()), 1e-6f)
-        for (i in 0 until n - 1) assertEquals(i + 0.5f, target(i + 0.5f), 1e-5f)
+    @Test fun theThumbIsExactlyUnderTheFingerBetweenTheEnds() {
+        // No wells, no speed limit, no lag: the thumb is where the finger is.
+        var p = 0f
+        while (p <= (n - 1).toFloat()) {
+            assertEquals("p=$p", p, follow(p), 1e-6f)
+            p += 0.013f
+        }
+    }
+
+    @Test fun theEndsRubberBandPastTheLastLevelAndCannotExceedTheMaximum() {
+        val last = (n - 1).toFloat()
+        assertEquals(last, follow(last), 1e-6f)
+        assertEquals(0f, follow(0f), 1e-6f)
+        assertTrue(follow(last + 0.05f) > last)
+        assertTrue(follow(-0.05f) < 0f)
+        assertTrue(follow(last + 50f) <= last + maxStretch)
+        assertTrue(follow(-50f) >= -maxStretch)
+        // Symmetric between the two ends.
+        assertEquals(follow(last + 0.7f) - last, -follow(-0.7f), 1e-6f)
     }
 
     @Test fun theMappingIsMonotonicAndContinuousEverywhereEvenOverTheEnds() {
-        var last = target(-3f)
+        var last = follow(-3f)
         var p = -3f
         while (p <= n + 3f) {
-            val v = target(p)
+            val v = follow(p)
             assertTrue("monotonic at $p", v >= last - 1e-6f)
             assertTrue("no jump at $p", v - last < 0.02f)
             last = v
             p += 0.001f
-        }
-    }
-
-    @Test fun theThumbIsStickyInsideEachWell() {
-        val well = EffortTuning.WELL_FRACTION
-        for (i in 0 until n) {
-            for (d in listOf(-well, -0.2f, -0.05f, 0f, 0.05f, 0.2f, well)) {
-                val p = i + d
-                if (p < 0f || p > n - 1) continue
-                assertEquals("p=$p", i.toFloat(), target(p), 1e-5f)
-            }
-        }
-        // Leaving the well it follows, crossing the gap in the remaining quarter of a step.
-        assertTrue(target(1f + well + 0.05f) > 1.02f)
-        assertEquals(2f, target(1f + 1f - well), 1e-5f)
-    }
-
-    @Test fun theWellIsAboutFortyPercentOfAStepAndMatchesTheHysteresis() {
-        assertTrue(EffortTuning.WELL_FRACTION in 0.3f..0.5f)
-        // The thumb lands on the next level just as the selection flips (0.5 + hysteresis).
-        assertEquals(0.5f, EffortTuning.WELL_FRACTION + EffortScale.HYSTERESIS, 1e-6f)
-    }
-
-    @Test fun theEndsRubberBandOnlyBeyondTheLastWellAndCannotExceedTheMaximum() {
-        val last = (n - 1).toFloat()
-        assertEquals(last, target(last + EffortTuning.WELL_FRACTION), 1e-6f)
-        assertEquals(0f, target(-EffortTuning.WELL_FRACTION), 1e-6f)
-        assertTrue(target(last + EffortTuning.WELL_FRACTION + 0.05f) > last)
-        assertTrue(target(-EffortTuning.WELL_FRACTION - 0.05f) < 0f)
-        assertTrue(target(last + 50f) <= last + maxStretch)
-        assertTrue(target(-50f) >= -maxStretch)
-        // Continuous where the staircase hands over to the band (value and no step).
-        assertEquals(target(last + EffortTuning.WELL_FRACTION), target(last + EffortTuning.WELL_FRACTION + 1e-4f), 1e-3f)
-        // Symmetric between the two ends.
-        assertEquals(target(last + 0.7f) - last, -target(-0.7f), 1e-6f)
-    }
-
-    @Test fun theFingerIsSpeedLimitedSoAFlickCannotSkipLevels() {
-        // A finger that jumps from Low to Ultrathink at once: the effective position still advances one step per ~133 ms.
-        var p = 0f
-        var elapsed = 0f
-        val dt = 1f / 60f
-        var levelsAt150ms = -1
-        var levelsAt300ms = -1
-        while (elapsed < 2f) {
-            p = EffortDrag.advance(p, finger = 4f, dt = dt)
-            elapsed += dt
-            val level = EffortScale.nearestStep((p / 4f).coerceIn(0f, 1f), 5)
-            if (levelsAt150ms < 0 && elapsed >= 0.15f) levelsAt150ms = level
-            if (levelsAt300ms < 0 && elapsed >= 0.3f) levelsAt300ms = level
-            if (p >= 4f) break
-        }
-        assertTrue("one or two levels in a 150 ms flick: $levelsAt150ms", levelsAt150ms in 1..2)
-        assertTrue("two or three in 300 ms: $levelsAt300ms", levelsAt300ms in 2..3)
-        // But a deliberate drag across the whole bar still arrives in about a second.
-        assertTrue("whole bar in under 1 s: $elapsed", elapsed < 1f)
-        // Never more than the budget in a single frame, in either direction.
-        assertEquals(EffortTuning.MAX_STEPS_PER_SECOND * dt, EffortDrag.advance(0f, 100f, dt), 1e-6f)
-        assertEquals(-EffortTuning.MAX_STEPS_PER_SECOND * dt, EffortDrag.advance(0f, -100f, dt), 1e-6f)
-        // A finger slower than the limit is followed exactly.
-        assertEquals(0.05f, EffortDrag.advance(0f, 0.05f, dt), 1e-6f)
-    }
-
-    @Test fun aReleaseCarriesTheThumbAHalfStepAtMostSoAFlickMovesOneLevel() {
-        // The finger is far ahead, the speed limit has only got the thumb 0.4 steps along: it lands one level on.
-        assertEquals(1, EffortScale.nearestStep(EffortDrag.landing(0.4f, 4f) / 4f, 5))
-        // But never two, however far the finger went, in either direction.
-        assertEquals(1.1f, EffortDrag.landing(0.6f, 100f), 1e-6f)
-        assertEquals(1, EffortScale.nearestStep(EffortDrag.landing(0.6f, 100f) / 4f, 5))
-        assertEquals(2.1f, EffortDrag.landing(2.6f, -50f), 1e-5f)
-        assertEquals(2, EffortScale.nearestStep(EffortDrag.landing(2.6f, -50f) / 4f, 5))
-        // A thumb that caught up with the finger stays put.
-        assertEquals(2f, EffortDrag.landing(2f, 2f), 0f)
-    }
-
-    @Test fun selectionNeverRunsAheadOfTheMovementBudget() {
-        // Whatever the finger does, the selection after t seconds is within MAX_STEPS_PER_SECOND * t + 1 of the start.
-        val dt = 1f / 120f
-        var p = 2f
-        var t = 0f
-        for (finger in listOf(-20f, 20f, 0f, 9f)) {
-            repeat(60) {
-                p = EffortDrag.advance(p, finger, dt)
-                t += dt
-                assertTrue(kotlin.math.abs(p - 2f) <= EffortTuning.MAX_STEPS_PER_SECOND * t + 1e-4f)
-            }
         }
     }
 

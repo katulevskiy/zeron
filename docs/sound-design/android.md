@@ -180,22 +180,14 @@ timer); switching fast off and on strikes again, and opening the picker with fas
 already on shows nothing. With reduced motion it is one still frame at the flash's
 peak for 450 ms. It sits at the bottom of the card and never takes touches.
 
-The effort bar has **friction**. The thumb does not track the finger: each level is a
-magnetic well (`EffortTuning.WELL_FRACTION = 0.38` of a step each side of the level)
-that the finger has to pull out of before the thumb leaves, after which it springs to
-the next level (a staircase of smoothsteps, `EffortDrag.target`). The finger itself is
-speed-limited to `MAX_STEPS_PER_SECOND = 7.5` (one level per 133 ms), so a quick flick
-moves one or two levels, never from Low to Ultrathink, while a deliberate drag across
-the bar (1 to 2 s) still gets there. A release carries the thumb at most half a step
-(`RELEASE_CARRY_STEPS`) and springs it to the nearest level; there is no fling. A tap on
-the track jumps straight to its level. The thumb is a spring (`FOLLOW_*` while dragging,
-`SETTLE_*` into a level, `REBOUND_*` after a stretch), and it is the single state the
-fill, dots and halo derive from. `EffortStep` fires when the thumb itself crosses over
-to the next level, so the haptic lands with the spring snapping in. The end rubber band
-starts only once the finger is past the last level's well. Measured on an emulator with
-`adb shell input swipe` and the `ZeronFeedback` log (Low to Ultrathink is six steps):
-a 100 ms swipe moves one level, 150 ms one or two, 250 ms two, 500 ms four, 1000 ms
-and 1500 ms the whole bar.
+The effort bar follows the finger exactly: while a finger is down the thumb is under
+it (`EffortDrag.follow`), with no stickiness, no speed limit and no inertia. Past the
+first or last level it rubber-bands (`EffortFx.damp`). On release the thumb springs to
+the nearest level (`SETTLE_*`; `REBOUND_*` after a stretch) and there is no fling. A tap
+on the track jumps straight to its level. The thumb is the single state the fill, dots
+and halo derive from. `EffortStep` fires when the thumb crosses to the next level
+(hysteresis in `EffortScale.snap`), so jitter at a boundary does not re-fire. (A
+magnetic-well / speed-limited variant was tried and dropped: it felt sticky.)
 
 Stretch past an end (frames: `docs/media/android/picker-stretch-*-before.png` and
 `-after.png`, recorded at animator scale 10): the old bar drew a flat bulge past the
