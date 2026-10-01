@@ -86,7 +86,11 @@ impl PolicyRules {
         }
         file.rules.push(rule);
         while file.rules.len() > MAX_USER_RULES {
-            match file.rules.iter().position(|r| r.effect == RuleEffect::Allow) {
+            match file
+                .rules
+                .iter()
+                .position(|r| r.effect == RuleEffect::Allow)
+            {
                 Some(oldest) => {
                     file.rules.remove(oldest);
                 }
@@ -162,7 +166,10 @@ mod tests {
         ];
         let merged = rules.merged(ws.path(), &own);
         let patterns: Vec<&str> = merged.iter().map(|r| r.pattern.as_str()).collect();
-        assert_eq!(patterns, ["*/deploy/*", "cargo test*", "make lint", "npm test"]);
+        assert_eq!(
+            patterns,
+            ["*/deploy/*", "cargo test*", "make lint", "npm test"]
+        );
         assert_eq!(merged[0].kind, Some(ActionKind::Edit));
         assert_eq!(merged[0].effect, RuleEffect::Deny);
         // Idempotent: merging the merged list changes nothing.
@@ -189,14 +196,21 @@ mod tests {
         .unwrap();
         for i in 0..MAX_USER_RULES {
             rules
-                .remember(rule(Some(ActionKind::Exec), &format!("cmd {i}"), RuleEffect::Allow))
+                .remember(rule(
+                    Some(ActionKind::Exec),
+                    &format!("cmd {i}"),
+                    RuleEffect::Allow,
+                ))
                 .unwrap();
         }
         let kept = rules.user_rules();
         assert_eq!(kept.len(), MAX_USER_RULES);
         assert_eq!(kept[0], deny, "hand-written deny rules are never evicted");
         assert!(!kept.contains(&allow), "the oldest allow made room");
-        assert_eq!(kept.last().unwrap().pattern, format!("cmd {}", MAX_USER_RULES - 1));
+        assert_eq!(
+            kept.last().unwrap().pattern,
+            format!("cmd {}", MAX_USER_RULES - 1)
+        );
 
         std::fs::write(data.path().join(USER_RULES_FILE), "not json").unwrap();
         assert!(rules.user_rules().is_empty());

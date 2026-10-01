@@ -11,9 +11,9 @@ use zeron_harness::policy::{Action, approval_question};
 use zeron_harness::{Harness, HarnessError, RunControls};
 use zeron_proto::policy::{APPROVAL_ALLOW_ALWAYS, APPROVAL_ALLOW_ONCE};
 use zeron_proto::{
-    ActionKind, AgentEvent, AgentPolicy, ChatConfig, DoneStatus, HarnessId, Model,
-    PermissionMode, PolicyCaps, PolicyRule, ReasoningLevel, RuleEffect, RunRequest,
-    SandboxLevel, SandboxMode, SteeringMode, UserInputAnswer, UserInputQuestion,
+    ActionKind, AgentEvent, AgentPolicy, ChatConfig, DoneStatus, HarnessId, Model, PermissionMode,
+    PolicyCaps, PolicyRule, ReasoningLevel, RuleEffect, RunRequest, SandboxLevel, SandboxMode,
+    SteeringMode, UserInputAnswer, UserInputQuestion,
 };
 
 use super::RuntimeConfig;
@@ -140,7 +140,9 @@ fn a_mode_change_needs_a_fresh_runtime_unless_the_harness_switches_live() {
     let mut next = initial.clone();
     next.prompt = "again".into();
     // Standing rules never force a restart (the host re-merges them).
-    next.policy.rules.push(rule(None, "cargo test*", RuleEffect::Allow));
+    next.policy
+        .rules
+        .push(rule(None, "cargo test*", RuleEffect::Allow));
     assert!(config.can_route(HarnessId::ClaudeCode, &next));
     next.policy.mode = PermissionMode::Ask;
     assert!(!config.can_route(HarnessId::ClaudeCode, &next));
@@ -177,7 +179,14 @@ async fn an_unsupported_mode_is_refused_visibly_and_never_run() {
         "{err}"
     );
     assert!(rig.seen.lock().unwrap().is_empty(), "the harness never ran");
-    let entries = rig.core.doc_host.open(chat).unwrap().doc().read_entries().unwrap();
+    let entries = rig
+        .core
+        .doc_host
+        .open(chat)
+        .unwrap()
+        .doc()
+        .read_entries()
+        .unwrap();
     assert_eq!(entries.len(), 2, "the user's message and the refusal");
     assert_eq!(entries[0].id, "m1");
     assert!(matches!(
@@ -188,7 +197,12 @@ async fn an_unsupported_mode_is_refused_visibly_and_never_run() {
     // Bypass is always honoured.
     rig.core
         .sessions
-        .dispatch(chat, HarnessId::Mock, request("/tmp", PermissionMode::Bypass), None)
+        .dispatch(
+            chat,
+            HarnessId::Mock,
+            request("/tmp", PermissionMode::Bypass),
+            None,
+        )
         .await
         .unwrap();
     until(|| rig.seen.lock().unwrap().len() == 1).await;
@@ -207,7 +221,11 @@ async fn dispatch_merges_project_then_user_rules_into_the_run() {
     .unwrap();
     let rules = rig.core.sessions.policy_rules().expect("wired at assembly");
     rules
-        .remember(rule(Some(ActionKind::Exec), "cargo test*", RuleEffect::Allow))
+        .remember(rule(
+            Some(ActionKind::Exec),
+            "cargo test*",
+            RuleEffect::Allow,
+        ))
         .unwrap();
 
     let chat = "chat-rules";
@@ -244,12 +262,18 @@ async fn always_allow_answers_become_standing_rules() {
     let (_, mut events) = rig.core.sessions.subscribe(chat, 0).unwrap();
     rig.core
         .sessions
-        .dispatch(chat, HarnessId::Mock, request("/tmp", PermissionMode::Ask), None)
+        .dispatch(
+            chat,
+            HarnessId::Mock,
+            request("/tmp", PermissionMode::Ask),
+            None,
+        )
         .await
         .unwrap();
     let request_id = tokio::time::timeout(Duration::from_secs(5), async {
         loop {
-            if let AgentEvent::InputRequested { request_id, .. } = events.recv().await.unwrap().event
+            if let AgentEvent::InputRequested { request_id, .. } =
+                events.recv().await.unwrap().event
             {
                 return request_id;
             }
@@ -279,7 +303,11 @@ async fn always_allow_answers_become_standing_rules() {
     let kept = rig.core.sessions.policy_rules().unwrap().user_rules();
     assert_eq!(
         kept,
-        vec![rule(Some(ActionKind::Exec), "make deploy", RuleEffect::Allow)]
+        vec![rule(
+            Some(ActionKind::Exec),
+            "make deploy",
+            RuleEffect::Allow
+        )]
     );
     rig.core.sessions.shutdown().await;
 }
@@ -295,7 +323,14 @@ async fn an_always_answer_to_a_question_the_harness_never_asked_is_ignored() {
             labels: vec![APPROVAL_ALLOW_ALWAYS.into()],
         }],
     );
-    assert!(rig.core.sessions.policy_rules().unwrap().user_rules().is_empty());
+    assert!(
+        rig.core
+            .sessions
+            .policy_rules()
+            .unwrap()
+            .user_rules()
+            .is_empty()
+    );
 }
 
 #[tokio::test]
