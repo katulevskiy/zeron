@@ -5,7 +5,7 @@
 ZCode; the difference is that the verifier here is a full hidden chat that can
 open files and run tests, not a tool-less model call over the transcript.
 
-Screenshots (live, mock harness with `ZERON_MOCK_GOAL=1`): [`docs/screenshots/goal-mode/`](screenshots/goal-mode/) — `collapsed-running` (tray header, round marker, goal-set marker), `collapsed-complete`, `expanded-rounds-working`, `expanded-paused` (reason line, verifier cost, per-round verdicts and todos), `expanded-complete`. The expanded shots use a build whose tray opens expanded by default (the tray itself defaults to collapsed); no interaction was automated.
+Screenshots (live, mock harness with `ZERON_MOCK_GOAL=1`): [`docs/screenshots/goal-mode/`](screenshots/goal-mode/) — `collapsed-running` (tray header, round marker, goal-set marker), `collapsed-complete`, `expanded-rounds-working`, `expanded-paused` (reason line, verifier cost, per-round verdicts and todos), `expanded-complete`, `stacked-trays` (goal + todo + queue together). The expanded shots use a build whose tray opens expanded by default (the tray itself defaults to collapsed); no interaction was automated.
 
 Two pieces, built to be separable:
 
@@ -219,6 +219,8 @@ rounds list. Round 1's title is the goal title, round *n*'s is the previous verd
 next action; opening a round shows the verdict reason, the todo items that first
 appeared during it (latest status) and "Open verifier chat". Markers in the transcript
 replace the round prompts and show verdicts, completion and pauses.
+
+Stacked trays never overlap their content: each expanded list keeps a clearance equal to the edge the next tray tucks over it, caps its height (the goal list takes 32% / 22% / 18% of the window as 0 / 1 / 2 trays stack below it; todo and queue keep 30%) and scrolls with the shared edge fade. The goal list follows the newest round (and verdict) as they land.
 
 The elapsed ticker repaints once a second while a goal runs and not at all under
 reduced motion (which covers "pause animations in background"); the spinner is the
