@@ -1255,9 +1255,10 @@ async fn a_running_workflow_defers_goal_verification() {
         "the goal to complete after the workflow",
     )
     .await;
-    // (At least once: PR2's controller can, rarely, start a second judgement
-    // of the same round in the instant between a verdict landing and being
-    // applied; that is its own concern and harmless here.)
-    assert!(verifier_calls.load(Ordering::SeqCst) >= 1);
+    assert_eq!(
+        verifier_calls.load(Ordering::SeqCst),
+        1,
+        "the round is judged exactly once"
+    );
     assert!(!rig.svc.has_running_run(CHAT));
 }
