@@ -20,7 +20,7 @@ use chrono::{DateTime, Utc};
 use serde::{Deserialize, Serialize};
 use serde_json::{Value, json};
 
-use zeron_proto::{Chat, ChatConfig, Device, MAX_SIDEBAR_PINS, Session, SidebarPreferences, Space};
+use zeron_proto::{Chat, ChatConfig, CloudBox, CloudBoxState, Device, MAX_SIDEBAR_PINS, Session, SidebarPreferences, Space};
 
 use crate::schema::DocError;
 use crate::workspace::{DeletedSpace, WorkspaceState};
@@ -31,6 +31,8 @@ pub const KIND_SPACES: &str = "spaces";
 pub const KIND_CHATS: &str = "chats";
 pub const KIND_SESSIONS: &str = "sessions";
 pub const KIND_PREFERENCES: &str = "preferences";
+/// Cloud boxes (docs/cloud.md §1): one row per box, keyed by its device id.
+pub const KIND_CLOUD_BOXES: &str = "cloudBoxes";
 
 /// Readiness only; membership and order live on individual pins.
 pub const SIDEBAR_PINS_STATE_ID: &str = "sidebarPins";
@@ -1237,6 +1239,60 @@ impl RegistryDoc {
         let existed = self.row_exists(KIND_CHATS, chat_id);
         self.delete_row_ops(&[(KIND_CHATS, chat_id), (KIND_SESSIONS, chat_id)]);
         Ok(existed)
+    }
+
+    // ── cloud boxes ─────────────────────────────────────────────────────────
+
+    /// Upsert a whole box record (the provisioning device).
+    pub fn upsert_cloud_box(&mut self, record: &CloudBox) -> Result<(), DocError> {
+        let Value::Object(map) = serde_json::to_value(record)? else {
+            return Ok(());
+        };
+        let set: BTreeMap<String, Value> = map.into_iter().collect();
+        self.write(KIND_CLOUD_BOXES, &record.id.clone(), OpKind::Upsert, set);
+        Ok(())
+    }
+
+    /// Record a box's state (any of the user's devices). `false` when no
+    /// such box.
+    pub fn set_cloud_box_state(
+        &mut self,
+        box_id: &str,
+        state: CloudBoxState,
+        error: Option<&str>,
+        at: DateTime<Utc>,
+    ) -> Result<bool, DocError> {
+        if !self.row_exists(KIND_CLOUD_BOXES, box_id) {
+            return Ok(false);
+        }
+        self.write(
+            KIND_CLOUD_BOXES,
+            box_id,
+            OpKind::Update,
+            fields([
+                ("state", json!(state.as_str())),
+                ("stateAt", json!(at.timestamp_millis())),
+                ("error", opt_str(error)),
+            ]),
+        );
+        Ok(true)
+    }
+
+    pub fn cloud_box(&self, box_id: &str) -> Option<CloudBox> {
+        self.overlay_row(KIND_CLOUD_BOXES, box_id)
+            .and_then(|row| row_to::<CloudBox>(&row))
+    }
+
+    pub fn read_cloud_boxes(&self) -> Vec<CloudBox> {
+        let mut boxes: Vec<CloudBox> = self.read_kind(KIND_CLOUD_BOXES);
+        boxes.sort_by(|a, b| a.created_at.cmp(&b.created_at).then_with(|| a.id.cmp(&b.id)));
+        boxes
+    }
+
+    pub fn delete_cloud_box(&mut self, box_id: &str) -> bool {
+        let existed = self.row_exists(KIND_CLOUD_BOXES, box_id);
+        self.delete_row_ops(&[(KIND_CLOUD_BOXES, box_id)]);
+        existed
     }
 
     // ── sessions ────────────────────────────────────────────────────────────

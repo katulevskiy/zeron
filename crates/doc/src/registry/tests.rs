@@ -1517,3 +1517,45 @@ fn side_chat_origin_syncs_and_survives_updates_and_restart() {
         Some("main")
     );
 }
+
+#[test]
+fn cloud_boxes_sync_between_devices_and_take_state_updates() {
+    let mut a = RegistryDoc::new("dev-a");
+    let mut b = RegistryDoc::new("dev-b");
+    let record = CloudBox {
+        id: "box-1".into(),
+        provider: "cloudflare".into(),
+        name: "Cloud".into(),
+        account_id: "acc".into(),
+        worker_url: "https://zeron-cloud.sub.workers.dev".into(),
+        wake_key: "a2V5".into(),
+        instance_type: "standard-2".into(),
+        idle_minutes: 15,
+        created_at: 5,
+        state: CloudBoxState::Asleep,
+        state_at: 5,
+        error: None,
+    };
+    a.upsert_cloud_box(&record).unwrap();
+    let mut server = HashMap::new();
+    let mut seq = 0;
+    server_round(&mut server, &mut seq, &mut [&mut a, &mut b]);
+    assert_eq!(b.read_cloud_boxes(), vec![record.clone()]);
+
+    assert!(
+        b.set_cloud_box_state("box-1", CloudBoxState::Error, Some("boom"), ts(9))
+            .unwrap()
+    );
+    assert!(!b.set_cloud_box_state("nope", CloudBoxState::Running, None, ts(9)).unwrap());
+    server_round(&mut server, &mut seq, &mut [&mut a, &mut b]);
+    let seen = a.cloud_box("box-1").unwrap();
+    assert_eq!(seen.state, CloudBoxState::Error);
+    assert_eq!(seen.error.as_deref(), Some("boom"));
+    assert_eq!(seen.state_at, 9);
+
+    // Same-millisecond HLCs tie-break by device id; step past b's write.
+    std::thread::sleep(std::time::Duration::from_millis(2));
+    assert!(a.delete_cloud_box("box-1"));
+    server_round(&mut server, &mut seq, &mut [&mut a, &mut b]);
+    assert!(b.read_cloud_boxes().is_empty());
+}

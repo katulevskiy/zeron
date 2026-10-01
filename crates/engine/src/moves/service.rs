@@ -327,6 +327,8 @@ impl MoveService {
                         harness_installed: false,
                         harness_signed_in: None,
                         problem: None,
+                        asleep: false,
+                        note: None,
                     };
                     if !supported {
                         candidate.problem = Some("Needs a newer Zeron".into());

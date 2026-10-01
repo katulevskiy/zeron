@@ -62,6 +62,8 @@ fn candidates() -> Vec<MoveCandidate> {
         harness_installed: true,
         harness_signed_in: None,
         problem: None,
+        asleep: false,
+        note: None,
     };
     let mut desk = candidate("desk", "Desktop");
     desk.harness_signed_in = Some(true);

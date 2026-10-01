@@ -132,4 +132,12 @@ pub struct MoveCandidate {
     /// Why the device can't take the chat, when it can't.
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub problem: Option<String>,
+    /// A cloud box that is asleep: selectable, and woken when the move
+    /// starts (docs/cloud.md §8).
+    #[serde(default, skip_serializing_if = "std::ops::Not::not")]
+    pub asleep: bool,
+    /// One line for the picker when nothing is wrong ("Asleep — wakes when
+    /// you move").
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub note: Option<String>,
 }

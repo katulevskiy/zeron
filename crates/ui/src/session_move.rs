@@ -265,7 +265,8 @@ pub fn picker_rows(
                 }
             });
             let selectable = problem.is_none();
-            let secondary = problem.or_else(|| {
+            let note = non_empty(candidate.note.as_deref());
+            let secondary = problem.or(note).or_else(|| {
                 candidate.harness_signed_in.map(|signed_in| {
                     if signed_in {
                         format!("Uses its own {harness} login")
@@ -338,6 +339,8 @@ pub(crate) mod fixtures {
             harness_installed: true,
             harness_signed_in: None,
             problem: None,
+            asleep: false,
+            note: None,
         }
     }
 }
@@ -531,9 +534,12 @@ mod tests {
         let mut phone = candidate("phone", "iPhone");
         phone.supported = false;
         let unknown_login = candidate("zz", "Attic");
+        let mut asleep = candidate("cloud", "Cloud");
+        asleep.asleep = true;
+        asleep.note = Some("Asleep — wakes when you move".into());
 
         let rows = picker_rows(
-            &[offline, phone, missing, copied, signed_in, unknown_login],
+            &[offline, phone, missing, copied, signed_in, unknown_login, asleep],
             &devices,
             "Codex",
         );
@@ -545,6 +551,7 @@ mod tests {
             summary,
             [
                 ("Attic", true, None),
+                ("Cloud", true, Some("Asleep — wakes when you move")),
                 ("Desktop", true, Some("Uses its own Codex login")),
                 (
                     "MacBook",
@@ -555,7 +562,7 @@ mod tests {
                 ("Old laptop", false, Some("Codex isn't installed there")),
             ]
         );
-        assert_eq!(rows[2].platform, "macos");
+        assert_eq!(rows[3].platform, "macos");
         assert_eq!(rows[0].platform, "", "no registry row");
 
         let mut old = candidate("x", "X");

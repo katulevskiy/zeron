@@ -1135,6 +1135,33 @@ impl WorkspaceHost {
         Ok(self.mutate(|doc| doc.rename_device(device_id, name))?)
     }
 
+    // ── cloud boxes (docs/cloud.md §1) ──────────────────────────────────────
+
+    pub fn read_cloud_boxes(&self) -> Vec<zeron_proto::CloudBox> {
+        self.read(|doc| doc.read_cloud_boxes())
+    }
+
+    pub fn cloud_box(&self, box_id: &str) -> Option<zeron_proto::CloudBox> {
+        self.read(|doc| doc.cloud_box(box_id))
+    }
+
+    pub fn upsert_cloud_box(&self, record: &zeron_proto::CloudBox) -> Result<(), EngineError> {
+        Ok(self.mutate(|doc| doc.upsert_cloud_box(record))?)
+    }
+
+    pub fn set_cloud_box_state(
+        &self,
+        box_id: &str,
+        state: zeron_proto::CloudBoxState,
+        error: Option<&str>,
+    ) -> Result<bool, EngineError> {
+        Ok(self.mutate(|doc| doc.set_cloud_box_state(box_id, state, error, Utc::now()))?)
+    }
+
+    pub fn delete_cloud_box(&self, box_id: &str) -> bool {
+        self.mutate(|doc| doc.delete_cloud_box(box_id))
+    }
+
     // ── git metadata (diff-sync host writes) ────────────────────────────────
 
     /// HEAD-watcher reconciliation: the branch checked out at the chat's cwd.
