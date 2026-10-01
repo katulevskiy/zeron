@@ -129,23 +129,92 @@ The gateway confines keys to `boxes/{deviceId}/`. Plain HTTP:
 
 ### 6. Enrollment: device credentials
 
-- `POST {edge}/cloud/devices` (WorkOS-authenticated). Body `{name}`. Returns
-  `{deviceId, credential}`. The edge stores only the credential's hash, and
-  the credential is shown once.
+- `POST {edge}/cloud/devices` (WorkOS-authenticated, org-scoped token). Body
+  `{name?}` (1–80 characters, default "Cloud"). Returns `{deviceId,
+  credential}` once: a fresh UUID and 32 random bytes, base64url. A token
+  without `org_id` gets 403.
 - `POST {edge}/auth/device-token` (no bearer). Body `{deviceId, credential}`.
-  Returns `{token, expiresAt}`: an edge-signed JWT (ES256) with `sub` = user
-  id, `org_id`, `did`, `kind: "cloud"`, valid for 30 minutes.
-- **Using the token.** `verifyToken` accepts both issuers. Tokens with `did`
-  may join only `/device/{did}/ws` (host role), the user's registry room and
-  chat rooms.
-- **Revoking.** `DELETE {edge}/cloud/devices/{deviceId}` (WorkOS) revokes the
-  credential.
-- **Local edge.** It mirrors these routes; in development the box may use the
-  shared token instead.
-- **Engine side.** With `ZERON_DEVICE_ID` + `ZERON_DEVICE_CREDENTIAL` set,
-  `Auth` gets its bearer from `/auth/device-token` and renews it 5 minutes
-  before expiry. The device id is fixed (written to `device-id` before the
-  store opens).
+  Returns `{token, expiresAt}` (`expiresAt` in epoch ms): an ES256 JWT with
+  `iss: "zeron-edge"`, `sub` = user id, `org_id`, `did`, `kind: "cloud"`,
+  `iat`, and `exp` 30 minutes later. Errors: 400 malformed body; 401
+  `{error: "invalid_credential" | "revoked"}`; 429 `{error: "rate_limited",
+  retryAfter}` with a `Retry-After` header.
+- `GET {edge}/.well-known/zeron-device-jwks.json` publishes the public key
+  (`kid` = the key's JWK thumbprint unless the secret names one).
+- `DELETE {edge}/cloud/devices/{deviceId}` (WorkOS, the owner only; 403 for
+  anyone else, 404 if unknown) revokes. Idempotent, returns `{revokedAt}`.
+
+**Storage.** The record lives in the device's own DeviceRoom (`d2/{deviceId}`,
+table `device_credential`): `{userId, orgId, name, salt, sha256(salt ‖
+credential), createdAt, revokedAt}` plus a failure counter. The exchange knows
+only the device id, and that room is already the per-device identity anchor,
+so there is no new Durable Object class, binding, or migration. Minting also
+claims the room for the user. The Worker reaches the record on internal
+`/credential/*` paths that no public route forwards to. There is no per-user
+list of boxes on the edge: the `cloudBoxes` registry rows are that list.
+
+**Verification.** Digests are compared in constant time. After 10 failures
+inside 10 minutes, every attempt for that device (right or wrong) gets 429
+until the window ends. Unknown device ids write nothing.
+
+**Signing key.** The wrangler secret `ZERON_DEVICE_JWT_KEY`: a private P-256
+key as a JWK (JSON) or PKCS8 PEM. Unset, the enrollment and exchange routes
+answer 501 and device tokens are rejected.
+
+**Using the token.** `verifyToken` checks the unverified `iss` first, in every
+auth mode: a `zeron-edge` token is verified against the device key only (a
+forged one fails closed rather than falling through to WorkOS or dev-bearer
+parsing). It maps to the owner's own `userId`/`orgId`, so every room name the
+Worker derives (`reg1/{org}/{user}`, `blob/{user}/…`, `preview1/{org}/{user}`)
+is the owner's. Device tokens may reach only:
+
+| Route | Allowed |
+| --- | --- |
+| `/device/{did}/ws` | `role=host` only, own device |
+| `/device/{other}/ws` | `role=client` (dialing the owner's other devices) |
+| `/device/{id}/status`, `/device/{id}/nudge` | any of the owner's devices |
+| `/device/{did}/sidecar/*` | own device only |
+| `/registry/{org}/…`: `ws`, `rows`, `push`, `stats` | yes (not `reset`, not `push-target`) |
+| `/chat2/{id}/…`: `ws`, `checkpoint`, `rows`, `tail`, `diff`, `stats` | yes (not `reset`) |
+| `/blob/*`, `/preview/{org}/ws`, `POST /diff/{chatId}` | yes |
+| everything else (`/cloud/*`, `/auth/orgs`, `/session/*`, `/workspace/*`, …) | 403 |
+
+This is wider than "registry and chat rooms" on purpose: a box is the source
+of a move back to a desktop, and a move source dials the target's device room
+as a client and signals P2P through the preview room; tool-output blobs and
+the legacy diff slot are part of hosting a chat. The registry room already
+holds the box's `wakeKey`, so the box is inside the user's trust boundary;
+what the scope withholds is managing credentials or memberships, operator
+resets, and hosting any device but itself.
+
+**Revocation.** New exchanges fail at once. The DeviceRoom closes the box's
+live host socket (code 4403) and refuses host joins made with a device token
+of a revoked credential. Other routes keep accepting an already-issued token
+until it expires (at most 30 minutes); checking them would cost a DO round
+trip per request.
+
+**Local edge.** `crates/localedge` mirrors the routes, scope, failure limit,
+and revocation. The owner is the shared-secret holder, so tokens carry
+`sub`/`org_id` = `local`. Its tokens are HS256 under a random key kept in the
+edge database (the JWKS is empty), and every request re-checks revocation (one
+SQLite read). In development a box may also use the shared secret instead.
+
+**Engine side.** With `ZERON_DEVICE_ID` + `ZERON_DEVICE_CREDENTIAL` set
+(`zeron headless` reads them, then removes the credential from its environment
+before any thread starts, so agents and terminals never inherit it):
+
+- The device id is pinned: `{data_dir}/device-id` is rewritten to it before
+  the store opens (`zeron_engine::pin_device_id`).
+- `Auth` runs in device mode: WorkOS and dev bearers are ignored. Its bearer
+  comes from `/auth/device-token`, renewed 5 minutes before expiry. Failures
+  back off from 1 s to 60 s (or the edge's `Retry-After`), shared by every
+  consumer.
+- The scope is `Synced` for the token's `sub`/`org_id`. Startup waits for the
+  first token unless `device-session.json` (written after each token) already
+  names the owner, in which case the box opens its profile offline.
+- Nothing interactive: sign-in RPCs fail, sign-out is ignored, and a rejected
+  or revoked credential is logged ("re-enrol the box") and retried, never
+  turned into a sign-out.
 
 ### 7. Provisioning (from a desktop engine)
 

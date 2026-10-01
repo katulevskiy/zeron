@@ -10,6 +10,10 @@
  * - client → DO: DO stamps `from = connId` and forwards to the host socket.
  * - host → DO: must carry `to = connId`; DO strips routing keys and delivers.
  *
+ * Also holds the device's credential record when it is an enrolled cloud
+ * box (device-credentials.ts, docs/cloud.md §6): internal `/credential/*`
+ * paths the Worker calls directly (no public route forwards to them).
+ *
  * Also holds small "sidecar" JSON slots the host publishes (repos/branches
  * snapshot for instant new-chat pickers §8.1; capability metadata) so pickers
  * render last-known state while the live RPC happens at confirm time.
@@ -17,7 +21,14 @@
 import { ensureNudges, enqueueNudge, pendingNudges, acknowledgeNudge, NUDGE_PAGE } from "./device-nudges";
 import { BytesReader, BytesWriter } from "loro-protocol";
 import { createBlobStore, getJsonBlob, putJsonBlob, type BlobStore } from "./blobs";
-import { AUTH_USER_HEADER, type Env } from "./env";
+import { AUTH_DEVICE_HEADER, AUTH_USER_HEADER, type Env } from "./env";
+import {
+  createCredential,
+  deviceTokenAdmitted,
+  ensureCredentials,
+  revokeCredential,
+  verifyCredential
+} from "./device-credentials";
 
 export interface DeviceFrameHeader {
   /** Stream id, unique per (connId, logical stream). */
@@ -50,6 +61,8 @@ interface SocketState {
   userId: string;
   role: "host" | "client";
   connId: string;
+  /** Joined with an edge-issued device token (a cloud box). */
+  deviceToken?: boolean;
   /** Accept time — the liveness floor until the socket's first auto-pong. */
   joinedAt?: number;
   nudgeAck?: boolean;
@@ -101,6 +114,7 @@ export class DeviceRoom implements DurableObject {
       "CREATE TABLE IF NOT EXISTS meta (key TEXT PRIMARY KEY, value TEXT NOT NULL)"
     );
     ensureNudges(ctx.storage.sql);
+    ensureCredentials(ctx.storage.sql);
     this.blobs = createBlobStore(ctx.storage.sql);
     ctx.setWebSocketAutoResponse(new WebSocketRequestResponsePair("ping", "pong"));
   }
@@ -144,13 +158,60 @@ export class DeviceRoom implements DurableObject {
 
   async fetch(request: Request): Promise<Response> {
     const url = new URL(request.url);
+    if (url.pathname === "/credential/verify" && request.method === "POST") {
+      const body = (await request.json().catch(() => null)) as { credential?: unknown } | null;
+      return json(await verifyCredential(this.ctx.storage.sql, body?.credential, Date.now()));
+    }
     const userId = request.headers.get(AUTH_USER_HEADER);
     if (!userId) return new Response("unauthenticated", { status: 401 });
     const owner = this.getMeta("owner");
 
+    if (url.pathname === "/credential/create" && request.method === "POST") {
+      // A fresh enrollment claims the room for its user, so no one else can
+      // ever host or join it.
+      if (owner && owner !== userId) return json({ error: "conflict" }, 409);
+      const body = (await request.json().catch(() => null)) as {
+        credential?: string;
+        orgId?: string;
+        name?: string;
+      } | null;
+      if (!body?.credential || !body.orgId || !body.name) return json({ error: "bad_request" }, 400);
+      const created = await createCredential(this.ctx.storage.sql, {
+        userId,
+        orgId: body.orgId,
+        name: body.name,
+        credential: body.credential,
+        now: Date.now()
+      });
+      if (!created) return json({ error: "conflict" }, 409);
+      if (!owner) this.setMeta("owner", userId);
+      return json({ ok: true });
+    }
+    if (url.pathname === "/credential/revoke" && request.method === "POST") {
+      const outcome = revokeCredential(this.ctx.storage.sql, userId, Date.now());
+      if (!outcome.ok) return json({ error: outcome.error }, outcome.error === "forbidden" ? 403 : 404);
+      // Cut the box off now; its next host join is refused below.
+      for (const ws of this.ctx.getWebSockets(HOST_TAG)) {
+        const state = ws.deserializeAttachment() as SocketState | null;
+        if (!state?.deviceToken) continue;
+        try {
+          ws.close(4403, "device credential revoked");
+        } catch {
+          /* already gone */
+        }
+      }
+      return json({ revokedAt: outcome.record.revokedAt });
+    }
+
     if (url.pathname === "/ws") {
       const role = url.searchParams.get("role") === "host" ? "host" : "client";
+      const deviceToken = request.headers.has(AUTH_DEVICE_HEADER);
       if (role === "host") {
+        // A cloud box's device token hosts only while its credential stands
+        // (the Worker already matched the token's device to this room).
+        if (deviceToken && !deviceTokenAdmitted(this.ctx.storage.sql, userId)) {
+          return new Response("forbidden", { status: 403 });
+        }
         // The device's own backend claims the room; the claim is the identity
         // anchor every later client join is checked against.
         if (!owner) this.setMeta("owner", userId);
@@ -174,7 +235,7 @@ export class DeviceRoom implements DurableObject {
       } else {
         this.ctx.acceptWebSocket(pair[1], [clientTag(connId)]);
       }
-      const state: SocketState = { userId, role, connId, joinedAt: Date.now(), nudgeAck: url.searchParams.get("nudgeAck") === "1", nudgeInflight: [] };
+      const state: SocketState = { userId, role, connId, deviceToken, joinedAt: Date.now(), nudgeAck: url.searchParams.get("nudgeAck") === "1", nudgeInflight: [] };
       pair[1].serializeAttachment(state);
       if (role === "host") this.replayNudges(pair[1]);
       return new Response(null, { status: 101, webSocket: pair[0] });

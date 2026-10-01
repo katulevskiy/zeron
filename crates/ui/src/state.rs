@@ -298,6 +298,7 @@ impl EngineHandle {
             org_id: config.org_id,
             workos_client_id: config.workos_client_id,
             dev_user_id: None,
+            device_credential: None,
         };
 
         // Own the data dir before opening anything under it or binding IPC —

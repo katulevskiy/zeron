@@ -456,6 +456,16 @@ fn on_close(state: &mut State, device: &str, peer: &Peer) {
     }
 }
 
+/// Close every host socket of `device` (a revoked cloud box). Clients learn
+/// through the usual `host_closed` once the socket's pump ends.
+pub(crate) fn close_hosts(state: &mut State, device: &str, code: u16, reason: &str) {
+    if let Some(room) = state.devices.get(device) {
+        for host in room.sockets.iter().filter(|s| s.role == Role::Host) {
+            host.peer.close(code, reason);
+        }
+    }
+}
+
 // ── HTTP surface ────────────────────────────────────────────────────────────
 
 /// Room claim + host join: the `/ws` gate. Clients may only join a claimed

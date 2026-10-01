@@ -4,11 +4,17 @@
  * token as `?token=` (WS clients cannot always set headers); plain requests
  * use `Authorization: Bearer`.
  *
+ * Edge-issued device tokens (`iss: "zeron-edge"`, docs/cloud.md §6) verify
+ * against the edge's own key and carry `deviceId`; they map to the SAME
+ * `userId`/`orgId` as the owning user, and `deviceTokenScope`
+ * (cloud-devices.ts) restricts which routes they may reach.
+ *
  * Workspace rooms (`ws/{orgId}`) authorize on the token's WorkOS organization
  * claim (`org_id`, present when the session was refreshed scoped to an org):
  * membership = claim equals the room's orgId.
  */
 import { createRemoteJWKSet, jwtVerify } from "jose";
+import { isDeviceToken, verifyDeviceToken } from "./device-tokens";
 import type { Env } from "./env";
 
 export interface Verified {
@@ -16,6 +22,8 @@ export interface Verified {
   readonly sessionId?: string;
   /** WorkOS `org_id` claim — the org the caller's session is scoped to. */
   readonly orgId?: string;
+  /** Set only for edge-issued device tokens: the cloud box's device id. */
+  readonly deviceId?: string;
 }
 
 const jwksCache = new Map<string, ReturnType<typeof createRemoteJWKSet>>();
@@ -37,6 +45,14 @@ export const bearerFromRequest = (request: Request): string | undefined => {
 };
 
 export const verifyToken = async (env: Env, token: string): Promise<Verified | undefined> => {
+  // Checked first in every auth mode: a token that names our issuer is ours
+  // to verify, and fails closed rather than being reinterpreted below.
+  if (isDeviceToken(token)) {
+    const device = await verifyDeviceToken(env, token);
+    return device
+      ? { userId: device.userId, orgId: device.orgId, deviceId: device.deviceId }
+      : undefined;
+  }
   if (env.AUTH_MODE === "dev") {
     // Dev mode mirrors the old apps/server: the bearer string IS the user id.
     // `userId@orgId` additionally carries a fake org claim so workspace-room

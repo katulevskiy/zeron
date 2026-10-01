@@ -86,6 +86,8 @@ export const handleAuthRoute = async (
     const token = bearerFromRequest(request);
     const caller = token ? await verifyToken(env, token) : undefined;
     if (!caller) return json({ error: "invalid or missing bearer token" }, 401);
+    // Cloud-box device tokens never act on the owner's WorkOS memberships.
+    if (caller.deviceId) return json({ error: "forbidden" }, 403);
     if (request.method === "GET") {
       try {
         return json({ orgs: await listOrgs(apiKey, caller.userId) });

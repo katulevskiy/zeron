@@ -210,6 +210,7 @@ async fn device(root: &Path, name: &str, edge_url: &str, script: &Arc<Script>, s
         org_id: None,
         workos_client_id: None,
         dev_user_id: None,
+        device_credential: None,
     }
     .with_local_edge(edge_url, TOKEN);
     let auth = Engine::build_auth(&config).await;

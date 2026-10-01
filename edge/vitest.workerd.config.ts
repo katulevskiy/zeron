@@ -18,6 +18,18 @@ export default defineConfig({
       main: "./test/workerd/fixture.ts",
       miniflare: {
         compatibilityDate: "2026-07-01",
+        bindings: {
+          AUTH_MODE: "dev",
+          WORKOS_CLIENT_ID: "unused-test-only",
+          // Test-only P-256 key for edge-issued device tokens (never deployed).
+          ZERON_DEVICE_JWT_KEY: JSON.stringify({
+            kty: "EC",
+            crv: "P-256",
+            x: "MwWP-rQAib_g5bIGmn9Wh-u1c9VKctZ7lrgn5iZ7hAM",
+            y: "50DKk1FuesG0cBadwn2s9mjKn-Jqzr75-wPVfoJs6gg",
+            d: "BDDdPZivUdHA8zShyV95Oheeth4S1UW9iZIA-SUbuns"
+          })
+        },
         durableObjects: {
           DEVICE_ROOMS: { className: "DeviceRoom", useSQLite: true },
           TEST_LOG: { className: "TestLogRoom", useSQLite: true },

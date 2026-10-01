@@ -89,6 +89,7 @@ pub(crate) fn open(dir: &Path) -> rusqlite::Result<Connection> {
     db.pragma_update(None, "synchronous", "NORMAL")?;
     db.busy_timeout(std::time::Duration::from_secs(5))?;
     db.execute_batch(SCHEMA)?;
+    db.execute_batch(crate::cloud::SCHEMA)?;
     Ok(db)
 }
 
