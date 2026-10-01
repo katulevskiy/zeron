@@ -18,6 +18,7 @@
 //! * `prompts` — actor instructions, approval text, completion message.
 
 mod core;
+pub mod demo;
 mod faults;
 mod governor;
 mod projection;

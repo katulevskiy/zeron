@@ -264,8 +264,12 @@ impl EngineCore {
         if std::env::var("ZERON_MOCK_GOAL").is_ok_and(|v| !v.is_empty() && v != "0") {
             doc_host.set_ask_backend(ask::demo_verifier());
         } else if std::env::var("ZERON_MOCK_WORKFLOW").is_ok_and(|v| !v.is_empty() && v != "0") {
-            // Dev knob: workflow agents are scripted (no model, no child chats).
-            doc_host.set_ask_backend(ask::demo_workflow_agents());
+            // Dev knob: workflow agents are scripted (no model); each actor
+            // still gets a real hidden child chat (`workflow::demo`).
+            doc_host.set_ask_backend(workflow::demo::DemoWorkflowAsk::new(
+                workspace.clone(),
+                doc_host.clone(),
+            ));
         }
         let workflows = workflow::WorkflowService::new(
             doc_host.clone(),

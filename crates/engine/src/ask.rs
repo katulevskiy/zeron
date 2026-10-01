@@ -1262,6 +1262,9 @@ pub enum FakeReply {
     Fail(AskError),
     /// Wait this long (or until cancelled), then play the inner reply.
     After(Duration, Box<FakeReply>),
+    /// Report these progress ticks `(delay, turns, tool_calls, last_tool)` as
+    /// the child "works", then play the inner reply.
+    Progress(Vec<(Duration, u32, u32, Option<String>)>, Box<FakeReply>),
     /// Never answer; resolves only when cancelled or the spec's timeout hits.
     Hang,
     /// Raise an escalation (needs [`AskSpec::escalation`]), wait for
@@ -1388,6 +1391,22 @@ impl AskBackend for FakeAsk {
                     tokio::select! {
                         _ = cancel.cancelled() => return Err(failure(AskError::Cancelled)),
                         _ = tokio::time::sleep(delay) => {}
+                    }
+                    reply = *inner;
+                }
+                FakeReply::Progress(ticks, inner) => {
+                    for (delay, turns, tool_calls, last_tool) in ticks {
+                        tokio::select! {
+                            _ = cancel.cancelled() => return Err(failure(AskError::Cancelled)),
+                            _ = tokio::time::sleep(delay) => {}
+                        }
+                        if let Some(hook) = &spec.progress {
+                            (hook.0)(AskProgress::Turn {
+                                turns,
+                                tool_calls,
+                                last_tool,
+                            });
+                        }
                     }
                     reply = *inner;
                 }
