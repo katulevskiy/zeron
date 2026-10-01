@@ -264,6 +264,15 @@ impl EngineCore {
         if std::env::var("ZERON_MOCK_GOAL").is_ok_and(|v| !v.is_empty() && v != "0") {
             doc_host.set_ask_backend(ask::demo_verifier());
         }
+        let workflows = workflow::WorkflowService::new(
+            doc_host.clone(),
+            sessions.clone(),
+            workspace.clone(),
+            profile.store_root(),
+        );
+        // Runs the last process left mid-flight are settled as interrupted.
+        workflows.reconcile();
+        doc_host.set_workflows(workflows);
         // Goals that were running when the engine last stopped resume here.
         doc_host.set_goal_index(profile.store_root().join("goals.json"));
         let repos = Repos::new(data_dir, &device_id);

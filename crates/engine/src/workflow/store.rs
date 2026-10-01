@@ -22,7 +22,7 @@ use std::sync::{Mutex, MutexGuard, PoisonError};
 use serde::{Deserialize, Serialize};
 use serde_json::Value;
 use zeron_proto::{
-    ArtifactKind, NodeKind, WorkflowBudgets, WorkflowEvent, WorkflowStatus, WorkflowStopReason,
+    ArtifactKind, WorkflowBudgets, WorkflowEvent, WorkflowStatus, WorkflowStopReason,
 };
 
 fn lock<T>(m: &Mutex<T>) -> MutexGuard<'_, T> {

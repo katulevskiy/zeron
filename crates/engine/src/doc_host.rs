@@ -291,6 +291,8 @@ struct DocHostInner {
     /// Child-ask runner (engine assembly). Severed on shutdown like
     /// `sessions`: it holds clones of the sessions and doc host.
     asks: Mutex<Option<crate::ask::AskService>>,
+    /// Dynamic-workflow runner (engine assembly); severed on shutdown.
+    workflows: Mutex<Option<crate::workflow::WorkflowService>>,
     /// A substitute backend for goal verification and other asks — tests and
     /// schedulers that fake the child chats.
     ask_override: Mutex<Option<Arc<dyn crate::ask::AskBackend>>>,
@@ -451,6 +453,7 @@ enum QueueSend {
 
 const ATTACHMENT_ONLY_PROMPT: &str = "See the attached image(s).";
 mod goal;
+mod workflow;
 
 const ATTACHMENT_PROMPT_HEADER: &str = "Attached images (local files — open them to view):";
 
@@ -952,6 +955,7 @@ impl DocHost {
                     .build()
                     .unwrap_or_else(|_| reqwest::Client::new()),
                 asks: Mutex::new(None),
+                workflows: Mutex::new(None),
                 ask_override: Mutex::new(None),
                 goal_runs: Mutex::new(HashMap::new()),
                 goal_index: OnceLock::new(),
@@ -1071,6 +1075,7 @@ impl DocHost {
         lock(&self.inner.seed_waiting).clear();
         lock(&self.inner.sessions).take();
         lock(&self.inner.asks).take();
+        lock(&self.inner.workflows).take();
         lock(&self.inner.ask_override).take();
         lock(&self.inner.goal_runs).clear();
     }

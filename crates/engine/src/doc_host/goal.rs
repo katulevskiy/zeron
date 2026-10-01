@@ -641,6 +641,11 @@ impl DocHost {
             Some(p) if !own_row_queued => self.round_view(handle, &p.message_id, session_errored),
             _ => (RoundOutcome::NotStarted, false),
         };
+        // A workflow the chat started is background work like a subagent:
+        // verifying now would judge a goal whose helpers are still running.
+        let workflow_running = self
+            .workflows()
+            .is_some_and(|w| w.has_running_run(&handle.chat_id));
         Observation {
             now_ms: now,
             turn_in_flight: sessions.turn_in_flight(&handle.chat_id),
@@ -648,7 +653,7 @@ impl DocHost {
             queue_has_rows: !queue.is_empty(),
             own_row_queued,
             round_outcome,
-            subagents_running,
+            subagents_running: subagents_running || workflow_running,
             read_only_chat: self
                 .workspace()
                 .and_then(|ws| ws.chat_config(&handle.chat_id))

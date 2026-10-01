@@ -810,6 +810,56 @@ impl SessionsEngine {
         Ok(true)
     }
 
+    /// Raise a question set in a chat that has a live run — an engine-side
+    /// twin of the harness' input bridge. The question reaches every client
+    /// exactly like a harness's (an `InputRequested` event, status
+    /// `AwaitingInput`) and is answered through `respond_input`. The receiver
+    /// yields the answers; an interrupt, or the run ending first, yields
+    /// nothing (`Err`) or an empty list, which callers treat as "no".
+    /// `None` when the chat has no live run to carry the question.
+    pub fn request_input(
+        &self,
+        chat_id: &str,
+        questions: Vec<UserInputQuestion>,
+    ) -> Option<oneshot::Receiver<Vec<UserInputAnswer>>> {
+        let (pending, engine_tx) = lock(&self.inner.runs)
+            .get(chat_id)
+            .map(|h| (h.pending_inputs.clone(), h.engine_tx.clone()))?;
+        let (answer_tx, answer_rx) = oneshot::channel();
+        let (mut tx, rx) = oneshot::channel();
+        let request_id = new_id();
+        lock(&pending).insert(request_id.clone(), answer_tx);
+        engine_tx
+            .send(AgentEvent::InputRequested {
+                request_id: request_id.clone(),
+                questions,
+            })
+            .ok()?;
+        tokio::spawn(async move {
+            tokio::select! {
+                answer = answer_rx => if let Ok(answer) = answer { let _ = tx.send(answer); },
+                _ = tx.closed() => {
+                    lock(&pending).remove(&request_id);
+                    let _ = engine_tx.send(AgentEvent::InputResolved { request_id });
+                }
+            }
+        });
+        Some(rx)
+    }
+
+    /// The harness implementation for `id`, as a run would resolve it.
+    pub fn resolve_harness(
+        &self,
+        id: HarnessId,
+    ) -> Result<Arc<dyn zeron_harness::Harness>, zeron_harness::HarnessError> {
+        self.inner.registry.resolve(id)
+    }
+
+    /// The harness catalog as `ListHarnesses` reports it.
+    pub fn harness_descriptors(&self) -> Vec<HarnessDescriptor> {
+        self.inner.registry.descriptors()
+    }
+
     /// Resolve a pending `request_input` question set. Returns `false` when no such
     /// request is pending (unknown id, or the run already settled).
     pub fn respond_input(
