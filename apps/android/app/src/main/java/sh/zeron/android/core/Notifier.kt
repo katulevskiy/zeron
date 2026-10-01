@@ -112,6 +112,12 @@ class Notifier(
     }
 
     /**
+     * The channel of a notification that has no kind of its own (a finished save): the completion chime is the app's
+     * default sound, with the Completion switch and the vibration setting choosing the variant, like the session ones.
+     */
+    private fun completionChannel(sound: Boolean, vibrate: Boolean): String = ensureChannel(Kind.Done, sound, vibrate)
+
+    /**
      * Remove alert channels left by other versions (their sounds cannot be
      * edited in place), and the unversioned `sessions` / `transfers` channels
      * of earlier builds.
@@ -264,11 +270,15 @@ class Notifier(
     }
 
     /** Save to Downloads from the developer tools: progress, then where it landed. */
-    fun download(id: String, title: String, text: String, fraction: Float?, done: Boolean, open: Intent? = null) {
+    fun download(id: String, title: String, text: String, fraction: Float?, done: Boolean, open: Intent? = null, ok: Boolean = true) {
         val tap = open?.let {
             PendingIntent.getActivity(context, "download:$id".hashCode(), it.addFlags(Intent.FLAG_ACTIVITY_NEW_TASK), PendingIntent.FLAG_IMMUTABLE or PendingIntent.FLAG_UPDATE_CURRENT)
         }
-        val n = NotificationCompat.Builder(context, DOWNLOADS_CHANNEL)
+        // Progress stays quiet. A finished save has no kind of its own, so it plays the app's default sound: the
+        // completion chime (on the Done channel, under the same switches). A failed one stays silent.
+        val s = settings()
+        val channel = if (done && ok) completionChannel(s.allows(Kind.Done.category), s.hapticsOn) else DOWNLOADS_CHANNEL
+        val n = NotificationCompat.Builder(context, channel)
             .setSmallIcon(R.drawable.ic_stat_zeron)
             .setContentTitle(title)
             .setContentText(text)

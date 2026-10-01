@@ -49,7 +49,7 @@ Asset QA: [android-audit.md](android-audit.md).
 | Haptics | Needs the **Haptics** switch and a vibrator. |
 | Sounds | Needs the **Sounds** switch and the category switch (Interface, or Session sounds with Completion / Input required / Errors). |
 | Not consulted | With the master on, the phone's *Touch sounds* and *Touch feedback* settings, the ringer mode and Do Not Disturb are **not** read: the user said play, so the app does not second-guess it. The only thing left outside the app is physical: Android itself may still mute the audio stream (silent or vibrate mode and total-silence Do Not Disturb mute the system-sound stream, volume zero is silence); see "If you hear nothing". |
-| No audio focus | Cues are `USAGE_ASSISTANCE_SONIFICATION` / `CONTENT_TYPE_SONIFICATION` and never take focus, so music keeps playing and nothing ducks. |
+| No audio focus | Cues are `USAGE_GAME` / `CONTENT_TYPE_SONIFICATION` (game sound effects: media volume, capturable by screen recorders) and never take focus, so music keeps playing and nothing ducks. |
 | Rate limits | The same cue never stacks inside its own gap (60 to 400 ms by cue); any two cues of equal or lower priority keep 20 ms apart; at most 4 concurrent streams (a more important cue still gets in); the same haptic is coalesced (70 ms for ticks up to 400 ms for alerts); at most 12 light haptics per second; any alert cuts through light ticks. |
 | Order | Wherever a sound and a haptic belong to the same moment, the **sound is issued first**, then the haptic, from the same synchronous call (`Feedback.both`, `Feedback.play`, the default tap, previews). See Latency. |
 | Default tap | Plain controls answer `Select` + `Tap` *after* their action; if the action asked for feedback of its own (a toggle, a menu item, a navigation's Open cue) the default stays out of the way. Menus and popovers close silently after a chosen item. |
@@ -247,10 +247,8 @@ sounds are immutable, are recreated. The system's notification volume still appl
 have 10 to 18 dB of peak room (mastered by loudness, not by peak, as asked: the set is
 not squashed against the ceiling), the chimes have none. `SoundPool` volume is capped
 at 1.0 and cannot be amplified. `LoudnessEnhancer` cannot be attached to a
-`SoundPool`'s internal session. Playing as `USAGE_GAME` / `USAGE_MEDIA` would follow the
-media volume (often set higher than the system-sound volume) and ignore silent mode,
-but it changes which slider governs the sounds and cannot be judged without a phone;
-not done.
+`SoundPool`'s internal session. (Playing as `USAGE_GAME` does follow the media volume,
+often set higher than the system-sound volume; see "Screen recording".)
 
 **Migration.** `FeedbackSettingsCodec.migrate` runs once, keyed on `feedback.prefs_version`
 (now 3), and **resets the stored volume to the new default 50%** (no attempt to preserve
@@ -274,7 +272,7 @@ prove the changes, only a phone proves the milliseconds).
 | Output standby | after a few seconds with no stream the audio output goes to standby, and waking it takes tens of ms on many phones (more over Bluetooth): the first sound after a pause came late | a silent looped stream (`silence_keepalive.wav`) keeps the mixer running; started on a finger-down anywhere (`MainActivity.dispatchTouchEvent` to `AndroidFeedback.onTouchDown`, so it is up before the click that sounds), stopped 12 s after the last touch or when the app leaves the foreground (`WarmPolicy`) |
 | First play per stream | `SoundPool` creates a stream's `AudioTrack` at its first `play`: a few ms the first four cues paid | after the last sample loads, four silent (-60 dB) plays of the shortest cue create all four tracks (`SoundBank.prime`). The pool has one stream more than the gate allows, for the keep-alive loop |
 | Sample rate | assets are 48 kHz; a mixer at another rate must resample every cue and loses the fast path | `AudioManager.PROPERTY_OUTPUT_SAMPLE_RATE` is read at start (logged: `outputRate=`); at 48 kHz (every current phone) nothing changes; otherwise each asset is resampled once to the output rate with a Catmull-Rom interpolator into `cacheDir/sounds-<rate>-<install time>` and loaded from there |
-| Attributes | `USAGE_ASSISTANCE_SONIFICATION` only | plus `FLAG_LOW_LATENCY` (deprecated since 29, still read by the audio policy, which then selects the fast output; `SoundPool` has no performance-mode API) |
+| Attributes | `USAGE_ASSISTANCE_SONIFICATION` only | `USAGE_GAME` (see "Screen recording") plus `FLAG_LOW_LATENCY` (deprecated since 29, still read by the audio policy, which then selects the fast output; `SoundPool` has no performance-mode API) |
 | Leading silence in the files | 1.1 to 8.2 ms before the sound reaches -40 dB re peak (Archive 8.2; the promoted desktop cues 7.3 to 7.5; Open 3.3), measured by the audit | every file is trimmed to a 0.25 ms lead-in with a click-free fade from exact zero; the audit and `LatencyTest` assert onset within 1 ms for every `fx_` file. The desktop originals keep their 7 ms (they are no longer shipped: the notification channels use the trimmed `fx_chime_*`) |
 | Loading | `onLoadComplete` was tracked; a cue that was not ready yet was dropped (`NotLoaded`) | unchanged: dropping is right (a late sound is worse than none); loading is one background thread at start |
 
@@ -286,21 +284,32 @@ more files).
 
 ## If you hear nothing
 
-Zeron's sounds are played by the app itself as *interface sonification*, the same
-channel the keyboard clicks use. With **Sounds & haptics** on, the app plays them
-whatever the phone's *Touch sounds*, ringer or Do Not Disturb settings say; what is
-left is physical. Check, in this order:
+Zeron's sounds are played by the app itself as *game sound effects* (`USAGE_GAME`):
+they follow the phone's **Media** volume, the way a game's do. With **Sounds & haptics**
+on, the app plays them whatever the phone's *Touch sounds*, ringer or Do Not Disturb
+settings say; what is left is physical. Check, in this order:
 
 1. Settings, Sounds & haptics: the top **Sounds & haptics** switch, **Sounds** and
    **Interface sounds** are on, and the page is not greyed out.
-2. Raise the phone's **system / touch sound volume** (the "Ring / System" slider, not
-   Media): at zero the audio stream itself is silent, and Android also mutes the
-   system-sound stream in silent or vibrate mode and in total-silence Do Not Disturb.
-   Zeron does not check any of this and has nothing to override it with.
+2. Raise the phone's **Media volume**: at zero the audio stream itself is silent.
 3. Zeron's own **Volume** slider is above 0%.
 
 There is no warning on the page and no override: the switches are the single source
 of truth. Haptics are the same: the phone's *Touch feedback* setting is not read.
+
+## Screen recording
+
+Reported on a Samsung: starting the screen recorder silenced Zeron's sounds, on the
+phone and in the recording, until it stopped. The cues used to be played as
+`USAGE_ASSISTANCE_SONIFICATION`, the OS's *system sound* path (the one for keyboard
+clicks and touch sounds). That path cannot be captured by `MediaProjection` playback
+capture (only media, game and unknown usages can), and One UI's recorder takes it
+over while it records. Cues are now `USAGE_GAME` with `ALLOW_CAPTURE_BY_ALL`: they
+play on the phone's speaker during a recording and are part of its "Media sounds"
+track. This could not be reproduced here (no Samsung, no audio on the emulators); the
+change is based on how the audio policy treats the usage. Side effects: the **Media**
+volume now governs them (not the system-sound volume), and the ringer mode no longer
+mutes them (the master switch is the single source of truth, as before).
 
 ## Where each event goes
 
@@ -310,6 +319,7 @@ of truth. Haptics are the same: the phone's *Touch feedback* setting is not read
 | Question / approval | `Attention` + `Request` (Input switch) | notification, `fx_chime_request`, 18-90-18 |
 | Session failed | `Error` + `Attention` (Errors switch) | notification, `fx_chime_attention`, 35-55-45 |
 | Connection lost mid-turn | `Attention` + `Attention` | nothing (nobody can hear it) |
+| A save to Downloads finished | `Success` + `UploadReady` | notification on the completion channel: the app's default sound is the completion chime (`fx_chime_done`), under the Completion and Haptics switches; progress and failures stay silent |
 | Connection restored | `Confirm` + `Reconnected`, only if the loss was announced | nothing |
 | Another device asks to send files | `Attention` + `Request` (Input switch) | notification with Accept / Decline, `fx_request`, 18-90-18 |
 | Files arrived (or this phone's send completed) | `Success` + `UploadReady` (a send completing is in-app only) | notification, `fx_done`, 24-40-30 |
