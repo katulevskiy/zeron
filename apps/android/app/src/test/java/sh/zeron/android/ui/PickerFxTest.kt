@@ -304,9 +304,241 @@ class LightningTest {
         assertTrue(LightningFx.intensity(0.9f) < 0.1f)
     }
 
-    @Test fun strikeGapsAreBetweenEightyAndOneEightyAndOutlastTheFlash() {
-        assertEquals(0.8f, LightningFx.gapSeconds(0f), 1e-6f)
-        assertEquals(1.8f, LightningFx.gapSeconds(1f), 1e-6f)
-        assertTrue(LightningFx.LIFE_SECONDS < LightningFx.gapSeconds(0f))
+    @Test fun theBloomFadesOutSmoothlyToNothing() {
+        // After the flicker the glow only ever dims, and it reaches zero without a pop at the end of the strike.
+        var last = LightningFx.intensity(0.45f)
+        for (i in 451..999) {
+            val v = LightningFx.intensity(i / 1000f)
+            assertTrue("dims at $i", v <= last + 1e-6f)
+            last = v
+        }
+        assertTrue(LightningFx.intensity(0.999f) < 0.001f)
+        // It is still visibly lit most of the way through, then gone: a fade of 0.7 to 1.0 s, not a blink.
+        assertTrue(LightningFx.intensity(0.5f) > 0.05f)
+        assertTrue(LightningFx.LIFE_SECONDS in 0.7f..1.0f)
+    }
+
+    @Test fun ageRunsFromZeroToOneOverTheStrikesLifeAndStaysThere() {
+        assertEquals(0f, LightningFx.ageAt(0), 0f)
+        assertEquals(0.5f, LightningFx.ageAt((LightningFx.LIFE_SECONDS * 0.5e9f).toLong()), 1e-3f)
+        assertEquals(1f, LightningFx.ageAt((LightningFx.LIFE_SECONDS * 1e9f).toLong()), 1e-6f)
+        assertEquals(1f, LightningFx.ageAt(60_000_000_000L), 0f)
+        assertEquals(0f, LightningFx.intensity(LightningFx.ageAt(60_000_000_000L)), 0f)
+    }
+
+    @Test fun aStrikeHappensOnlyWhenFastIsSwitchedOn() {
+        // Opening the picker with fast already on (first composition): nothing.
+        assertFalse(LightningFx.strikes(first = true, was = true, now = true))
+        assertFalse(LightningFx.strikes(first = true, was = false, now = false))
+        // Switched on afterwards: strikes. Off, or unchanged: no.
+        assertTrue(LightningFx.strikes(first = false, was = false, now = true))
+        assertFalse(LightningFx.strikes(first = false, was = true, now = false))
+        assertFalse(LightningFx.strikes(first = false, was = true, now = true))
+        // Off and on again strikes again.
+        assertTrue(LightningFx.strikes(first = false, was = false, now = true))
+    }
+
+    @Test fun seedsAreDeterministicAndEveryStrikeLooksDifferent() {
+        assertEquals(LightningFx.seedFor(1, 99L), LightningFx.seedFor(1, 99L))
+        val seeds = (1..50).map { LightningFx.seedFor(it, 12345L) }
+        assertEquals(50, seeds.toSet().size)
+        assertNotEquals(LightningFx.seedFor(1, 1L), LightningFx.seedFor(1, 2L))
+        // And different seeds draw different bolts.
+        fun dump(seed: Long) = BoltBuffer().also { Lightning.generate(seed, 300f, 60f, 344f, 300f, it) }.let { b -> (0 until b.count).map { b.x2[it] } }
+        assertNotEquals(dump(seeds[0]), dump(seeds[1]))
+    }
+}
+
+class EffortDragTest {
+    private val n = 5
+    private val maxStretch = 0.1f
+
+    private fun target(p: Float) = EffortDrag.target(p, n, maxStretch)
+
+    @Test fun theThumbIsAtTheLevelAtEveryLevelAndMidwayAtEveryMidpoint() {
+        for (i in 0 until n) assertEquals(i.toFloat(), target(i.toFloat()), 1e-6f)
+        for (i in 0 until n - 1) assertEquals(i + 0.5f, target(i + 0.5f), 1e-5f)
+    }
+
+    @Test fun theMappingIsMonotonicAndContinuousEverywhereEvenOverTheEnds() {
+        var last = target(-3f)
+        var p = -3f
+        while (p <= n + 3f) {
+            val v = target(p)
+            assertTrue("monotonic at $p", v >= last - 1e-6f)
+            assertTrue("no jump at $p", v - last < 0.02f)
+            last = v
+            p += 0.001f
+        }
+    }
+
+    @Test fun theThumbIsStickyInsideEachWell() {
+        val well = EffortTuning.WELL_FRACTION
+        for (i in 0 until n) {
+            for (d in listOf(-well, -0.2f, -0.05f, 0f, 0.05f, 0.2f, well)) {
+                val p = i + d
+                if (p < 0f || p > n - 1) continue
+                assertEquals("p=$p", i.toFloat(), target(p), 1e-5f)
+            }
+        }
+        // Leaving the well it follows, crossing the gap in the remaining quarter of a step.
+        assertTrue(target(1f + well + 0.05f) > 1.02f)
+        assertEquals(2f, target(1f + 1f - well), 1e-5f)
+    }
+
+    @Test fun theWellIsAboutFortyPercentOfAStepAndMatchesTheHysteresis() {
+        assertTrue(EffortTuning.WELL_FRACTION in 0.3f..0.5f)
+        // The thumb lands on the next level just as the selection flips (0.5 + hysteresis).
+        assertEquals(0.5f, EffortTuning.WELL_FRACTION + EffortScale.HYSTERESIS, 1e-6f)
+    }
+
+    @Test fun theEndsRubberBandOnlyBeyondTheLastWellAndCannotExceedTheMaximum() {
+        val last = (n - 1).toFloat()
+        assertEquals(last, target(last + EffortTuning.WELL_FRACTION), 1e-6f)
+        assertEquals(0f, target(-EffortTuning.WELL_FRACTION), 1e-6f)
+        assertTrue(target(last + EffortTuning.WELL_FRACTION + 0.05f) > last)
+        assertTrue(target(-EffortTuning.WELL_FRACTION - 0.05f) < 0f)
+        assertTrue(target(last + 50f) <= last + maxStretch)
+        assertTrue(target(-50f) >= -maxStretch)
+        // Continuous where the staircase hands over to the band (value and no step).
+        assertEquals(target(last + EffortTuning.WELL_FRACTION), target(last + EffortTuning.WELL_FRACTION + 1e-4f), 1e-3f)
+        // Symmetric between the two ends.
+        assertEquals(target(last + 0.7f) - last, -target(-0.7f), 1e-6f)
+    }
+
+    @Test fun theFingerIsSpeedLimitedSoAFlickCannotSkipLevels() {
+        // A finger that jumps from Low to Ultrathink at once: the effective position still advances one step per ~133 ms.
+        var p = 0f
+        var elapsed = 0f
+        val dt = 1f / 60f
+        var levelsAt150ms = -1
+        var levelsAt300ms = -1
+        while (elapsed < 2f) {
+            p = EffortDrag.advance(p, finger = 4f, dt = dt)
+            elapsed += dt
+            val level = EffortScale.nearestStep((p / 4f).coerceIn(0f, 1f), 5)
+            if (levelsAt150ms < 0 && elapsed >= 0.15f) levelsAt150ms = level
+            if (levelsAt300ms < 0 && elapsed >= 0.3f) levelsAt300ms = level
+            if (p >= 4f) break
+        }
+        assertTrue("one or two levels in a 150 ms flick: $levelsAt150ms", levelsAt150ms in 1..2)
+        assertTrue("two or three in 300 ms: $levelsAt300ms", levelsAt300ms in 2..3)
+        // But a deliberate drag across the whole bar still arrives in about a second.
+        assertTrue("whole bar in under 1 s: $elapsed", elapsed < 1f)
+        // Never more than the budget in a single frame, in either direction.
+        assertEquals(EffortTuning.MAX_STEPS_PER_SECOND * dt, EffortDrag.advance(0f, 100f, dt), 1e-6f)
+        assertEquals(-EffortTuning.MAX_STEPS_PER_SECOND * dt, EffortDrag.advance(0f, -100f, dt), 1e-6f)
+        // A finger slower than the limit is followed exactly.
+        assertEquals(0.05f, EffortDrag.advance(0f, 0.05f, dt), 1e-6f)
+    }
+
+    @Test fun selectionNeverRunsAheadOfTheMovementBudget() {
+        // Whatever the finger does, the selection after t seconds is within MAX_STEPS_PER_SECOND * t + 1 of the start.
+        val dt = 1f / 120f
+        var p = 2f
+        var t = 0f
+        for (finger in listOf(-20f, 20f, 0f, 9f)) {
+            repeat(60) {
+                p = EffortDrag.advance(p, finger, dt)
+                t += dt
+                assertTrue(kotlin.math.abs(p - 2f) <= EffortTuning.MAX_STEPS_PER_SECOND * t + 1e-4f)
+            }
+        }
+    }
+
+    @Test fun theSpringSettlesOnItsTargetWithALittleGiveAndStaysBounded() {
+        val s = ThumbSpring(0f)
+        var peak = 0f
+        for (i in 0 until 600) {
+            s.step(1f, 1f / 60f, EffortTuning.SETTLE_STIFFNESS, EffortTuning.SETTLE_DAMPING_RATIO)
+            peak = maxOf(peak, s.x)
+        }
+        assertTrue(s.isSettled(1f))
+        assertTrue("slight overshoot ($peak)", peak > 1.0f && peak < 1.15f)
+        // Stable even with one very long frame.
+        val t = ThumbSpring(0f)
+        t.step(1f, 0.5f, EffortTuning.REBOUND_STIFFNESS, EffortTuning.REBOUND_DAMPING_RATIO)
+        assertTrue(t.x.isFinite() && kotlin.math.abs(t.x) < 3f)
+    }
+}
+
+class EffortGeometryTest {
+    // The real slider: a 56 dp thumb on a 34 dp rail, five levels, 330 px rail.
+    private val half = 28f
+    private val rail = 34f
+    private val width = 330f
+    private val inset = half
+    private val travel = width - 2 * inset
+    private val n = 5
+
+    private fun fillRight(x: Float): Float {
+        val c = EffortGeometry.centre(x, n, inset, travel)
+        return EffortGeometry.fillRight(c, EffortGeometry.thumbHalf(half, EffortGeometry.stretch(x, n, travel)), rail)
+    }
+
+    @Test fun theFillEndStaysBetweenTheThumbCentreAndTheThumbsFarEdgeAtEveryStretchOnBothEnds() {
+        // Positions from the maximum stretch past the first level to the maximum stretch past the last, and back.
+        val maxPx = EffortFx.MAX_STRETCH_DP
+        val stepPx = travel / (n - 1)
+        var x = -maxPx / stepPx
+        while (x <= (n - 1) + maxPx / stepPx) {
+            val c = EffortGeometry.centre(x, n, inset, travel)
+            val pull = EffortGeometry.stretch(x, n, travel)
+            val thumbHalf = EffortGeometry.thumbHalf(half, pull)
+            val end = fillRight(x)
+            assertTrue("never shorter than the centre at x=$x ($end < $c)", end >= c - 1e-4f)
+            assertTrue("never past the thumb at x=$x ($end > ${c + thumbHalf})", end <= c + thumbHalf + 1e-4f)
+            // Round: the capsule is never narrower than tall, so the right cap is a full semicircle.
+            assertTrue("at least a full capsule at x=$x", end >= rail - 1e-4f)
+            // The cap is covered by the thumb's own rounded end: the fill's rightmost point lies inside the thumb.
+            assertTrue(end - c <= thumbHalf)
+            x += 0.002f
+        }
+    }
+
+    @Test fun theFillEndFollowsTheThumbSmoothlyWithNoJumpAcrossTheEnd() {
+        var last = fillRight(3f)
+        var x = 3f
+        while (x <= 4.5f) {
+            val v = fillRight(x)
+            assertTrue("no jump at $x", kotlin.math.abs(v - last) < 1f)
+            last = v
+            x += 0.001f
+        }
+        last = fillRight(1f)
+        x = 1f
+        while (x >= -0.5f) {
+            val v = fillRight(x)
+            assertTrue("no jump at $x", kotlin.math.abs(v - last) < 1f)
+            last = v
+            x -= 0.001f
+        }
+    }
+
+    @Test fun stretchIsZeroBetweenTheStopsAndMeasuredFromTheNearestEnd() {
+        assertEquals(0f, EffortGeometry.stretch(0f, n, travel), 0f)
+        assertEquals(0f, EffortGeometry.stretch(2.5f, n, travel), 0f)
+        assertEquals(0f, EffortGeometry.stretch(4f, n, travel), 0f)
+        val stepPx = travel / (n - 1)
+        assertEquals(0.1f * stepPx, EffortGeometry.stretch(4.1f, n, travel), 1e-4f)
+        assertEquals(0.1f * stepPx, EffortGeometry.stretch(-0.1f, n, travel), 1e-4f)
+        // The rebound spring swinging back inside the last stop is not a stretch.
+        assertEquals(0f, EffortGeometry.stretch(3.95f, n, travel), 0f)
+    }
+
+    @Test fun theCentreRunsFromTheFirstStopToTheLast() {
+        assertEquals(inset, EffortGeometry.centre(0f, n, inset, travel), 1e-4f)
+        assertEquals(width - inset, EffortGeometry.centre(4f, n, inset, travel), 1e-4f)
+        assertEquals(inset, EffortGeometry.centre(2f, 1, inset, travel), 0f)
+    }
+
+    @Test fun reboundStaysACapsuleWhenTheSpringSwingsInsideTheEnd() {
+        // The old bug: swinging inside the last stop left a square-ended fill and a gap. Now the fill end is
+        // always a capsule end a rail-radius (or less) beyond the centre, whatever side of the stop the thumb is on.
+        for (x in listOf(3.8f, 3.9f, 3.97f, 4f, 4.05f, 4.1f)) {
+            val c = EffortGeometry.centre(x, n, inset, travel)
+            val end = fillRight(x)
+            assertTrue("x=$x", end - c in 0f..(rail / 2 + 1e-3f))
+        }
     }
 }

@@ -211,16 +211,27 @@ class ArrivalTracker {
     }
 }
 
-/** Smooth 0..1 envelope for one lightning strike: a hard first flash, two weaker restrikes, then decay. */
+/**
+ * One lightning strike as pure functions: its brightness over its life, its seed and when a strike happens at all.
+ * Fast mode strikes ONCE when it is switched on; nothing is drawn or animated afterwards.
+ */
 object LightningFx {
+    /**
+     * Brightness 0..1 at [age] (0 at the first frame, 1 when the strike is over): a hard first flash, two weaker
+     * restrikes (the flicker) and a bloom that fades out to nothing. Zero outside 0 until 1, continuous into it.
+     */
     fun intensity(age: Float): Float {
         if (age < 0f || age >= 1f) return 0f
         val main = pulse(age, 0f, 0.09f)
         val second = 0.75f * pulse(age, 0.14f, 0.10f)
         val third = 0.5f * pulse(age, 0.30f, 0.16f)
-        val fade = 1f - age
-        return (maxOf(main, second, third) * fade).coerceIn(0f, 1f)
+        val rest = 1f - age
+        // The afterglow: a soft bloom that lingers under the flicker and dies away smoothly.
+        val glow = AFTERGLOW * rest * rest
+        return (maxOf(main, second, third, glow) * rest).coerceIn(0f, 1f)
     }
+
+    private const val AFTERGLOW = 0.45f
 
     private fun pulse(age: Float, at: Float, width: Float): Float {
         if (age < at) return 0f
@@ -230,9 +241,26 @@ object LightningFx {
         return exp(-d / width) * rise
     }
 
-    /** Seconds from one strike's start to the next, 0.8..1.8, from a 0..1 roll. */
-    fun gapSeconds(roll: Float): Float = 0.8f + 1.0f * roll.coerceIn(0f, 1f)
+    /** How long a strike lasts from its first frame to the last, s: flash, flicker and the bloom fading out. */
+    const val LIFE_SECONDS = 0.9f
 
-    /** How long one strike stays visible, s (must stay under the shortest gap). */
-    const val LIFE_SECONDS = 0.72f
+    /** With reduced motion: how long the single still frame (at the flash's peak) stays up, ms. */
+    const val STILL_MILLIS = 450L
+
+    /** The strike's age, 0..1, [elapsedNanos] after its first frame. */
+    fun ageAt(elapsedNanos: Long): Float = (elapsedNanos / 1e9f / LIFE_SECONDS).coerceIn(0f, 1f)
+
+    /**
+     * Whether a change of fast mode from [was] to [now] strikes: only on switching it ON. Opening the picker with
+     * fast already on ([first] composition) shows nothing, and switching off strikes nothing either.
+     */
+    fun strikes(first: Boolean, was: Boolean, now: Boolean): Boolean = !first && !was && now
+
+    /** A strike's seed from its running number and some [entropy]: well mixed, so consecutive strikes look different. */
+    fun seedFor(strike: Int, entropy: Long): Long {
+        var z = entropy + strike * -0x61c8864680b583ebL
+        z = (z xor (z ushr 30)) * -0x40a7b892e31b1a47L
+        z = (z xor (z ushr 27)) * -0x6b2fb644ecceee15L
+        return z xor (z ushr 31)
+    }
 }
