@@ -316,7 +316,7 @@ describe("device-first New project flow (spaces.rs project_flow_tests)", () => {
     localDeviceId: string | null = null,
   ): EngineSession {
     return {
-      engine: { baseUrl: "https://engine.test", credential: "cred" },
+      engine: { key: "engine-local", endpoint: "wss://relay.test/local/ws", label: "Local", deviceId: localDeviceId ?? "d-local" },
       client: {
         engineInfo: { deviceId: localDeviceId },
         call: (method: string, params: Record<string, unknown>): Promise<unknown> => {
@@ -358,7 +358,7 @@ describe("device-first New project flow (spaces.rs project_flow_tests)", () => {
     try {
       const devices = [device("d-local", "Studio"), device("d-remote", "Server")];
       const calls: Array<{ method: string; params: Record<string, unknown> }> = [];
-      addSpaceStore.attach({ session: fakeSession(devices, calls, "d-local"), goToCanvas: () => {} });
+      addSpaceStore.attach({ session: fakeSession(devices, calls, "d-remote"), goToCanvas: () => {} });
 
       // The Devices step: no pick, no loads — the query filters the list.
       addSpaceStore.open();
@@ -457,10 +457,10 @@ describe("device-first New project flow (spaces.rs project_flow_tests)", () => {
       const remoteBase = fakeSession([device("ovh", "OVH")], remoteCalls, "ovh");
       const remote = {
         ...remoteBase,
-        engine: { ...remoteBase.engine, baseUrl: remoteKey },
+        engine: { ...remoteBase.engine, key: remoteKey },
         cache: { getSnapshot: () => ({ devices: { rows: [device("ovh", "OVH")] }, spaces: { rows: [] } }) },
       } as unknown as EngineSession;
-      const sessions = new Map([[local.engine.baseUrl, local], [remoteKey, remote]]);
+      const sessions = new Map([[local.engine.key, local], [remoteKey, remote]]);
       addSpaceStore.attach({ session: local, sessions, goToCanvas: () => {} });
       addSpaceStore.open();
       addSpaceStore.pickDevice(encodeScopedId(remoteKey, "ovh"));
@@ -484,7 +484,7 @@ describe("device-first New project flow (spaces.rs project_flow_tests)", () => {
     try {
       const calls: Array<{ method: string; params: Record<string, unknown> }> = [];
       const local = fakeSession([device("threadripper", "Threadripper")], calls, "threadripper");
-      addSpaceStore.attach({ session: local, sessions: new Map([[local.engine.baseUrl, local]]), goToCanvas: () => {} });
+      addSpaceStore.attach({ session: local, sessions: new Map([[local.engine.key, local]]), goToCanvas: () => {} });
       addSpaceStore.open();
       addSpaceStore.pickDevice(encodeScopedId("https://missing.test", "ovh"));
       addSpaceStore.gotoLocation("Home", null);
@@ -511,5 +511,18 @@ describe("device-first New project flow (spaces.rs project_flow_tests)", () => {
     } finally {
       cleanup();
     }
+  });
+  it("rejects a device id that does not match the selected connection, even when scoped", async () => {
+    try {
+      const calls: Array<{ method: string; params: Record<string, unknown> }> = [];
+      const local = fakeSession([device("threadripper", "Threadripper")], calls, "threadripper");
+      addSpaceStore.attach({ session: local, sessions: new Map([[local.engine.key, local]]), goToCanvas: () => {} });
+      addSpaceStore.open();
+      addSpaceStore.pickDevice(encodeScopedId(local.engine.key, "ovh"));
+      addSpaceStore.gotoLocation("Home", null);
+      await flush();
+      expect(calls).toEqual([]);
+      expect(addSpaceStore.getSnapshot().flow?.listing).toEqual({ error: "Device is not connected" });
+    } finally { cleanup(); }
   });
 });

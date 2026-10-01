@@ -1,4 +1,4 @@
-import { useEffect, useRef } from "react";
+import { useEffect, useRef, useState } from "react";
 import type { ReactNode, RefObject } from "react";
 import { useNavigate } from "@tanstack/react-router";
 import { Icon, type IconName } from "@zeron/icons";
@@ -15,6 +15,7 @@ import {
   filteredFolders,
   highlightRanges,
   locationRows,
+  manualPathQuery,
   pathUnder,
   type LocationRowEntry,
 } from "../lib/add-space";
@@ -25,7 +26,7 @@ import {
   type AddSpaceStep,
 } from "../state/add-space";
 import { isMacPlatform } from "../state/shortcuts";
-import { ESCAPE_PRIORITY, registerEscapeSurface } from "../state/escape";
+import { ESCAPE_PRIORITY } from "../state/escape";
 import { RbDialogGlass } from "./base/dialog";
 import { KeyCap, KeyHintPair, KeyHintText } from "./ui/KeyHint";
 import { MenuRowNav } from "./ui/MenuRows";
@@ -121,30 +122,6 @@ export function AddSpacePalette() {
   // is not an unmount, and an open flow stays open.
   useEffect(() => () => addSpaceStore.forceClose(), []);
 
-  // The shell's Escape ladder owns Escape at the reserved addSpace
-  // priority — one capture-phase handler, so the focused input's own
-  // keydown never sees the key (no double close).
-  useEffect(() => {
-    if (state.status === "closed") {
-      return;
-    }
-    return registerEscapeSurface(ESCAPE_PRIORITY.addSpace, () => {
-      if (state.status === "open") {
-        addSpaceStore.close();
-      }
-      // Consumed either way — closing still counts; a second Escape in the
-      // exit window must not fall through to the chat interrupt.
-      return true;
-    });
-  }, [state.status]);
-
-  // `focus_pending`: the search input takes focus on open.
-  useEffect(() => {
-    if (state.status === "open") {
-      inputRef.current?.focus({ preventScroll: true });
-    }
-  }, [state.status]);
-
   const flow = state.flow;
   if (state.status === "closed" || flow === null) {
     return null;
@@ -176,6 +153,8 @@ export function AddSpacePalette() {
       // claim holds until the layer is truly gone — a jump firing under a
       // still-visible scrim would strand it (ticket 11's comment).
       overlayOpen
+      escapePriority={ESCAPE_PRIORITY.addSpace}
+      initialFocus={inputRef}
       backdropClassName="add-space-backdrop"
       cardClassName="add-space-frost"
     >
@@ -183,7 +162,8 @@ export function AddSpacePalette() {
         <Header flow={flow} inputRef={inputRef} />
         <Crumbs flow={flow} device={device} />
         <Results flow={flow} devices={devices} now={now} engineStates={engineStates} listRef={listRef} />
-        {flow.error !== null && <div className="add-space-error">{flow.error}</div>}
+        {flow.error !== null && <div role="alert" className="add-space-error">{flow.error}</div>}
+        {flow.step === "folders" && <CreateRepository key={`${flow.identity}:${flow.deviceId}`} flow={flow} />}
         <Footer flow={flow} />
       </div>
     </RbDialogGlass>
@@ -454,6 +434,15 @@ function Results(props: {
   }
 
   // Folders.
+  if (manualPathQuery(flow.query)) {
+    return (
+      <div className="add-space-list-state" style={{ padding: "20px", overflowWrap: "anywhere" }}>
+        {flow.manualPath !== null
+          ? <span>Folder verified on this device: {flow.manualPath.path}</span>
+          : <span>{flow.error === null ? "Checking this folder…" : "Choose an existing folder or explicitly create a managed repository below."}</span>}
+      </div>
+    );
+  }
   if (listing === null && loadError === null) {
     return (
       <div className="add-space-list-state">
@@ -529,15 +518,30 @@ function LocationRow(props: {
   );
 }
 
+function CreateRepository({ flow }: { readonly flow: AddSpaceFlow }) {
+  const [name, setName] = useState("");
+  return (
+    <form style={{ padding: "12px 20px", display: "flex", flexWrap: "wrap", gap: 8 }} onSubmit={(event) => {
+      event.preventDefault();
+      addSpaceStore.createRepository(name);
+    }}>
+      <p style={{ width: "100%", margin: 0, fontSize: 12, color: "var(--rb-text-muted)" }}>Create a Git repository in this device’s managed folder, not the browsed path.</p>
+      <input className="input" aria-label="New repository name" placeholder="Repository name" value={name}
+        disabled={flow.submitBusy} onChange={(event) => setName(event.target.value)}
+        style={{ flex: "1 1 160px", width: "auto", minWidth: 0 }} />
+      <button type="submit" className="btn btn-solid" disabled={flow.submitBusy || !name.trim()}>Create repository and add</button>
+    </form>
+  );
+}
+
 // ── Footer: the key-hint legend + the Add action (Folders step) ──────────
 
 function Footer(props: { readonly flow: AddSpaceFlow }) {
   const { flow } = props;
-  const manualMissing = flow.manualPath !== null && !flow.manualPath.exists;
   const listing = readyListing(flow);
-  const dim = flow.submitBusy || (listing === null && flow.manualPath === null);
+  const dim = flow.submitBusy || (manualPathQuery(flow.query) ? flow.manualPath === null : listing === null);
   return (
-    <div className="add-space-footer">
+    <div className="add-space-footer" style={{ flexWrap: "wrap" }}>
       <KeyHintPair first={<Icon name="arrowUp" />} second={<Icon name="arrowDown" />} label="Navigate" />
       <KeyHintText cap="↵" label="Open" />
       <KeyHintText cap="esc" label="Close" />
@@ -547,6 +551,7 @@ function Footer(props: { readonly flow: AddSpaceFlow }) {
           type="button"
           className="add-space-submit"
           data-rb-dim={dim ? "" : undefined}
+          disabled={dim}
           onClick={() => {
             addSpaceStore.submit();
           }}
@@ -555,7 +560,7 @@ function Footer(props: { readonly flow: AddSpaceFlow }) {
             <span>Adding…</span>
           ) : (
             <>
-              <span>{manualMissing ? "Create and add" : "Add project"}</span>
+              <span>Add project</span>
               <KeyCap>
                 <span className="key-cap-word">{isMacPlatform() ? "⌘↵" : "Ctrl↵"}</span>
               </KeyCap>

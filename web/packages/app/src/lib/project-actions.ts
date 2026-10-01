@@ -11,6 +11,7 @@ import type {
   TerminalSession,
 } from "@zeron/proto";
 import type { IconName } from "@zeron/icons";
+import { isCurrentPrivateSession, privateSessionGeneration } from "../state/private-session-generation";
 
 /**
  * The web peer of the desktop's project-Actions state
@@ -254,6 +255,17 @@ export class ProjectActionsStore {
       this.#listeners.delete(listener);
     };
   };
+
+  resetPrivateState(): void {
+    this.#generation += 1;
+    this.#invalidateMutation();
+    this.#active = null;
+    this.#cache.clear();
+    this.#editor = null;
+    this.#menuOpen = false;
+    this.#lastRunActionId = null;
+    this.#bump();
+  }
 
   getVersion = (): number => this.#version;
 
@@ -600,6 +612,7 @@ export class ProjectActionsStore {
       return Promise.resolve();
     }
     this.closeMenu();
+    const privateGeneration = privateSessionGeneration();
     const tabKey = terminals.reserveTabForChat(context.chatId, action.name);
     const params = projectActionParams(
       { spaceId: context.key.spaceId, chatId: context.chatId, actionId: action.id, cols: 80, rows: 24 },
@@ -608,6 +621,7 @@ export class ProjectActionsStore {
     return context.client
       .call<ProjectActionRun>(methods.RUN_PROJECT_ACTION, params)
       .then((run) => {
+        if (!isCurrentPrivateSession(privateGeneration)) return;
         if (tabKey === null || !terminals.attachReservedSession(context.chatId, tabKey, run.terminal)) {
           // The tab was closed while the run was in flight — release the PTY
           // (desktop run_project_action's !attached path).
@@ -620,6 +634,7 @@ export class ProjectActionsStore {
         this.#bump();
       })
       .catch((failure: unknown) => {
+        if (!isCurrentPrivateSession(privateGeneration)) return;
         const message = failure instanceof Error ? failure.message : String(failure);
         if (tabKey !== null) {
           terminals.failReservedTab(context.chatId, tabKey, message);

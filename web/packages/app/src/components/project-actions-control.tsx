@@ -61,7 +61,7 @@ export function ProjectActionsControl({
   const context = projectActionContext({
     chat,
     spaces: snapshot.spaces.rows,
-    engineKey: session === null ? "" : session.engine.baseUrl,
+    engineKey: session === null ? "" : session.engine.key,
     client: session === null ? null : session.client,
     localDeviceId: fleetLocalDeviceId(registry, fleet.active),
   });

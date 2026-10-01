@@ -5,7 +5,6 @@ import type {
   DriveListing,
   FolderEntry,
   FolderListing,
-  PrepareSpacePathReply,
   Space,
 } from "@zeron/proto";
 import { methods, encodeScopedId, parseScopedId } from "@zeron/engine-client";
@@ -26,17 +25,21 @@ import {
   type StaleGuard,
 } from "../lib/add-space";
 import type { EngineSession } from "./engine-session";
+import { createProjectRepository, inspectProjectFolder } from "../lib/project-folder";
+import { privateSessionGeneration, isCurrentPrivateSession } from "./private-session-generation";
 import { mintId } from "../lib/id";
 import { commandPaletteStore } from "./command-palette";
 import { sidebarStore } from "./sidebar";
 import { uiSettings } from "./ui-settings";
+
+type ProjectRequest = StaleGuard & { client: EngineSession["client"] | null; generation: number };
 
 /**
  * The add-space palette's state machine — the web port of the desktop's
  * `AddSpaceFlow` (`crates/ui/src/shell/spaces.rs:186-231`) plus its whole
  * action surface: open/close, the Devices → Locations → Folders step
  * ladder with its breadcrumbs and back navigation, the search-edit
- * decision tree, the keyboard handler, manual-path prepare, and submit
+ * decision tree, the keyboard handler, engine-side path validation, and submit
  * with its optimistic space row.
  *
  * The mount lifecycle rides the Base UI dialog (`RbDialogGlass` in the
@@ -64,11 +67,9 @@ export type AddSpaceListing =
   | { error: string }
   | { path: string; entries: FolderEntry[]; truncated: boolean };
 
-/** `SpacePath` as the palette stores it (`prepare_manual_space`). */
+/** A typed directory verified by the selected engine's ListFolders reply. */
 export interface AddSpaceManualPath {
   readonly path: string;
-  readonly exists: boolean;
-  readonly gitDetected: boolean;
 }
 
 /** The single flow state object, carrying the current step's own state. */
@@ -137,8 +138,6 @@ export class AddSpaceStore {
   #flow: AddSpaceFlow | null = null;
   #pending: Space[] = [];
   #context: AddSpaceContext | null = null;
-  #manualInFlight = false;
-  #submitInFlight = false;
   #snapshot: AddSpaceSnapshot = { status: "closed", flow: null, pendingSpaces: [] };
   readonly #listeners = new Set<() => void>();
 
@@ -164,8 +163,6 @@ export class AddSpaceStore {
     // The desktop's `open_add_space` clears the command palette first —
     // Mod+Shift+N (the New project binding) must not stack two cards.
     commandPaletteStore.close();
-    this.#manualInFlight = false;
-    this.#submitInFlight = false;
     this.#pending = [];
     this.#flow = {
       identity: mintId(),
@@ -210,8 +207,6 @@ export class AddSpaceStore {
     this.#open = false;
     this.#mounted = false;
     this.#flow = null;
-    this.#manualInFlight = false;
-    this.#submitInFlight = false;
     this.#commit();
   }
 
@@ -219,6 +214,13 @@ export class AddSpaceStore {
    * Hard close for a host that is unmounting (an engine switch remounts the
    * sidebar): there is nothing left to paint, so no exit window either.
    */
+  resetPrivateState(): void {
+    this.forceClose();
+    this.#context = null;
+    this.#pending = [];
+    this.#commit();
+  }
+
   forceClose(): void {
     this.close();
     this.unmounted();
@@ -226,7 +228,14 @@ export class AddSpaceStore {
 
   /** The component's session binding — re-called on engine switches. */
   attach(context: AddSpaceContext): void {
+    const flow = this.#aliveFlow();
+    const previous = flow === null ? null : this.#sessionForDevice(flow.deviceId)?.client;
     this.#context = context;
+    if (flow !== null && previous !== this.#sessionForDevice(flow.deviceId)?.client) {
+      this.#flow = { ...flow, revision: flow.revision + 1, submitBusy: false,
+        manualPath: null, listing: { error: "Device connection changed. Browse again to continue." }, error: null };
+      this.#commit();
+    }
   }
 
   // ── Search edits (the Edited decision tree) ───────────────────────────
@@ -240,7 +249,7 @@ export class AddSpaceStore {
    */
   setQuery(text: string): void {
     const flow = this.#aliveFlow();
-    if (flow === null || flow.query === text) {
+    if (flow === null || flow.submitBusy || flow.query === text) {
       return;
     }
     if (this.#slashDescend(text)) {
@@ -252,14 +261,10 @@ export class AddSpaceStore {
       this.#commit();
       return;
     }
-    if (this.#manualInFlight && !this.#submitInFlight) {
-      next = { ...next, submitBusy: false };
-    }
-    this.#manualInFlight = false;
-    next = { ...next, revision: next.revision + 1, manualPath: null, error: null };
+    next = { ...next, revision: next.revision + (manualPathQuery(text) || manualPathQuery(flow.query) ? 1 : 0), manualPath: null, error: null };
     this.#flow = next;
     if (manualPathQuery(text)) {
-      this.#prepareManual(false, false);
+      this.#prepareManual(false);
       return;
     }
     const showHidden = text.startsWith(".");
@@ -327,7 +332,6 @@ export class AddSpaceStore {
     if (flow === null) {
       return;
     }
-    this.#manualInFlight = false;
     this.#flow = {
       ...flow,
       step: "locations",
@@ -345,6 +349,7 @@ export class AddSpaceStore {
       active: 0,
       query: "",
       error: null,
+      submitBusy: false,
     };
     this.#commit();
     this.#loadDrives();
@@ -377,7 +382,6 @@ export class AddSpaceStore {
     if (flow === null) {
       return;
     }
-    this.#manualInFlight = false;
     this.#flow = {
       ...flow,
       step,
@@ -388,10 +392,13 @@ export class AddSpaceStore {
       browserRepo: false,
       active: 0,
       error: null,
+      submitBusy: false,
+      manualPath: null,
       query: "",
       ...(step === "devices" ? { deviceId: null, drives: [], drivesLoading: false, home: null } : {}),
     };
     this.#commit();
+    if (step === "locations") this.#loadDrives();
   }
 
   /** `add_space_open_active`: → / Enter — on Devices/Locations, open the
@@ -417,7 +424,7 @@ export class AddSpaceStore {
       return;
     }
     if (manualPathQuery(flow.query)) {
-      this.#prepareManual(false, true);
+      this.#prepareManual(true);
       return;
     }
     const listing = this.#readyListing();
@@ -534,9 +541,6 @@ export class AddSpaceStore {
     }
     const key = classifyKey(event.key, event.metaKey, event.ctrlKey);
     switch (key) {
-      case "escape":
-        this.close();
-        return true;
       case "up":
       case "down": {
         const count =
@@ -577,9 +581,7 @@ export class AddSpaceStore {
   // ── Submit ─────────────────────────────────────────────────────────────
 
   /**
-   * `submit_add_space`: ⌘⏎ on the Folders step. A typed path re-prepares
-   * with create when the manual probe said it does not exist; a browsed
-   * folder goes straight to the create.
+   * Validate a typed path again before adding. Missing directories are never created.
    */
   submit(): void {
     const flow = this.#aliveFlow();
@@ -587,8 +589,7 @@ export class AddSpaceStore {
       return;
     }
     if (manualPathQuery(flow.query)) {
-      const create = flow.manualPath !== null && !flow.manualPath.exists;
-      this.#prepareManual(create, true);
+      this.#prepareManual(true);
       return;
     }
     this.#submitBrowsed();
@@ -619,7 +620,7 @@ export class AddSpaceStore {
     const path = listing.path;
     const deviceId = flow.deviceId;
     const gitDetected = flow.browserRepo;
-    const identity = flow.identity;
+    const request = this.#request(flow, flow.revision);
     const existing = session.cache
       .getSnapshot()
       .spaces.rows.find((row) => row.deviceId === parseScopedId(deviceId).rawId && row.path === path);
@@ -643,25 +644,19 @@ export class AddSpaceStore {
         createdAt: new Date().toISOString(),
       },
     ];
-    this.#submitInFlight = true;
     this.#flow = { ...flow, submitBusy: true, error: null };
     this.#commit();
     void session.client
       .call(methods.MUTATE, { op: "createSpace", spaceId, deviceId: parseScopedId(deviceId).rawId, path, gitDetected })
       .then(() => {
-        this.#submitInFlight = false;
-        // The optimistic row STAYS — the watch frame replaces it by id.
-        if (this.#aliveFlow()?.identity === identity) {
-          this.#land(this.#scope(spaceId, session));
-        } else {
-          this.#commit();
-        }
+        if (this.#guard(request, null, null) === null) return;
+        this.#land(this.#scope(spaceId, session));
       })
       .catch((error: unknown) => {
-        this.#submitInFlight = false;
+        if (!isCurrentPrivateSession(request.generation)) return;
         this.#pending = this.#pending.filter((row) => row.id !== this.#scope(spaceId, session));
-        const current = this.#aliveFlow();
-        if (current !== null && current.identity === identity) {
+        const current = this.#guard(request, null, null);
+        if (current !== null) {
           this.#flow = { ...current, submitBusy: false, error: errorMessage(error) };
         }
         this.#commit();
@@ -701,10 +696,9 @@ export class AddSpaceStore {
     }
     const session = this.#sessionForDevice(flow.deviceId);
     const deviceId = flow.deviceId;
-    const request: StaleGuard = { identity: flow.identity, revision: null, deviceId };
+    const request = this.#request(flow, flow.revision + 1);
     const query = flow.query;
     const hiddenQuery = query.startsWith(".");
-    this.#manualInFlight = false;
     this.#flow = {
       ...flow,
       revision: flow.revision + 1,
@@ -713,6 +707,8 @@ export class AddSpaceStore {
       browserPath: path,
       listing: "loading",
       active: 0,
+      error: null,
+      submitBusy: false,
     };
     if (session === null || deviceId === null) {
       this.#flow = { ...this.#flow, listing: { error: "Device is not connected" } };
@@ -720,7 +716,7 @@ export class AddSpaceStore {
       return;
     }
     this.#commit();
-    const params: Record<string, unknown> = { query };
+    const params: Record<string, unknown> = {};
     if (path !== null) {
       params.path = path;
     }
@@ -768,7 +764,7 @@ export class AddSpaceStore {
       }
       return;
     }
-    const request: StaleGuard = { identity: flow.identity, revision: null, deviceId: flow.deviceId };
+    const request = this.#request(flow, flow.revision);
     // The client is already connected to the selected device's engine.
     const params: Record<string, unknown> = {};
     void session.client
@@ -791,68 +787,85 @@ export class AddSpaceStore {
       });
   }
 
-  /**
-   * `prepare_manual_space` (spaces.rs:2256-2306): probe — and optionally
-   * create — a typed path on the OWNING device. A missing folder is never
-   * silently created on plain Enter; only the ⌘⏎ path passes create.
-   */
-  #prepareManual(create: boolean, submit: boolean): void {
+  /** Validate a typed path using the selected engine's existing folder API. */
+  #prepareManual(submit: boolean): void {
     const flow = this.#aliveFlow();
     const session = this.#sessionForDevice(flow?.deviceId ?? null);
-    if (flow === null || session === null || flow.submitBusy || flow.deviceId === null) {
+    if (flow === null || flow.submitBusy || flow.deviceId === null) return;
+    if (session === null) {
+      this.#flow = { ...flow, error: "Device is not connected", submitBusy: false };
+      this.#commit();
       return;
     }
-    const request: StaleGuard = { identity: flow.identity, revision: flow.revision, deviceId: flow.deviceId };
-    const path = flow.query.trim();
-    this.#manualInFlight = true;
-    this.#flow = { ...flow, submitBusy: submit, error: null };
+    const request = this.#request(flow, flow.revision + 1);
+    // Only expand ~ after home was returned by THIS engine; never use browser home.
+    const path = flow.query.trim().startsWith("~")
+      ? typedPathTarget(flow.query.trim(), flow.home)
+      : flow.query.trim();
+    if (path === null) {
+      this.#flow = { ...flow, error: "Browse Home on this device before using ~." };
+      this.#commit();
+      return;
+    }
+    this.#flow = { ...flow, revision: flow.revision + 1, submitBusy: submit, error: null };
     this.#commit();
-    void session.client
-      .call<PrepareSpacePathReply>(methods.PREPARE_SPACE_PATH, {
-        path,
-        createIfMissing: create,
-        targetDeviceId: flow.deviceId,
-      })
-      .then((result) => {
-        this.#manualInFlight = false;
+    void inspectProjectFolder(session.client, path)
+      .then((listing) => {
         const current = this.#guard(request, null, null);
-        if (current === null) {
-          return;
-        }
-        const add = submit && result.exists;
+        if (current === null) return;
         this.#flow = {
-          ...current,
-          submitBusy: false,
-          manualPath: {
-            path: result.path,
-            exists: result.exists,
-            gitDetected: result.gitDetected,
-          },
-          ...(add
-            ? {
-                listing: { path: result.path, entries: [], truncated: false },
-                browserRepo: result.gitDetected,
-              }
-            : {}),
+          ...current, submitBusy: false,
+          manualPath: { path: listing.path },
+          ...(submit ? { listing, browserRepo: false } : {}),
         };
         this.#commit();
-        if (add) {
-          this.#submitBrowsed();
-        }
+        if (submit) this.#submitBrowsed();
       })
       .catch((error: unknown) => {
-        this.#manualInFlight = false;
         const current = this.#guard(request, null, null);
-        if (current === null) {
-          return;
-        }
-        this.#flow = { ...current, submitBusy: false, error: errorMessage(error) };
+        if (current === null) return;
+        this.#flow = { ...current, submitBusy: false, manualPath: null, error: errorMessage(error) };
         this.#commit();
       });
   }
 
+  /** Explicit creation uses upstream CreateRepo in the selected engine's managed directory. */
+  createRepository(name: string): void {
+    const flow = this.#aliveFlow();
+    if (flow === null || flow.step !== "folders" || flow.submitBusy || flow.deviceId === null) return;
+    const session = this.#sessionForDevice(flow.deviceId);
+    if (session === null) {
+      this.#flow = { ...flow, error: "Device is not connected" };
+      this.#commit();
+      return;
+    }
+    const next = { ...flow, revision: flow.revision + 1, submitBusy: true, error: null };
+    this.#flow = next;
+    const request = this.#request(next, next.revision);
+    this.#commit();
+    void createProjectRepository(session.client, name).then((repo) => {
+      const current = this.#guard(request, null, null);
+      if (current === null) return;
+      this.#flow = { ...current, query: "", submitBusy: false, browserRepo: true,
+        manualPath: null, browserPath: repo.path,
+        listing: { path: repo.path, entries: [], truncated: false } };
+      this.#commit();
+      this.#submitBrowsed();
+    }).catch((error: unknown) => {
+      const current = this.#guard(request, null, null);
+      if (current === null) return;
+      this.#flow = { ...current, submitBusy: false, error: errorMessage(error) };
+      this.#commit();
+    });
+  }
+
   // ── Internals ──────────────────────────────────────────────────────────
 
+  #request(flow: AddSpaceFlow, revision: number | null): ProjectRequest {
+    return { identity: flow.identity, revision, deviceId: flow.deviceId,
+      client: this.#sessionForDevice(flow.deviceId)?.client ?? null,
+      generation: privateSessionGeneration() };
+  }
   /** The flow, but only while genuinely open — closing reads as gone. */
   #aliveFlow(): AddSpaceFlow | null {
     return this.#open ? this.#flow : null;
@@ -867,8 +880,9 @@ export class AddSpaceStore {
     const current = this.#session();
     if (deviceId === null) return current;
     try {
-      const owner = parseScopedId(deviceId).engine;
-      return owner === null ? current : this.#context?.sessions?.get(owner) ?? null;
+      const { engine: owner, rawId } = parseScopedId(deviceId);
+      const session = owner === null ? current : this.#context?.sessions?.get(owner) ?? null;
+      return session?.engine.deviceId === rawId ? session : null;
     } catch {
       return null;
     }
@@ -876,7 +890,7 @@ export class AddSpaceStore {
 
   /** Scope a raw id to the engine that owns it. */
   #scope(id: string, session: EngineSession | null = this.#session()): string {
-    return session === null ? id : encodeScopedId(session.engine.baseUrl, id);
+    return session === null ? id : encodeScopedId(session.engine.key, id);
   }
 
   #devices(): readonly Device[] {
@@ -921,7 +935,9 @@ export class AddSpaceStore {
    * `is_stale`, then — for folder loads — the browser path, the hidden
    * flag, and "the search became a manual path".
    */
-  #guard(request: StaleGuard, path: string | null, hiddenQuery: boolean | null): AddSpaceFlow | null {
+  #guard(request: ProjectRequest, path: string | null, hiddenQuery: boolean | null): AddSpaceFlow | null {
+    if (!isCurrentPrivateSession(request.generation) ||
+      this.#sessionForDevice(request.deviceId)?.client !== request.client) return null;
     const current = this.#aliveFlow();
     if (current === null || isStaleResponse(current, request)) {
       return null;
