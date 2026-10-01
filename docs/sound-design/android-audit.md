@@ -56,6 +56,27 @@ Definitions: active region = first to last sample within 30 dB of the peak; cent
 | request | desktop ref | 2ch/16b/48k | 600.0 | 434.8 | 6.77 | -18.7 | -43.1 | -41.7 | 24.3 | 0 | 0 | yes/yes | +0.00 | 115244 |
 | attention | desktop ref | 2ch/16b/48k | 650.0 | 531.6 | 6.46 | -19.6 | -42.7 | -41.8 | 23.1 | 0 | 0 | yes/yes | +0.00 | 124844 |
 
+## Round 2 cues
+
+| file | what it is | ms | onset ms | centroid Hz | dir (dominant) st |
+|---|---|---:|---:|---:|---:|
+| fx_surge | rising power swell G4 to C6, detuned second voice for shimmer, climbing pentatonic sparkles, bright C-major bloom | 490 | 0.25 | 1247 | +4.7 |
+| fx_zip | fast airy falling streak (band-passed noise 7.5 to 1.8 kHz) with a thin pure zing G6 to C6 | 85 | 0.25 | 5685 | -2.4 |
+| fx_rebound | soft elastic boing, G4 with an overshooting, wobbling pitch | 121 | 0.25 | 585 | -4.4 |
+| fx_fast_on | quiet electric crackle (eight signed micro-pulses), bright G6 to G7 zap, small C7 bloom | 195 | 0.25 | 2268 | +4.3 |
+| fx_fast_off | soft tick and the charge draining, G6 falling to C5 | 100 | 0.25 | 1451 | -4.0 |
+| fx_provider_claude | warm two-note rising pair, E5 then A5 | 115 | 0.25 | 1150 | +5.0 |
+| fx_provider_codex | crisp bracket-like double tick, two identical hollow clicks on D6 | 83 | 0.25 | 2034 | +0.2 |
+| fx_provider_cursor | one glassy blip, G6 bending up to A6, inharmonic partials | 108 | 0.25 | 2838 | +1.8 |
+| fx_provider_devin | soft pad-like minor third, A4 + C5, slow bloom | 116 | 0.25 | 572 | +3.0 |
+| fx_provider_grok | bright quick fifth C5 to G5 with a three-grain sparkle | 116 | 0.25 | 1273 | +7.0 |
+| fx_provider_hermes | fast flutter up, seven scale steps 9 ms apart, a breath of air | 94 | 0.25 | 2371 | +11.8 |
+| fx_provider_pi | three-note tiny arpeggio on the digits 3-1-4: E5, C5, G5 | 110 | 0.25 | 845 | +2.9 |
+| fx_provider_opencode | open hollow tone, an open fifth D5 + A5 in odd harmonics | 117 | 0.25 | 1270 | -0.0 |
+| fx_provider_antigravity | floaty upward glide C5 to C6 with slow wobble and a higher echo | 116 | 0.25 | 918 | +9.0 |
+| fx_provider_favorites | twinkle: four inharmonic bell tones C7, G6, C7, E7 fading | 116 | 0.25 | 2523 | -0.0 |
+| fx_provider_other | neutral soft pop: broad rounded pulse with a short low A4 body | 59 | 0.25 | 481 | +0.7 |
+
 ## Spectrum and pitch direction
 
 | file | centroid Hz | dominant Hz | first half Hz | second half Hz | dir (dominant) st | dir (centroid) st |

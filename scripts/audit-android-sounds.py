@@ -54,6 +54,24 @@ MAX_MS = {'tap': 60, 'select': 90, 'toggle_on': 90, 'toggle_off': 90, 'detent': 
           'archive': 120, 'delete': 130, 'refresh': 130, 'error': 180,
           'surge': 600, 'zip': 120, 'rebound': 130, 'fast_on': 250, 'fast_off': 120}
 MAX_MS.update({name: 120 for name in PROVIDERS})
+NOTES = {
+    'surge': 'rising power swell G4 to C6, detuned second voice for shimmer, climbing pentatonic sparkles, bright C-major bloom',
+    'zip': 'fast airy falling streak (band-passed noise 7.5 to 1.8 kHz) with a thin pure zing G6 to C6',
+    'rebound': 'soft elastic boing, G4 with an overshooting, wobbling pitch',
+    'fast_on': 'quiet electric crackle (eight signed micro-pulses), bright G6 to G7 zap, small C7 bloom',
+    'fast_off': 'soft tick and the charge draining, G6 falling to C5',
+    'provider_claude': 'warm two-note rising pair, E5 then A5',
+    'provider_codex': 'crisp bracket-like double tick, two identical hollow clicks on D6',
+    'provider_cursor': 'one glassy blip, G6 bending up to A6, inharmonic partials',
+    'provider_devin': 'soft pad-like minor third, A4 + C5, slow bloom',
+    'provider_grok': 'bright quick fifth C5 to G5 with a three-grain sparkle',
+    'provider_hermes': 'fast flutter up, seven scale steps 9 ms apart, a breath of air',
+    'provider_pi': 'three-note tiny arpeggio on the digits 3-1-4: E5, C5, G5',
+    'provider_opencode': 'open hollow tone, an open fifth D5 + A5 in odd harmonics',
+    'provider_antigravity': 'floaty upward glide C5 to C6 with slow wobble and a higher echo',
+    'provider_favorites': 'twinkle: four inharmonic bell tones C7, G6, C7, E7 fading',
+    'provider_other': 'neutral soft pop: broad rounded pulse with a short low A4 body',
+}
 RMS_BAND_DB = 1.5
 DESKTOP_MARGIN_DB = 2.0
 BOOST_DB = 20 * math.log10(2.0)  # the slider headroom baked into every fx_ file
@@ -359,6 +377,11 @@ def main():
                        f"{r['crest_db']:.1f} | {r['first']} | {r['last']} | "
                        f"{'yes' if r['zc_start'] else 'NO'}/{'yes' if r['zc_end'] else 'NO'} | "
                        f"{r['dc']:+.2f} | {r['bytes']} |")
+    out += ['', '## Round 2 cues', '',
+            '| file | what it is | ms | onset ms | centroid Hz | dir (dominant) st |', '|---|---|---:|---:|---:|---:|']
+    for n in ROUND2 + PROVIDERS:
+        r = m[n]
+        out.append(f"| fx_{n} | {NOTES[n]} | {r['ms']:.0f} | {r['onset_ms']:.2f} | {r['centroid']:.0f} | {r['dir_dom_st']:+.1f} |")
     out += ['', '## Spectrum and pitch direction', '',
             '| file | centroid Hz | dominant Hz | first half Hz | second half Hz | dir (dominant) st | dir (centroid) st |',
             '|---|---:|---:|---:|---:|---:|---:|']
