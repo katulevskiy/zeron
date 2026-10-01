@@ -52,7 +52,7 @@ class Downloads(private val app: Application, private val model: AppModel) {
         when (state) {
             is State.Running -> model.notifier.download(id, "Saving ${job.name}", state.detail, state.fraction, done = false)
             is State.Done -> feedback.both(sh.zeron.android.feedback.Haptic.Success, sh.zeron.android.feedback.Cue.UploadReady).also { model.notifier.download(id, "Saved ${job.name}", state.detail, 1f, done = true, open = openIntent(job.name, state.uri)) }
-            is State.Failed -> feedback.both(sh.zeron.android.feedback.Haptic.Error, sh.zeron.android.feedback.Cue.Error).also { model.notifier.download(id, "Couldn't save ${job.name}", state.message, null, done = true) }
+            is State.Failed -> feedback.both(sh.zeron.android.feedback.Haptic.Error, sh.zeron.android.feedback.Cue.Error).also { model.notifier.download(id, "Couldn't save ${job.name}", state.message, null, done = true, ok = false) }
         }
     }
 

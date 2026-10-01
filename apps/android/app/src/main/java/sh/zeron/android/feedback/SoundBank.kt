@@ -135,13 +135,18 @@ class SoundBank(private val context: Context) {
         /** Inaudible (-60 dB) but not zero, so no layer treats the priming plays as muted and skips the track. */
         const val PRIME_VOLUME = 0.001f
 
+        // USAGE_GAME, not USAGE_ASSISTANCE_SONIFICATION: the sonification usage is the OS's system-sound path, which
+        // Samsung's screen recorder (and other capture / routing modes) silences while it records, on the phone and in
+        // the recording alike. Game sound effects follow the media volume, are never muted by the capture, and are
+        // included in a recording's "media sounds". No audio focus is requested, so music keeps playing.
         // FLAG_LOW_LATENCY is deprecated since 29 in favour of AudioTrack performance modes, which SoundPool cannot
         // take; the audio policy still reads it and routes the stream to the fast output.
         @Suppress("DEPRECATION")
         private fun attributes(): AudioAttributes = AudioAttributes.Builder()
-            .setUsage(AudioAttributes.USAGE_ASSISTANCE_SONIFICATION)
+            .setUsage(AudioAttributes.USAGE_GAME)
             .setContentType(AudioAttributes.CONTENT_TYPE_SONIFICATION)
             .setFlags(AudioAttributes.FLAG_LOW_LATENCY)
+            .setAllowedCapturePolicy(AudioAttributes.ALLOW_CAPTURE_BY_ALL)
             .build()
     }
 }
