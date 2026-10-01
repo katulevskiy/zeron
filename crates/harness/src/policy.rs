@@ -213,6 +213,41 @@ pub fn glob(pattern: &str, text: &str) -> bool {
     pi == p.len()
 }
 
+/// The workspace a driver judges paths against: the run's cwd (the process's
+/// own when empty) with symlinks resolved, like [`real_path`].
+pub fn workspace_root(cwd: &str) -> PathBuf {
+    let cwd = if cwd.is_empty() {
+        std::env::current_dir().unwrap_or_default()
+    } else {
+        PathBuf::from(cwd)
+    };
+    real_path(&cwd)
+}
+
+/// An absolute `path` with the symlinks of its longest existing ancestor
+/// resolved (macOS `/tmp` and `/var` are links into `/private`, and agents
+/// report paths under their resolved cwd), so a lexical containment check
+/// compares like with like. Relative paths are returned as they are.
+pub fn real_path(path: &Path) -> PathBuf {
+    if !path.is_absolute() {
+        return path.to_path_buf();
+    }
+    let mut existing = path;
+    let mut rest = Vec::new();
+    loop {
+        if let Ok(real) = existing.canonicalize() {
+            return rest.iter().rev().fold(real, |acc, part| acc.join(part));
+        }
+        match (existing.parent(), existing.file_name()) {
+            (Some(parent), Some(name)) => {
+                rest.push(name.to_owned());
+                existing = parent;
+            }
+            _ => return path.to_path_buf(),
+        }
+    }
+}
+
 /// `path` (absolute, or relative to the workspace) stays inside it after
 /// resolving `.`/`..` lexically.
 pub fn inside_workspace(path: &Path, workspace: &Path) -> bool {
@@ -642,6 +677,17 @@ mod tests {
         assert!(!inside_workspace(Path::new("../x"), ws));
         assert!(!inside_workspace(Path::new("/home/bob/project2/x"), ws));
         assert!(inside_workspace(Path::new("/home/bob/proj/x"), ws));
+    }
+
+    #[test]
+    fn real_paths_resolve_links_of_existing_ancestors() {
+        let dir = tempfile::tempdir().unwrap();
+        let real = dir.path().canonicalize().unwrap();
+        let unborn = dir.path().join("src/new.rs");
+        assert_eq!(real_path(&unborn), real.join("src/new.rs"));
+        assert_eq!(workspace_root(&dir.path().display().to_string()), real);
+        assert!(inside_workspace(&real_path(&unborn), &workspace_root(&dir.path().display().to_string())));
+        assert_eq!(real_path(Path::new("rel/a.rs")), PathBuf::from("rel/a.rs"));
     }
 
     #[test]
