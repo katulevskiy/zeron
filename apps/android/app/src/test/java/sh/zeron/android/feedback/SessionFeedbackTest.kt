@@ -142,4 +142,19 @@ class SessionFeedbackTest {
         t += 1_000
         assertEquals(false, c.hapticClaimed(t))
     }
+
+    @Test fun aChosenMenuItemQuietsTheCloseThatFollows() {
+        var t = 5_000L
+        val c = ClaimTracker { t }
+        assertEquals(false, c.cueWithin(250))
+        c.quiet()
+        t += 100
+        assertEquals(true, c.cueWithin(250))
+        t += 200
+        assertEquals(false, c.cueWithin(250))
+        // An explicit cue counts the same way, and a later one extends it.
+        c.claimCue()
+        t += 100
+        assertEquals(true, c.cueWithin(250))
+    }
 }
