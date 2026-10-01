@@ -8,7 +8,7 @@ use std::time::Duration;
 use chrono::{TimeZone, Utc};
 use tokio_util::sync::CancellationToken;
 use zeron_doc::RegistryDoc;
-use zeron_proto::{Chat, ChatConfig, SidebarPinChange, SidebarSectionChange};
+use zeron_proto::{Chat, ChatConfig, ChatIndicator, SidebarPinChange, SidebarSectionChange};
 
 use crate::attachments::{self, AttachmentCache};
 use crate::auth::TokenProvider;
@@ -34,8 +34,35 @@ const TICK: Duration = Duration::from_secs(1);
 /// is evicted. On-screen sessions, streaming ones and ones with unadopted
 /// sends are never evicted.
 pub const WARM_SESSION_CAP: usize = 6;
-/// Sessions `preload_sessions` warms (front page order).
+/// Sessions `preload_sessions` warms.
 pub const PRELOAD_CAP: usize = 4;
+/// A chat active this recently is warmed ahead of the front page's order.
+const HOT_CHAT_MS: i64 = 30 * 60_000;
+
+/// The chats `preload_sessions` opens, best first.
+fn preload_ids(front: &crate::workspace::FrontPage, now_ms: i64) -> Vec<String> {
+    let ordered = front
+        .pinned
+        .iter()
+        .chain(front.sections.iter().flat_map(|s| s.sessions.iter()))
+        .chain(front.recent.iter())
+        .filter(|row| row.room_gen >= 2);
+    let hot = |row: &crate::workspace::SessionRow| {
+        matches!(
+            row.host_indicator,
+            ChatIndicator::Working | ChatIndicator::AwaitingInput
+        ) || now_ms - row.last_activity_ms < HOT_CHAT_MS
+    };
+    let (hot_rows, rest): (Vec<_>, Vec<_>) = ordered.partition(|row| hot(row));
+    let mut seen = std::collections::HashSet::new();
+    hot_rows
+        .into_iter()
+        .chain(rest)
+        .filter(|row| seen.insert(row.id.as_str()))
+        .take(PRELOAD_CAP)
+        .map(|row| row.id.clone())
+        .collect()
+}
 
 /// Where a new session runs.
 #[derive(Debug, Clone, PartialEq, Eq)]
@@ -169,7 +196,15 @@ impl ClientInner {
         let Some(live) = self.live() else { return };
         let posture = live.registry_posture();
         if posture.synced {
-            self.synced.store(true, Ordering::Release);
+            let first_sync = !self.synced.swap(true, Ordering::AcqRel);
+            if first_sync {
+                // The rows are now the server's, not last session's cache:
+                // warm the chats that are live (see `preload_sessions`).
+                Client {
+                    inner: Arc::clone(self),
+                }
+                .preload_sessions();
+            }
             // Initialize prefs / prune pins of deleted chats (authoritative
             // only once a server state applied — never on a cold replica).
             match self
@@ -1539,6 +1574,7 @@ impl Client {
             self.inner.reconcile_change_request_watches();
         }
         self.inner.tick();
+        self.preload_sessions();
     }
 
     /// App is backgrounding: persist registry + docs now; pause time-driven
@@ -1562,21 +1598,20 @@ impl Client {
         }
     }
 
-    /// Warm the most relevant sessions (front page order: pinned, sections,
-    /// recent), up to [`PRELOAD_CAP`]. Opening is instant (local snapshot);
-    /// live rooms dial behind the client's dial cap.
+    /// Warm the most relevant sessions, up to [`PRELOAD_CAP`]: chats that are
+    /// live right now first (a running turn, or active within
+    /// [`HOT_CHAT_MS`] -- where background subagents are most likely still
+    /// going, and a warm chat is what lets the Sessions list badge them for
+    /// hosts that publish no count), then the front page's order (pinned,
+    /// sections, recent). Opening is instant (local snapshot); live rooms dial
+    /// behind the client's dial cap. Idempotent and cheap: the app calls it at
+    /// start, and the client again when the registry first syncs and on every
+    /// return to the foreground.
     pub fn preload_sessions(&self) {
         let workspace = self.workspace();
-        let front = &workspace.front;
-        let candidates = front
-            .pinned
-            .iter()
-            .chain(front.sections.iter().flat_map(|s| s.sessions.iter()))
-            .chain(front.recent.iter())
-            .filter(|row| row.room_gen >= 2);
-        for row in candidates.take(PRELOAD_CAP) {
-            if self.inner.session_core(&row.id).is_none() {
-                let _ = self.open_session(&row.id);
+        for id in preload_ids(&workspace.front, now_ms()) {
+            if self.inner.session_core(&id).is_none() {
+                let _ = self.open_session(&id);
             }
         }
     }
@@ -1605,4 +1640,90 @@ pub struct PushPrefs {
     pub input: bool,
     /// A run failed.
     pub failed: bool,
+}
+
+#[cfg(test)]
+mod preload_tests {
+    use super::*;
+    use crate::workspace::{FrontPage, SectionView, SessionRow};
+
+    const NOW: i64 = 100 * 3_600_000;
+
+    fn row(id: &str, indicator: ChatIndicator, idle_ms: i64) -> Arc<SessionRow> {
+        Arc::new(SessionRow {
+            id: id.into(),
+            revision: 0,
+            title: id.into(),
+            has_title: true,
+            preview: None,
+            project: None,
+            device_id: "host".into(),
+            device_name: None,
+            device_online: true,
+            harness: None,
+            harness_label: None,
+            model: None,
+            model_label: None,
+            reasoning: None,
+            branch: None,
+            cwd: None,
+            indicator,
+            host_indicator: indicator,
+            working_since_ms: None,
+            last_activity_ms: NOW - idle_ms,
+            time_label: String::new(),
+            created_at_ms: 0,
+            unseen: false,
+            archived: false,
+            pinned: false,
+            section_id: None,
+            pull_request: None,
+            send_state: None,
+            parent_chat_id: None,
+            room_gen: 2,
+            running_subagents: 0,
+            pending_callbacks: 0,
+        })
+    }
+
+    #[test]
+    fn live_chats_are_warmed_before_the_front_pages_order() {
+        let day = 24 * 3_600_000;
+        let front = FrontPage {
+            pinned: vec![
+                row("pin-old-1", ChatIndicator::Idle, day),
+                row("pin-old-2", ChatIndicator::Idle, 2 * day),
+            ],
+            sections: vec![SectionView {
+                id: "s".into(),
+                name: "S".into(),
+                collapsed: false,
+                sessions: vec![row("sect-old", ChatIndicator::Idle, 3 * day)],
+            }],
+            recent: vec![
+                row("just-finished", ChatIndicator::Completed, 5 * 60_000),
+                row("old", ChatIndicator::Idle, 4 * day),
+                row("running", ChatIndicator::Working, 2 * day),
+            ],
+        };
+        assert_eq!(
+            preload_ids(&front, NOW),
+            ["just-finished", "running", "pin-old-1", "pin-old-2"]
+        );
+    }
+
+    #[test]
+    fn nothing_hot_keeps_the_front_pages_order_and_legacy_rooms_are_skipped() {
+        let day = 24 * 3_600_000;
+        let mut legacy = (*row("legacy", ChatIndicator::Working, 0)).clone();
+        legacy.room_gen = 1;
+        let front = FrontPage {
+            pinned: vec![Arc::new(legacy), row("p", ChatIndicator::Idle, day)],
+            sections: Vec::new(),
+            recent: (0..6)
+                .map(|i| row(&format!("r{i}"), ChatIndicator::Idle, (i + 2) * day))
+                .collect(),
+        };
+        assert_eq!(preload_ids(&front, NOW), ["p", "r0", "r1", "r2"]);
+    }
 }

@@ -103,7 +103,9 @@ pub struct SessionRow {
     /// Sync room generation (2 = chat2; 1 = legacy, not dialable).
     pub room_gen: u32,
     /// Subagents of this chat running right now — also after the parent's
-    /// turn has settled (staleness-gated like `indicator`).
+    /// turn has settled. The larger of the hosting engine's published count
+    /// (staleness-gated like `indicator`; absent from engines that predate
+    /// the field) and the running spawn chips of a warm, live transcript.
     pub running_subagents: u32,
     /// Confirmed background callbacks on a live, freshness-gated host.
     pub pending_callbacks: u32,

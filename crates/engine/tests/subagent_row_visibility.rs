@@ -262,8 +262,10 @@ fn main_text(text: &str) -> AgentEvent {
     AgentEvent::TextDelta { text: text.into() }
 }
 
+/// One stops and another launches; a count that dips to zero and returns.
+/// Every state the phone's list can land on is the true one.
 #[tokio::test(flavor = "multi_thread", worker_threads = 2)]
-async fn explore_count_changes() {
+async fn count_follows_children_through_wake_turns_and_respawns() {
     let rig = Rig::start().await;
     let phone = rig.phone();
     rig.dispatch().await;
@@ -290,6 +292,65 @@ async fn explore_count_changes() {
     rig.feed.send(chatter("d")).await;
     rig.feed.send(parent_done()).await;
     phone_sees(&phone, "new child alone", "Completed", 1).await;
+    // A settled child is steered and runs again.
+    rig.feed.send(child_done("d")).await;
+    phone_sees(&phone, "d settled", "Completed", 0).await;
+    rig.feed
+        .send(child(
+            "d",
+            AgentEvent::Steered {
+                assistant_message_id: None,
+                next_assistant_message_id: None,
+            },
+        ))
+        .await;
+    phone_sees(&phone, "d reopened by a steer", "Completed", 1).await;
+    phone.shutdown();
+    rig.core.shutdown().await;
+}
+
+/// Children can be the only traffic for minutes. The session row keeps being
+/// refreshed on the host's heartbeat so the phone's 45s staleness gate never
+/// trips, and the cold-started phone keeps the badge. (Real time: the
+/// heartbeat is 15s and the throttle reads the wall clock.)
+#[tokio::test(flavor = "multi_thread", worker_threads = 2)]
+async fn quiet_children_keep_the_row_fresh_past_the_staleness_window() {
+    let rig = Rig::start().await;
+    rig.dispatch().await;
+    for ev in [spawn("a"), spawn("b"), chatter("a"), chatter("b"), parent_done()] {
+        rig.feed.send(ev).await;
+    }
+    wait_for("host counts two", || {
+        rig.core
+            .sessions
+            .session_status(CHAT)
+            .is_some_and(|s| s.running_subagents == 2)
+    })
+    .await;
+    // Cold start while they run.
+    let phone = rig.phone();
+    phone_sees(&phone, "two children, cold", "Completed", 2).await;
+    let started = std::time::Instant::now();
+    let mut beats = std::collections::BTreeSet::new();
+    let mut worst_age = 0;
+    while started.elapsed() < Duration::from_secs(50) {
+        let host = rig.core.sessions.session_status(CHAT).unwrap();
+        beats.insert(host.updated_at.timestamp_millis());
+        let age = (chrono::Utc::now() - host.updated_at).num_milliseconds();
+        worst_age = worst_age.max(age);
+        assert!(
+            age < zeron_proto::view::SESSION_STALE_MS / 2,
+            "row went {age}ms without a refresh while two children ran"
+        );
+        assert_eq!(
+            seen(&phone),
+            ("Completed".to_string(), 2),
+            "the phone's badge dropped {}s in (worst row age so far {worst_age}ms)",
+            started.elapsed().as_secs()
+        );
+        tokio::time::sleep(Duration::from_secs(1)).await;
+    }
+    assert!(beats.len() >= 3, "heartbeats seen: {}", beats.len());
     phone.shutdown();
     rig.core.shutdown().await;
 }
