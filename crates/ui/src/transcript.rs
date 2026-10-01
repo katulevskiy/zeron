@@ -1069,6 +1069,9 @@ pub enum RowKind {
         source_chat_id: SharedString,
         source_title: SharedString,
     },
+    /// Goal mode: a round's controller-sent prompt, a verdict, a pause…
+    /// rendered as a compact marker instead of a bubble.
+    GoalMarker(crate::goal_panel::GoalMarker),
 }
 
 fn generated_image_devices(owner: &str, fallback: &[String]) -> Vec<String> {
@@ -1302,6 +1305,20 @@ pub fn rows_for_entry(
     let mut rows: Vec<Row> = Vec::new();
     let streaming = entry.status == Some(MessageStatus::Streaming);
     let entry_id: SharedString = entry.id.clone().into();
+
+    // Goal machinery (a round's prompt, verdicts, pauses) is not conversation.
+    if let Some(marker) = crate::goal_panel::goal_marker(entry) {
+        return vec![Row {
+            id: format!("{}#goal", entry.id).into(),
+            version: fnv1a(marker.label().as_bytes()) ^ fnv1a(marker.detail.as_bytes()),
+            turn_start: true,
+            kind: RowKind::GoalMarker(marker),
+            entry_id,
+            timestamp: None,
+            copy_text: None,
+            compact_fold: None,
+        }];
+    }
 
     if entry.role == MessageRole::User {
         let raw: String = entry
@@ -6641,6 +6658,7 @@ impl Transcript {
             } => self.render_generated_image(&row.id, owner, path, name, mime_type, cx),
             RowKind::ErrorChip { message } => error_chip(message.clone(), &theme),
             RowKind::ForkMarker { source_title, .. } => fork_marker(source_title.clone(), &theme),
+            RowKind::GoalMarker(marker) => crate::goal_panel::marker_element(marker, &theme),
         };
 
         // Hover-revealed metadata strip: a RESERVED 32px lane under the
