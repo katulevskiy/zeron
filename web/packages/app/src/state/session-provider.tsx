@@ -1,7 +1,9 @@
-import { createContext, useCallback, useContext, useEffect, useMemo, useRef, useState } from "react";
+import { createContext, useCallback, useContext, useEffect, useMemo, useRef, useState, useSyncExternalStore } from "react";
 import type { ReactNode } from "react";
 import { useNavigate, useRouterState } from "@tanstack/react-router";
 import { parseScopedId } from "@zeron/engine-client";
+import { composerDefaults } from "../lib/composer-draft";
+import { resolveNewChatTarget } from "../lib/new-chat-target";
 import { engineRegistry, useFleet, useFleetRegistry } from "./fleet";
 import { useSidebar } from "./sidebar";
 import { disposeEngineSession, engineSessionKey, reconcileEngineSessions, type EngineSession } from "./engine-session";
@@ -46,6 +48,9 @@ const SessionsContext = createContext<ReadonlyMap<string, EngineSession>>(new Ma
 const EngineRetryContext = createContext<() => void>(() => {});
 
 const EMPTY_SESSIONS: ReadonlyMap<string, EngineSession> = new Map();
+
+const subscribeComposerDefaults = (listener: () => void) => composerDefaults.subscribe(listener);
+const getComposerDefaults = () => composerDefaults.getSnapshot();
 
 export function EngineSessionProvider({ children }: { children: ReactNode }) {
   const fleet = useFleet();
@@ -98,10 +103,14 @@ export function EngineSessionProvider({ children }: { children: ReactNode }) {
 
   // ── Routing: which engine is "the" engine for this route ──────────────
   const sidebar = useSidebar();
-  const sidebarFilter = sidebar.spaceFilter ?? sidebar.lastSpaceId;
+  const defaults = useSyncExternalStore(subscribeComposerDefaults, getComposerDefaults, getComposerDefaults);
+  const canvasTarget = useMemo(
+    () => resolveNewChatTarget(defaults, sidebar, fleet.active),
+    [defaults, sidebar, fleet.active],
+  );
   const routedKey = useMemo(
-    () => routedEngineKey(pathname, sidebarFilter, fleet.active),
-    [pathname, sidebarFilter, fleet.active],
+    () => routedEngineKey(pathname, canvasTarget.engineKey, fleet.active),
+    [pathname, canvasTarget.engineKey, fleet.active],
   );
   // A scoped chat stays bound to its owner even while that device is absent.
   // Falling back to active would hand unrelated device resources to this route.
@@ -233,15 +242,15 @@ function SessionNotificationDriver({ session }: { session: EngineSession }) {
 }
 
 /** The engine this route routes to, per `selected_target`'s precedence. */
-function routedEngineKey(pathname: string, spaceFilter: string | null, active: string | null): string | null {
+function routedEngineKey(pathname: string, canvasEngine: string | null, active: string | null): string | null {
   const chatId = chatIdOfPath(pathname);
   if (chatId !== null) {
     return scopedEngine(chatId, active);
   }
-  // The new-thread canvas (`/`): the picked space's engine, else the active
-  // engine — the composer targets the space's host when one is picked.
-  if (spaceFilter !== null && (pathname === "/" || pathname === "")) {
-    return scopedEngine(spaceFilter, active);
+  // The blank canvas resolves device/project/default/sidebar precedence once in
+  // `resolveNewChatTarget`; its catalog and creation calls use this same owner.
+  if (pathname === "/" || pathname === "") {
+    return canvasEngine;
   }
   return active;
 }

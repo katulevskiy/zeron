@@ -7,6 +7,7 @@ import { createRoot } from "react-dom/client";
 import { afterAll, afterEach, beforeAll, beforeEach, describe, expect, it, vi } from "vitest";
 import type { HarnessDescriptor, Model } from "@zeron/proto";
 import { encodeScopedId } from "@zeron/engine-client";
+import { createChat } from "../src/lib/chat-actions";
 import type { OwnedEngine, FleetState } from "../src/lib/owned-engine";
 import type { EngineSession } from "../src/state/engine-session";
 import { EngineSessionProvider, useEngineRetry, useEngineSession, useEngineSessions } from "../src/state/session-provider";
@@ -78,6 +79,10 @@ const h = vi.hoisted(() => {
   const cells = {
     fleet: { active: null, engines: [], configurationError: null } as import("../src/lib/owned-engine").FleetState,
     fleetListeners: new Set<() => void>(), registry: new FakeRegistry(), pathname: "/",
+    sidebar: { spaceFilter: null as string | null, lastSpaceId: null as string | null },
+    sidebarListeners: new Set<() => void>(),
+    defaults: { device: null as string | null, project: null as string | null, noProject: false },
+    defaultsListeners: new Set<() => void>(),
   };
   return { FakeClient, FakeCache, FakeRegistry, cells };
 });
@@ -93,7 +98,24 @@ vi.mock("@tanstack/react-router", () => ({
   useRouterState: (options: { select: (state: { location: { pathname: string } }) => unknown }) => options.select({ location: { pathname: h.cells.pathname } }),
   useNavigate: () => () => Promise.resolve(),
 }));
-vi.mock("../src/state/sidebar", () => ({ useSidebar: () => ({ spaceFilter: null, lastSpaceId: null }) }));
+vi.mock("../src/state/sidebar", async () => {
+  const { useSyncExternalStore } = await import("react");
+  return {
+    useSidebar: () => useSyncExternalStore(
+      (listener) => { h.cells.sidebarListeners.add(listener); return () => { h.cells.sidebarListeners.delete(listener); }; },
+      () => h.cells.sidebar,
+    ),
+  };
+});
+vi.mock("../src/lib/composer-draft", () => ({
+  composerDefaults: {
+    subscribe: (listener: () => void) => {
+      h.cells.defaultsListeners.add(listener);
+      return () => { h.cells.defaultsListeners.delete(listener); };
+    },
+    getSnapshot: () => h.cells.defaults,
+  },
+}));
 vi.mock("../src/state/ui-settings", () => { const settings = {}; return { useUiSettings: () => settings }; });
 vi.mock("../src/lib/sounds", () => ({ playSound: () => {}, sessionSoundEnabled: () => false }));
 vi.mock("../src/state/attention-gate", () => ({ appAttentionGate: { shouldPlay: () => false } }));
@@ -148,9 +170,24 @@ function sessionOf(handle: ReturnType<typeof mountProvider>, key: string): Engin
 }
 beforeAll(() => { Object.assign(globalThis, { IS_REACT_ACT_ENVIRONMENT: true }); });
 afterAll(() => { delete (globalThis as { IS_REACT_ACT_ENVIRONMENT?: boolean }).IS_REACT_ACT_ENVIRONMENT; });
-beforeEach(() => { h.cells.registry = new h.FakeRegistry(); h.cells.fleet = { active: null, engines: [], configurationError: null }; h.cells.pathname = "/"; });
+beforeEach(() => {
+  h.cells.registry = new h.FakeRegistry();
+  h.cells.fleet = { active: null, engines: [], configurationError: null };
+  h.cells.pathname = "/";
+  h.cells.sidebar = { spaceFilter: null, lastSpaceId: null };
+  h.cells.defaults = { device: null, project: null, noProject: false };
+});
 afterEach(() => { for (const handle of mounted.splice(0)) handle.unmount(); vi.restoreAllMocks(); document.body.replaceChildren(); });
 
+function setCanvasTarget(target: Partial<typeof h.cells.defaults>): void {
+  h.cells.defaults = { ...h.cells.defaults, ...target };
+  for (const listener of h.cells.defaultsListeners) listener();
+}
+
+function setSidebarTarget(target: Partial<typeof h.cells.sidebar>): void {
+  h.cells.sidebar = { ...h.cells.sidebar, ...target };
+  for (const listener of h.cells.sidebarListeners) listener();
+}
 describe("EngineSessionProvider resource lifetime", () => {
   it("an unavailable scoped route never falls through to a different active engine", async () => {
     await discovered(ONE);
@@ -160,6 +197,99 @@ describe("EngineSessionProvider resource lifetime", () => {
     const handle = mountProvider();
     expect(handle.observed.current.sessions.has(TWO)).toBe(true);
     expect(handle.observed.current.session).toBeNull();
+  });
+
+  it("routes a selected canvas device and its catalog to that device's engine", async () => {
+    const one = await discovered(ONE);
+    await discovered(TWO);
+    await act(async () => { setCanvasTarget({ device: encodeScopedId(ONE, "device-one"), noProject: true }); });
+    const handle = mountProvider();
+    expect(handle.observed.current.session?.engine.key).toBe(ONE);
+    let load!: Promise<void>;
+    await act(async () => { load = handle.observed.current.session!.catalog.loadHarnesses(); });
+    expect(one.client.calls.map((call) => call.method)).toEqual(["ListHarnesses"]);
+    expect(h.cells.registry.clientFor(TWO)!.calls).toHaveLength(0);
+    await act(async () => { one.client.resolveNext("ListHarnesses", [HARNESS]); await load; });
+  });
+
+  it("routes an explicit canvas project over the active engine", async () => {
+    const one = await discovered(ONE);
+    await discovered(TWO);
+    await act(async () => {
+      setCanvasTarget({
+        device: encodeScopedId(TWO, "device-two"),
+        project: encodeScopedId(ONE, "project-one"),
+        noProject: false,
+      });
+    });
+    const handle = mountProvider();
+    expect(handle.observed.current.session?.engine.key).toBe(ONE);
+    let load!: Promise<void>;
+    await act(async () => { load = handle.observed.current.session!.catalog.loadModels("claude-code"); });
+    expect(one.client.calls.map((call) => call.method)).toEqual(["ListModels"]);
+    expect(h.cells.registry.clientFor(TWO)!.calls).toHaveLength(0);
+    await act(async () => { one.client.resolveNext("ListModels", [MODEL]); await load; });
+  });
+
+  it("does not let sidebar history override an explicit projectless canvas target", async () => {
+    await discovered(ONE);
+    await discovered(TWO);
+    await act(async () => {
+      setSidebarTarget({ spaceFilter: null, lastSpaceId: encodeScopedId(ONE, "project-one") });
+      setCanvasTarget({ device: encodeScopedId(TWO, "device-two"), project: null, noProject: true });
+    });
+    const handle = mountProvider();
+    expect(handle.observed.current.session?.engine.key).toBe(TWO);
+  });
+
+  it("fails closed when a selected canvas engine is unavailable", async () => {
+    await discovered(ONE);
+    await discovered(TWO);
+    await act(async () => { setCanvasTarget({ device: encodeScopedId(ONE, "device-one"), noProject: true }); });
+    h.cells.registry.drop(ONE);
+    const handle = mountProvider();
+    expect(handle.observed.current.sessions.has(TWO)).toBe(true);
+    expect(handle.observed.current.session).toBeNull();
+  });
+
+  it("keeps per-engine catalogs and creation requests isolated through A → B → A", async () => {
+    const one = await discovered(ONE);
+    const two = await discovered(TWO);
+    await act(async () => { setCanvasTarget({ device: encodeScopedId(ONE, "device-one"), noProject: true }); });
+    const handle = mountProvider();
+
+    let firstLoad!: Promise<void>;
+    await act(async () => { firstLoad = handle.observed.current.session!.catalog.loadHarnesses(); });
+    expect(one.client.calls.map((call) => call.method)).toEqual(["ListHarnesses"]);
+
+    await act(async () => { setCanvasTarget({ device: encodeScopedId(TWO, "device-two"), noProject: true }); });
+    expect(handle.observed.current.session?.engine.key).toBe(TWO);
+    let secondLoad!: Promise<void>;
+    await act(async () => { secondLoad = handle.observed.current.session!.catalog.loadModels("claude-code"); });
+    const created = createChat(handle.observed.current.session!.client, {
+      deviceId: encodeScopedId(TWO, "device-two"),
+      mintId: () => "chat-two",
+    });
+    expect(two.client.calls.map((call) => call.method)).toEqual(["ListModels", "Mutate"]);
+    expect(one.client.calls.map((call) => call.method)).toEqual(["ListHarnesses"]);
+
+    await act(async () => {
+      one.client.resolveNext("ListHarnesses", [HARNESS]);
+      await firstLoad;
+    });
+    expect(handle.observed.current.session?.engine.key).toBe(TWO);
+    expect(handle.observed.current.session!.catalog.getHarnesses().rows).toEqual([]);
+
+    await act(async () => {
+      two.client.resolveNext("ListModels", [{ ...MODEL, id: "model-two" }]);
+      two.client.resolveNext("Mutate", null);
+      await Promise.all([secondLoad, created]);
+    });
+    expect(handle.observed.current.session!.catalog.getModels("claude-code").rows.map((model) => model.id)).toEqual(["model-two"]);
+
+    await act(async () => { setCanvasTarget({ device: encodeScopedId(ONE, "device-one"), noProject: true }); });
+    expect(handle.observed.current.session?.engine.key).toBe(ONE);
+    expect(handle.observed.current.session!.catalog.getHarnesses().rows.map((harness) => harness.id)).toEqual(["claude-code"]);
   });
   it("discovery metadata refresh preserves the live mounted picker catalog", async () => {
     const { engine, client, cache } = await discovered(ONE);

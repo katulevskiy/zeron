@@ -5,6 +5,7 @@ import { useEngineSession } from "../../state/session-provider";
 import { useNow } from "../../state/hooks";
 import { useFleetSnapshot } from "../../state/fleet";
 import { composerDefaults } from "../../lib/composer-draft";
+import { resolveNewChatTarget } from "../../lib/new-chat-target";
 import { spacesSorted } from "../../lib/view";
 import { useSidebar } from "../../state/sidebar";
 import { CheckoutChip, DeviceChip, ProjectChip, RefChip, type CheckoutKind } from "../composer-footer";
@@ -67,20 +68,21 @@ export function useNewThreadTarget(): NewThreadTarget {
   return useMemo(() => {
     const devices = snapshot?.devices.rows ?? EMPTY_DEVICES;
     const spaces = spacesSorted(snapshot?.spaces.rows ?? EMPTY_SPACES);
-    // `restore_composer_target`: the pick survives only while the row does.
-    const fallback = sidebar.spaceFilter ?? sidebar.lastSpaceId;
-    const projectId = defaults.noProject ? null : (defaults.project ?? fallback);
-    const space = projectId === null ? null : spaces.find((row) => row.id === projectId) ?? null;
+    // `resolveNewChatTarget` is also the provider's route decision: target
+    // labels, catalogs, and chat creation therefore share the same owner.
+    const canvasTarget = resolveNewChatTarget(defaults, sidebar, session?.engine.key ?? null);
+    const space = canvasTarget.projectId === null ? null : spaces.find((row) => row.id === canvasTarget.projectId) ?? null;
     // The routed engine's own device, SCOPED to match the merged rows.
     const ownRawDeviceId = session?.client.engineInfo?.deviceId ?? null;
     const own =
       session !== null && ownRawDeviceId !== null
         ? encodeScopedId(session.engine.key, ownRawDeviceId)
         : null;
-    const effectiveDeviceId = space?.deviceId ?? defaults.device ?? own;
+    const effectiveDeviceId = space?.deviceId ?? canvasTarget.deviceId ?? own;
     const effectiveDevice = devices.find((device) => device.id === effectiveDeviceId) ?? null;
-    const targetDeviceId =
-      space !== null && own !== null && space.deviceId !== own ? space.deviceId : null;
+    // Calls are already made on the resolved target owner; no cross-engine
+    // targetDeviceId passthrough is needed (or allowed) at the wire boundary.
+    const targetDeviceId = null;
     return { devices, spaces, ownDeviceId: own, space, effectiveDevice, effectiveDeviceId, targetDeviceId };
     // `defaults` is a cached snapshot object; the memo keys on its identity,
     // which changes only when a pick lands.
