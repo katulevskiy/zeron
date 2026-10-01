@@ -63,7 +63,11 @@ pub fn policy_command(
         return Ok(Command::new(exe));
     }
     let home = crate::executable::home_or_current_dir();
-    let cwd = if cwd.as_os_str().is_empty() { home.as_path() } else { cwd };
+    let cwd = if cwd.as_os_str().is_empty() {
+        home.as_path()
+    } else {
+        cwd
+    };
     let mut spec = SandboxSpec::for_agent(harness, policy, cwd, &home);
     // The agent's `zeron mcp` server dials the engine on loopback.
     if let Some(port) = mcp
@@ -148,7 +152,10 @@ mod tests {
         .unwrap();
         assert_eq!(cmd.as_std().get_program(), "/usr/bin/sandbox-exec");
         let args: Vec<_> = cmd.as_std().get_args().collect();
-        assert_eq!(args.last().map(|a| a.to_os_string()), Some("/usr/bin/true".into()));
+        assert_eq!(
+            args.last().map(|a| a.to_os_string()),
+            Some("/usr/bin/true".into())
+        );
         assert!(os_sandboxes().contains(&SandboxMode::ReadOnly));
     }
 
@@ -160,13 +167,8 @@ mod tests {
         let outside = dirs_outside();
         let mut req = request(SandboxMode::WorkspaceWrite);
         req.cwd = ws_path.display().to_string();
-        let mut cmd = agent_command(
-            HarnessId::ClaudeCode,
-            &req,
-            Path::new("/bin/sh"),
-            &ws_path,
-        )
-        .unwrap();
+        let mut cmd =
+            agent_command(HarnessId::ClaudeCode, &req, Path::new("/bin/sh"), &ws_path).unwrap();
         cmd.arg("-c").arg(format!(
             "echo ok > '{}/inside' && (echo no > '{}' 2>/dev/null && echo leaked || echo blocked)",
             ws_path.display(),
