@@ -63,12 +63,15 @@ foreground only, rate limits), and `FeedbackCompose` holds the hooks
 (`LocalFeedback`, `tapAction`, `feedbackAction`, `toggleAction`,
 `OpenCloseFeedback`, `feedbackClickable`). Non-Compose code uses
 `AppFeedback.current`. Settings, Sounds & haptics has the switches and previews.
+`DeviceFeedback.kt` turns the phone engine's setup / failure and file-transfer
+state changes into one-shot cues (`EngineTransitions`, `DeviceFeedbackPolicy`).
 
 ```sh
 adb logcat -s ZeronFeedback          # one line per haptic / cue, or why it was skipped
 adb shell dumpsys vibrator_manager   # what the motor was asked to play
 adb shell am broadcast -a sh.zeron.android.DEBUG_EVENT -p sh.zeron.android \
   --es kind done|input|failed [--ez background true]   # debug builds: a session event
+                                   # (also engine-setup|engine-failed|transfer-asked|received|sent|failed)
 python3 scripts/generate-android-sounds.py && python3 scripts/audit-android-sounds.py
 ```
 

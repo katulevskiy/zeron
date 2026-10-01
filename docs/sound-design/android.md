@@ -97,9 +97,9 @@ cue is wired.
 | `Done` | desktop `done.wav` | 520 | Completion | `Success` | a session's turn finished while Zeron is open |
 | `Request` | desktop `request.wav` | 600 | Input required | `Attention` | a session is waiting for an answer or approval |
 | `Attention` | desktop `attention.wav` | 650 | Errors | `Error` / `Attention` | a session failed; connection lost while a turn runs |
-| `Send` | desktop audition 01 | 300 | Interface | `Confirm` | composer send / steer, question answer, queued message "Send now" |
+| `Send` | desktop audition 01 | 300 | Interface | `Confirm` | composer send / steer, question answer, queued message "Send now", a device picked in Share to Zeron |
 | `Queued` | desktop audition 02 | 480 | Interface | `Confirm` | composer send while a turn is running (queue) |
-| `UploadReady` | desktop audition 03 | 740 | Interface | `Success` | Save to Downloads done; agent install / update done; project cloned or created |
+| `UploadReady` | desktop audition 03 | 740 | Interface | `Success` | Save to Downloads done; agent install / update done; project cloned or created; files arrived or sent; the phone's engine finished setup |
 | `Reconnected` | desktop audition 09 | 760 | Errors | `Confirm` | connection restored after a loss that was announced |
 | `Undo` | desktop audition 10 | 490 | Interface | `Select` | Undo on the "Archived" snackbar |
 | `Tap` | generated | 34 | Interface | `Select` | default tap of any plain control; links, tool disclosures, file badges, tree rows |
@@ -111,9 +111,9 @@ cue is wired.
 | `Star` / `Unstar` | generated | 108 / 92 | Interface | `Pop` | favorites (the model picker); `Unstar` also unpins a session |
 | `Pin` | generated | 84 | Interface | `Pop` | pin a session (list menu, session menu) |
 | `Archive` | generated | 112 | Interface | `Confirm` | archive by swipe, menu, session menu or search |
-| `Delete` | generated | 124 | Interface | `Heavy` (`Confirm` for light removals) | uninstall confirm, discard edits, sign out of an agent, remove a queued message, remove the wallpaper |
+| `Delete` | generated | 124 | Interface | `Heavy` (`Confirm` for light removals) | uninstall confirm, reset the phone's engine, discard edits, sign out of an agent, remove a queued message, remove the wallpaper, clear finished transfers |
 | `Copy` | generated | 76 | Interface | `Confirm` | every copy action: paths, links, transcript, code blocks, terminal selection |
-| `Error` | generated | 176 | Interface | `Error` | a refusal or failure: save failed or conflicted, send failed, install / update / save-to-Downloads failed, terminal could not open, toasts |
+| `Error` | generated | 176 | Interface | `Error` | a refusal or failure: save failed or conflicted, send failed, install / update / save-to-Downloads failed, terminal could not open, toasts, the engine stopped with an error, a refused custom server |
 | `Refresh` | generated | 118 | Interface | `Select` / `Confirm` | pull to refresh, reload, retry, refresh files |
 
 Detent gets `Haptic.Tick`; pull and swipe thresholds have haptic only (`Threshold`).
@@ -129,6 +129,11 @@ the model chip are used by the model picker, `Press` is reserved.
 | Session failed | `Error` + `Attention` (Errors switch) | notification, `fx_attention`, 35-55-45 |
 | Connection lost mid-turn | `Attention` + `Attention` | nothing (nobody can hear it) |
 | Connection restored | `Confirm` + `Reconnected`, only if the loss was announced | nothing |
+| Another device asks to send files | `Attention` + `Request` (Input switch) | notification with Accept / Decline, `fx_request`, 18-90-18 |
+| Files arrived (or this phone's send completed) | `Success` + `UploadReady` (a send completing is in-app only) | notification, `fx_done`, 24-40-30 |
+| A transfer failed, was declined or cancelled by the other side | `Error` + `Attention` (Errors switch) | notification, `fx_attention`, 35-55-45 |
+| The phone's engine finished its first setup | `Success` + `UploadReady` | nothing |
+| The phone's engine stopped with an error | `Error` + `Error` | nothing |
 
 Session events are derived from workspace snapshots (`SessionTransitions`): the
 first snapshot is a baseline, subagent rows are skipped, new rows are baselines,
@@ -138,16 +143,69 @@ happened while away already had its notification. Periodic (clock) refreshes nev
 announce, so a status that merely aged out is not an event.
 
 **Notification channels.** Channel sounds are immutable once a channel exists, so
-session channels are versioned (`session-<kind>-v1-<s|v|sv|q>`); bumping
+session and transfer channels are versioned (`session-<kind>-v1-<s|v|sv|q>`,
+`transfer-<ask|received|failed>-v1-<s|v|sv|q>`); bumping
 `Notifier.CHANNEL_VERSION` migrates (deletes) older ones. One channel exists per
 kind and per sound / vibration combination the in-app switches ask for, created
 lazily, so turning a chime off in Zeron also turns it off in the notification.
+Transfer notifications are posted in the foreground too (they carry Accept /
+Decline and open the received file) but silently there, because the app plays the
+same cue itself; progress notifications are always silent (the `downloads`
+channel, shared with Save to Downloads). The unversioned `sessions` and
+`transfers` channels of earlier builds are deleted on start.
 Sounds are `android.resource://sh.zeron.android/raw/fx_*`. Notifications need the
 `POST_NOTIFICATIONS` permission (API 33+), asked once after the first message you
 send and again from Settings. Android freezes or kills a backgrounded process, so
 a session finishing long after you leave is only announced if the connection is
 still alive; a push service would be the way to make that reliable (not part of
 this change).
+
+## On-device screens (the phone as a device)
+
+Wired by the same rules: a default tap through `tapAction`, an explicit
+`feedbackAction` where the moment has a meaning, nothing for progress. All of it
+obeys the same switches (Interface for the cues in this table, Completion /
+Input required / Errors for the event cues).
+
+| Where | Moment | Haptic + cue |
+| --- | --- | --- |
+| First run | Sign in, organisation pick, Cancel | `Select` + `Tap` (default) |
+| First run | Continue without an account, Explore the demo | `Confirm` + `Open` |
+| First run, Sessions | Engine strip: Start / Try again | `Confirm` + `ToggleOn` / `Confirm` + `Refresh` |
+| Engine (strip, page) | Setup progress, starting, stopped | silent |
+| Engine | Setup finished (once) | `Success` + `UploadReady` |
+| Engine | Stopped with an error (once per failure) | `Error` + `Error` |
+| Settings | This phone, Coding agents, Transfers, Custom server rows | `Select` + `Tap` (navigation adds `Open`) |
+| Settings | Seventh tap on Version (developer options appear) | `Confirm` + `Open` |
+| Settings | Sign out, Leave demo | `Confirm` + `Close` |
+| Custom server | Dialog opens / closes | `Open` / `Close` |
+| Custom server | Use server (valid) | `Confirm` + `Select` |
+| Custom server | Use server (refused: bad URL or token) | `Error` + `Error`, the reason appears |
+| Engine page | Start / Set up, Stop | `Confirm` + `ToggleOn` / `ToggleOff` |
+| Engine page | Reset... opens its dialog; Reset confirmed | `Open`; `Heavy` + `Delete` |
+| Engine page | Copy log | `Confirm` + `Copy` |
+| Engine page | Battery, notification, child-process rows | `Select` + `Tap` |
+| Transfers | Ask before accepting | `ToggleOn` / `ToggleOff` |
+| Transfers | Cancel a live transfer | `Confirm` + `Close` |
+| Transfers | Accept / Decline | `Confirm` + `Select` / `Select` + `Select` |
+| Transfers | Clear finished / remove one row | `Confirm` + `Delete` / `Confirm` + `Close` |
+| Transfers | Open / Show a received item; Downloads | `Select` + `Select` |
+| Transfers | Open failed, setting not saved | `Error` + `Error` |
+| Share to Zeron | A device row (picking it sends) | `Confirm` + `Send` |
+| Share to Zeron | Send failed, files unreadable | `Error` + `Error` |
+| Share to Zeron | Close, Send in background / Done | `Select` + `Close` |
+| Transfers (events) | Offer waiting for you | `Attention` + `Request` |
+| Transfers (events) | Files arrived; your send completed | `Success` + `UploadReady` |
+| Transfers (events) | Failed; declined or cancelled by the other side | `Error` + `Attention` |
+| Transfers (events) | Cancelled or declined by you, progress | silent |
+
+Event cues come from state transitions, never from polling: `TransferCenter` sees a
+transfer change state once and calls `DeviceFeedbackPolicy`; the engine's stage
+changes pass `EngineTransitions` (the first state is a baseline, so opening the
+app on a failed engine does not chime). The same event for the same transfer inside
+2 s is dropped. Foreground follows the whole process (`ProcessLifecycleOwner`), so
+the share sheet is heard, and a transfer finishing while the app is away is only
+the notification.
 
 ## Settings
 

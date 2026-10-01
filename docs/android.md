@@ -503,6 +503,17 @@ same family. When the app is in the background, session events arrive as
 notifications with the same sounds and matching vibration. Design, the cue and
 haptic tables and the policy: [`sound-design/android.md`](sound-design/android.md).
 
+The layer covers the on-device screens too: first run (Continue without an account,
+Explore the demo), the engine (Start / Stop, Reset, setup finished, failures),
+Settings, the Custom server dialog, Transfers and the Share to Zeron sheet. Device
+events are one-shots from state transitions: an offer waiting for you
+(`Attention` + `Request`), files arrived or your send completed (`Success` +
+`UploadReady`), a transfer that failed or was declined (`Error` + `Attention`);
+behind the app, transfer notifications use versioned channels with the same
+request / done / attention chimes (silent while the app is in front, which plays
+the cue itself). The full matrix is in `sound-design/android.md`
+(§ On-device screens).
+
 ## Development: several devices without WorkOS
 
 ```

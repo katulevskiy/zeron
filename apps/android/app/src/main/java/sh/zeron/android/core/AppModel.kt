@@ -286,7 +286,7 @@ class AppModel(private val app: Application) {
 
     /**
      * Debuggable builds: `adb shell am broadcast -a sh.zeron.android.DEBUG_EVENT -p sh.zeron.android --es kind
-     * done|input|failed [--es chat <id>]` runs a session event through the real policy (in-app cue in front,
+     * done|input|failed [--es chat <id>]` (or engine-setup|engine-failed|transfer-asked|received|sent|failed) runs an event through the real policy (in-app cue in front,
      * notification behind), to check the sensory layer without waiting for an agent.
      */
     val isDebuggable: Boolean get() = (app.applicationInfo.flags and android.content.pm.ApplicationInfo.FLAG_DEBUGGABLE) != 0
@@ -294,6 +294,16 @@ class AppModel(private val app: Application) {
     private fun registerDebugAlerts() {
         val receiver = object : android.content.BroadcastReceiver() {
             override fun onReceive(context: android.content.Context, intent: android.content.Intent) {
+                // Device events: engine-setup | engine-failed | transfer-asked | -received | -sent | -failed.
+                when (val kind = intent.getStringExtra("kind").orEmpty()) {
+                    "engine-setup" -> deviceFeedback.engine(sh.zeron.android.feedback.EngineEvent.SetupDone).also { return }
+                    "engine-failed" -> deviceFeedback.engine(sh.zeron.android.feedback.EngineEvent.Failed).also { return }
+                    "transfer-asked" -> deviceFeedback.transfer("debug", sh.zeron.android.feedback.TransferEvent.Asked).also { return }
+                    "transfer-received" -> deviceFeedback.transfer("debug", sh.zeron.android.feedback.TransferEvent.Received).also { return }
+                    "transfer-sent" -> deviceFeedback.transfer("debug", sh.zeron.android.feedback.TransferEvent.Sent).also { return }
+                    "transfer-failed" -> deviceFeedback.transfer("debug", sh.zeron.android.feedback.TransferEvent.Failed).also { return }
+                    else -> kind
+                }
                 val event = when (intent.getStringExtra("kind")) {
                     "input" -> sh.zeron.android.feedback.SessionEvent.NeedsInput
                     "failed" -> sh.zeron.android.feedback.SessionEvent.Failed
