@@ -9,11 +9,7 @@ import sh.zeron.android.core.FavoriteModel
 import sh.zeron.android.core.FavoritesCodec
 import sh.zeron.android.core.NewSessionDraft
 import uniffi.zeron_core.ContextUsage
-import uniffi.zeron_core.ModelInfo
 import uniffi.zeron_core.RepoRef
-
-private fun m(harness: String, id: String, label: String = id) =
-    ModelChoice(harness, harness.uppercase(), ModelInfo(id, label, null, emptyList(), emptyList(), null))
 
 class FavoritesTest {
     @Test fun roundTripKeepsStarringOrder() {
@@ -38,59 +34,6 @@ class FavoritesTest {
             listOf(FavoriteModel("codex", "gpt-5")),
             FavoritesCodec.decode("""[{"harness":"codex","model":"gpt-5"},{"harness":"codex"},42,{"harness":"codex","model":"gpt-5"}]"""),
         )
-    }
-}
-
-class ModelPickerRulesTest {
-    private val catalog = listOf(m("claude-code", "opus"), m("claude-code", "sonnet"), m("codex", "gpt-5"), m("opencode", "glm"))
-    private val providers = ModelPickerRules.providers(catalog, "claude-code", locked = false) { it }
-
-    @Test fun railListsOfferedProvidersInCatalogOrder() {
-        assertEquals(listOf("claude-code", "codex", "opencode"), providers.map { it.harness })
-        // A session keeps its harness: only its own provider, even before its catalog loads.
-        assertEquals(listOf("codex"), ModelPickerRules.providers(catalog, "codex", locked = true) { it }.map { it.harness })
-        assertEquals(listOf(PickerProvider("pi", "Pi")), ModelPickerRules.providers(catalog, "pi", locked = true) { "Pi" })
-    }
-
-    @Test fun railOpensOnFavoritesOnlyWhenTheCurrentModelIsStarred() {
-        val codex = FavoriteModel("codex", "gpt-5")
-        val opus = FavoriteModel("claude-code", "opus")
-        assertEquals(ModelRail.Favorites, ModelPickerRules.defaultRail(listOf(codex, opus), opus, false, providers))
-        assertEquals(ModelRail.Provider("claude-code"), ModelPickerRules.defaultRail(listOf(codex), opus, false, providers))
-        assertEquals(ModelRail.Provider("claude-code"), ModelPickerRules.defaultRail(emptyList(), opus, false, providers))
-        // Locked sessions stay on their harness.
-        assertEquals(ModelRail.Provider("claude-code"), ModelPickerRules.defaultRail(listOf(opus), opus, true, providers))
-        // A current harness the device doesn't offer falls back to the first provider.
-        assertEquals(ModelRail.Provider("claude-code"), ModelPickerRules.defaultRail(emptyList(), FavoriteModel("grok", "x"), false, providers))
-        assertEquals(ModelRail.Favorites, ModelPickerRules.defaultRail(emptyList(), null, false, emptyList()))
-    }
-
-    @Test fun favoritesViewKeepsStarringOrderAndDropsUnofferedModels() {
-        val favorites = listOf(FavoriteModel("codex", "gpt-5"), FavoriteModel("grok", "x"), FavoriteModel("claude-code", "opus"), FavoriteModel("codex", "gone"))
-        val rows = ModelPickerRules.rows(ModelRail.Favorites, catalog, favorites, providers, null)
-        assertEquals(listOf("gpt-5", "opus"), rows.map { it.model.id })
-    }
-
-    @Test fun providerViewKeepsCatalogOrderAndShowsAnUnlistedSelection() {
-        val rows = ModelPickerRules.rows(ModelRail.Provider("claude-code"), catalog, listOf(FavoriteModel("claude-code", "sonnet")), providers, null)
-        assertEquals(listOf("opus", "sonnet"), rows.map { it.model.id })
-        val custom = m("claude-code", "opus-preview")
-        assertEquals(
-            listOf("opus-preview", "opus", "sonnet"),
-            ModelPickerRules.rows(ModelRail.Provider("claude-code"), catalog, emptyList(), providers, custom).map { it.model.id },
-        )
-    }
-
-    @Test fun fiveRowsThenMore() {
-        val many = (1..12).map { m("opencode", "m$it") }
-        val (shown, hidden) = ModelPickerRules.visible(many, expanded = false)
-        assertEquals(5, shown.size)
-        assertEquals(7, hidden)
-        assertEquals(12 to 0, ModelPickerRules.visible(many, expanded = true).let { it.first.size to it.second })
-        assertEquals(5 to 0, ModelPickerRules.visible(many.take(5), expanded = false).let { it.first.size to it.second })
-        assertFalse(ModelPickerRules.startsExpanded(many, FavoriteModel("opencode", "m5")))
-        assertTrue(ModelPickerRules.startsExpanded(many, FavoriteModel("opencode", "m6")))
-        assertFalse(ModelPickerRules.startsExpanded(many, null))
     }
 }
 

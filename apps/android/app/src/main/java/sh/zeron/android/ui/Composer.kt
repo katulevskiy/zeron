@@ -93,6 +93,7 @@ import androidx.compose.ui.text.style.TextOverflow
 import androidx.compose.ui.unit.dp
 import kotlinx.coroutines.launch
 import sh.zeron.android.core.AppModel
+import sh.zeron.android.core.userMessage
 import uniffi.zeron_core.BusyPolicy
 import uniffi.zeron_core.ChatConfig
 import uniffi.zeron_core.ComposerState
@@ -324,14 +325,21 @@ private fun SessionChips(app: AppModel, client: CoreClient, c: ComposerState, ro
     val deviceId = c.host.deviceId
     val favorites by app.favorites.favorites.collectAsState()
     val workspace by app.workspace.collectAsState()
-    // The harness's models: the device's list (the picker shows a loader until it lands).
+    // The harness's models: the built-in catalog at once, then the device's list.
     var models by remember(deviceId, harness) { mutableStateOf<List<ModelInfo>?>(null) }
-    var menu by remember { mutableStateOf<String?>(null) }
+    var loading by remember(deviceId, harness) { mutableStateOf(false) }
+    var loadError by remember(deviceId, harness) { mutableStateOf<String?>(null) }
+    // The session's model options (fast mode, context window…), as last set from here.
+    var options by remember(c.chatId) { mutableStateOf(runCatching { client.sessionConfig(c.chatId)?.modelOptions }.getOrNull().orEmpty()) }
 
-    fun open(which: String) {
-        menu = which
-        if (models == null) scope.launch {
-            models = runCatching { client.listModels(deviceId, harness) }.getOrNull() ?: fallbackModels(harness)
+    fun load() {
+        loading = true
+        loadError = null
+        scope.launch {
+            val result = runCatching { client.listModels(deviceId, harness) }
+            models = result.getOrNull() ?: fallbackModels(harness)
+            loadError = result.exceptionOrNull()?.userMessage()
+            loading = false
         }
     }
 
@@ -343,39 +351,43 @@ private fun SessionChips(app: AppModel, client: CoreClient, c: ComposerState, ro
     val modelLabel = row?.modelLabel ?: row?.harnessLabel
     if (modelLabel != null) {
         val label = row?.harnessLabel ?: harnessLabel(harness)
-        val catalog = models.orEmpty().map { ModelChoice(harness, label, it) }
+        // The built-in catalog stands in until the device's list lands, so the chip
+        // and the card show the right effort ladder straight away.
+        val builtIn = remember(harness) { fallbackModels(harness) }
+        val catalog = (models ?: builtIn).map { ModelChoice(harness, label, it) }
         val current = row?.model?.let { id ->
             catalog.firstOrNull { it.model.id == id }
                 ?: ModelChoice(harness, label, ModelInfo(id, row.modelLabel ?: id, "Selected in this session; not in the device's model list", emptyList(), emptyList(), null))
+        } ?: catalog.firstOrNull()
+        val statuses = when {
+            loadError != null -> listOf(CatalogStatus(harness, label, loadError))
+            loading -> listOf(CatalogStatus(harness, label))
+            else -> emptyList()
         }
-        ContextChip(modelLabel, leading = { HarnessMark(harness, 14.dp) }, onClick = { open("model") }) {
-            // A session keeps its harness (as on the desktop): its own provider and its favorites.
-            ModelPickerPopover(
-                expanded = menu == "model",
-                onDismiss = { menu = null },
-                catalog = catalog,
-                current = current,
-                favorites = favorites,
-                onToggleFavorite = app.favorites::toggle,
-                onPick = { m -> setConfig { it.copy(model = m.model.id) } },
-                locked = true,
-                loading = models == null,
-                labelFor = { harnessLabel(it) },
-            )
-        }
-    }
-    // Effort: the device's ladder once loaded, the built-in catalog's until then
-    // (never an empty menu); shown whenever the model has one.
-    val builtIn = remember(harness) { fallbackModels(harness) }
-    val ladder = (models ?: builtIn).let { list -> list.firstOrNull { it.id == row?.model } ?: list.firstOrNull() }
-    val levels = ladder?.reasoningLevels.orEmpty()
-    val level = row?.reasoning?.takeIf { it.isNotEmpty() } ?: ladder?.defaultReasoning?.takeIf { it in levels }
-    if (row != null && level != null && levels.isNotEmpty()) {
-        ContextChip(reasoningLabel(level), leading = { ZIcon(ZIcons.Effort, null, Modifier.size(16.dp)) }, onClick = { open("effort") }) {
-            ChoiceMenu(menu == "effort", { menu = null }, listOf(MenuSection("Reasoning effort", levels.map { l ->
-                MenuChoice(reasoningLabel(l), l == level) { setConfig { it.copy(reasoning = l) } }
-            })), steps = true)
-        }
+        // A session keeps its harness (as on the desktop): its own provider and its favorites.
+        ModelPickerChip(
+            catalog = catalog,
+            current = current,
+            harness = harness,
+            fallbackLabel = modelLabel,
+            favorites = favorites,
+            onToggleFavorite = app.favorites::toggle,
+            onPick = { m ->
+                options = emptyMap()
+                setConfig { it.copy(model = m.model.id, modelOptions = emptyMap()) }
+            },
+            effort = row?.reasoning?.takeIf { it.isNotEmpty() },
+            onEffort = { level -> setConfig { it.copy(reasoning = level) } },
+            options = options,
+            onOptions = { next ->
+                options = next
+                setConfig { it.copy(modelOptions = next) }
+            },
+            locked = true,
+            statuses = statuses,
+            onRetry = { load() },
+            onOpen = { if (models == null && !loading) load() },
+        )
     }
     val pr = row?.pullRequest
     if (pr != null) {

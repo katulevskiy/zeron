@@ -8,7 +8,13 @@ import androidx.compose.animation.fadeOut
 import androidx.compose.animation.scaleIn
 import androidx.compose.animation.scaleOut
 import androidx.compose.foundation.BorderStroke
+import androidx.compose.foundation.background
+import androidx.compose.foundation.gestures.detectTapGestures
+import androidx.compose.foundation.layout.Box
 import androidx.compose.foundation.layout.Column
+import androidx.compose.foundation.layout.requiredSize
+import androidx.compose.ui.graphics.Color
+import androidx.compose.ui.input.pointer.pointerInput
 import androidx.compose.foundation.layout.ColumnScope
 import androidx.compose.foundation.layout.Spacer
 import androidx.compose.foundation.layout.WindowInsets
@@ -56,7 +62,8 @@ private val MinAbove = 260.dp
  * it hugs its content. It opens above the chip when there's room — the
  * composer sits at the bottom — else below, and its height is bounded by
  * that space and [maxHeight], so it never covers the screen. Tapping
- * outside or Back dismisses it.
+ * outside or Back dismisses it. A fixed [width] (capped to the window) makes
+ * a compact card; [scrim] dims the page behind and catches taps outside.
  */
 @Composable
 fun AnchoredPopover(
@@ -64,6 +71,8 @@ fun AnchoredPopover(
     onDismiss: () -> Unit,
     wide: Boolean = true,
     maxHeight: Dp = 520.dp,
+    width: Dp? = null,
+    scrim: Boolean = false,
     content: @Composable ColumnScope.() -> Unit,
 ) {
     val density = LocalDensity.current
@@ -92,10 +101,29 @@ fun AnchoredPopover(
     val spaceBelow = with(density) { (screenHeight - bottomInset - anchorBottom - margin).coerceAtLeast(0f).toDp() }
     val above = spaceAbove >= MinAbove || spaceAbove >= spaceBelow
     val height = min(maxHeight, if (above) spaceAbove else spaceBelow)
-    val width = min(with(density) { window.width.toDp() } - Margin * 2, 560.dp)
+    val windowWidth = with(density) { window.width.toDp() } - Margin * 2
+    val cardWidth = min(windowWidth, width ?: 560.dp)
 
-    val provider = remember(above, density) {
-        AnchoredPosition(above, with(density) { Margin.roundToPx() }, with(density) { Gap.roundToPx() })
+    val provider = remember(above, density, width) {
+        AnchoredPosition(above, with(density) { Margin.roundToPx() }, with(density) { Gap.roundToPx() }, startAligned = width != null)
+    }
+    if (scrim) {
+        // A full-window layer under the card: dims the page and takes taps outside it.
+        Popup(popupPositionProvider = ScrimPosition, onDismissRequest = onDismiss, properties = PopupProperties(focusable = false, clippingEnabled = false)) {
+            var entered by remember { androidx.compose.runtime.mutableStateOf(false) }
+            androidx.compose.runtime.LaunchedEffect(Unit) { entered = true }
+            val fade by androidx.compose.animation.core.animateFloatAsState(
+                if (entered && visible.targetState) 1f else 0f,
+                MaterialTheme.motionScheme.defaultEffectsSpec(),
+                label = "scrim",
+            )
+            Box(
+                Modifier
+                    .requiredSize(with(density) { window.width.toDp() }, with(density) { window.height.toDp() })
+                    .background(Color.Black.copy(alpha = 0.22f * fade))
+                    .pointerInput(Unit) { detectTapGestures { onDismiss() } },
+            )
+        }
     }
     Popup(popupPositionProvider = provider, onDismissRequest = onDismiss, properties = PopupProperties(focusable = true)) {
         AnimatedVisibility(
@@ -110,7 +138,7 @@ fun AnchoredPopover(
                 color = MaterialTheme.colorScheme.surfaceContainerHigh,
                 border = BorderStroke(1.dp, MaterialTheme.colorScheme.outlineVariant),
                 shadowElevation = 8.dp,
-                modifier = Modifier.heightIn(max = height).then(if (wide) Modifier.width(width) else Modifier),
+                modifier = Modifier.heightIn(max = height).then(if (wide || width != null) Modifier.width(cardWidth) else Modifier),
             ) {
                 Column(content = content)
             }
@@ -118,11 +146,16 @@ fun AnchoredPopover(
     }
 }
 
-/** Above (or below) the anchor, centred on it but kept inside the window's margins. */
-private class AnchoredPosition(private val above: Boolean, private val margin: Int, private val gap: Int) : PopupPositionProvider {
+/** The window's top-left corner, whatever the anchor. */
+private object ScrimPosition : PopupPositionProvider {
+    override fun calculatePosition(anchorBounds: IntRect, windowSize: IntSize, layoutDirection: LayoutDirection, popupContentSize: IntSize) = IntOffset.Zero
+}
+
+/** Above (or below) the anchor, centred on it (or, for a fixed-width card, starting at its edge) but kept inside the window's margins. */
+private class AnchoredPosition(private val above: Boolean, private val margin: Int, private val gap: Int, private val startAligned: Boolean = false) : PopupPositionProvider {
     override fun calculatePosition(anchorBounds: IntRect, windowSize: IntSize, layoutDirection: LayoutDirection, popupContentSize: IntSize): IntOffset {
         val maxX = (windowSize.width - popupContentSize.width - margin).coerceAtLeast(margin)
-        val x = (anchorBounds.center.x - popupContentSize.width / 2).coerceIn(margin, maxX)
+        val x = (if (startAligned) anchorBounds.left else anchorBounds.center.x - popupContentSize.width / 2).coerceIn(margin, maxX)
         val y = if (above) anchorBounds.top - gap - popupContentSize.height else anchorBounds.bottom + gap
         return IntOffset(x, y.coerceIn(0, (windowSize.height - popupContentSize.height).coerceAtLeast(0)))
     }
