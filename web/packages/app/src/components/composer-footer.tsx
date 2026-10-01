@@ -9,6 +9,7 @@ import { deviceOnline, spaceDisplayName, spacesSorted } from "../lib/view";
 import { filterIndices } from "../lib/picker-search";
 import { addSpaceStore } from "../state/add-space";
 import { composerDefaults, rememberNoProject, rememberTarget } from "../lib/composer-draft";
+import { targetForDevicePick, targetForProjectPick } from "../lib/new-chat-target";
 import { sidebarStore } from "../state/sidebar";
 import { ContextUsageIndicator, hasWindow } from "./context-usage";
 import { ChangeRequestBadge } from "./change-request-badge";
@@ -140,7 +141,7 @@ export function ComposerFooter({ chat, crSummary, contextUsage }: ComposerFooter
       ) : (
         <>
           <DeviceChip devices={devices} effectiveDevice={effectiveDevice} ownDeviceId={ownDeviceId} now={now} />
-          <ProjectChip spaces={spaces} currentSpaceId={space?.id ?? null} />
+          <ProjectChip spaces={spaces} currentSpaceId={space?.id ?? null} currentDeviceId={effectiveDeviceId} />
           <CheckoutChip
             checkout={checkout}
             pickedRefHasWorktree={pickedRefHasWorktree}
@@ -279,8 +280,14 @@ function DeviceCard({
   const filtered = filterIndices(query, names).map((ix) => rows[ix]!);
 
   function pick(device: Device): void {
-    const snapshot = composerDefaults.getSnapshot();
-    rememberTarget(device.id, snapshot.project, snapshot.noProject);
+    const target = targetForDevicePick(composerDefaults.getSnapshot(), device.id);
+    if (target.noProject) {
+      // Projectless engine switches clear only the visible sidebar filter;
+      // last-project history remains navigation state, never a hidden run target.
+      rememberNoProject(target.device, sidebarStore);
+    } else {
+      rememberTarget(target.device, target.project, target.noProject);
+    }
     onClose();
   }
 
@@ -348,11 +355,13 @@ function DeviceCard({
 export interface ProjectChipProps {
   readonly spaces: readonly Space[];
   readonly currentSpaceId: string | null;
+  /** The resolved engine/device to retain when opting out of a project. */
+  readonly currentDeviceId?: string | null;
   /** The label with no project — "All projects" in the footer, "No project" on the canvas (pickers.rs:2453). */
   readonly fallbackLabel?: string;
 }
 
-export function ProjectChip({ spaces, currentSpaceId, fallbackLabel = "All projects" }: ProjectChipProps) {
+export function ProjectChip({ spaces, currentSpaceId, currentDeviceId = null, fallbackLabel = "All projects" }: ProjectChipProps) {
   const [open, setOpen] = useState(false);
 
   const pickedSpace = currentSpaceId === null ? null : spaces.find((space) => space.id === currentSpaceId) ?? null;
@@ -369,7 +378,13 @@ export function ProjectChip({ spaces, currentSpaceId, fallbackLabel = "All proje
       overlaySource="composer-pickers"
       trigger={<FooterChip id="picker-project" icon="folder" label={label} open={open} title={label} />}
     >
-      <ProjectCard open={open} onClose={() => setOpen(false)} spaces={spaces} currentSpaceId={currentSpaceId} />
+      <ProjectCard
+        open={open}
+        onClose={() => setOpen(false)}
+        spaces={spaces}
+        currentSpaceId={currentSpaceId}
+        currentDeviceId={currentDeviceId}
+      />
     </PickerCard>
   );
 }
@@ -379,11 +394,13 @@ function ProjectCard({
   onClose,
   spaces,
   currentSpaceId,
+  currentDeviceId,
 }: {
   readonly open: boolean;
   readonly onClose: () => void;
   readonly spaces: readonly Space[];
   readonly currentSpaceId: string | null;
+  readonly currentDeviceId: string | null;
 }) {
   const [query, setQuery] = useState("");
   const inputRef = useRef<HTMLInputElement | null>(null);
@@ -392,17 +409,15 @@ function ProjectCard({
   const filtered = filterIndices(query, labels).map((ix) => spaces[ix]!);
 
   function pickSpace(space: Space): void {
-    const snapshot = composerDefaults.getSnapshot();
-    rememberTarget(snapshot.device, space.id, false);
+    const target = targetForProjectPick(space.id, space.deviceId);
+    rememberTarget(target.device, target.project, target.noProject);
     onClose();
   }
 
   function pickNoProject(): void {
-    const snapshot = composerDefaults.getSnapshot();
-    // The no-project pick ALSO takes the sidebar's space filter (§2.4,
-    // shell.rs:1767-1774): a retained project filter would hide the
-    // projectless session's first send from the active list.
-    rememberNoProject(snapshot.device, sidebarStore);
+    // Prefer the visible resolved device: when the current project came from
+    // another engine, this prevents no-project from restoring an older host.
+    rememberNoProject(currentDeviceId ?? composerDefaults.getSnapshot().device, sidebarStore);
     onClose();
   }
 

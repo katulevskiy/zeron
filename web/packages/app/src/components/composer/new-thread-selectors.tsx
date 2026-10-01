@@ -125,6 +125,7 @@ export function NewThreadTargetSelectors() {
       <ProjectChip
         spaces={target.spaces}
         currentSpaceId={target.space?.id ?? null}
+        currentDeviceId={target.effectiveDeviceId}
         fallbackLabel="No project"
       />
     </div>

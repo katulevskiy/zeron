@@ -36,6 +36,29 @@ export function resolveNewChatTarget(
   return { projectId, deviceId: defaults.device, noProject: defaults.noProject, engineKey };
 }
 
+/** The device-picker policy: retain only a project owned by the chosen engine. */
+export function targetForDevicePick(current: NewChatDefaults, deviceId: string): NewChatDefaults {
+  const keepProject = current.project !== null && !current.noProject && sameOwner(current.project, deviceId);
+  return keepProject
+    ? { device: deviceId, project: current.project, noProject: false }
+    : { device: deviceId, project: null, noProject: true };
+}
+
+/** A project row supplies both the project and the owning device identity. */
+export function targetForProjectPick(projectId: string, deviceId: string): NewChatDefaults {
+  return { device: deviceId, project: projectId, noProject: false };
+}
+
+function sameOwner(left: string, right: string): boolean {
+  try {
+    const leftOwner = parseScopedId(left).engine;
+    const rightOwner = parseScopedId(right).engine;
+    return leftOwner !== null && leftOwner === rightOwner;
+  } catch {
+    return false;
+  }
+}
+
 function ownerOf(id: string | null, fallback: string | null): string | null {
   if (id === null) {
     return null;
