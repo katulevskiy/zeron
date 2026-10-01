@@ -222,17 +222,11 @@ impl Repos {
 
     /// Run `git <args>` (optionally under `cwd`), returning trimmed stdout.
     async fn git(&self, args: &[&str], cwd: Option<&Path>) -> Result<String, EngineError> {
-        let mut cmd = tokio::process::Command::new("git");
-        #[cfg(windows)]
-        {
-            use std::os::windows::process::CommandExt;
-            cmd.as_std_mut().creation_flags(0x08000000);
-        }
+        let mut cmd = git_command();
         cmd.args(args);
         if let Some(cwd) = cwd {
             cmd.current_dir(cwd);
         }
-        cmd.stdin(std::process::Stdio::null());
         let output = cmd
             .output()
             .await
@@ -2166,6 +2160,25 @@ fn parse_history_refs(output: &str) -> HashMap<String, Vec<GitHistoryRef>> {
         });
     }
     refs_by_sha
+}
+
+/// A blocking `git` command with the engine's process hygiene: no console
+/// window on Windows and stdin closed, so git can never wait on a prompt read
+/// from our stdin. For code already running on a blocking thread.
+pub(crate) fn git_std_command() -> std::process::Command {
+    let mut cmd = std::process::Command::new("git");
+    #[cfg(windows)]
+    {
+        use std::os::windows::process::CommandExt;
+        cmd.creation_flags(0x08000000);
+    }
+    cmd.stdin(std::process::Stdio::null());
+    cmd
+}
+
+/// [`git_std_command`] for async callers.
+pub(crate) fn git_command() -> tokio::process::Command {
+    tokio::process::Command::from(git_std_command())
 }
 
 /// Absolute form of a possibly-relative path (no filesystem access).
