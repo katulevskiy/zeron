@@ -383,12 +383,12 @@ pub(crate) fn goal_marker(entry: &SessionMessageEntry) -> Option<GoalMarker> {
                     _ => None,
                 })
                 .unwrap_or_default();
-            // Line two of a result is the one-line summary; of a question,
-            // the question itself.
+            // A question row shows the question; a result row is just a label
+            // (the end marker above already carries the summary line).
             let detail = if text.starts_with("[Workflow question]") {
                 text.lines().nth(2).unwrap_or_default().to_owned()
             } else {
-                text.lines().nth(1).unwrap_or_default().to_owned()
+                String::new()
             };
             Some(GoalMarker {
                 kind: MarkerKind::WorkflowMessage(*status),
@@ -433,7 +433,7 @@ impl GoalMarker {
                     _ => "stopped",
                 };
                 format!(
-                    "Workflow {word} · {} — result sent to the agent",
+                    "Result of workflow {} ({word}) sent to the agent",
                     one_line(&self.title)
                 )
             }
@@ -1554,13 +1554,10 @@ mod tests {
         .unwrap();
         assert_eq!(
             result.label(),
-            "Workflow completed · PR review — result sent to the agent"
+            "Result of workflow PR review (completed) sent to the agent"
         );
         assert_eq!(result.tone(), Tone::Success);
-        assert_eq!(
-            result.detail_line().as_deref(),
-            Some("completed · 4 agents · 12 asks · 2m 5s")
-        );
+        assert_eq!(result.detail_line(), None);
         // An escalation notice shows the question.
         let question = goal_marker(&workflow_entry(
             MessageRole::User,

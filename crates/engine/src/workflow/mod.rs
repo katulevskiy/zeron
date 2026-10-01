@@ -107,6 +107,12 @@ impl Approver for SessionsApprover {
             {
                 Approval::Approved
             }
+            // An interrupt (or the turn ending) answers parked questions with
+            // nothing: that is a cancelled question, not a user's "no".
+            Ok(Ok(answers)) if answers.is_empty() => Approval::Denied(
+                "the approval was cancelled: the chat's turn was interrupted or ended before the question was answered"
+                    .into(),
+            ),
             Ok(Ok(_)) => Approval::Denied("the user denied the workflow".into()),
             Ok(Err(_)) => Approval::Denied(
                 "the approval question was lost (the turn ended before it was answered)".into(),
@@ -751,7 +757,11 @@ impl WorkflowService {
             (_, Some(WorkflowStopReason::Denied)) => WorkflowEventMarker::Denied,
             _ => WorkflowEventMarker::Stopped,
         };
-        let detail = prompts::summary_line(run);
+        let mut detail = prompts::summary_line(run);
+        if let Some(why) = h.stop_detail.as_deref().or(h.error.as_deref()) {
+            detail.push_str(" — ");
+            detail.push_str(why);
+        }
         let _ = self.shared.doc_host.push_system_marker(
             chat_id,
             &format!("workflow-{run_id}-end"),

@@ -373,8 +373,10 @@ host (`crates/workflow/tests/guide.rs`), so the documentation cannot drift from 
 `ZERON_HARNESS=mock ZERON_MOCK_WORKFLOW=1` replaces the child agents with scripted ones (a few
 seconds each, schema-valid sample answers, token counts; an agent whose name starts with `flaky`
 fails authentication, which stops the run) so a workflow runs end to end without a model. Start one
-from a chat's live turn with the `WorkflowStart` RPC (or `start_workflow`) and answer the question;
-`scripts/` helpers used for the screenshots drive exactly that.
+from a chat's live turn with `start_workflow` (a `zeron mcp` process with `ZERON_CHAT_ID` set, or the
+`WorkflowStart` RPC), then answer the approval question with `respond_to_input` — that is how the
+screenshots were taken. Pace the parent's mock turn with `ZERON_MOCK_REPEAT` / `ZERON_MOCK_DELAY_MS`
+so it is still running when the question is raised.
 
 ## Follow-ups
 
