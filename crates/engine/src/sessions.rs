@@ -194,10 +194,16 @@ struct Inner {
     /// dispatch or accepted steer) — the diff sync snapshots the checkout tree
     /// for the Changes pane's "Latest turn" scope. Absent in bare tests.
     turn_listener: OnceLock<TurnListener>,
+    cwd_preparer: OnceLock<CwdPreparer>,
 }
 
 /// Turn-start hook: called with `(chat_id, cwd)`.
 pub type TurnListener = Arc<dyn Fn(&str, &str) + Send + Sync>;
+
+/// Makes a run's folder ready before the run starts there (a cloud box
+/// restores the workspace from its checkpoint, docs/cloud.md §5).
+pub type CwdPreparer =
+    Arc<dyn Fn(std::path::PathBuf) -> futures::future::BoxFuture<'static, ()> + Send + Sync>;
 
 fn lock<T>(mutex: &Mutex<T>) -> MutexGuard<'_, T> {
     mutex.lock().unwrap_or_else(PoisonError::into_inner)
@@ -231,6 +237,7 @@ impl SessionsEngine {
                 titles: OnceLock::new(),
                 generated_images: OnceLock::new(),
                 turn_listener: OnceLock::new(),
+                cwd_preparer: OnceLock::new(),
             }),
         }
     }
@@ -279,6 +286,21 @@ impl SessionsEngine {
     /// Wire the turn-start listener (called once at engine assembly).
     pub fn set_turn_listener(&self, listener: TurnListener) {
         let _ = self.inner.turn_listener.set(listener);
+    }
+
+    /// Wire the cwd preparer (once, by `zeron cloud-boot`).
+    pub fn set_cwd_preparer(&self, preparer: CwdPreparer) {
+        let _ = self.inner.cwd_preparer.set(preparer);
+    }
+
+    /// Run the cwd preparer, if one is wired, for `cwd` (`~` expanded).
+    pub async fn prepare_cwd(&self, cwd: &str) {
+        let Some(preparer) = self.inner.cwd_preparer.get().cloned() else {
+            return;
+        };
+        if let Ok(cwd) = crate::repos::expand_home(cwd) {
+            preparer(std::path::PathBuf::from(cwd)).await;
+        }
     }
 
     fn note_turn_start(&self, chat_id: &str, cwd: &str) {
@@ -473,6 +495,7 @@ impl SessionsEngine {
         // host's home); expand it here, on the host, where the run spawns.
         request.cwd = crate::repos::expand_home(&request.cwd)
             .map_err(|error| EngineError::Other(error.to_string()))?;
+        self.prepare_cwd(&request.cwd).await;
         // Native-only catalog entries have no portable file fallback. Reject
         // cross-harness delivery before recording or routing the user turn.
         zeron_proto::invocation::validate_harness_invocations(&request.prompt, harness_id)

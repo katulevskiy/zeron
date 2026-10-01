@@ -1,0 +1,2 @@
+# The binary is copied in by the image workflow (or by hand) before a build.
+/zeron

@@ -78,6 +78,12 @@ enum Command {
         #[arg(long)]
         data_dir: Option<std::path::PathBuf>,
     },
+    /// Boot a cloud box (inside its container): restore the engine data and
+    /// agent state from the checkpoint store, then run the headless engine
+    /// with the box's control server and checkpoints (docs/cloud.md).
+    #[cfg(unix)]
+    #[command(name = "cloud-boot", hide = true)]
+    CloudBoot,
 }
 
 #[derive(Subcommand)]
@@ -195,7 +201,7 @@ fn main() -> anyhow::Result<()> {
     let long_running = matches!(
         &cli.command,
         None | Some(Command::Headless) | Some(Command::LocalEdge { .. })
-    );
+    ) || is_cloud_boot(&cli.command);
     let default_filter = if long_running {
         "info,loro_internal=warn,loro=warn"
     } else {
@@ -322,6 +328,20 @@ fn main() -> anyhow::Result<()> {
                 token,
             }))
         }
+        #[cfg(unix)]
+        Some(Command::CloudBoot) => {
+            let env = zeron_engine::cloud::CloudEnv::from_env()?;
+            let runtime = tokio::runtime::Runtime::new()?;
+            runtime.block_on(async {
+                zeron_engine::cloud::CloudBoot::new(engine_config_from_env(), env)
+                    .run(async {
+                        if let Err(error) = shutdown_signal().await {
+                            tracing::error!(%error, "signal handler failed; stopping");
+                        }
+                    })
+                    .await
+            })
+        }
         Some(Command::Daemon { command }) => match command {
             DaemonCommand::Install => daemon::install(&engine_config_from_env().data_dir),
             DaemonCommand::Uninstall => daemon::uninstall(),
@@ -382,6 +402,18 @@ fn attach_parent_console() {
                 }
             }
         }
+    }
+}
+
+fn is_cloud_boot(command: &Option<Command>) -> bool {
+    #[cfg(unix)]
+    {
+        matches!(command, Some(Command::CloudBoot))
+    }
+    #[cfg(not(unix))]
+    {
+        let _ = command;
+        false
     }
 }
 

@@ -35,7 +35,7 @@ container engine ──WSS──▶ Zeron edge (device credential) ── like a
 | --- | --- |
 | `CloudProvider` trait + Cloudflare implementation (REST) | `crates/cloud` |
 | Worker template (`ZeronBox` DO, `R2Gateway`, signed routes) | `cloud/worker/` (prebuilt ESM, embedded in the binary) |
-| Container image (Debian trixie-slim, Node, git, agent CLIs, non-root `zeron`, `tini`) | `cloud/image/Dockerfile` |
+| Container image (Debian trixie-slim, Node, git, agent CLIs, non-root `zeron`, `tini`) | `cloud/image/Dockerfile`, pushed by `.github/workflows/cloud-image.yml` |
 | `zeron cloud-boot`, control server, checkpoints | `crates/engine/src/cloud/` |
 | Device credentials (enrollment) | `edge/src` + `crates/localedge` + `crates/engine/src/auth.rs` |
 | Box records (synced) | registry kind `cloudBoxes` |
@@ -94,14 +94,58 @@ container engine ──WSS──▶ Zeron edge (device credential) ── like a
 
 ### 4. Engine control server (inside the box, `0.0.0.0:$ZERON_CLOUD_CONTROL_PORT`)
 
-Every request needs `x-zeron-control: $ZERON_CONTROL_TOKEN`.
+`zeron cloud-boot` (the image's entrypoint) restores `data` and `harness`
+from the store's `HEAD` (§5), then starts the headless engine as `zeron
+headless` would, with the control server and checkpoints attached. A first
+boot finds no `HEAD` and restores nothing. A restore that fails stops the
+boot: a box must not start empty and then overwrite its own checkpoint. The
+server only runs when `ZERON_CLOUD_CONTROL_PORT` is set, and refuses to start
+without `ZERON_CONTROL_TOKEN`.
+
+The image (`cloud/image/Dockerfile`, linux/amd64) is Debian trixie-slim with
+`tini` as PID 1, git, openssh-client, curl, ripgrep, python3, Node 24 LTS
+(official tarball, checksum-verified), and Claude Code, Codex and OpenCode
+installed with npm under the non-root user `zeron` (uid 1000,
+`HOME=/home/zeron`, npm prefix `~/.npm-global`, so Zeron can update them).
+`IS_SANDBOX=1` lets Claude Code accept permission bypass in a container. The
+`zeron` binary is the release's Linux x86_64 build. Its desktop libraries
+(gpui, the webview) are installed but unused; a static musl engine-only build
+passes `ZERON_LIBC=musl` and skips them. The image build fails if `ldd` finds
+a missing library. `.github/workflows/cloud-image.yml` pushes
+`docker.io/zeronsh/zeron-cloud:<version>` (and `:latest`) after each release.
+
+Every request needs `x-zeron-control: $ZERON_CONTROL_TOKEN` (compared in
+constant time; anything else is `401`).
 
 - `GET /zeron/cloud/status` returns `{busy, lastActivityAt, runs, moves,
-  terminals}`. `busy` is true while any run, move, terminal or connected
-  viewer is active.
-- `POST /zeron/cloud/checkpoint?final=0|1` returns `{seq, objects, bytes}`.
-  A final checkpoint pauses drains, as a move does.
-- On SIGTERM: final checkpoint within the 15-minute grace, then exit.
+  terminals, viewers}`. `busy` is true while any of the counts is nonzero:
+  - `runs`: runs working or waiting for an answer;
+  - `moves`: moves into or out of this device that haven't finished (from the
+    chats' registry rows);
+  - `terminals`: open terminals;
+  - `viewers`: RPC calls in flight and open RPC streams, from the local IPC
+    port and from other devices through the host relay. A device showing a
+    chat hosted here keeps streams open to it (files, diffs, terminal
+    output), so this is the "connected viewer" signal.
+
+  `lastActivityAt` (epoch ms) is the latest of: the last RPC call, and the
+  last time the box was seen busy (sampled every 5 s and on every status
+  request). It starts at boot.
+- `POST /zeron/cloud/checkpoint?final=0|1` returns `{seq, objects, bytes,
+  changed}`: the checkpoint now in force, objects and compressed bytes
+  uploaded, and whether anything changed (an unchanged checkpoint writes
+  nothing). It flushes open docs to the store first. A final checkpoint first
+  holds every hosted chat's commands and queue, as a move does (chats a move
+  already holds stay the move's), and keeps them held. If the box is still
+  running 10 minutes later, the holds lift.
+- An incremental checkpoint runs every 10 minutes. It writes only when
+  something changed.
+- On SIGTERM: hold every chat, give live runs up to 10 minutes to finish,
+  stop the engine gracefully (which settles anything still running), then
+  write the final checkpoint and exit. That fits Cloudflare's 15-minute grace.
+- Workspaces restore lazily: the first dispatch of a run whose folder belongs
+  to a workspace not restored yet restores it first (`SessionsEngine`'s cwd
+  preparer, also called before a worktree is created from a project).
 
 ### 5. Checkpoint store (`$ZERON_CHECKPOINT_URL`, the R2 gateway)
 
@@ -115,17 +159,84 @@ The gateway confines keys to `boxes/{deviceId}/`. Plain HTTP:
 | `PUT /manifests/{seq}.json` | Write a manifest |
 | `GET /manifests/{seq}.json` | Read a manifest |
 | `PUT /HEAD` | `{"seq": n}`, written last, so a checkpoint is atomic |
-| `GET /HEAD` | Latest sequence |
+| `GET /HEAD` | Latest sequence (`404` before the first checkpoint) |
 
-- **Objects:** zstd tar packs of small files (≤ 64 MiB each), or ≤ 64 MiB
-  chunks of large files, named by the SHA-256 of their content.
-- **Manifest:** `{seq, createdAt, roots: {name: {path, entries: [{rel, kind,
-  mode, size, mtimeMs, target?, chunks: [sha], pack?: sha}]}}}`.
-- **Roots:** `data` (Zeron data dir; SQLite via `VACUUM INTO` copies),
-  `harness` (`~/.claude`, `~/.codex`, …), and one root per workspace
-  (including `.git` and regenerable folders; the box keeps its build caches).
-- **Restore order at boot:** `data` and `harness` first, workspaces lazily
-  (a chat's workspace before its first run).
+Requests that fail with a transport error or a `5xx` are retried 3 times
+with backoff.
+
+- **Objects.** Every object is one zstd frame (level 3), named by the
+  SHA-256 of its *uncompressed* payload. A name is known without compressing
+  anything, and a download is verified by decompressing and hashing it.
+  - Files under 4 MiB travel in **packs**: a tar of members named by their
+    content's SHA-256 (mode 0644, mtime 0, so equal content gives an equal
+    pack). A pack's raw tar stays under 64 MiB.
+  - Larger files are cut into 64 MiB **chunks**, one object each.
+- **Manifest.** `{version: 1, seq, createdAt, roots: {name: {path, requires?,
+  entries: [{rel, kind, mode, size, mtimeMs, target?, chunks?, pack?}]}}}`.
+  - `kind` is `file`, `symlink` or `dir`. Every folder is listed, so a
+    restore recreates empty folders and every folder's mode and mtime.
+  - `chunks` holds the content hashes: one per 64 MiB chunk, or one for a
+    small file. It is empty for empty files.
+  - `pack` names the pack holding a small file, whose member is `chunks[0]`.
+    Without `pack`, every chunk is an object of its own. A small file whose
+    content already exists as an object (the tail chunk of a large file, say)
+    points at that object instead of being packed again.
+  - `requires` lists roots to restore first: a linked worktree requires its
+    main checkout, which holds its git metadata.
+- **What is uploaded.** Only content the store lacks:
+  - A local index (`{data}/cloud-checkpoints/index.json`, never checkpointed)
+    remembers which objects exist and each file's hashes by size, mtime and
+    inode. Files changed within 2 s of being hashed aren't cached.
+  - The previous manifest says which pack holds which small file.
+  - Large chunks are probed with `HEAD` before a `PUT`. Small files are never
+    probed one by one.
+
+  A small edit uploads one small pack. A restore seeds the index, so the
+  first checkpoint after a wake uploads nothing new.
+- **Roots.**
+  - `data`: the engine data dir. SQLite databases (found by their header)
+    are copied with `VACUUM INTO` from a read-only connection: a consistent
+    snapshot while the engine has them open, with the WAL's committed
+    transactions included. Left out: `-wal`/`-shm`/`-journal` files, `*.lock`,
+    temp files (`*.tmp`, `.tmp*`, `*.tmp-*`), sockets and FIFOs, and the
+    folders `logs`, `updates`, `adapters`, `worktrees` (workspace roots),
+    `local-edge-server`, `cloud-checkpoints`, and `moves/in|out` (staging).
+  - `harness`: these paths under the home folder, logins included (the store
+    is the user's own bucket, and a box that forgot its logins on every sleep
+    would be useless): `.claude`, `.claude.json`, `.codex`,
+    `.config/opencode`, `.local/share/opencode`, `.local/state/opencode`,
+    `.pi`, `.grok`, `.gemini`, `.hermes`, `.cursor`, `.config/devin`,
+    `.local/share/devin`. Cursor's Zeron-side store is in the data dir.
+    - Left out: `node_modules`, `.cache`, `.claude/local`, `.claude/statsig`,
+      `.codex/log`, `.codex/tmp`, OpenCode's `bin` and `log`, and
+      `.cursor/extensions`.
+    - SQLite files get the same `VACUUM INTO` copy as in `data`.
+  - one root per workspace, named `ws-<first 16 hex of sha256(path)>`.
+    - Workspaces are the git toplevels (else the folders themselves) of the
+      chats hosted here and of this device's projects, plus each linked
+      worktree's main checkout.
+    - Everything is included: `.git` and regenerable folders, so the box keeps
+      its build caches. Only `*.lock` files inside `.git` are left out (a
+      leftover `index.lock` would wedge the restored repository).
+    - A chat working in the home folder gets the `home` root instead. It
+      leaves out caches and toolchains (`.cache`, `.npm`, `.npm-global`,
+      `.cargo`, `.rustup`, …) and the usual regenerable folders. `/` and
+      folders above home are never carried.
+    - A workspace from the previous checkpoint is kept while its folder still
+      exists, even if no chat lists it right now. A momentarily empty chat
+      list can't drop a workspace.
+  - Roots never nest: a walk skips any path another root covers.
+- **Restore order at boot.** `data`, `harness` and `home` are restored in
+  place, merged with what's there, before the engine opens anything. Each file is
+  written beside its final name, then renamed, with its mode and mtime. Links
+  are recreated. Folder modes and mtimes are set last, deepest first.
+  - Workspaces wait for their chat's first run. Until then a checkpoint
+    carries their entries forward unchanged.
+  - A workspace is restored into `.<name>.zeron-restore` beside it, then
+    renamed into place. If its folder already exists with content (a move
+    landed there first), that content wins.
+- **Not done yet.** Garbage collection of objects no manifest references,
+  repacking packs that are mostly dead, and pruning old manifests.
 
 ### 6. Enrollment: device credentials
 

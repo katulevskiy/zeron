@@ -19,6 +19,7 @@ pub mod agent_accounts;
 pub mod auth;
 pub mod change_requests;
 pub mod chat2_host;
+pub mod cloud;
 mod chat_persistence;
 pub mod cloud_boxes;
 pub mod diff_sync;
@@ -193,6 +194,9 @@ pub struct EngineCore {
     pub agent_accounts: AgentAccounts,
     pub harness_updates: harness_updates::HarnessUpdateCoordinator,
     pub device_id: String,
+    /// RPC calls and streams served to the IPC port and the host relay (a
+    /// cloud box's "connected viewer", docs/cloud.md §4).
+    pub rpc_activity: Arc<cloud::activity::RpcActivity>,
     /// Local→synced profile import (account-scoped runtimes only).
     pub local_import: Option<local_import::LocalImporter>,
     workspace_scope: WorkspaceScope,
@@ -431,6 +435,7 @@ impl EngineCore {
             agent_accounts,
             harness_updates,
             device_id,
+            rpc_activity: Arc::default(),
             local_import,
             workspace_scope: profile.scope(),
             auth: std::sync::Mutex::new(None),
@@ -548,7 +553,8 @@ impl EngineCore {
                 }
             }
         });
-        zeron_rpc::HostRelay::spawn(config, self.rpc_service(), on_nudge)
+        let service = cloud::activity::TrackedRpc::wrap(self.rpc_service(), self.rpc_activity.clone());
+        zeron_rpc::HostRelay::spawn(config, service, on_nudge)
     }
 
     pub fn rpc_service(&self) -> Arc<EngineRpc> {
@@ -986,6 +992,20 @@ impl Engine {
     /// executor, IPC server, and — when edge+auth are ready — the device-room host
     /// relay + peer link cache (targetDeviceId routing).
     pub async fn run(self) -> anyhow::Result<()> {
+        let mut running = self.start().await?;
+        tokio::select! {
+            result = shutdown_signal() => result?,
+            _ = running.stop_requested() => {}
+        }
+        tracing::info!("shutting down");
+        running.shutdown().await;
+        Ok(())
+    }
+
+    /// Assemble the runtime and serve IPC, as [`Self::run`] does, but hand
+    /// the lifecycle to the caller (`zeron cloud-boot` attaches its control
+    /// server and checkpoints, and decides how to stop).
+    pub async fn start(self) -> anyhow::Result<RunningEngine> {
         let config = self.config;
         tracing::info!(data_dir = %config.data_dir.display(), "engine starting");
 
@@ -1000,7 +1020,7 @@ impl Engine {
         let mut auth_state = auth.watch_state();
         let workspace_scope = Self::initial_workspace_scope(&auth);
         let mut profile = Self::resolve_profile(&config, &auth, workspace_scope)?;
-        let _refresh_loop = auth.spawn_refresh_loop();
+        let refresh_loop = auth.spawn_refresh_loop();
 
         // A captured cloud session without an organization must finish onboarding
         // before its profile can open. A clean signed-out install is local and never
@@ -1028,9 +1048,12 @@ impl Engine {
         // A daemon exists to serve this port, so a bind failure is fatal here —
         // unlike the headed app, which can still work over its in-process
         // transport (see `serve_ipc`).
-        let (stop_tx, mut stop_rx) = tokio::sync::mpsc::unbounded_channel();
+        let (stop_tx, stop_rx) = tokio::sync::mpsc::unbounded_channel();
         let service: Arc<dyn RpcService> = Arc::new(HeadlessRpc {
-            inner: runtime.core().rpc_service(),
+            inner: cloud::activity::TrackedRpc::wrap(
+                runtime.core().rpc_service(),
+                runtime.core().rpc_activity.clone(),
+            ),
             stop_tx,
         });
         let server = serve_ipc(config.ipc_port, service).await?;
@@ -1038,26 +1061,57 @@ impl Engine {
         // injected MCP server must dial back into THIS engine.
         runtime.core().sessions.set_ipc_port(config.ipc_port);
 
+        Ok(RunningEngine {
+            runtime,
+            server,
+            stop_rx,
+            auth_state,
+            workspace_scope,
+            _refresh_loop: refresh_loop,
+        })
+    }
+}
+
+/// A started headless engine (see [`Engine::start`]).
+pub struct RunningEngine {
+    runtime: EngineRuntime,
+    server: tokio::task::JoinHandle<()>,
+    stop_rx: tokio::sync::mpsc::UnboundedReceiver<()>,
+    auth_state: tokio::sync::watch::Receiver<AuthState>,
+    workspace_scope: WorkspaceScope,
+    _refresh_loop: tokio::task::JoinHandle<()>,
+}
+
+impl RunningEngine {
+    pub fn runtime(&self) -> &EngineRuntime {
+        &self.runtime
+    }
+
+    /// Resolves when the engine asks to stop by itself: `StopEngine` over
+    /// IPC, or a synced runtime's sign-out.
+    pub async fn stop_requested(&mut self) {
+        let synced = self.workspace_scope == WorkspaceScope::Synced;
         tokio::select! {
-            result = shutdown_signal() => result?,
-            requested = stop_rx.recv() => {
+            requested = self.stop_rx.recv() => {
                 if requested.is_some() {
                     tracing::info!("headless shutdown requested over IPC");
                 }
             }
-            _ = wait_for_signed_out(&mut auth_state), if workspace_scope == WorkspaceScope::Synced => {
+            _ = wait_for_signed_out(&mut self.auth_state), if synced => {
                 // Edge transports observe the same auth signal and close at
                 // once. Leave a brief reply window for a SignOut RPC before
                 // the localhost server itself is aborted.
-                runtime.disconnect_edge();
+                self.runtime.disconnect_edge();
                 tracing::info!("headless authentication revoked; stopping synced runtime");
                 tokio::time::sleep(std::time::Duration::from_millis(100)).await;
             }
         }
-        tracing::info!("shutting down");
-        server.abort();
-        runtime.shutdown().await;
-        Ok(())
+    }
+
+    /// Stop serving IPC, then drain the runtime gracefully.
+    pub async fn shutdown(self) {
+        self.server.abort();
+        self.runtime.shutdown().await;
     }
 }
 

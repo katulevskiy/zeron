@@ -39,6 +39,16 @@ sha2.workspace = true
 reqwest.workspace = true
 ignore.workspace = true
 nucleo-matcher.workspace = true
+# Cloud box checkpoints (docs/cloud.md §4–§5): packs of small files are zstd
+# tars, and the control server is a plain hyper HTTP/1 listener.
+tar = { version = "0.4", default-features = false }
+zstd = { version = "0.13", default-features = false }
+filetime = "0.2"
+bytes = "1"
+hyper = { version = "1", features = ["server", "http1"] }
+hyper-util = { version = "0.1", features = ["tokio"] }
+http-body-util = "0.1"
+subtle = "2"
 
 tempfile.workspace = true
 

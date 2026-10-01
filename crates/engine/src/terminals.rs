@@ -475,6 +475,11 @@ impl Terminals {
         !lock(&self.inner.sessions).is_empty()
     }
 
+    /// Live PTYs (a cloud box stays awake while any is open).
+    pub fn open_count(&self) -> usize {
+        lock(&self.inner.sessions).len()
+    }
+
     /// Engine shutdown: kill every live shell.
     pub fn shutdown(&self) {
         let sessions: Vec<_> = lock(&self.inner.sessions).drain().map(|(_, s)| s).collect();
