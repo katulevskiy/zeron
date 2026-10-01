@@ -1169,6 +1169,10 @@ fn rebuild(replay: &store::Replay) -> Option<WorkflowRun> {
     state.runs.into_iter().next()
 }
 
+fn saved_script_body(script: &str) -> &str {
+    zeron_workflow::saved::strip_frontmatter(script)
+}
+
 fn approval_question(
     meta: &RunMeta,
     graph: &WorkflowGraph,
@@ -1185,6 +1189,13 @@ fn approval_question(
         .model
         .clone()
         .or_else(|| defaults.model.clone());
+    // A saved file opens with its frontmatter, which the approval already
+    // shows as the name, the arguments and the limits.
+    let shown = if meta.saved.is_some() {
+        saved_script_body(script)
+    } else {
+        script
+    };
     let text = prompts::approval_text(&prompts::ApprovalFacts {
         name: &meta.name,
         graph,
@@ -1194,7 +1205,7 @@ fn approval_question(
         budgets: &meta.options.budgets,
         script_hash: &meta.script_hash,
         draft_path: meta.draft_path.as_deref(),
-        script,
+        script: shown,
         saved: meta.saved.as_ref(),
         args: &meta.args,
     });
@@ -1208,7 +1219,7 @@ fn approval_question(
         budgets: meta.options.budgets.clone(),
         harness,
         model,
-        excerpt: prompts::excerpt(script, 40),
+        excerpt: prompts::excerpt(shown, 40),
         saved: meta.saved.clone(),
         args: match &meta.args {
             Value::Object(o) if !o.is_empty() => meta.args.clone(),

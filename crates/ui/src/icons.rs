@@ -168,6 +168,8 @@ icon_assets![
     (FILE_IMAGE, "file-image"),
     (GLOBAL, "global"),
     (CHECKLIST, "checklist"),
+    // Saved workflows: a source node fanning out to two, drawn in the toolbar family's linear weight.
+    (WORKFLOW, "workflow"),
     // Goal mode: the objective target and the pause control.
     (GOAL, "goal"),
     (PAUSE, "pause"),

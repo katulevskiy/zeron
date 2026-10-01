@@ -3427,6 +3427,10 @@ pub enum TranscriptEvent {
         run_id: String,
         artifact_id: String,
     },
+    /// "Run again" on a saved workflow's card.
+    RerunSavedWorkflow { chat_id: String, run_id: String },
+    /// "Save as workflow…" on an ad-hoc run's card.
+    SaveWorkflowFromRun { chat_id: String, run_id: String },
 }
 
 impl gpui::EventEmitter<TranscriptEvent> for Transcript {}
@@ -9154,6 +9158,12 @@ impl Transcript {
                     cx,
                 )
             }),
+            A::RerunSaved { run_id } => {
+                cx.emit(TranscriptEvent::RerunSavedWorkflow { chat_id, run_id })
+            }
+            A::SaveAsWorkflow { run_id } => {
+                cx.emit(TranscriptEvent::SaveWorkflowFromRun { chat_id, run_id })
+            }
         }
     }
 
@@ -14802,10 +14812,32 @@ mod tests {
                     },
                     cx,
                 );
+                t.on_workflow_action(
+                    A::RerunSaved {
+                        run_id: "run-1".into(),
+                    },
+                    cx,
+                );
+                t.on_workflow_action(
+                    A::SaveAsWorkflow {
+                        run_id: "run-2".into(),
+                    },
+                    cx,
+                );
             });
         });
         let events = seen.borrow();
-        assert_eq!(events.len(), 3);
+        assert_eq!(events.len(), 5);
+        assert!(matches!(
+            &events[3],
+            TranscriptEvent::RerunSavedWorkflow { chat_id, run_id }
+                if chat_id == "chat-a" && run_id == "run-1"
+        ));
+        assert!(matches!(
+            &events[4],
+            TranscriptEvent::SaveWorkflowFromRun { chat_id, run_id }
+                if chat_id == "chat-a" && run_id == "run-2"
+        ));
         assert!(matches!(
             &events[0],
             TranscriptEvent::OpenWorkflowRun { run_id, landing }

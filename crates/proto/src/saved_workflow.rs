@@ -493,6 +493,9 @@ pub struct SavedWorkflowList {
     pub workflows: Vec<SavedWorkflowSummary>,
     #[serde(default)]
     pub invalid: Vec<SavedWorkflowInvalid>,
+    /// Where this device keeps its global workflows (shown in Settings).
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub global_dir: Option<String>,
 }
 
 /// One workflow with its script and the analysis the approval would show.

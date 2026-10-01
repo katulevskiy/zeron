@@ -11,6 +11,8 @@ pub mod artifact;
 pub mod card;
 pub mod model;
 pub mod pane;
+pub mod saved;
+pub(crate) mod saved_view;
 pub mod sidebar;
 pub(crate) mod widgets;
 
@@ -45,6 +47,14 @@ pub enum WorkflowAction {
         run_id: String,
     },
     Resume {
+        run_id: String,
+    },
+    /// Start the saved workflow this run came from again, same arguments.
+    RerunSaved {
+        run_id: String,
+    },
+    /// Keep this ad-hoc run's script as a saved workflow.
+    SaveAsWorkflow {
         run_id: String,
     },
 }

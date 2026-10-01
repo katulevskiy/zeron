@@ -322,6 +322,7 @@ impl SavedStore {
         SavedWorkflowList {
             workflows: all.into_iter().map(|l| l.summary).collect(),
             invalid,
+            global_dir: Some(self.global_dir.to_string_lossy().into_owned()),
         }
     }
 

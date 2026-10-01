@@ -43,6 +43,7 @@ use crate::settings::files::{FilesSettingsEvent, FilesSettingsPage};
 use crate::settings::harnesses::HarnessesPage;
 use crate::settings::notifications::{NotificationsEvent, NotificationsPage};
 use crate::settings::shortcuts::{ShortcutsEvent, ShortcutsPage};
+use crate::settings::workflows::{WorkflowsEvent, WorkflowsPage};
 use crate::settings::{
     self, CHAT_PANEL_MIN, ComposerSendBehavior, JUMP_SLOTS, KeymapConfig, RIGHT_PANE_DEFAULT,
     RIGHT_PANE_MIN, SIDEBAR_DEFAULT, SIDEBAR_MAX, SIDEBAR_MIN, SavePolicy, ShortcutId,
@@ -70,6 +71,7 @@ mod navigation_focus;
 #[cfg(test)]
 mod navigation_tests;
 mod project_icon;
+mod saved_workflows;
 mod side_chats;
 mod sidebar_pins;
 mod sidebar_sections;
@@ -538,11 +540,13 @@ pub enum SettingsSection {
     General,
     Appshots,
     Archived,
+    /// Saved (reusable) workflows with arguments.
+    Workflows,
 }
 
 impl SettingsSection {
     /// Sections shown in Settings. `Agents` is a legacy Accounts route alias.
-    pub const ALL: [SettingsSection; 10] = [
+    pub const ALL: [SettingsSection; 11] = [
         SettingsSection::General,
         SettingsSection::Appearance,
         SettingsSection::Notifications,
@@ -550,6 +554,7 @@ impl SettingsSection {
         SettingsSection::Shortcuts,
         SettingsSection::Harnesses,
         SettingsSection::Devices,
+        SettingsSection::Workflows,
         SettingsSection::Files,
         SettingsSection::Appshots,
         SettingsSection::Archived,
@@ -595,6 +600,7 @@ impl SettingsSection {
             SettingsSection::General => "general",
             SettingsSection::Appshots => "appshots",
             SettingsSection::Archived => "archived",
+            SettingsSection::Workflows => "workflows",
         }
     }
 
@@ -612,6 +618,7 @@ impl SettingsSection {
             "general" | "conversations" => SettingsSection::General,
             "appshots" => SettingsSection::Appshots,
             "archived" => SettingsSection::Archived,
+            "workflows" => SettingsSection::Workflows,
             _ => return None,
         })
     }
@@ -637,6 +644,7 @@ impl SettingsSection {
             SettingsSection::General => "General",
             SettingsSection::Appshots => "Appshots",
             SettingsSection::Archived => "Archived sessions",
+            SettingsSection::Workflows => "Workflows",
         }
     }
 }
@@ -1874,6 +1882,10 @@ pub struct Shell {
     nav: NavHistory,
     devices_page: Option<Entity<DevicesPage>>,
     archived_page: Option<Entity<ArchivedPage>>,
+    workflows_page: Option<Entity<WorkflowsPage>>,
+    workflows_sub: Option<Subscription>,
+    /// The launcher and "Save as workflow…" dialogs of saved workflows.
+    saved_ui: saved_workflows::SavedUi,
     appearance_page: Option<Entity<AppearancePage>>,
     files_settings_page: Option<Entity<FilesSettingsPage>>,
     notifications_page: Option<Entity<NotificationsPage>>,
@@ -2128,6 +2140,21 @@ impl Shell {
                     cx.notify();
                 }
                 ComposerEvent::OpenChat { chat_id } => this.open_chat(chat_id.clone(), cx),
+                ComposerEvent::SavedWorkflow {
+                    chat_id,
+                    workflow,
+                    args,
+                    missing,
+                } => this.saved_workflow_from_composer(
+                    chat_id.clone(),
+                    workflow.clone(),
+                    args.clone(),
+                    missing.clone(),
+                    cx,
+                ),
+                ComposerEvent::OpenSavedWorkflows => {
+                    this.open_settings(SettingsSection::Workflows, cx)
+                }
                 ComposerEvent::NewThreadTransitionStarted => {
                     // Route observation drives the dock once selection commits.
                     cx.notify();
@@ -2330,6 +2357,9 @@ impl Shell {
             nav,
             devices_page: None,
             archived_page: None,
+            workflows_page: None,
+            workflows_sub: None,
+            saved_ui: saved_workflows::SavedUi::from_env(),
             appearance_page: None,
             files_settings_page: None,
             notifications_page: None,
@@ -2613,6 +2643,7 @@ impl Shell {
                 self.add_subagent_surface(chat, child, name, false, cx);
             }
         }
+        self.capture_saved_workflows(cx);
         // Capture knob: the add-space palette needs only the device registry.
         if self.debug_dialog.as_deref() == Some("add-space") && !state.read(cx).devices.is_empty() {
             self.debug_dialog = None;
@@ -4002,6 +4033,12 @@ impl Shell {
             } => {
                 self.add_workflow_surface(run_id.clone(), None, Some(artifact_id.clone()), cx);
             }
+            TranscriptEvent::RerunSavedWorkflow { chat_id, run_id } => {
+                self.rerun_saved(chat_id.clone(), run_id.clone(), cx);
+            }
+            TranscriptEvent::SaveWorkflowFromRun { chat_id, run_id } => {
+                self.open_save_workflow(chat_id.clone(), run_id.clone(), cx);
+            }
         }
     }
 
@@ -4061,6 +4098,12 @@ impl Shell {
                             false,
                             cx,
                         ),
+                        crate::workflow::pane::PaneEvent::RerunSaved { run_id } => {
+                            this.rerun_saved(chat_id.clone(), run_id.clone(), cx)
+                        }
+                        crate::workflow::pane::PaneEvent::SaveAsWorkflow { run_id } => {
+                            this.open_save_workflow(chat_id.clone(), run_id.clone(), cx)
+                        }
                     }
                 });
                 self.workflow_tabs.insert(
@@ -4901,6 +4944,10 @@ impl Shell {
                 .appearance_page
                 .as_ref()
                 .is_some_and(|page| page.update(cx, |page, cx| page.dismiss_on_escape(cx))),
+            SettingsSection::Workflows => self
+                .workflows_page
+                .as_ref()
+                .is_some_and(|page| page.update(cx, |page, cx| page.dismiss_on_escape(cx))),
             _ => false,
         }
     }
@@ -5169,6 +5216,33 @@ impl Shell {
                                 section == SettingsSection::General,
                             )
                         });
+                        page.clone().into_any_element()
+                    }
+                    None => Empty.into_any_element(),
+                }
+            }
+            SettingsSection::Workflows => {
+                if self.workflows_page.is_none() {
+                    let state = self.state.clone();
+                    let page = cx.new(|cx| WorkflowsPage::new(state, cx));
+                    self.workflows_sub = Some(cx.subscribe_in(
+                        &page,
+                        window,
+                        |this: &mut Shell, _, event: &WorkflowsEvent, _window, cx| match event {
+                            WorkflowsEvent::Run(summary) => {
+                                this.open_saved_launcher(summary.clone(), cx)
+                            }
+                            WorkflowsEvent::OpenRun { chat_id, run_id } => {
+                                this.open_chat_run(chat_id.clone(), run_id.clone(), cx)
+                            }
+                        },
+                    ));
+                    self.workflows_page = Some(page);
+                }
+                match &self.workflows_page {
+                    Some(page) => {
+                        // Coming back to the page rescans the folders.
+                        page.update(cx, |page, cx| page.refresh_if_stale(cx));
                         page.clone().into_any_element()
                     }
                     None => Empty.into_any_element(),
@@ -7054,6 +7128,7 @@ impl Shell {
             SettingsSection::General => icons::SETTINGS,
             SettingsSection::Appshots => icons::MONITOR,
             SettingsSection::Archived => icons::ARCHIVE_MINIMALISTIC,
+            SettingsSection::Workflows => icons::WORKFLOW,
         };
         settings::widgets::scroll_faded(
             "settings-nav-scroll",
@@ -9422,6 +9497,11 @@ impl Shell {
             self.set_harness_updates_expanded(false, cx);
             return true;
         }
+        if self.saved_ui.is_open() {
+            self.saved_ui.close_all();
+            cx.notify();
+            return true;
+        }
         if self.rename_dialog.is_some() {
             self.rename_dialog = None;
             cx.notify();
@@ -9861,6 +9941,7 @@ impl Shell {
             overlays.push(popover::modal("rename-chat-dialog", viewport, card));
         }
 
+        overlays.extend(self.render_saved_workflow_overlays(viewport, window, cx));
         overlays.extend(self.render_space_overlays(viewport, window, cx));
         overlays.extend(self.render_section_overlays(viewport, window, cx));
         if let Some(overlay) = self.render_command_palette(viewport, window, cx) {
@@ -12398,6 +12479,7 @@ impl Render for Shell {
                 WorkspaceCommand::New => self.open_new_session(cx),
                 WorkspaceCommand::Resume => self.toggle_command_palette(window, cx),
                 WorkspaceCommand::Settings => self.open_last_settings(cx),
+                WorkspaceCommand::Workflow => self.open_settings(SettingsSection::Workflows, cx),
                 WorkspaceCommand::Diff if !self.active_chat.is_empty() => {
                     self.add_diff_surface(window, cx)
                 }
@@ -16758,6 +16840,7 @@ mod settings_modal_regressions {
             ("settings/files", SettingsSection::Files),
             ("settings/appshots", SettingsSection::Appshots),
             ("settings/archived", SettingsSection::Archived),
+            ("settings/workflows", SettingsSection::Workflows),
         ] {
             assert_eq!(
                 settings_open_route(route, remembered),

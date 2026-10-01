@@ -226,7 +226,20 @@ impl Shell {
                         ComposerEvent::NewThreadTransitionStarted
                         | ComposerEvent::WorktreeSetup { .. }
                         // A side chat has no goal tray of its own to link from.
-                        | ComposerEvent::OpenChat { .. } => {}
+                        | ComposerEvent::OpenChat { .. }
+                        | ComposerEvent::OpenSavedWorkflows => {}
+                        ComposerEvent::SavedWorkflow {
+                            chat_id,
+                            workflow,
+                            args,
+                            missing,
+                        } => this.saved_workflow_from_composer(
+                            chat_id.clone(),
+                            workflow.clone(),
+                            args.clone(),
+                            missing.clone(),
+                            cx,
+                        ),
                         ComposerEvent::Sent {
                             chat_id,
                             message_id,

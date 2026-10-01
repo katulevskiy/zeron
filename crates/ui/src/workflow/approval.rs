@@ -69,6 +69,21 @@ pub struct ApprovalModel {
     pub default_model: Option<String>,
     pub draft_path: Option<String>,
     pub excerpt: String,
+    /// `pr-review · global`: started from a saved workflow.
+    pub saved: Option<String>,
+    /// What `main(args)` will receive, as `name`, `value` pairs.
+    pub args: Vec<(String, String)>,
+}
+
+/// Values in the approval block: strings verbatim, the rest compact JSON, cut
+/// to one line.
+pub fn arg_display(value: &serde_json::Value) -> String {
+    let text = match value {
+        serde_json::Value::String(s) => s.clone(),
+        other => other.to_string(),
+    };
+    let flat = text.split_whitespace().collect::<Vec<_>>().join(" ");
+    zeron_proto::truncate_chars(&flat, 160)
 }
 
 fn agent_of(actor: &GraphActor) -> ApprovalAgent {
@@ -156,6 +171,15 @@ impl ApprovalModel {
             draft_path: meta.draft_path.clone(),
             // A script that opens with blank lines would draw an empty band.
             excerpt: meta.excerpt.trim_start_matches(['\r', '\n']).to_owned(),
+            saved: meta
+                .saved
+                .as_ref()
+                .map(|s| format!("{} · {}", s.name, s.scope.label().to_lowercase())),
+            args: meta
+                .args
+                .as_object()
+                .map(|o| o.iter().map(|(k, v)| (k.clone(), arg_display(v))).collect())
+                .unwrap_or_default(),
         }
     }
 
@@ -425,6 +449,54 @@ pub fn approval_block(
                 .child(label("Phases", theme))
                 .child(div().flex_1().min_w_0().child(phases)),
         )
+        .when_some(model.saved.clone(), |el, saved| {
+            el.child(
+                div()
+                    .flex()
+                    .gap(px(8.0))
+                    .child(label("Saved", theme))
+                    .child(
+                        div()
+                            .flex_1()
+                            .min_w_0()
+                            .flex()
+                            .items_center()
+                            .gap(px(6.0))
+                            .text_size(ui_rems(12.0))
+                            .text_color(theme.text)
+                            .child(
+                                icon(icons::WORKFLOW)
+                                    .size(px(12.0))
+                                    .text_color(theme.text_muted),
+                            )
+                            .child(SharedString::from(saved)),
+                    ),
+            )
+        })
+        .when(!model.args.is_empty(), |el| {
+            el.child(
+                div()
+                    .flex()
+                    .gap(px(8.0))
+                    .child(label("Arguments", theme))
+                    .child(
+                        div()
+                            .flex_1()
+                            .min_w_0()
+                            .flex()
+                            .flex_col()
+                            .gap(px(2.0))
+                            .children(model.args.iter().map(|(k, v)| {
+                                div()
+                                    .truncate()
+                                    .font_family(theme.font_mono.clone())
+                                    .text_size(px(theme.code_font_size - 1.0))
+                                    .text_color(theme.text)
+                                    .child(SharedString::from(format!("{k} = {v}")))
+                            })),
+                    ),
+            )
+        })
         .when(!model.agents.is_empty(), |el| {
             el.child(
                 div()
@@ -633,6 +705,38 @@ mod tests {
             ApprovalModel::from_meta(&m).excerpt,
             "  def main(args):\n    pass\n"
         );
+    }
+
+    #[test]
+    fn a_saved_run_names_its_workflow_and_shows_its_arguments() {
+        let m = ApprovalModel::from_meta(&meta());
+        assert!(
+            m.saved.is_none() && m.args.is_empty(),
+            "ad-hoc runs show neither"
+        );
+        let mut with = meta();
+        with.saved = Some(zeron_proto::SavedRunRef {
+            name: "pr-review".into(),
+            scope: zeron_proto::SavedScope::Global,
+        });
+        with.args = serde_json::json!({
+            "base": "main", "deep": false, "n": 3,
+            "long": format!("{}\n{}", "x".repeat(300), "y"), "opts": {"a": [1, 2]}
+        });
+        let m = ApprovalModel::from_meta(&with);
+        assert_eq!(m.saved.as_deref(), Some("pr-review · global"));
+        let get = |k: &str| {
+            m.args
+                .iter()
+                .find(|(n, _)| n == k)
+                .map(|(_, v)| v.clone())
+                .unwrap()
+        };
+        assert_eq!(get("base"), "main");
+        assert_eq!(get("deep"), "false");
+        assert_eq!(get("n"), "3");
+        assert_eq!(get("opts"), "{\"a\":[1,2]}");
+        assert!(get("long").chars().count() <= 161 && !get("long").contains('\n'));
     }
 
     #[test]

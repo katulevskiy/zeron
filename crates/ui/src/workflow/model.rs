@@ -457,6 +457,13 @@ pub struct CardModel {
     pub notices: Vec<Notice>,
     pub can_stop: bool,
     pub can_resume: bool,
+    /// Started from a saved workflow: its name and where it lives.
+    pub saved: Option<(String, zeron_proto::SavedScope)>,
+    /// "Run again": a saved run that has ended (with the same arguments).
+    pub can_rerun: bool,
+    /// "Save as workflow…": an ad-hoc run that ended having run, and has a
+    /// script worth keeping.
+    pub can_save: bool,
     /// `3m 12s · 48.2k tokens · 12 asks` once anything ran.
     pub meta: String,
     /// First part of the result, one line, for the expanded card.
@@ -673,7 +680,13 @@ impl CardModel {
         }
         let can_stop = h.status == WorkflowStatus::Running;
         let can_resume = h.status == WorkflowStatus::Stopped && h.resumable;
+        // A run that was denied never ran; there is nothing to repeat or keep.
+        let ran = h.status.is_settled() && h.stop_reason != Some(WorkflowStopReason::Denied);
+        let saved = h.saved_name.clone().zip(h.saved_scope);
         CardModel {
+            can_rerun: ran && saved.is_some(),
+            can_save: ran && saved.is_none(),
+            saved,
             run_id: h.run_id.clone(),
             name: h.name.clone(),
             status: h.status,
@@ -1837,6 +1850,38 @@ mod tests {
             truncate_title("日本語のとても長いタイトルがここにあります", 8),
             "日本語のとても…"
         );
+    }
+
+    #[test]
+    fn saved_runs_offer_run_again_and_ad_hoc_runs_offer_save() {
+        let mut run = run_with(header(WorkflowStatus::Running), &["a"]);
+        let c = CardModel::build(&run, true);
+        assert!(
+            !c.can_rerun && !c.can_save,
+            "nothing to offer while it runs"
+        );
+        run.header.status = WorkflowStatus::Completed;
+        let c = CardModel::build(&run, true);
+        assert!(c.can_save && !c.can_rerun && c.saved.is_none());
+        run.header.saved_name = Some("pr-review".into());
+        run.header.saved_scope = Some(zeron_proto::SavedScope::Global);
+        let c = CardModel::build(&run, true);
+        assert!(c.can_rerun && !c.can_save);
+        assert_eq!(
+            c.saved,
+            Some(("pr-review".to_owned(), zeron_proto::SavedScope::Global))
+        );
+        // A failed or stopped run can be run again too; a denied one never ran.
+        run.header.status = WorkflowStatus::Errored;
+        assert!(CardModel::build(&run, true).can_rerun);
+        run.header.status = WorkflowStatus::Stopped;
+        run.header.stop_reason = Some(WorkflowStopReason::User);
+        assert!(CardModel::build(&run, true).can_rerun);
+        run.header.stop_reason = Some(WorkflowStopReason::Denied);
+        let c = CardModel::build(&run, true);
+        assert!(!c.can_rerun && !c.can_save);
+        run.header.saved_name = None;
+        assert!(!CardModel::build(&run, true).can_save);
     }
 
     #[test]

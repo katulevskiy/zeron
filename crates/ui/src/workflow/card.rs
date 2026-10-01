@@ -100,7 +100,7 @@ pub fn card_element(
                         .iter()
                         .map(|notice| notice_line(notice, theme)),
                 )
-                .when(expanded, |el| el.child(footer(model, theme))),
+                .when(expanded, |el| el.child(footer(model, row_id, theme, sink))),
         )
         .into_any_element()
 }
@@ -157,6 +157,32 @@ fn header_row(
                 .text_color(theme.text)
                 .child(SharedString::from(format!("· {}", model.name))),
         )
+        .when_some(model.saved.clone(), |el, (name, scope)| {
+            el.child(
+                div()
+                    .id(SharedString::from(format!("{row_id}-saved")))
+                    .flex_none()
+                    .h(px(18.0))
+                    .px(px(6.0))
+                    .rounded_full()
+                    .flex()
+                    .items_center()
+                    .gap(px(4.0))
+                    .bg(crate::theme::ink(0.06))
+                    .text_size(ui_rems(10.5))
+                    .text_color(theme.text_muted)
+                    .tooltip(tip(format!(
+                        "Run from the saved {} workflow {name}",
+                        scope.label().to_lowercase()
+                    )))
+                    .child(
+                        icon(icons::WORKFLOW)
+                            .size(px(10.0))
+                            .text_color(theme.text_muted),
+                    )
+                    .child(scope.label()),
+            )
+        })
         .when(!model.counts.is_empty(), |el| {
             el.child(
                 div()
@@ -697,9 +723,96 @@ fn notice_line(notice: &Notice, theme: &Theme) -> AnyElement {
         .into_any_element()
 }
 
-/// The expanded card's last line: totals and, once it ended, the result.
-fn footer(model: &CardModel, theme: &Theme) -> AnyElement {
+/// A small bordered text button for the card's and pane's secondary actions.
+pub(crate) fn text_button(
+    id: SharedString,
+    glyph: &'static str,
+    label: &'static str,
+    tooltip: &'static str,
+    theme: &Theme,
+    on_click: impl Fn(&mut gpui::Window, &mut gpui::App) + 'static,
+) -> AnyElement {
+    let accent = theme.accent;
+    swallow(
+        div()
+            .id(id)
+            .role(gpui::Role::Button)
+            .aria_label(tooltip)
+            .flex_none()
+            .h(px(24.0))
+            .px(px(8.0))
+            .rounded(px(6.0))
+            .flex()
+            .items_center()
+            .gap(px(5.0))
+            .text_size(ui_rems(12.0))
+            .font_weight(gpui::FontWeight::MEDIUM)
+            .text_color(theme.text)
+            .border_1()
+            .border_color(crate::theme::hairline(0.14))
+            .cursor_pointer()
+            .tab_index(0)
+            .hover(|s| s.bg(crate::theme::ink(0.07)))
+            .focus_visible(move |s| s.border_color(accent))
+            .on_click(move |_, window, cx| {
+                cx.stop_propagation();
+                on_click(window, cx);
+            })
+            .tooltip(tip(tooltip))
+            .tooltip_show_delay(Duration::from_millis(350))
+            .child(icon(glyph).size(px(12.0)).text_color(theme.text_muted))
+            .child(label),
+    )
+    .into_any_element()
+}
+
+/// The expanded card's last line: totals and, once it ended, the result —
+/// and what to do with a run that ended: run a saved workflow again, or keep
+/// an ad-hoc one.
+fn footer(
+    model: &CardModel,
+    row_id: &SharedString,
+    theme: &Theme,
+    sink: &ActionSink,
+) -> AnyElement {
     let ended = model.status.is_settled();
+    let run_id = model.run_id.clone();
+    let again = model.can_rerun.then(|| {
+        let sink = sink.clone();
+        let id = run_id.clone();
+        text_button(
+            SharedString::from(format!("{row_id}-again")),
+            icons::RESTART,
+            "Run again",
+            "Start this saved workflow again with the same arguments",
+            theme,
+            move |window, cx| {
+                sink(
+                    WorkflowAction::RerunSaved { run_id: id.clone() },
+                    window,
+                    cx,
+                )
+            },
+        )
+    });
+    let save = model.can_save.then(|| {
+        let sink = sink.clone();
+        let id = run_id.clone();
+        text_button(
+            SharedString::from(format!("{row_id}-save")),
+            icons::FLOPPY_DISK,
+            "Save as workflow…",
+            "Keep this script to run again with arguments",
+            theme,
+            move |window, cx| {
+                sink(
+                    WorkflowAction::SaveAsWorkflow { run_id: id.clone() },
+                    window,
+                    cx,
+                )
+            },
+        )
+    });
     div()
         .w_full()
         .min_w_0()
@@ -725,6 +838,17 @@ fn footer(model: &CardModel, theme: &Theme) -> AnyElement {
                         .child(SharedString::from(format!("Result: {preview}"))),
                 )
             })
+        })
+        .when(again.is_some() || save.is_some(), |el| {
+            el.child(
+                div()
+                    .mt(px(6.0))
+                    .flex()
+                    .items_center()
+                    .gap(px(6.0))
+                    .children(again)
+                    .children(save),
+            )
         })
         .into_any_element()
 }

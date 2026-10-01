@@ -36,6 +36,10 @@ pub enum PaneEvent {
         child_chat_id: String,
         title: String,
     },
+    /// "Run again" on a saved workflow's run.
+    RerunSaved { run_id: String },
+    /// "Save as workflow…" on an ad-hoc run.
+    SaveAsWorkflow { run_id: String },
 }
 
 impl EventEmitter<PaneEvent> for WorkflowRunPane {}
@@ -589,6 +593,42 @@ impl WorkflowRunPane {
                                 )
                                 .child("Resume"),
                         )
+                    })
+                    .when(card.can_rerun, |el| {
+                        let id = run_id.clone();
+                        el.child(super::card::text_button(
+                            "pane-again".into(),
+                            icons::RESTART,
+                            "Run again",
+                            "Start this saved workflow again with the same arguments",
+                            theme,
+                            {
+                                let view = cx.entity();
+                                move |_, cx| {
+                                    view.update(cx, |_, cx| {
+                                        cx.emit(PaneEvent::RerunSaved { run_id: id.clone() })
+                                    })
+                                }
+                            },
+                        ))
+                    })
+                    .when(card.can_save, |el| {
+                        let id = run_id.clone();
+                        el.child(super::card::text_button(
+                            "pane-save".into(),
+                            icons::FLOPPY_DISK,
+                            "Save as workflow…",
+                            "Keep this script to run again with arguments",
+                            theme,
+                            {
+                                let view = cx.entity();
+                                move |_, cx| {
+                                    view.update(cx, |_, cx| {
+                                        cx.emit(PaneEvent::SaveAsWorkflow { run_id: id.clone() })
+                                    })
+                                }
+                            },
+                        ))
                     }),
             )
             .child(
@@ -599,6 +639,25 @@ impl WorkflowRunPane {
                     .text_color(theme.text)
                     .child(SharedString::from(card.name.clone())),
             )
+            .when_some(card.saved.clone(), |el, (name, scope)| {
+                el.child(
+                    div()
+                        .flex()
+                        .items_center()
+                        .gap(px(5.0))
+                        .text_size(ui_rems(12.0))
+                        .text_color(theme.text_muted)
+                        .child(
+                            icon(icons::WORKFLOW)
+                                .size(px(12.0))
+                                .text_color(theme.text_muted),
+                        )
+                        .child(SharedString::from(format!(
+                            "Saved {} workflow {name}",
+                            scope.label().to_lowercase()
+                        ))),
+                )
+            })
             .when(!card.meta.is_empty(), |el| {
                 el.child(
                     div()
