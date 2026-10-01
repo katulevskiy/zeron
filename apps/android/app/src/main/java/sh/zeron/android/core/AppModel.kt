@@ -115,6 +115,9 @@ class AppModel(private val app: Application) {
     /** A route to open once the main UI is up (`chat:<id>` from a notification). */
     val pendingRoute = MutableStateFlow<String?>(null)
 
+    /** Debug builds: a bottom-nav tab to switch to ("sessions" | "settings"), see the DEBUG_EVENT `tab` kind. */
+    val tabRequest = MutableStateFlow<String?>(null)
+
     private val _client = MutableStateFlow<CoreClient?>(null)
     val client: StateFlow<CoreClient?> = _client.asStateFlow()
 
@@ -296,6 +299,13 @@ class AppModel(private val app: Application) {
             override fun onReceive(context: android.content.Context, intent: android.content.Intent) {
                 // Device events: engine-setup | engine-failed | transfer-asked | -received | -sent | -failed.
                 when (val kind = intent.getStringExtra("kind").orEmpty()) {
+                    "tab" -> {
+                        val tab = intent.getStringExtra("tab").orEmpty()
+                        Perf.sampling = intent.getBooleanExtra("sample", false)
+                        Perf.begin("tab->$tab")
+                        tabRequest.value = tab
+                        return
+                    }
                     "engine-setup" -> deviceFeedback.engine(sh.zeron.android.feedback.EngineEvent.SetupDone).also { return }
                     "engine-failed" -> deviceFeedback.engine(sh.zeron.android.feedback.EngineEvent.Failed).also { return }
                     "transfer-asked" -> deviceFeedback.transfer("debug", sh.zeron.android.feedback.TransferEvent.Asked).also { return }

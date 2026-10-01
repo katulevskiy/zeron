@@ -260,6 +260,13 @@ private enum class Tab { Sessions, Settings }
 @Composable
 private fun Home(model: AppModel, nav: NavHostController) {
     var tab by rememberSaveable { mutableStateOf(if (model.launch.route == "settings") Tab.Settings else Tab.Sessions) }
+    // Debug builds: `--es kind tab --es tab sessions|settings` flips the tab (scripts/android/measure-tab-switch.sh).
+    val tabRequest by model.tabRequest.collectAsState()
+    LaunchedEffect(tabRequest) {
+        tabRequest?.let { tab = if (it == "settings") Tab.Settings else Tab.Sessions }
+        model.tabRequest.value = null
+    }
+    sh.zeron.android.core.PerfFrame(tab)
     val workspace by model.workspace.collectAsState()
     val summary = remember(workspace) { workspace?.let { liveSummary(it) } }
     Box(Modifier.fillMaxSize().background(MaterialTheme.colorScheme.background)) {
@@ -280,8 +287,8 @@ private fun Home(model: AppModel, nav: NavHostController) {
             if (tab == Tab.Sessions) NewSessionBar(summary, onClick = { nav.open(Routes.NEW) })
             FloatingNavBar(
                 listOf(
-                    NavItem("Sessions", ZIcons.TabSessions, tab == Tab.Sessions) { tab = Tab.Sessions },
-                    NavItem("Settings", ZIcons.TabSettings, tab == Tab.Settings) { tab = Tab.Settings },
+                    NavItem("Sessions", ZIcons.TabSessions, tab == Tab.Sessions) { sh.zeron.android.core.Perf.begin("tab->sessions"); tab = Tab.Sessions },
+                    NavItem("Settings", ZIcons.TabSettings, tab == Tab.Settings) { sh.zeron.android.core.Perf.begin("tab->settings"); tab = Tab.Settings },
                 ),
                 trailing = {
                     TonalCircleButton(ZIcons.Search, "Search", onClick = { nav.open(Routes.SEARCH) }, size = 72.dp)
