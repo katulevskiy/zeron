@@ -3,6 +3,7 @@ package sh.zeron.android.feedback
 import android.content.Context
 import android.media.AudioAttributes
 import android.media.SoundPool
+import android.util.Log
 import java.util.concurrent.ConcurrentHashMap
 
 /**
@@ -24,14 +25,16 @@ class SoundBank(private val context: Context) {
     private val ready = ConcurrentHashMap.newKeySet<Int>()
 
     init {
-        pool.setOnLoadCompleteListener { _, sampleId, status -> if (status == 0) ready.add(sampleId) }
+        pool.setOnLoadCompleteListener { _, sampleId, status ->
+            if (status == 0) { ready.add(sampleId); Log.d(AndroidFeedback.TAG, "sound $sampleId loaded") } else Log.w(AndroidFeedback.TAG, "sound $sampleId failed to load: $status")
+        }
     }
 
     /** Starts decoding every cue; returns at once (SoundPool loads asynchronously). */
     fun load() {
         for (spec in CueTable.all) {
             val res = context.resources.getIdentifier(spec.resource, "raw", context.packageName)
-            if (res != 0) ids[spec.cue] = pool.load(context, res, 1)
+            if (res != 0) ids[spec.cue] = pool.load(context, res, 1) else Log.w(AndroidFeedback.TAG, "no resource ${spec.resource} for ${spec.cue}")
         }
     }
 
