@@ -462,9 +462,10 @@ impl Harness for OpencodeHarness {
         let initial_native_command_selected = selected_native_command(&request.prompt, self.id());
         request.prompt = zeron_proto::invocation::harness_prompt(&request.prompt, self.id());
         let cwd = (!request.cwd.is_empty()).then(|| request.cwd.clone());
-        // Bypass keeps opencode's own permission config exactly as before;
-        // every other mode makes the server ask so the policy answers.
-        let ask_permissions = request.policy.mode != zeron_proto::PermissionMode::Bypass;
+        // Bypass keeps opencode's own permission config exactly as before
+        // (unless a rule can stop something); every other mode makes the
+        // server ask so the policy answers.
+        let ask_permissions = request.policy.consults_gate();
         let server = self
             .server(cwd.as_deref(), request.mcp.as_ref(), ask_permissions)
             .await?;
@@ -1684,8 +1685,9 @@ async fn run_session(session: Session) {
         .get("agent")
         .and_then(Value::as_str)
         .filter(|a| !a.is_empty());
-    // Outside Bypass every `permission.asked` goes through the policy.
-    let gate = (request.policy.mode != PermissionMode::Bypass)
+    // Outside Bypass (and in Bypass with a Deny or Ask rule) every
+    // `permission.asked` goes through the policy.
+    let gate = request.policy.consults_gate()
         .then(|| SharedGate::new(Gate::new(request.policy.clone(), request.cwd.clone())));
     let plan_mode = request.policy.mode == PermissionMode::Plan;
     // Plan runs on opencode's own read-only `plan` agent when the server has

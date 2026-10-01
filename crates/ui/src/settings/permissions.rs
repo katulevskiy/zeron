@@ -281,7 +281,8 @@ impl Render for PolicyRulesCard {
                     vec![
                         div()
                             .child(format!(
-                                "Checked before the mode; the first match wins. A matching rule {}.",
+                                "Checked before the mode; the first match wins. A matching rule {}. \
+                                 In Bypass, Ask and Deny rules apply to Claude Code and OpenCode.",
                                 effect_description(effect)
                             ))
                             .into_any_element(),

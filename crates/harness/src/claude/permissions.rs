@@ -7,7 +7,7 @@
 //!
 //! | Zeron mode    | `--permission-mode`                                   | `can_use_tool`        |
 //! |---------------|-------------------------------------------------------|-----------------------|
-//! | Bypass        | `bypassPermissions` + `--dangerously-skip-permissions` when `auto_approve`, else `default` | allowed (deny rules still hold) |
+//! | Bypass        | `bypassPermissions` + `--dangerously-skip-permissions` when `auto_approve` and no Deny/Ask rule applies, else `default` | allowed (Deny and Ask rules still hold) |
 //! | Auto, Ask     | `default`                                             | gate                  |
 //! | AcceptEdits   | `acceptEdits` (the CLI accepts project edits itself)  | gate                  |
 //! | Plan          | `plan` (the CLI's native plan mode)                   | gate, Plan semantics  |
@@ -31,7 +31,10 @@ use crate::policy::{Action, Decision, Gate, real_path};
 /// `--permission-mode …` (plus the skip flag) for `request`.
 pub(crate) fn permission_args(request: &RunRequest) -> &'static [&'static str] {
     match request.policy.mode {
-        PermissionMode::Bypass if request.auto_approve => &[
+        // The CLI's own bypass never asks, so a rule that can stop something
+        // needs the `default` mode (where every tool call reaches the gate,
+        // which allows all but what a rule stops).
+        PermissionMode::Bypass if request.auto_approve && !request.policy.consults_gate() => &[
             "--permission-mode",
             "bypassPermissions",
             "--dangerously-skip-permissions",
@@ -146,6 +149,25 @@ mod tests {
             permission_args(&request(PermissionMode::Bypass, false)),
             ["--permission-mode", "default"]
         );
+    }
+
+    #[test]
+    fn a_rule_that_can_stop_something_takes_bypass_out_of_the_cli_s_own_bypass() {
+        use zeron_proto::{PolicyRule, RuleEffect};
+        let with = |effect| {
+            let mut request = request(PermissionMode::Bypass, true);
+            request.policy.rules = vec![PolicyRule {
+                kind: None,
+                pattern: "rm *".into(),
+                effect,
+            }];
+            permission_args(&request)
+        };
+        // An allow rule changes nothing; a deny or ask rule needs the gate.
+        assert!(with(RuleEffect::Allow).contains(&"--dangerously-skip-permissions"));
+        for effect in [RuleEffect::Deny, RuleEffect::Ask] {
+            assert_eq!(with(effect), ["--permission-mode", "default"]);
+        }
     }
 
     #[test]

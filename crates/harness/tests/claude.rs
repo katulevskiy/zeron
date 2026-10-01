@@ -982,11 +982,21 @@ async fn gated(
     auto_approve: bool,
     answers: Vec<&'static str>,
 ) -> (String, Vec<UserInputQuestion>) {
+    gated_with(scenario, zeron_proto::AgentPolicy::with_mode(mode), auto_approve, answers).await
+}
+
+/// [`gated`] with a whole policy (standing rules included).
+async fn gated_with(
+    scenario: &str,
+    policy: zeron_proto::AgentPolicy,
+    auto_approve: bool,
+    answers: Vec<&'static str>,
+) -> (String, Vec<UserInputQuestion>) {
     let dir = tempfile::tempdir().unwrap();
     let mut req = request(scenario);
     req.cwd = dir.path().display().to_string();
     req.auto_approve = auto_approve;
-    req.policy = zeron_proto::AgentPolicy::with_mode(mode);
+    req.policy = policy;
     let (controls, asked, _steer) = answering(answers);
     let events = run_to_end(&harness(), req, controls).await;
     assert!(
@@ -1073,6 +1083,25 @@ async fn ask_mode_asks_and_honours_once_deny_and_always() {
     );
     assert!(asked[1].question.contains("curl https://example.com"));
     assert!(asked[3].question.contains("src/a.rs"));
+}
+
+#[tokio::test]
+async fn a_deny_rule_holds_in_bypass_even_with_auto_approve() {
+    use zeron_proto::{ActionKind, PolicyRule, RuleEffect};
+    let mut policy = zeron_proto::AgentPolicy::with_mode(zeron_proto::PermissionMode::Bypass);
+    policy.rules = vec![PolicyRule {
+        kind: Some(ActionKind::Exec),
+        pattern: "git push*".into(),
+        effect: RuleEffect::Deny,
+    }];
+    let (text, asked) = gated_with("scenario:gate", policy, true, vec!["Allow once"]).await;
+    // The CLI is in `default` (not its own bypass), so every call reaches
+    // the gate: the force-push is refused by the rule, the rest still runs.
+    assert_eq!(
+        text,
+        "args:default:no|cr-1:allow|cr-2:allow|cr-3:deny|cr-4:allow|cr-5:allow"
+    );
+    assert!(asked.is_empty(), "Bypass still asks nothing: {asked:?}");
 }
 
 #[tokio::test]

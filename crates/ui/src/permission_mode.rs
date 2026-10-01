@@ -94,7 +94,7 @@ pub fn effect_description(effect: RuleEffect) -> &'static str {
     match effect {
         RuleEffect::Allow => "runs without asking, in every mode that asks",
         RuleEffect::Ask => "always asks, even where the mode would allow it",
-        RuleEffect::Deny => "is refused, even in Bypass",
+        RuleEffect::Deny => "is refused, and stays refused in Bypass",
     }
 }
 

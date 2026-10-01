@@ -173,6 +173,17 @@ impl AgentPolicy {
         }
     }
 
+    /// Whether the agent should ask Zeron about each action: any mode but
+    /// Bypass, and Bypass too when a rule can stop an action (a Deny, or an Ask
+    /// the user wants to see). Allow rules change nothing in Bypass.
+    pub fn consults_gate(&self) -> bool {
+        self.mode != PermissionMode::Bypass
+            || self
+                .rules
+                .iter()
+                .any(|rule| matches!(rule.effect, RuleEffect::Deny | RuleEffect::Ask))
+    }
+
     /// The agent can't change the workspace: Plan mode or a read-only sandbox.
     pub fn is_read_only(&self) -> bool {
         self.mode == PermissionMode::Plan || self.sandbox == SandboxMode::ReadOnly
@@ -340,6 +351,24 @@ pub fn approval_answer_is_always(labels: &[String]) -> bool {
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    #[test]
+    fn bypass_only_consults_the_gate_for_rules_that_can_stop_something() {
+        let rule = |effect| PolicyRule {
+            kind: None,
+            pattern: "*".into(),
+            effect,
+        };
+        let mut policy = AgentPolicy::default();
+        assert!(!policy.consults_gate());
+        policy.rules = vec![rule(RuleEffect::Allow)];
+        assert!(!policy.consults_gate(), "an allow changes nothing in Bypass");
+        policy.rules.push(rule(RuleEffect::Deny));
+        assert!(policy.consults_gate());
+        policy.rules = vec![rule(RuleEffect::Ask)];
+        assert!(policy.consults_gate());
+        assert!(AgentPolicy::with_mode(PermissionMode::Ask).consults_gate());
+    }
 
     #[test]
     fn an_old_peer_without_a_policy_reads_as_bypass() {
