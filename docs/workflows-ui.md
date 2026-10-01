@@ -18,7 +18,7 @@ Screenshots are from the live app with the mock harness (`ZERON_MOCK_WORKFLOW=1`
 ```
 crates/ui/src/workflow/
   model.rs      PURE view-model: stations, pills, fractions, header text, chips, caps, run pane,
-                sidebar lines + selection, result-message parsing, acknowledgement list (33 tests)
+                sidebar lines + selection, result-message parsing, acknowledgement list (23 tests)
   card.rs       the transcript card and the result row (functions of a model + an ActionSink)
   pane.rs       WorkflowRunPane: the run pane (right-pane surface)
   artifact.rs   artifact parsing (table, metrics, values) and the viewer entity
@@ -116,7 +116,7 @@ and creates it archived, readable by id; **no engine or client change was needed
 A chip (or an artifact row) opens the viewer inside the run pane with a back arrow. Content comes
 from `WorkflowArtifactData` (versions) and `WorkflowArtifactRead` (one page, ≤ 1 MB). Markdown goes
 through the transcript's markdown renderer; a table is a header + paged grid (200 rows a page,
-numeric columns right-aligned and grouped, widths from the content, horizontal scroll); metrics are
+numeric columns right-aligned and grouped, widths from the content, the last column takes any slack so the table spans the pane, horizontal scroll when wider); metrics are
 tiles with units; a file is a numbered monospace block (2000 lines) — a binary file says so. States:
 loading, an error with **Try again**, a `v1 v2 v3` picker when there are versions, and the view
 follows a newer version of the artifact on screen while the run publishes it.
@@ -193,8 +193,8 @@ now with **real hidden child chats** (so "open this agent" works) and determinis
 | starts with `ask` | escalates a question and waits for the answer (pending-question state) |
 | `slow` / `quick` | 6× / a third of the time |
 
-Capture knobs (read once, for screenshots): `ZERON_OPEN_WORKFLOW=run[:artifact=<id>|phase=<name>]`
-opens the newest run's pane; `ZERON_WORKFLOW_CARD=expanded|collapsed` and
+Capture knobs (read once, for screenshots): `ZERON_OPEN_WORKFLOW=run[:artifact=<id>|phase=<name>|actor]`
+opens the newest run's pane (`actor` also opens the first agent's chat beside it); `ZERON_WORKFLOW_CARD=expanded|collapsed` and
 `ZERON_WORKFLOW_RESULT=expanded` set the default open state; `ZERON_WORKFLOW_APPROVAL=script`
 unfolds the script in the approval block. Keep the parent's mock turn alive while the question is
 raised (`ZERON_MOCK_REPEAT=1 ZERON_MOCK_DELAY_MS=2500`). The screenshots show a 5-phase, 14-agent

@@ -149,7 +149,8 @@ fn header_row(
         .child(
             div()
                 .min_w(px(40.0))
-                .flex_shrink(1.0)
+                // Barely gives way: the counts after it shrink first.
+                .flex_shrink(0.1)
                 .truncate()
                 .text_size(ui_rems(12.5))
                 .font_weight(gpui::FontWeight::MEDIUM)

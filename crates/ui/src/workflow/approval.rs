@@ -27,6 +27,9 @@ use crate::typography::ui_rems;
 pub const COMMANDS_SHOWN: usize = 5;
 /// The excerpt is drawn this tall before it scrolls.
 pub const EXCERPT_MAX_HEIGHT: f32 = 220.0;
+/// Lines of the excerpt that fit in [`EXCERPT_MAX_HEIGHT`] (the block's header
+/// and padding take about 44px, a line 18px); more and the bottom is cut.
+const EXCERPT_LINES_FIT: usize = 9;
 
 /// The approval payload of a question, if it is one.
 pub fn parse_meta(meta: Option<&serde_json::Value>) -> Option<WorkflowApprovalMeta> {
@@ -363,10 +366,18 @@ pub fn approval_block(
             language: Some("python".into()),
             code: model.excerpt.clone(),
         };
+        // A clipped block loses its own bottom edge: draw one, so the cut
+        // reads as a scroll area and not as missing content.
+        let cut = model.excerpt.lines().count() > EXCERPT_LINES_FIT;
         div()
             .id("workflow-approval-excerpt")
             .max_h(px(EXCERPT_MAX_HEIGHT))
             .overflow_y_scroll()
+            .when(cut, |el| {
+                el.rounded_b(px(8.0))
+                    .border_b_1()
+                    .border_color(crate::theme::hairline(0.1))
+            })
             .child(render::render_block(
                 &block,
                 0,
