@@ -2579,7 +2579,7 @@ impl Shell {
                     "Here is the screenshot of the bug.",
                     std::slice::from_ref(&pending_path),
                 );
-                let echo = zeron_doc::SessionMessageEntry {
+                let echo = zeron_doc::SessionMessageEntry { origin: None,
                     id: "demo-upload-echo".into(),
                     role: zeron_doc::MessageRole::User,
                     parts: vec![zeron_doc::MessagePart::Text {
@@ -3986,7 +3986,7 @@ impl Shell {
                     let value = reply.ok()?;
                     let entries: Vec<zeron_doc::SessionMessageEntry> =
                         serde_json::from_str(value.get("text")?.as_str()?).ok()?;
-                    let update = zeron_doc::TranscriptUpdate {
+                    let update = zeron_doc::TranscriptUpdate { goal: None, goal_cleared: false,
                         replay_baseline: Some(zeron_doc::TranscriptBaseline::capture(&entries)),
                         frame: zeron_doc::TranscriptFrame::Reset { reset: entries },
                         context_usage: None,
