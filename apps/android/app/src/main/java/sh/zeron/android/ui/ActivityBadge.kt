@@ -97,7 +97,7 @@ internal class ShapeArt(val path: Path, val outline: Outline)
 
 private const val SAMPLES_PER_CUBIC = 20
 
-internal fun RoundedPolygon.art(): ShapeArt {
+internal fun RoundedPolygon.art(scale: Float = 1f): ShapeArt {
     val raw = ArrayList<Pair<Float, Float>>()
     for (c in cubics) {
         for (i in 0 until SAMPLES_PER_CUBIC) {
@@ -109,13 +109,17 @@ internal fun RoundedPolygon.art(): ShapeArt {
     }
     val sampled = Outline(FloatArray(raw.size) { raw[it].first }, FloatArray(raw.size) { raw[it].second })
     val n = sampled.normalization()
+    // [scale] shrinks the shape about the footprint's centre (the label keeps its size, so it sits snugger).
+    fun sx(v: Float) = 0.5f + (n.x(v) - 0.5f) * scale
+    fun sy(v: Float) = 0.5f + (n.y(v) - 0.5f) * scale
     val path = Path()
     cubics.forEachIndexed { i, c ->
-        if (i == 0) path.moveTo(n.x(c.anchor0X), n.y(c.anchor0Y))
-        path.cubicTo(n.x(c.control0X), n.y(c.control0Y), n.x(c.control1X), n.y(c.control1Y), n.x(c.anchor1X), n.y(c.anchor1Y))
+        if (i == 0) path.moveTo(sx(c.anchor0X), sy(c.anchor0Y))
+        path.cubicTo(sx(c.control0X), sy(c.control0Y), sx(c.control1X), sy(c.control1Y), sx(c.anchor1X), sy(c.anchor1Y))
     }
     path.close()
-    return ShapeArt(path, sampled.normalized())
+    val unit = sampled.normalized()
+    return ShapeArt(path, Outline(FloatArray(unit.size) { 0.5f + (unit.xs[it] - 0.5f) * scale }, FloatArray(unit.size) { 0.5f + (unit.ys[it] - 0.5f) * scale }))
 }
 
 /** The ink of the labels, measured from the face itself (Geist Bold) and never from a line box. */
@@ -186,7 +190,7 @@ private val fits = HashMap<Pair<BadgeShape, Int>, LabelFit>()
 @Synchronized
 internal fun badgePlan(count: UInt): BadgePlan {
     val shape = BadgeShape.of(count)
-    val art = arts.getOrPut(shape) { polygonOf(shape).art() }
+    val art = arts.getOrPut(shape) { polygonOf(shape).art(BadgeGeometry.shapeScale(shape)) }
     val label = SessionActivity.badgeLabel(count)
     val key = shape to (label?.length ?: 0)
     val fit = fits.getOrPut(key) {

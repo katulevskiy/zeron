@@ -149,11 +149,14 @@ fun SubagentsButton(running: Int, onClick: () -> Unit) {
     val scheme = MaterialTheme.colorScheme
     val pulse by breath(running > 0)
     val face = if (running > 0) lerp(scheme.surfaceContainerHighest, scheme.primaryContainer, pulse) else scheme.surfaceContainerHighest
-    // The same Material count badge as a session row's tile, pinned over the button's corner (the arc's 45-degree point),
-    // so the button itself is never resized or moved by the count.
-    CornerBadge(
-        inset = 6.dp,
-        badge = if (running > 0) ({ SubagentCountBadge(running.toUInt(), tone = CountBadgeTone.Activity, describe = false) }) else null,
+    BadgedBox(
+        badge = {
+            if (running > 0) {
+                Badge(containerColor = activityColor(), contentColor = scheme.onPrimary) {
+                    Text(Subagents.countLabel(running), fontFamily = GeistMono, fontWeight = FontWeight.Medium, fontSize = 10.sp)
+                }
+            }
+        },
     ) {
         TonalCircleButton(
             ZIcons.Bot,

@@ -126,6 +126,12 @@ object BadgeGeometry {
     /** No label is taller than this share of the footprint, however roomy the shape. */
     const val MAX_HEIGHT = 0.5f
 
+    /**
+     * How much of its footprint a shape fills. The arch (2) is the one Material shape that is bulky around a single
+     * digit, so it is drawn 20% smaller; the label keeps its size, so it sits snugger in it.
+     */
+    fun shapeScale(shape: BadgeShape): Float = if (shape == BadgeShape.Arch) 0.8f else 1f
+
     /** The digits' height as a share of the footprint: one size per digit count, whatever the shape. */
     fun digitHeight(digits: Int): Float = if (digits <= 1) 0.44f else 0.34f
 
