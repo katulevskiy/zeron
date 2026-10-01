@@ -814,6 +814,40 @@ impl ChatDocHandle {
         })
     }
 
+    /// A run the host refused before starting it: the user's message (so
+    /// the text isn't lost) plus an assistant entry carrying `reason` as a
+    /// visible error. Idempotent by the message id.
+    pub fn write_refusal(
+        &self,
+        message_id: &str,
+        text: &str,
+        reason: &str,
+        created_at: i64,
+    ) -> Result<(), DocError> {
+        if !text.trim().is_empty() {
+            self.write_user_message(message_id, text, created_at)?;
+        }
+        let id = format!("{message_id}-refused");
+        if self.doc.read_entries()?.iter().any(|e| e.id == id) {
+            return Ok(());
+        }
+        self.doc.push_message(&SessionMessageEntry {
+            id,
+            role: MessageRole::Assistant,
+            parts: vec![MessagePart::Error {
+                id: "e0".into(),
+                message: reason.to_string(),
+            }],
+            created_at,
+            device_id: self.device_id.clone(),
+            status: Some(MessageStatus::Aborted),
+            continuation_of: None,
+            duration_ms: None,
+        })?;
+        self.publish_messages();
+        Ok(())
+    }
+
     /// Recovery sweep: settle this device's running subagent chips (including
     /// chips in completed parent turns), then stamp abandoned `streaming`
     /// entries `aborted`, appending
@@ -4166,6 +4200,11 @@ impl DocHost {
                 if let Some(previous) = &previous {
                     current.auto_approve = previous.auto_approve;
                     current.worktree = previous.worktree.clone();
+                    // The row's policy is the chat's setting; a row without
+                    // a config keeps what the last run used.
+                    if self.chat_policy(chat_id).is_none() {
+                        current.policy = previous.policy.clone();
+                    }
                 }
                 current
             })
@@ -5265,7 +5304,7 @@ impl DocHost {
                     && ws.chat_config(chat_id).is_none()
                 {
                     let config = zeron_proto::ChatConfig {
-                        policy: Default::default(),
+                        policy: request.policy.clone(),
                         harness,
                         model: request.model.clone(),
                         reasoning: request.reasoning,
@@ -5387,6 +5426,15 @@ impl DocHost {
                         Some("no pending input request and no prior run config".into()),
                     ));
                 };
+                if let Some(policy) = self.chat_policy(chat_id) {
+                    request.policy = policy;
+                }
+                // The run that asked is gone, but an "Always allow" still
+                // stands for the runs after it.
+                sessions.remember_always_allowed(
+                    &crate::sessions::approval_rules(&questions),
+                    answers,
+                );
                 request.prompt = respond_input_prompt(&questions, answers);
                 request.resume = None; // dispatch re-derives the harness session
                 request.attachments = Vec::new();
@@ -5511,6 +5559,9 @@ impl DocHost {
                         Some("no live run and no prior run config".into()),
                     ));
                 };
+                if let Some(policy) = self.chat_policy(chat_id) {
+                    request.policy = policy;
+                }
                 request.prompt = prompt;
                 request.resume = None; // dispatch re-derives the harness session
                 // A reused config must not re-inline the PREVIOUS turn's
@@ -5714,7 +5765,10 @@ impl DocHost {
         };
         let config = chat.config;
         Some(zeron_proto::RunRequest {
-            policy: Default::default(),
+            policy: config
+                .as_ref()
+                .map(|c| c.policy.clone())
+                .unwrap_or_default(),
             mcp: None,
             prompt: prompt.to_string(),
             harness: config.as_ref().map(|c| c.harness),
@@ -5734,6 +5788,13 @@ impl DocHost {
             resume: None,
             worktree: None,
         })
+    }
+
+    /// The chat's permission policy from its workspace row, when the row has
+    /// a config. A reused earlier request takes this over its own copy: the
+    /// user may have changed the mode since that request ran.
+    pub(crate) fn chat_policy(&self, chat_id: &str) -> Option<zeron_proto::AgentPolicy> {
+        self.workspace()?.chat_config(chat_id).map(|c| c.policy)
     }
 
     fn save_snapshot(&self, handle: &ChatDocHandle) {

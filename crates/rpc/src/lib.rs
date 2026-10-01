@@ -41,6 +41,10 @@ pub mod methods {
     /// replies with the device's fresh `ListHarnesses` catalog.
     pub const GET_TITLE_SETTINGS: &str = "GetTitleSettings";
     pub const SET_TITLE_SETTINGS: &str = "SetTitleSettings";
+    /// The device's permission defaults (`{defaultMode}`): the mode new
+    /// chats start in. Set replies with the stored settings.
+    pub const GET_POLICY_SETTINGS: &str = "GetPolicySettings";
+    pub const SET_POLICY_SETTINGS: &str = "SetPolicySettings";
     pub const SET_HARNESS_ENABLED: &str = "SetHarnessEnabled";
     pub const LIST_MODELS: &str = "ListModels";
     pub const LIST_SKILLS: &str = "ListSkills";

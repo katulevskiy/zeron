@@ -58,6 +58,20 @@ pub enum SteerOutcome {
 }
 
 type PendingInputs = Arc<Mutex<HashMap<String, oneshot::Sender<Vec<UserInputAnswer>>>>>;
+/// request id → the rules its approval questions would add on "Always
+/// allow" (question id, rule), as the harness asked them.
+type PendingApprovalRules = Arc<Mutex<HashMap<String, Vec<(String, zeron_proto::PolicyRule)>>>>;
+
+/// The (question id, rule) pairs of the approval questions in `questions`
+/// whose "Always allow" can become a standing rule.
+pub(crate) fn approval_rules(
+    questions: &[UserInputQuestion],
+) -> Vec<(String, zeron_proto::PolicyRule)> {
+    questions
+        .iter()
+        .filter_map(|q| Some((q.id.clone(), zeron_proto::policy::approval_rule(&q.id)?)))
+        .collect()
+}
 
 /// A harness-native session id plus the cwd it was created under. Harness
 /// session stores are cwd-scoped (claude keys conversations by project
@@ -83,10 +97,17 @@ struct RuntimeConfig {
     sandbox: zeron_proto::SandboxLevel,
     auto_approve: bool,
     worktree: Option<zeron_proto::WorktreeSpec>,
+    /// The policy the runtime was started under (mode, sandbox, network) —
+    /// `None` when the harness switches modes on a live session, so a mode
+    /// change doesn't cost it a restart. Standing rules never count: the
+    /// host re-merges them on every fresh run.
+    policy: Option<(zeron_proto::PermissionMode, zeron_proto::SandboxMode, bool)>,
+    live_mode_switch: bool,
 }
 
 impl RuntimeConfig {
-    fn from_request(harness_id: HarnessId, request: &RunRequest) -> Self {
+    fn from_request(harness_id: HarnessId, request: &RunRequest, live_mode_switch: bool) -> Self {
+        let policy = &request.policy;
         Self {
             harness_id,
             model: request.model.clone(),
@@ -96,11 +117,14 @@ impl RuntimeConfig {
             sandbox: request.sandbox,
             auto_approve: request.auto_approve,
             worktree: request.worktree.clone(),
+            policy: (!live_mode_switch).then_some((policy.mode, policy.sandbox, policy.network)),
+            live_mode_switch,
         }
     }
 
     fn can_route(&self, harness_id: HarnessId, request: &RunRequest) -> bool {
-        request.attachments.is_empty() && self == &Self::from_request(harness_id, request)
+        request.attachments.is_empty()
+            && self == &Self::from_request(harness_id, request, self.live_mode_switch)
     }
 }
 
@@ -116,6 +140,7 @@ struct RunHandle {
     cancel: watch::Sender<bool>,
     engine_tx: mpsc::UnboundedSender<AgentEvent>,
     pending_inputs: PendingInputs,
+    approval_rules: PendingApprovalRules,
     /// Steers accepted into the mailbox but not yet confirmed by a `Steered`
     /// event — the at-least-once ledger. A run can die with accepted steers
     /// still in its mailbox (idle reaper vs. a routed send; a mid-turn error
@@ -171,6 +196,9 @@ struct Inner {
     /// dispatch or accepted steer) — the diff sync snapshots the checkout tree
     /// for the Changes pane's "Latest turn" scope. Absent in bare tests.
     turn_listener: OnceLock<TurnListener>,
+    /// Standing permission rules merged into every fresh run (absent in bare
+    /// tests: runs keep only the rules their request carries).
+    policy_rules: OnceLock<crate::policy_rules::PolicyRules>,
 }
 
 /// Turn-start hook: called with `(chat_id, cwd)`.
@@ -208,8 +236,18 @@ impl SessionsEngine {
                 titles: OnceLock::new(),
                 generated_images: OnceLock::new(),
                 turn_listener: OnceLock::new(),
+                policy_rules: OnceLock::new(),
             }),
         }
+    }
+
+    /// Wire the standing-rules store (engine assembly; first set wins).
+    pub fn set_policy_rules(&self, rules: crate::policy_rules::PolicyRules) {
+        let _ = self.inner.policy_rules.set(rules);
+    }
+
+    pub fn policy_rules(&self) -> Option<&crate::policy_rules::PolicyRules> {
+        self.inner.policy_rules.get()
     }
 
     /// Record the loopback IPC port this engine serves. Runs started after
@@ -436,6 +474,16 @@ impl SessionsEngine {
         // cross-harness delivery before recording or routing the user turn.
         zeron_proto::invocation::validate_harness_invocations(&request.prompt, harness_id)
             .map_err(EngineError::Other)?;
+        // A mode the harness can't honour is refused, never silently run
+        // looser. The refusal lands in the transcript so the sender sees why.
+        if let Err(reason) = self
+            .inner
+            .registry
+            .check_policy(harness_id, request.policy.mode)
+        {
+            self.refuse_run(chat_id, message_id.as_deref(), &request.prompt, &reason);
+            return Err(EngineError::Other(reason));
+        }
         let routed = lock(&self.inner.runs).get(chat_id).map(|h| {
             (
                 h.run_id.clone(),
@@ -558,17 +606,23 @@ impl SessionsEngine {
         let (cancel_tx, cancel_rx) = watch::channel(false);
         let (engine_tx, engine_rx) = mpsc::unbounded_channel::<AgentEvent>();
         let pending_inputs: PendingInputs = Arc::new(Mutex::new(HashMap::new()));
+        let approval_rules: PendingApprovalRules = Arc::new(Mutex::new(HashMap::new()));
 
         // Input bridge: the harness asks questions; we mint the request id, park the
         // resolver for `respond_input`, and surface the event through the run pipeline.
         let request_input = {
             let pending = pending_inputs.clone();
+            let rules = approval_rules.clone();
             let engine_tx = engine_tx.clone();
             Box::new(move |questions: Vec<UserInputQuestion>| {
                 let (mut tx, rx) = oneshot::channel();
                 let (answer_tx, answer_rx) = oneshot::channel();
                 let request_id = new_id();
                 lock(&pending).insert(request_id.clone(), answer_tx);
+                let asked = self::approval_rules(&questions);
+                if !asked.is_empty() {
+                    lock(&rules).insert(request_id.clone(), asked);
+                }
                 let _ = engine_tx.send(AgentEvent::InputRequested {
                     request_id: request_id.clone(),
                     questions,
@@ -602,12 +656,17 @@ impl SessionsEngine {
             RunHandle {
                 run_id: run_id.clone(),
                 steerable: harness.supports_steering(),
-                runtime_config: RuntimeConfig::from_request(harness_id, &request),
+                runtime_config: RuntimeConfig::from_request(
+                    harness_id,
+                    &request,
+                    harness.policy_caps().live_mode_switch,
+                ),
                 steer_tx,
                 interrupt_token,
                 cancel: cancel_tx,
                 engine_tx,
                 pending_inputs,
+                approval_rules,
                 routed_steers: Arc::new(Mutex::new(std::collections::VecDeque::new())),
                 fork_history_sent: fork_history_sent.clone(),
             },
@@ -624,6 +683,14 @@ impl SessionsEngine {
         // generation).
         if let Some(titles) = self.inner.titles.get() {
             titles.maybe_generate(chat_id, harness_id, &request.prompt, &request.cwd);
+        }
+
+        // Standing rules: the project's, then the user's, then the request's
+        // own. Merged here, after `last_requests` kept the request as sent,
+        // so a rule deleted from a file doesn't outlive it through reuse.
+        if let Some(rules) = self.inner.policy_rules.get() {
+            request.policy.rules =
+                rules.merged(std::path::Path::new(&request.cwd), &request.policy.rules);
         }
 
         tokio::spawn(drive_run(
@@ -644,6 +711,18 @@ impl SessionsEngine {
             },
         ));
         Ok(run_id)
+    }
+
+    /// Record a run the host refused before it started (see
+    /// [`ChatDocHandle::write_refusal`]).
+    fn refuse_run(&self, chat_id: &str, message_id: Option<&str>, prompt: &str, reason: &str) {
+        let Ok(handle) = self.doc_handle(chat_id) else {
+            return;
+        };
+        let user_id = message_id.map(str::to_owned).unwrap_or_else(new_id);
+        if let Err(err) = handle.write_refusal(&user_id, prompt, reason, now_ms()) {
+            tracing::warn!(chat = %chat_id, error = %err, "refused run: transcript write failed");
+        }
     }
 
     /// A warm send's prompt with the fork's copied history in front, when the
@@ -818,20 +897,52 @@ impl SessionsEngine {
         request_id: &str,
         answers: Vec<UserInputAnswer>,
     ) -> Result<bool, EngineError> {
-        let target = lock(&self.inner.runs)
-            .get(chat_id)
-            .map(|h| (h.pending_inputs.clone(), h.engine_tx.clone()));
-        let Some((pending, engine_tx)) = target else {
+        let target = lock(&self.inner.runs).get(chat_id).map(|h| {
+            (
+                h.pending_inputs.clone(),
+                h.approval_rules.clone(),
+                h.engine_tx.clone(),
+            )
+        });
+        let Some((pending, rules, engine_tx)) = target else {
             return Ok(false);
         };
         let Some(resolver) = lock(&pending).remove(request_id) else {
             return Ok(false);
         };
+        let asked = lock(&rules).remove(request_id).unwrap_or_default();
+        self.remember_always_allowed(&asked, &answers);
         let _ = resolver.send(answers);
         let _ = engine_tx.send(AgentEvent::InputResolved {
             request_id: request_id.to_string(),
         });
         Ok(true)
+    }
+
+    /// Keep the rule behind every "Always allow" in `answers` (only for the
+    /// approval questions in `asked`, which the harness itself minted) in
+    /// the user's standing rules, so later runs don't ask again.
+    pub(crate) fn remember_always_allowed(
+        &self,
+        asked: &[(String, zeron_proto::PolicyRule)],
+        answers: &[UserInputAnswer],
+    ) {
+        let Some(store) = self.inner.policy_rules.get() else {
+            return;
+        };
+        for answer in answers {
+            if !zeron_proto::policy::approval_answer_is_always(&answer.labels) {
+                continue;
+            }
+            let Some((_, rule)) = asked.iter().find(|(id, _)| *id == answer.question_id) else {
+                continue;
+            };
+            match store.remember(rule.clone()) {
+                Ok(true) => tracing::info!(pattern = %rule.pattern, "remembered an always-allow rule"),
+                Ok(false) => {}
+                Err(err) => tracing::warn!(error = %err, "always-allow rule save failed"),
+            }
+        }
     }
 
     /// Boot recovery: for every journal whose last event is not `Done` (a run died
@@ -951,6 +1062,9 @@ impl SessionsEngine {
                     tracing::warn!(chat = %chat_id, "auto-resume skipped: no run config");
                     return;
                 };
+                if let Some(policy) = host.chat_policy(&chat_id) {
+                    request.policy = policy;
+                }
                 request.prompt = prompt_text;
                 request.resume = None; // dispatch re-injects the remembered session
                 request.attachments = Vec::new();
@@ -2948,6 +3062,10 @@ async fn drive_run(
 }
 
 #[cfg(test)]
+#[path = "sessions_policy_tests.rs"]
+mod policy_tests;
+
+#[cfg(test)]
 mod tests {
     use super::*;
 
@@ -3129,7 +3247,7 @@ mod tests {
     #[test]
     fn live_routing_requires_the_same_runtime_configuration() {
         let initial = request();
-        let config = RuntimeConfig::from_request(HarnessId::Grok, &initial);
+        let config = RuntimeConfig::from_request(HarnessId::Grok, &initial, false);
 
         let mut follow_up = initial.clone();
         follow_up.prompt = "second".into();

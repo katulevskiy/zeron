@@ -1357,6 +1357,8 @@ fn forwardable(method: &str) -> bool {
             | methods::CANCEL_INSTALL
             | methods::GET_TITLE_SETTINGS
             | methods::SET_TITLE_SETTINGS
+            | methods::GET_POLICY_SETTINGS
+            | methods::SET_POLICY_SETTINGS
             | methods::SET_HARNESS_ENABLED
             | methods::LIST_MODELS
             | methods::LIST_SKILLS
@@ -1775,6 +1777,12 @@ impl RpcService for EngineRpc {
                     .set_title_settings(p)
                     .map_err(RpcError::Failed)?;
                 RpcReply::value(&self.registry.title_settings())
+            }
+            methods::GET_POLICY_SETTINGS => RpcReply::value(&self.registry.policy_settings()),
+            methods::SET_POLICY_SETTINGS => {
+                let p: crate::registry::PolicySettings = parse_params(params)?;
+                self.registry.set_policy_settings(p);
+                RpcReply::value(&self.registry.policy_settings())
             }
             methods::SET_HARNESS_ENABLED => {
                 let p: SetHarnessEnabledParams = parse_params(params)?;

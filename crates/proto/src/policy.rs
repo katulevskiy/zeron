@@ -268,6 +268,35 @@ impl PolicyCaps {
     pub fn supports(&self, mode: PermissionMode) -> bool {
         self.modes.contains(&mode)
     }
+
+    /// Why `harness` (its display name) can't run in `mode`; `None` when it
+    /// can. Pickers show this beside a greyed mode.
+    pub fn unsupported_reason(&self, harness: &str, mode: PermissionMode) -> Option<String> {
+        if self.supports(mode) {
+            return None;
+        }
+        Some(if self.modes.iter().all(|m| *m == PermissionMode::Bypass) {
+            format!("{harness} runs without asking — it can only bypass permissions")
+        } else {
+            format!("{harness} can't run in {} mode", mode.label())
+        })
+    }
+
+    /// The error a host gives a run asking `harness` for a mode it can't
+    /// honour. Hosts refuse such runs rather than silently loosening them.
+    pub fn refusal(&self, harness: &str, mode: PermissionMode) -> Option<String> {
+        let reason = self.unsupported_reason(harness, mode)?;
+        let offered: Vec<&str> = PermissionMode::ALL
+            .iter()
+            .filter(|m| self.supports(**m))
+            .map(|m| m.label())
+            .collect();
+        Some(if offered.is_empty() {
+            format!("{reason}.")
+        } else {
+            format!("{reason}. Pick {} for it.", offered.join(" or "))
+        })
+    }
 }
 
 /// Question ids of approval prompts start with this, so the host can tell
@@ -339,6 +368,32 @@ mod tests {
         assert_eq!(strict.capped_by(&parent).mode, PermissionMode::Plan);
         assert!(AgentPolicy::read_only().is_read_only());
         assert!(!AgentPolicy::default().is_read_only());
+    }
+
+    #[test]
+    fn unsupported_modes_explain_themselves() {
+        let bypass = PolicyCaps::bypass_only();
+        assert_eq!(bypass.unsupported_reason("Cursor", PermissionMode::Bypass), None);
+        assert_eq!(
+            bypass.unsupported_reason("Cursor", PermissionMode::Ask).as_deref(),
+            Some("Cursor runs without asking — it can only bypass permissions")
+        );
+        assert_eq!(
+            bypass.refusal("Cursor", PermissionMode::Plan).as_deref(),
+            Some(
+                "Cursor runs without asking — it can only bypass permissions. \
+                 Pick Bypass permissions for it."
+            )
+        );
+        let some = PolicyCaps {
+            modes: vec![PermissionMode::Bypass, PermissionMode::Ask],
+            ..PolicyCaps::bypass_only()
+        };
+        assert_eq!(
+            some.refusal("Codex", PermissionMode::Plan).as_deref(),
+            Some("Codex can't run in Plan mode. Pick Bypass permissions or Ask for it.")
+        );
+        assert_eq!(PolicyCaps::all_modes().refusal("Claude", PermissionMode::Auto), None);
     }
 
     #[test]

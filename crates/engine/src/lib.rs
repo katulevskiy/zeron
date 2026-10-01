@@ -29,6 +29,7 @@ mod http_error;
 pub mod instance_lock;
 pub mod local_import;
 mod model_catalogs;
+pub mod policy_rules;
 pub mod profile;
 pub mod project_actions;
 pub mod registry;
@@ -226,6 +227,9 @@ impl EngineCore {
         let store_for_import = store.clone();
         let journal = Arc::new(RunJournal::open(profile.store_root().join("journals"))?);
         let sessions = SessionsEngine::new(device_id.clone(), journal, registry.clone());
+        // Standing permission rules: this device user's file, merged with each
+        // project's at dispatch.
+        sessions.set_policy_rules(policy_rules::PolicyRules::new(data_dir));
         let doc_host = DocHost::new(
             store.clone(),
             DocHostConfig {
