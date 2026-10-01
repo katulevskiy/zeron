@@ -10,6 +10,7 @@ import androidx.compose.runtime.collectAsState
 import androidx.compose.runtime.getValue
 import androidx.core.content.IntentCompat
 import sh.zeron.android.design.ZeronTheme
+import sh.zeron.android.feedback.ProvideFeedback
 import sh.zeron.android.ui.ShareScreen
 
 /**
@@ -30,6 +31,7 @@ class ShareActivity : ComponentActivity() {
         setContent {
             val appearance by model.appearance.collectAsState()
             ZeronTheme(appearance) {
+                ProvideFeedback(model.feedback) {
                 ShareScreen(
                     model,
                     uris,
@@ -44,6 +46,7 @@ class ShareActivity : ComponentActivity() {
                         finish()
                     },
                 )
+                }
             }
         }
     }

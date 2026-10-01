@@ -252,6 +252,11 @@ class AppModel(private val app: Application) {
                 phone.restart()
             }
         }
+        // Foreground means any of the app's activities (the share sheet included), not only MainActivity.
+        androidx.lifecycle.ProcessLifecycleOwner.get().lifecycle.addObserver(object : androidx.lifecycle.DefaultLifecycleObserver {
+            override fun onStart(owner: androidx.lifecycle.LifecycleOwner) = onForeground()
+            override fun onStop(owner: androidx.lifecycle.LifecycleOwner) = onBackground()
+        })
         watchNetwork()
         // Incoming-transfer notifications and Downloads export, whenever this
         // phone's engine runs (docs/android.md § File transfers).

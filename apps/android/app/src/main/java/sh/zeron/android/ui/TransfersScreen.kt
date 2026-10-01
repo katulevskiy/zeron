@@ -52,6 +52,12 @@ import sh.zeron.android.core.Transfers
 import sh.zeron.android.core.userMessage
 import sh.zeron.android.design.ZIcon
 import sh.zeron.android.design.ZIcons
+import sh.zeron.android.feedback.Cue
+import sh.zeron.android.feedback.Haptic
+import sh.zeron.android.feedback.LocalFeedback
+import sh.zeron.android.feedback.feedbackAction
+import sh.zeron.android.feedback.tapAction
+import sh.zeron.android.feedback.toggleAction
 
 /**
  * Settings → Transfers: files between this phone's engine and your other
@@ -70,6 +76,7 @@ fun TransfersScreen(model: AppModel, onBack: () -> Unit) {
     val context = LocalContext.current
     val snackbar = remember { SnackbarHostState() }
     val scope = rememberCoroutineScope()
+    val fb = LocalFeedback.current
     DisposableEffect(center) {
         val release = center.watch()
         onDispose { release() }
@@ -77,7 +84,10 @@ fun TransfersScreen(model: AppModel, onBack: () -> Unit) {
 
     fun attempt(what: String, body: suspend () -> Unit) {
         scope.launch {
-            runCatching { body() }.onFailure { snackbar.showSnackbar("Couldn't $what: ${it.userMessage()}") }
+            runCatching { body() }.onFailure {
+                fb.both(Haptic.Error, Cue.Error)
+                snackbar.showSnackbar("Couldn't $what: ${it.userMessage()}")
+            }
         }
     }
 
@@ -93,18 +103,19 @@ fun TransfersScreen(model: AppModel, onBack: () -> Unit) {
         item {
             Column(Modifier.padding(horizontal = 16.dp), verticalArrangement = Arrangement.spacedBy(ListItemDefaults.SegmentedGap)) {
                 val ask = settings?.requireConfirmation == true
+                val toggle = toggleAction { on -> attempt("change the setting") { center.setRequireConfirmation(on) } }
                 SegmentedListItem(
-                    onClick = { attempt("change the setting") { center.setRequireConfirmation(!ask) } },
+                    onClick = tapAction { if (settings != null) toggle(!ask) },
                     shapes = segmentedShapes(0, 2),
                     colors = ListItemDefaults.segmentedColors(containerColor = cardColor()),
                     leadingContent = { IconTile(ZIcons.Bell) },
                     supportingContent = { Text("Files from your other devices wait until you accept them") },
                     trailingContent = {
-                        Switch(ask, { on -> attempt("change the setting") { center.setRequireConfirmation(on) } }, enabled = settings != null)
+                        Switch(ask, toggle, enabled = settings != null)
                     },
                 ) { Text("Ask before accepting") }
                 SegmentedListItem(
-                    onClick = { runCatching { context.startActivity(Intent(DownloadManager.ACTION_VIEW_DOWNLOADS).addFlags(Intent.FLAG_ACTIVITY_NEW_TASK)) } },
+                    onClick = feedbackAction(Haptic.Select, Cue.Select) { runCatching { context.startActivity(Intent(DownloadManager.ACTION_VIEW_DOWNLOADS).addFlags(Intent.FLAG_ACTIVITY_NEW_TASK)) } },
                     shapes = segmentedShapes(1, 2),
                     colors = ListItemDefaults.segmentedColors(containerColor = cardColor()),
                     leadingContent = { IconTile(ZIcons.Folder) },
@@ -153,7 +164,7 @@ fun TransfersScreen(model: AppModel, onBack: () -> Unit) {
             item {
                 Row(Modifier.fillMaxWidth().padding(start = 28.dp, end = 16.dp, top = 16.dp), verticalAlignment = Alignment.CenterVertically) {
                     Text("Earlier", style = MaterialTheme.typography.titleSmallEmphasized, color = MaterialTheme.colorScheme.primary, modifier = Modifier.weight(1f))
-                    TextButton(onClick = { attempt("clear") { center.clear() } }) { Text("Clear") }
+                    TextButton(onClick = feedbackAction(Haptic.Confirm, Cue.Delete) { attempt("clear") { center.clear() } }) { Text("Clear") }
                 }
             }
             for (t in done) {
@@ -165,7 +176,10 @@ fun TransfersScreen(model: AppModel, onBack: () -> Unit) {
                         onAccept = {},
                         onDecline = {},
                         onOpen = { item ->
-                            if (!center.open(context, t, item)) scope.launch { snackbar.showSnackbar("Nothing on this phone can open ${item.name}.") }
+                            if (!center.open(context, t, item)) {
+                                fb.both(Haptic.Error, Cue.Error)
+                                scope.launch { snackbar.showSnackbar("Nothing on this phone can open ${item.name}.") }
+                            }
                         },
                         onClear = { attempt("clear") { center.clear(t.id) } },
                     )
@@ -186,6 +200,14 @@ private fun TransferCard(
     onClear: (() -> Unit)?,
 ) {
     val liveTone = t.state.live
+    // A transfer is the user's own act here: cancel closes it out, accept commits, decline is a choice,
+    // opening a received file leaves for another app, removing a finished row is a light removal.
+    val cancel = feedbackAction(Haptic.Confirm, Cue.Close, onCancel)
+    val accept = feedbackAction(Haptic.Confirm, Cue.Select, onAccept)
+    val decline = feedbackAction(Haptic.Select, Cue.Select, onDecline)
+    val clear = onClear?.let { feedbackAction(Haptic.Confirm, Cue.Close, it) }
+    val fb = LocalFeedback.current
+    val open: (Transfers.Item) -> Unit = { fb.both(Haptic.Select, Cue.Select); onOpen(it) }
     Surface(
         shape = RoundedCornerShape(28.dp),
         color = cardColor(),
@@ -211,9 +233,9 @@ private fun TransferCard(
                     )
                 }
                 if (liveTone) {
-                    TonalCircleButton(ZIcons.Close, "Cancel", onClick = onCancel, size = 40.dp)
-                } else if (onClear != null) {
-                    TonalCircleButton(ZIcons.Close, "Remove from list", onClick = onClear, size = 40.dp, container = androidx.compose.ui.graphics.Color.Transparent)
+                    TonalCircleButton(ZIcons.Close, "Cancel", onClick = cancel, size = 40.dp)
+                } else if (clear != null) {
+                    TonalCircleButton(ZIcons.Close, "Remove from list", onClick = clear, size = 40.dp, container = androidx.compose.ui.graphics.Color.Transparent)
                 }
             }
             if (liveTone) {
@@ -235,12 +257,12 @@ private fun TransferCard(
             if (t.incoming && t.state == Transfers.State.AwaitingAcceptance) {
                 Spacer(Modifier.height(12.dp))
                 Row(horizontalArrangement = Arrangement.spacedBy(8.dp)) {
-                    Button(onClick = onAccept, modifier = Modifier.weight(1f), shapes = ButtonDefaults.shapes()) {
+                    Button(onClick = accept, modifier = Modifier.weight(1f), shapes = ButtonDefaults.shapes()) {
                         ZIcon(ZIcons.Check, null, Modifier.size(ButtonDefaults.IconSize))
                         Spacer(Modifier.size(ButtonDefaults.IconSpacing))
                         Text("Accept")
                     }
-                    OutlinedButton(onClick = onDecline, modifier = Modifier.weight(1f), shapes = ButtonDefaults.shapes()) { Text("Decline") }
+                    OutlinedButton(onClick = decline, modifier = Modifier.weight(1f), shapes = ButtonDefaults.shapes()) { Text("Decline") }
                 }
             }
             if (t.incoming && t.state == Transfers.State.Completed) {
@@ -251,7 +273,7 @@ private fun TransferCard(
                     Column(verticalArrangement = Arrangement.spacedBy(ListItemDefaults.SegmentedGap)) {
                         t.items.forEachIndexed { i, item ->
                             SegmentedListItem(
-                                onClick = { onOpen(item) },
+                                onClick = { open(item) },
                                 shapes = segmentedShapes(i, t.items.size),
                                 colors = ListItemDefaults.segmentedColors(containerColor = MaterialTheme.colorScheme.surfaceContainerHigh),
                                 leadingContent = { ZIcon(if (item.kind == Transfers.Kind.Folder) ZIcons.Folder else ZIcons.Text, null, Modifier.size(22.dp)) },
@@ -261,7 +283,7 @@ private fun TransferCard(
                                     )
                                 },
                                 trailingContent = {
-                                    FilledTonalButton(onClick = { onOpen(item) }, shapes = ButtonDefaults.shapes()) {
+                                    FilledTonalButton(onClick = { open(item) }, shapes = ButtonDefaults.shapes()) {
                                         Text(if (item.kind == Transfers.Kind.Folder) "Show" else "Open")
                                     }
                                 },

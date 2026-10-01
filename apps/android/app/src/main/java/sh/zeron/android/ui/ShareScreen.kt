@@ -53,6 +53,11 @@ import sh.zeron.android.core.Transfers
 import sh.zeron.android.core.userMessage
 import sh.zeron.android.design.ZIcon
 import sh.zeron.android.design.ZIcons
+import sh.zeron.android.feedback.Cue
+import sh.zeron.android.feedback.Haptic
+import sh.zeron.android.feedback.LocalFeedback
+import sh.zeron.android.feedback.feedbackAction
+import sh.zeron.android.feedback.tapAction
 import sh.zeron.runtime.RuntimeState
 
 /**
@@ -70,6 +75,7 @@ fun ShareScreen(model: AppModel, uris: List<Uri>, text: String?, onClose: () -> 
     val workspace by model.workspace.collectAsState()
     val transfers by center.list.collectAsState()
     val scope = rememberCoroutineScope()
+    val fb = LocalFeedback.current
 
     var staged by remember { mutableStateOf<Pair<String, List<TransferCenter.Staged>>?>(null) }
     var stageError by remember { mutableStateOf<String?>(null) }
@@ -95,6 +101,8 @@ fun ShareScreen(model: AppModel, uris: List<Uri>, text: String?, onClose: () -> 
                 stageError = if (it is SecurityException) "The app you shared from didn't give Zeron access to the file." else it.message ?: "Couldn't read what was shared."
             }
     }
+    // A refusal is felt once when it appears.
+    LaunchedEffect(stageError) { if (stageError != null) fb.both(Haptic.Error, Cue.Error) }
     // Abandoned before sending: drop the staged copy.
     DisposableEffect(Unit) {
         onDispose { if (transferId == null) staged?.let { center.discard(it.first) } }
@@ -107,7 +115,7 @@ fun ShareScreen(model: AppModel, uris: List<Uri>, text: String?, onClose: () -> 
         LazyColumn(Modifier.fillMaxSize().statusBarsPadding().navigationBarsPadding()) {
             item {
                 Box(Modifier.padding(start = 12.dp, top = 8.dp)) {
-                    TonalCircleButton(ZIcons.Close, "Close", onClick = onClose)
+                    TonalCircleButton(ZIcons.Close, "Close", onClick = feedbackAction(Haptic.Select, Cue.Close, onClose))
                 }
             }
             val files = staged?.second
@@ -133,7 +141,7 @@ fun ShareScreen(model: AppModel, uris: List<Uri>, text: String?, onClose: () -> 
                         ZIcons.Phone,
                         "Finish setting up Zeron",
                         "Zeron sends shared files from the engine on this phone. Open Zeron to sign in or continue without an account.",
-                    ) { Button(onClick = { onOpenApp(null) }, shapes = ButtonDefaults.shapes()) { Text("Open Zeron") } }
+                    ) { Button(onClick = tapAction { onOpenApp(null) }, shapes = ButtonDefaults.shapes()) { Text("Open Zeron") } }
                 }
                 stageError != null -> item { Notice(ZIcons.Warning, "Couldn't prepare the files", stageError!!) {} }
                 client == null -> item {
@@ -141,7 +149,7 @@ fun ShareScreen(model: AppModel, uris: List<Uri>, text: String?, onClose: () -> 
                         RuntimeState.Starting, is RuntimeState.Bootstrapping, is RuntimeState.Running ->
                             Notice(ZIcons.Terminal, "Connecting to the engine…", PhoneEngine.stateLabel(engine), busy = true) {}
                         else -> Notice(ZIcons.Terminal, "The engine isn't running", "Start it to send these files.") {
-                            Button(onClick = { model.startEngine() }, shapes = ButtonDefaults.shapes()) { Text("Start engine") }
+                            Button(onClick = feedbackAction(Haptic.Confirm, Cue.ToggleOn) { model.startEngine() }, shapes = ButtonDefaults.shapes()) { Text("Start engine") }
                         }
                     }
                 }
@@ -156,8 +164,8 @@ fun ShareScreen(model: AppModel, uris: List<Uri>, text: String?, onClose: () -> 
                     }
                     item {
                         Row(Modifier.fillMaxWidth().padding(16.dp), horizontalArrangement = Arrangement.spacedBy(8.dp)) {
-                            FilledTonalButton(onClick = { onOpenApp("transfers") }, modifier = Modifier.weight(1f), shapes = ButtonDefaults.shapes()) { Text("All transfers") }
-                            Button(onClick = onClose, modifier = Modifier.weight(1f), shapes = ButtonDefaults.shapes()) {
+                            FilledTonalButton(onClick = tapAction { onOpenApp("transfers") }, modifier = Modifier.weight(1f), shapes = ButtonDefaults.shapes()) { Text("All transfers") }
+                            Button(onClick = feedbackAction(Haptic.Select, Cue.Close, onClose), modifier = Modifier.weight(1f), shapes = ButtonDefaults.shapes()) {
                                 Text(if (transfer?.state?.live != false) "Send in background" else "Done")
                             }
                         }
@@ -183,10 +191,15 @@ fun ShareScreen(model: AppModel, uris: List<Uri>, text: String?, onClose: () -> 
                                         if (sending != null) return@SegmentedListItem
                                         sending = d.id
                                         sendError = null
+                                        // Picking the device is sending: one commit, one sound.
+                                        fb.both(Haptic.Confirm, Cue.Send)
                                         scope.launch {
                                             runCatching { center.send(d.id, files.map { it.guestPath }) }
                                                 .onSuccess { transferId = it }
-                                                .onFailure { sendError = it.userMessage() }
+                                                .onFailure {
+                                                    sendError = it.userMessage()
+                                                    fb.both(Haptic.Error, Cue.Error)
+                                                }
                                             sending = null
                                         }
                                     },

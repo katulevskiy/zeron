@@ -79,7 +79,12 @@ import sh.zeron.android.core.PhoneEngine
 import sh.zeron.android.design.GeistMono
 import sh.zeron.android.design.ZIcon
 import sh.zeron.android.design.ZIcons
+import sh.zeron.android.feedback.Cue
+import sh.zeron.android.feedback.Haptic
+import sh.zeron.android.feedback.OpenCloseFeedback
+import sh.zeron.android.feedback.feedbackAction
 import sh.zeron.android.feedback.pullFeedback
+import sh.zeron.android.feedback.tapAction
 import sh.zeron.runtime.RuntimePermissions
 import sh.zeron.runtime.RuntimeState
 
@@ -104,6 +109,8 @@ fun rememberPermissionAsk(): (battery: Boolean, then: () -> Unit) -> Unit {
         { battery, then ->
             if (Build.VERSION.SDK_INT >= 33 && RuntimePermissions.needsNotificationPermission(activity)) {
                 pending = battery to then
+                // Asked here, in context: the "first message" prompt (Composer) must not ask a second time.
+                (activity.application as? sh.zeron.android.ZeronApplication)?.model?.notificationsAsked = true
                 notifications.launch(Manifest.permission.POST_NOTIFICATIONS)
             } else {
                 if (battery) RuntimePermissions.requestIgnoreBatteryOptimizations(activity)
@@ -145,18 +152,18 @@ fun EngineScreen(model: AppModel, onBack: () -> Unit, onAgents: () -> Unit) {
             Row(Modifier.padding(horizontal = 16.dp, vertical = 8.dp), horizontalArrangement = Arrangement.spacedBy(8.dp)) {
                 when (state) {
                     is RuntimeState.Running, RuntimeState.Starting, is RuntimeState.Bootstrapping ->
-                        FilledTonalButton(onClick = { model.stopEngine() }, modifier = Modifier.weight(1f), shapes = ButtonDefaults.shapes()) {
+                        FilledTonalButton(onClick = feedbackAction(Haptic.Confirm, Cue.ToggleOff) { model.stopEngine() }, modifier = Modifier.weight(1f), shapes = ButtonDefaults.shapes()) {
                             ZIcon(ZIcons.Stop, null, Modifier.size(ButtonDefaults.IconSize))
                             Spacer(Modifier.size(ButtonDefaults.IconSpacing))
                             Text("Stop")
                         }
-                    else -> Button(onClick = start, enabled = phone.isSupportedAbi, modifier = Modifier.weight(1f), shapes = ButtonDefaults.shapes()) {
+                    else -> Button(onClick = feedbackAction(Haptic.Confirm, Cue.ToggleOn, start), enabled = phone.isSupportedAbi, modifier = Modifier.weight(1f), shapes = ButtonDefaults.shapes()) {
                         ZIcon(ZIcons.Restart, null, Modifier.size(ButtonDefaults.IconSize))
                         Spacer(Modifier.size(ButtonDefaults.IconSpacing))
                         Text(if (state == RuntimeState.NotInstalled) "Set up" else "Start")
                     }
                 }
-                OutlinedButton(onClick = { confirmReset = true }, modifier = Modifier.weight(1f), shapes = ButtonDefaults.shapes()) {
+                OutlinedButton(onClick = tapAction { confirmReset = true }, modifier = Modifier.weight(1f), shapes = ButtonDefaults.shapes()) {
                     ZIcon(ZIcons.Delete, null, Modifier.size(ButtonDefaults.IconSize), tint = MaterialTheme.colorScheme.error)
                     Spacer(Modifier.size(ButtonDefaults.IconSpacing))
                     Text("Reset…", color = MaterialTheme.colorScheme.error)
@@ -166,7 +173,7 @@ fun EngineScreen(model: AppModel, onBack: () -> Unit, onAgents: () -> Unit) {
         sectionTitle("Agents")
         item {
             SegmentedListItem(
-                onClick = onAgents,
+                onClick = tapAction(onAgents),
                 shapes = segmentedShapes(0, 1),
                 colors = ListItemDefaults.segmentedColors(containerColor = cardColor()),
                 leadingContent = { IconTile(ZIcons.Bot) },
@@ -180,7 +187,7 @@ fun EngineScreen(model: AppModel, onBack: () -> Unit, onAgents: () -> Unit) {
             val rows = if (state is RuntimeState.Failed) 3 else 2
             Column(Modifier.padding(horizontal = 16.dp), verticalArrangement = Arrangement.spacedBy(ListItemDefaults.SegmentedGap)) {
                 SegmentedListItem(
-                    onClick = { if (!battery) RuntimePermissions.requestIgnoreBatteryOptimizations(activity) },
+                    onClick = tapAction { if (!battery) RuntimePermissions.requestIgnoreBatteryOptimizations(activity) },
                     shapes = segmentedShapes(0, rows),
                     colors = ListItemDefaults.segmentedColors(containerColor = cardColor()),
                     leadingContent = { IconTile(ZIcons.Restart) },
@@ -188,8 +195,8 @@ fun EngineScreen(model: AppModel, onBack: () -> Unit, onAgents: () -> Unit) {
                     trailingContent = { StatusDot(battery) },
                 ) { Text("Unrestricted battery") }
                 SegmentedListItem(
-                    onClick = {
-                        if (notify) return@SegmentedListItem
+                    onClick = tapAction {
+                        if (notify) return@tapAction
                         if (Build.VERSION.SDK_INT >= 33 && activity.shouldShowRequestPermissionRationale(Manifest.permission.POST_NOTIFICATIONS)) {
                             notifications.launch(Manifest.permission.POST_NOTIFICATIONS)
                         } else {
@@ -214,7 +221,7 @@ fun EngineScreen(model: AppModel, onBack: () -> Unit, onAgents: () -> Unit) {
             Column(Modifier.padding(horizontal = 16.dp)) {
                 LogBox(log.ifBlank { "No log yet." }, Modifier.fillMaxWidth())
                 Spacer(Modifier.height(8.dp))
-                TextButton(onClick = { clipboard.setText(AnnotatedString(phone.logTail(1000))) }) {
+                TextButton(onClick = feedbackAction(Haptic.Confirm, Cue.Copy) { clipboard.setText(AnnotatedString(phone.logTail(1000))) }) {
                     ZIcon(ZIcons.Copy, null, Modifier.size(ButtonDefaults.IconSize))
                     Spacer(Modifier.size(ButtonDefaults.IconSpacing))
                     Text("Copy log")
@@ -283,7 +290,7 @@ fun EngineCard(phone: PhoneEngine, state: RuntimeState, modifier: Modifier = Mod
 private fun ChildProcessHint(modifier: Modifier, shapes: androidx.compose.material3.ListItemShapes = segmentedShapes(0, 1)) {
     val context = LocalContext.current
     SegmentedListItem(
-        onClick = { runCatching { context.startActivity(RuntimePermissions.developerOptionsIntent()) } },
+        onClick = tapAction { runCatching { context.startActivity(RuntimePermissions.developerOptionsIntent()) } },
         shapes = shapes,
         colors = ListItemDefaults.segmentedColors(containerColor = cardColor()),
         leadingContent = { IconTile(ZIcons.Warning, MaterialTheme.colorScheme.errorContainer, MaterialTheme.colorScheme.onErrorContainer) },
@@ -323,14 +330,18 @@ private fun ResetDialog(onDismiss: () -> Unit, onReset: () -> Unit) {
         onDismissRequest = onDismiss,
         icon = { ZIcon(ZIcons.Delete, null) },
         title = { Text("Reset this phone's engine?") },
-        text = { Text("Deletes the Linux guest with its projects, agents and their sign-ins, this phone's local sessions and its Zeron sign-in. Sessions on your other devices aren't touched.") },
+        text = {
+            OpenCloseFeedback()
+            Text("Deletes the Linux guest with its projects, agents and their sign-ins, this phone's local sessions and its Zeron sign-in. Sessions on your other devices aren't touched.")
+        },
         confirmButton = {
-            TextButton(onClick = {
+            // Irreversible: the heaviest cue; the dialog's own Close stays quiet behind it.
+            TextButton(onClick = feedbackAction(Haptic.Heavy, Cue.Delete) {
                 onDismiss()
                 onReset()
             }) { Text("Reset", color = MaterialTheme.colorScheme.error) }
         },
-        dismissButton = { TextButton(onClick = onDismiss) { Text("Cancel") } },
+        dismissButton = { TextButton(onClick = tapAction(onDismiss)) { Text("Cancel") } },
     )
 }
 
