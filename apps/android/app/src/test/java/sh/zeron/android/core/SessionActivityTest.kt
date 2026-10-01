@@ -38,13 +38,13 @@ class SessionActivityTest {
         assertFalse(SessionActivity.isWorking(ChatIndicator.IDLE, 0u, 0u))
     }
 
-    @Test fun badgeIsHiddenAtZeroAndCapsSafelyWithoutSignedOverflow() {
+    @Test fun badgeHasNoTextForZeroOrOverflowIcon() {
         assertNull(SessionActivity.badgeLabel(0u))
         assertEquals("1", SessionActivity.badgeLabel(1u))
         assertEquals("9", SessionActivity.badgeLabel(9u))
         assertEquals("10", SessionActivity.badgeLabel(10u))
         assertEquals("99", SessionActivity.badgeLabel(99u))
-        assertEquals("99+", SessionActivity.badgeLabel(100u))
-        assertEquals("99+", SessionActivity.badgeLabel(UInt.MAX_VALUE))
+        assertNull(SessionActivity.badgeLabel(100u))
+        assertNull(SessionActivity.badgeLabel(UInt.MAX_VALUE))
     }
 }

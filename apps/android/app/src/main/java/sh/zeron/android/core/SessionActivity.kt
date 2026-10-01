@@ -25,9 +25,9 @@ object SessionActivity {
 
     fun isWorking(row: SessionRow): Boolean = isWorking(row.indicator, row.runningSubagents, row.pendingCallbacks)
 
+    /** Overflow uses an icon; neither it nor the hidden zero badge has text. */
     fun badgeLabel(count: UInt): String? = when {
-        count == 0u -> null
-        count > 99u -> "99+"
+        count == 0u || count > 99u -> null
         else -> count.toString()
     }
 }

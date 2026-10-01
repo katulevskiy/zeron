@@ -475,13 +475,17 @@ The desktop's Subagents view (#638, #647), on the phone:
   running first, longest-running on top, then unstamped; finished ones split
   into Completed and Failed, newest first.
 - **Sessions list**: a purple badge at the provider tile's top-right shows
-  the active subagent count in bold, centered numerals and caps at "99+".
-  Material cookie shapes gain scallops as the count rises: 4 sides for 1–4,
-  6 for 5–6, 7 for 7, 9 for 8–9, and 12 for 10 or more. The badge measures
-  its text (including accessibility font scaling), reserves space above the
-  logo, and is hidden at zero. `ActivityBadgePreview` shows 1–12, 67, 99,
-  99+, and the hidden state in the app theme. The rotating Material shape is purple while the main thread
-  runs, yellow when the main thread is idle with running subagents, and blue
+  the active subagent count in bold, centered numerals. Shape mapping: Pill
+  (1), Arch (2), Triangle (3), Diamond (4), Pentagon (5), Gem (6), 7-sided
+  Cookie (7), 8-leaf Clover (8), Puffy Diamond (9), Clam Shell (10–20), and
+  Puffy (21–99). Above 99, a Heart contains Material's standard rounded
+  `AllInclusive` infinity icon; accessibility still announces the actual count.
+  The badge is hidden at zero. Every shape uses a square viewport and uniform
+  scaling to preserve its original proportions, grows with accessibility text,
+  and reserves space above the provider logo. `ActivityBadgePreview` shows all
+  shapes, the range boundaries, and overflow. The rotating Material activity
+  shape is purple while the main thread runs, yellow when the main thread is
+  idle with running subagents, and blue
   when an idle main thread has a confirmed background callback. Input and
   Failed labels remain visible when the main thread needs attention.
   Chats with active subagents or callbacks count toward **Working**, including
