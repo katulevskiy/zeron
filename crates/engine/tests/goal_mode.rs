@@ -657,6 +657,85 @@ async fn pausing_or_clearing_while_the_verifier_runs_cancels_it() {
     .await;
 }
 
+/// The controller hooks (turn completed, queue-flush watcher, status change)
+/// all end in `goal_tick`. Hammer it from several threads while verdicts land:
+/// whenever one of those ticks falls between a verifier returning and its
+/// verdict being applied, it must see a verification still in flight, not
+/// start a second one for the same round.
+#[tokio::test(flavor = "multi_thread", worker_threads = 4)]
+async fn a_tick_between_a_verdict_returning_and_being_applied_starts_no_second_verifier() {
+    use std::sync::atomic::{AtomicBool, Ordering};
+
+    const ROUNDS: usize = 20;
+    let rig = rig();
+    for n in 1..ROUNDS {
+        rig.ask.push(FakeReply::After(
+            Duration::from_millis(3),
+            Box::new(FakeReply::Result(not_satisfied(&format!("step {n}")))),
+        ));
+    }
+    rig.ask.push(FakeReply::After(
+        Duration::from_millis(3),
+        Box::new(FakeReply::Result(pass())),
+    ));
+
+    let host = rig.env.core.doc_host.clone();
+    let handle = host.open(CHAT).unwrap();
+    let done = Arc::new(AtomicBool::new(false));
+    let hammers: Vec<_> = (0..6)
+        .map(|_| {
+            let (host, handle, done) = (host.clone(), handle.clone(), done.clone());
+            tokio::spawn(async move {
+                while !done.load(Ordering::Acquire) {
+                    host.goal_tick(&handle).await;
+                    tokio::task::yield_now().await;
+                }
+            })
+        })
+        .collect();
+
+    rig.env.set_goal(CHAT, "Verify every step once");
+    wait_for(
+        || {
+            rig.env
+                .goal(CHAT)
+                .is_some_and(|g| matches!(g.status, GoalStatus::Complete | GoalStatus::Paused))
+        },
+        "the goal to finish",
+    )
+    .await;
+    done.store(true, Ordering::Release);
+    for hammer in hammers {
+        hammer.await.unwrap();
+    }
+    // A late second verifier would still be asking; give it room to show up.
+    tokio::time::sleep(Duration::from_millis(100)).await;
+
+    let goal = goal_of(&rig);
+    assert_eq!(goal.status, GoalStatus::Complete, "{:?}", goal.reason);
+    let rounds: Vec<u32> = rig
+        .ask
+        .calls()
+        .iter()
+        .map(|c| {
+            let at = c.spec.prompt.find("round ").map_or(0, |i| i + 6);
+            c.spec.prompt[at..]
+                .chars()
+                .take_while(char::is_ascii_digit)
+                .collect::<String>()
+                .parse()
+                .unwrap_or(0)
+        })
+        .collect();
+    assert_eq!(
+        rig.ask.calls().len(),
+        ROUNDS,
+        "one verifier per round, got rounds {rounds:?}"
+    );
+    assert_eq!(goal.iteration as usize, ROUNDS);
+    assert_eq!(goal.verdicts.len(), ROUNDS);
+}
+
 // ── restart recovery ───────────────────────────────────────────────────────
 
 #[tokio::test]

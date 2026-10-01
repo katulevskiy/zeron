@@ -165,6 +165,17 @@ the next action and the budget. A **verifier failure of any kind (timeout, crash
 output, a question it cannot ask) pauses the goal with the reason shown — it never
 retries on its own**, so infrastructure errors cannot loop. Resume is the retry.
 
+**One verification per round.** A verification is keyed by `(goal id, round)` and its
+marker (the controller's in-process run entry) is created under the chat's controller
+lock *together with* the `verifying` ledger write, and removed under the same lock only
+after the verdict has been applied. So there is no instant at which the ledger says
+`verifying` while nothing is registered: a tick that lands while a returned verdict is
+still waiting for the lock sees a verification in flight and waits, and asking to start
+the same `(goal, round)` again is a no-op. (Before this, the entry was dropped when the
+verifier returned and the verdict applied afterwards, and a tick in between judged the
+round a second time.) Restart recovery is unchanged: the registry is per-process, so a
+`verifying` goal found at boot has no entry and is judged again.
+
 ### Safeguards ZCode lacks
 
 * **Round cap** (default 25, per goal) → `budgetLimited`.
@@ -177,7 +188,8 @@ retries on its own**, so infrastructure errors cannot loop. Resume is the retry.
   with "no progress".
 * **Idempotence:** a round prompt is keyed `goal-<id>-r<n>`; re-sending is a no-op
   if it is queued or already in the transcript, so a restart, a lost row or a double
-  tick never double-continues.
+  tick never double-continues. Verifications are idempotent the same way, per
+  `(goal, round)`.
 
 ### Restart and recovery
 
