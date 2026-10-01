@@ -422,6 +422,10 @@ pub(crate) struct GoalPanelState {
     pub open_rounds: HashSet<u32>,
     /// Bumped on every toggle so the body's fade-in replays.
     pub epoch: u32,
+    /// What the list was last scrolled to the end for (rounds, verdicts,
+    /// status); it follows the newest round when it opens and whenever a
+    /// round or verdict lands.
+    pub followed: Option<(usize, usize, GoalStatus)>,
 }
 
 // ---------------------------------------------------------------------------
@@ -436,6 +440,23 @@ const TEXT_LINE: f32 = 17.0;
 const GLYPH_SLOT: f32 = 14.0;
 const ACTION_SIZE: f32 = 24.0;
 const SIDE_INSET: f32 = 16.0;
+/// Space kept clear under the expanded list. Every tray tucks
+/// `QUEUE_COMPOSER_OVERLAP` behind whatever follows it (the todo or queue tray,
+/// or the composer); without this clearance the last round row would sit under
+/// that edge.
+pub(crate) const BODY_BOTTOM_CLEARANCE: f32 = 6.0 + QUEUE_COMPOSER_OVERLAP;
+
+/// Share of the window height the expanded goal list may take. The todo and
+/// queue trays each cap at 0.3; the goal tray gives way as trays stack below
+/// it, so a short window keeps room for the transcript and every list scrolls
+/// inside its own cap instead of pushing another tray out of view.
+pub(crate) fn body_height_fraction(trays_below: usize) -> f32 {
+    match trays_below {
+        0 => 0.32,
+        1 => 0.22,
+        _ => 0.18,
+    }
+}
 
 fn tone_color(tone: Tone, theme: &Theme) -> gpui::Hsla {
     match tone {
@@ -478,6 +499,13 @@ impl Composer {
                 let state = self.state.read(cx);
                 rounds(&goal, &state.transcript)
             };
+            let signature = (round_views.len(), goal.verdicts.len(), goal.status);
+            if panel.followed != Some(signature) {
+                self.goal_scroll.scroll_to_bottom();
+                if let Some(state) = self.goal_panels.get_mut(&chat_id) {
+                    state.followed = Some(signature);
+                }
+            }
             let body = self.goal_body(
                 &chat_id,
                 &goal,
@@ -495,7 +523,7 @@ impl Composer {
                 true,
                 div()
                     .id("goal-panel-body")
-                    .max_h(window.viewport_size().height * 0.36)
+                    .max_h(window.viewport_size().height * body_height_fraction(below))
                     .overflow_y_scroll()
                     .track_scroll(&self.goal_scroll)
                     .child(body),
@@ -601,6 +629,7 @@ impl Composer {
                 let panel = this.goal_panels.entry(toggle_chat.clone()).or_default();
                 panel.expanded = !panel.expanded;
                 panel.epoch = panel.epoch.wrapping_add(1);
+                panel.followed = None;
                 cx.notify();
             }))
             .tooltip(crate::settings::widgets::text_tooltip(label))
@@ -1085,6 +1114,7 @@ impl Composer {
             let panel = self.goal_panels.entry(chat_id.to_owned()).or_default();
             panel.expanded = true;
             panel.epoch = panel.epoch.wrapping_add(1);
+            panel.followed = None;
         } else {
             self.failure =
                 Some("This chat has no goal. Type /goal followed by an objective.".into());
@@ -1179,6 +1209,19 @@ mod tests {
 
     fn goal() -> Goal {
         Goal::new("g1", "Ship the thing", &GoalLimits::default(), 0).unwrap()
+    }
+
+    #[test]
+    fn stacked_trays_split_the_height_and_clear_the_overlap() {
+        // The goal list never takes more than the todo/queue cap, shrinks as
+        // trays stack under it, and the three together stay under 4/5 of the
+        // window (each list scrolls inside its own cap).
+        assert!(body_height_fraction(0) <= 0.35);
+        assert!(body_height_fraction(1) < body_height_fraction(0));
+        assert!(body_height_fraction(2) < body_height_fraction(1));
+        assert!(body_height_fraction(2) + 0.3 + 0.3 < 0.8);
+        // The last row clears the edge the next tray tucks over.
+        assert!(BODY_BOTTOM_CLEARANCE > QUEUE_COMPOSER_OVERLAP);
     }
 
     #[test]

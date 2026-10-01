@@ -337,9 +337,10 @@ impl Composer {
             surface.child(
                 div()
                     .mt(px(2.0))
-                    // The tray's lowest strip hides behind the composer; keep
-                    // the last row clear of that edge.
-                    .pb(px(6.0))
+                    // The tray's lowest strip hides behind whatever follows
+                    // (the queue tray or the composer); keep the last row clear
+                    // of that edge.
+                    .pb(px(crate::goal_panel::BODY_BOTTOM_CLEARANCE))
                     .child(rows)
                     .with_animation(
                         SharedString::from(format!("todo-rows-{epoch}")),
