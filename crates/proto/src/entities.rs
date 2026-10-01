@@ -232,6 +232,11 @@ pub struct Chat {
     /// deleted) is tolerated rather than cascaded.
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub parent_chat_id: Option<String>,
+    /// A move to another device, live or recently finished (registry field
+    /// `move`, written only by the engine running it — never by whole-row
+    /// upserts, so a stale writer can't resurrect or erase it).
+    #[serde(default, rename = "move", skip_serializing_if = "Option::is_none")]
+    pub move_state: Option<crate::ChatMove>,
 }
 
 impl Chat {

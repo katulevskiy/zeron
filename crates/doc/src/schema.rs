@@ -98,6 +98,9 @@ struct DocPartJson {
     source_chat_id: Option<String>,
     #[serde(default, skip_serializing_if = "Option::is_none")]
     source_title: Option<String>,
+    /// Move seam (`kind: "moved"`, additive): the devices on either side.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    moved: Option<serde_json::Value>,
     /// Tool output summary (additive — absent on old rows and old writers;
     /// pre-strip writers stored up to 4KB of capped output here).
     #[serde(default, skip_serializing_if = "Option::is_none")]
@@ -224,6 +227,12 @@ fn to_doc_part(part: &MessagePart) -> Result<DocPartJson, DocError> {
             source_title: Some(source_title.clone()),
             ..Default::default()
         },
+        MessagePart::Moved { id, seam } => DocPartJson {
+            id: id.clone(),
+            kind: "moved".into(),
+            moved: Some(serde_json::to_value(seam)?),
+            ..Default::default()
+        },
     })
 }
 
@@ -278,6 +287,13 @@ fn from_doc_part(p: DocPartJson) -> MessagePart {
             id: p.id,
             source_chat_id: p.source_chat_id.unwrap_or_default(),
             source_title: p.source_title.unwrap_or_default(),
+        },
+        "moved" => MessagePart::Moved {
+            id: p.id,
+            seam: p
+                .moved
+                .and_then(|m| serde_json::from_value(m).ok())
+                .unwrap_or_default(),
         },
         _ => MessagePart::Text {
             id: p.id,

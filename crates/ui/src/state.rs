@@ -3659,6 +3659,7 @@ mod tests {
             .unwrap()
             .to_utc();
         Chat {
+            move_state: None,
             id: id.into(),
             device_id: "dev".into(),
             title: None,

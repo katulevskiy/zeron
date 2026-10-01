@@ -790,6 +790,7 @@ impl Tools {
             // The row may not have folded into WatchChats yet; build the
             // chat locally from what we just wrote rather than re-reading.
             let chat = Chat {
+                move_state: None,
                 id: chat_id.clone(),
                 device_id: device_id.clone(),
                 title: args.title.clone(),

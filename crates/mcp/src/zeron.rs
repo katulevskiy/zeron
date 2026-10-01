@@ -636,6 +636,7 @@ mod tests {
 
     fn chat(id: &str, title: Option<&str>) -> Chat {
         Chat {
+            move_state: None,
             id: id.into(),
             device_id: "dev".into(),
             title: title.map(str::to_owned),

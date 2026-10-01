@@ -18,6 +18,9 @@ pub mod capabilities {
     /// The engine sends and receives device-to-device file transfers
     /// (docs/file-transfer.md).
     pub const FILE_TRANSFER_V1: &str = "file-transfer-v1";
+    /// The engine moves chats to and takes chats over from other engines
+    /// (docs/session-move.md).
+    pub const SESSION_MOVE_V1: &str = "session-move-v1";
 
     pub const CURRENT: &[&str] = &[
         COMPOSER_REFERENCES_V1,
@@ -28,6 +31,7 @@ pub mod capabilities {
         MESSAGE_QUEUE_EDIT_LEASE_V1,
         HARNESS_UPDATES_V1,
         FILE_TRANSFER_V1,
+        SESSION_MOVE_V1,
     ];
 
     pub fn current() -> Vec<String> {

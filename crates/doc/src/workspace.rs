@@ -716,6 +716,18 @@ pub(crate) struct RawChat {
     room_gen: Option<u32>,
     #[serde(default)]
     parent_chat_id: Option<String>,
+    #[serde(default, rename = "move", deserialize_with = "lenient_move")]
+    move_state: Option<zeron_proto::ChatMove>,
+}
+
+/// A move record this build can't decode (a newer peer's phase) hides the
+/// banner, never the chat.
+fn lenient_move<'de, D>(deserializer: D) -> Result<Option<zeron_proto::ChatMove>, D::Error>
+where
+    D: serde::Deserializer<'de>,
+{
+    let value = Option::<serde_json::Value>::deserialize(deserializer)?;
+    Ok(value.and_then(|value| serde_json::from_value(value).ok()))
 }
 
 /// Decode a chat row's `config` leniently: unknown enum values (a newer
@@ -757,6 +769,7 @@ impl From<RawChat> for Chat {
             last_seen_at: raw.last_seen_at.map(dt),
             room_gen: raw.room_gen,
             parent_chat_id: raw.parent_chat_id,
+            move_state: raw.move_state,
         }
     }
 }
@@ -842,6 +855,7 @@ mod tests {
 
     fn chat(id: &str, device_id: &str) -> Chat {
         Chat {
+            move_state: None,
             id: id.into(),
             device_id: device_id.into(),
             title: Some("First chat".into()),

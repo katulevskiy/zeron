@@ -12824,6 +12824,7 @@ mod tests {
         source: Option<(&str, &str)>,
     ) -> zeron_proto::Chat {
         zeron_proto::Chat {
+            move_state: None,
             id: "chat".into(),
             device_id: "remote-device".into(),
             title: None,

@@ -382,6 +382,7 @@ pub(crate) fn seed(
             _ => None,
         };
         let chat = Chat {
+            move_state: None,
             id: demo.id.into(),
             device_id: demo.device.into(),
             title: Some(demo.title.into()),

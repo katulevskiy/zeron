@@ -1062,6 +1062,13 @@ pub enum RowKind {
         source_chat_id: SharedString,
         source_title: SharedString,
     },
+    /// The move seam: the chat continued on another device from here.
+    MoveMarker {
+        /// "MacBook → Workstation".
+        route: SharedString,
+        /// "12 files · 3.4 MB · 6 s", empty when nothing travelled.
+        summary: SharedString,
+    },
 }
 
 fn generated_image_devices(owner: &str, fallback: &[String]) -> Vec<String> {
@@ -1644,6 +1651,27 @@ pub fn rows_for_entry(
                             compact_fold: None,
                         });
                     }
+                    MessagePart::Moved { id: part_id, seam } => {
+                        let route = format!(
+                            "{} → {}",
+                            single_line(&seam.from_device_name),
+                            single_line(&seam.to_device_name)
+                        );
+                        let summary = move_summary(seam);
+                        rows.push(Row {
+                            id: format!("{}#{}", entry.id, part_id).into(),
+                            version: fnv1a(format!("{route}{summary}").as_bytes()),
+                            turn_start: false,
+                            kind: RowKind::MoveMarker {
+                                route: route.into(),
+                                summary: summary.into(),
+                            },
+                            entry_id: entry_id.clone(),
+                            timestamp: None,
+                            copy_text: None,
+                            compact_fold: None,
+                        });
+                    }
                     // Tools and thoughts are grouped by the outer arms;
                     // nothing reaches here.
                     MessagePart::Tool { .. } | MessagePart::Reasoning { .. } => {}
@@ -1728,7 +1756,10 @@ pub fn rows_for_entry(
     // change when streaming flips off (chips).
     if !streaming
         && let Some(last) = rows.last_mut()
-        && !matches!(last.kind, RowKind::ForkMarker { .. })
+        && !matches!(
+            last.kind,
+            RowKind::ForkMarker { .. } | RowKind::MoveMarker { .. }
+        )
     {
         last.timestamp = Some(entry.created_at);
         last.copy_text = assistant_copy_text(entry);
@@ -6633,7 +6664,17 @@ impl Transcript {
                 mime_type,
             } => self.render_generated_image(&row.id, owner, path, name, mime_type, cx),
             RowKind::ErrorChip { message } => error_chip(message.clone(), &theme),
-            RowKind::ForkMarker { source_title, .. } => fork_marker(source_title.clone(), &theme),
+            RowKind::ForkMarker { source_title, .. } => {
+                seam_marker("Forked from".into(), source_title.clone(), &theme)
+            }
+            RowKind::MoveMarker { route, summary } => {
+                let caption: SharedString = if summary.is_empty() {
+                    "Moved".into()
+                } else {
+                    format!("Moved · {summary}").into()
+                };
+                seam_marker(caption, route.clone(), &theme)
+            }
         };
 
         // Hover-revealed metadata strip: a RESERVED 32px lane under the
@@ -7846,7 +7887,30 @@ fn error_chip(message: SharedString, theme: &Theme) -> AnyElement {
 
 /// A quiet fork seam. The source gets its own constrained line so long
 /// titles cannot widen a narrow side-chat pane. No message metadata lane.
-fn fork_marker(source_title: SharedString, theme: &Theme) -> AnyElement {
+/// "12 files · 3.4 MB · 6 s" for a move seam; empty when nothing travelled.
+fn move_summary(seam: &zeron_doc::MoveSeam) -> String {
+    let mut bits = Vec::new();
+    if seam.files_sent > 0 {
+        bits.push(match seam.files_sent {
+            1 => "1 file".to_owned(),
+            n => format!("{n} files"),
+        });
+        bits.push(crate::file_transfers::format_bytes(seam.bytes_sent));
+    }
+    if seam.duration_ms > 0 {
+        let secs = seam.duration_ms.div_ceil(1000);
+        bits.push(if secs < 60 {
+            format!("{secs} s")
+        } else {
+            format!("{} min {} s", secs / 60, secs % 60)
+        });
+    }
+    bits.join(" · ")
+}
+
+/// A labeled divider between two parts of a transcript (fork, move): a
+/// muted caption between two rules, the subject centred under it.
+fn seam_marker(caption: SharedString, subject: SharedString, theme: &Theme) -> AnyElement {
     let rule = || div().flex_1().min_w_0().h(px(1.0)).bg(theme.border_strong);
     div()
         .py(px(14.0))
@@ -7869,7 +7933,7 @@ fn fork_marker(source_title: SharedString, theme: &Theme) -> AnyElement {
                         .flex_none()
                         .text_size(crate::typography::ui_rems(12.0))
                         .text_color(theme.text_muted.opacity(0.7))
-                        .child("Forked from"),
+                        .child(caption),
                 )
                 .child(rule()),
         )
@@ -7882,7 +7946,7 @@ fn fork_marker(source_title: SharedString, theme: &Theme) -> AnyElement {
                 .text_size(crate::typography::ui_rems(13.0))
                 .font_weight(gpui::FontWeight::MEDIUM)
                 .text_color(theme.text_muted)
-                .child(source_title),
+                .child(subject),
         )
         .into_any_element()
 }

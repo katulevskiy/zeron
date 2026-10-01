@@ -10,6 +10,7 @@ pub mod file_transfer;
 pub mod invocation;
 pub mod motion;
 pub mod preview;
+pub mod session_move;
 pub mod sidebar_pins;
 pub mod view;
 pub mod workspace;
@@ -18,6 +19,7 @@ pub use agent::*;
 pub use entities::*;
 pub use file_transfer::*;
 pub use preview::*;
+pub use session_move::*;
 pub use sidebar_pins::*;
 pub use workspace::*;
 

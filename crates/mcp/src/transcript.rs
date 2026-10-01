@@ -149,6 +149,11 @@ fn render_one(entry: &SessionMessageEntry, options: RenderOptions) -> RenderedMe
             // The fork seam is a transcript marker, not agent content: an
             // orchestrator reads the copied history as ordinary turns.
             MessagePart::Fork { .. } => {}
+            // A move seam tells an orchestrator where the chat runs now.
+            MessagePart::Moved { seam, .. } => tools.push(format!(
+                "moved: {} → {}",
+                seam.from_device_name, seam.to_device_name
+            )),
         }
     }
     RenderedMessage {

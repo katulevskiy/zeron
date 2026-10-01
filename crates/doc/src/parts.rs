@@ -218,6 +218,33 @@ pub enum MessagePart {
         /// source does not rewrite history.
         source_title: String,
     },
+    /// The seam where a chat moved to another device: everything above ran
+    /// on `seam.from_device_*`, everything below on `seam.to_device_*`.
+    /// Written once by the receiving engine when it takes the chat over;
+    /// renders as a labeled divider (old readers: invisible empty text).
+    Moved { id: String, seam: MoveSeam },
+}
+
+/// What a [`MessagePart::Moved`] divider shows. Device names are captured at
+/// move time so the transcript reads them without a registry lookup.
+#[derive(Debug, Clone, PartialEq, Eq, Default, Serialize, Deserialize)]
+#[serde(rename_all = "camelCase")]
+pub struct MoveSeam {
+    pub from_device_id: String,
+    pub from_device_name: String,
+    pub to_device_id: String,
+    pub to_device_name: String,
+    /// Files whose content travelled (unchanged files are not counted).
+    #[serde(default)]
+    pub files_sent: u64,
+    #[serde(default)]
+    pub bytes_sent: u64,
+    /// From the move request to the chat continuing on the new device.
+    #[serde(default)]
+    pub duration_ms: u64,
+    /// Where the workspace landed on the new device.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub cwd: Option<String>,
 }
 
 impl MessagePart {
@@ -229,7 +256,8 @@ impl MessagePart {
             | MessagePart::Tool { id, .. }
             | MessagePart::Input { id, .. }
             | MessagePart::Error { id, .. }
-            | MessagePart::Fork { id, .. } => id,
+            | MessagePart::Fork { id, .. }
+            | MessagePart::Moved { id, .. } => id,
         }
     }
 
@@ -267,6 +295,9 @@ impl MessagePart {
                 source_title,
                 ..
             } => source_chat_id.len() + source_title.len(),
+            MessagePart::Moved { seam, .. } => {
+                seam.from_device_name.len() + seam.to_device_name.len() + 64
+            }
         }
     }
 }
