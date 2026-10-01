@@ -261,6 +261,9 @@ struct TerminalTab {
     title: SharedString,
     terminal_id: Option<String>,
     target_device_id: Option<String>,
+    /// The chat moved to another device and this tab was told it still runs
+    /// on the previous one.
+    host_noted: bool,
     emulator: Emulator,
     /// Fractional wheel movement in rows, retained across trackpad events.
     scroll_remainder: f32,
@@ -491,6 +494,7 @@ impl TerminalPanel {
             title: title.into(),
             terminal_id: None,
             target_device_id: None,
+            host_noted: false,
             emulator: Emulator::new(80, 24),
             scroll_remainder: 0.0,
             exited: None,
@@ -599,7 +603,45 @@ impl TerminalPanel {
                 self.ensure_tab(cx);
             }
         }
+        self.note_moved_terminals(cx);
         if switched {
+            cx.notify();
+        }
+    }
+
+    /// A chat that moved to another device leaves its open terminals on the
+    /// previous host: their PTYs live there, and closing them would kill
+    /// whatever runs in them. Say so once in each, so typing into one isn't
+    /// mistaken for the new host; a new tab opens on the chat's current host.
+    fn note_moved_terminals(&mut self, cx: &mut Context<Self>) {
+        let state = self.state.read(cx);
+        let mut noted = false;
+        for (chat_id, tabs) in self.chats.iter_mut() {
+            let Some(chat) = state.chats.iter().find(|chat| &chat.id == chat_id) else {
+                continue;
+            };
+            let target = state.terminal_target_device(chat_id);
+            for tab in tabs.tabs.iter_mut().filter(|tab| {
+                tab.terminal_id.is_some()
+                    && tab.exited.is_none()
+                    && !tab.host_noted
+                    && tab.target_device_id != target
+            }) {
+                let to = state
+                    .device_name(&chat.device_id)
+                    .unwrap_or("another device");
+                tab.emulator.feed(
+                    format!(
+                        "\r\n\x1b[2mThis chat moved to {to}. This terminal still runs on the \
+                         previous device; open a new one to work on {to}.\x1b[0m\r\n"
+                    )
+                    .as_bytes(),
+                );
+                tab.host_noted = true;
+                noted = true;
+            }
+        }
+        if noted {
             cx.notify();
         }
     }

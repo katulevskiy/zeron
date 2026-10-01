@@ -1049,7 +1049,23 @@ impl AppState {
             }
         }
         sort_chats(&mut chats);
+        // The selected chat's placement before this snapshot: a chat that
+        // moved to another device keeps its id but changes host and project.
+        let placement = |chats: &[Chat], id: &str| {
+            chats
+                .iter()
+                .find(|c| c.id == id)
+                .map(|c| (c.device_id.clone(), c.space_id.clone()))
+        };
+        let moved = self.selected_chat.as_deref().is_some_and(|id| {
+            let before = placement(&self.chats, id);
+            let after = placement(&chats, id);
+            before.is_some() && after.is_some() && before != after
+        });
         self.chats = chats;
+        if moved {
+            self.adopt_selected_chat_placement();
+        }
         self.link_roots_revision = self.link_roots_revision.wrapping_add(1);
         self.chats_synced = true;
         self.transcript_cache
@@ -2482,19 +2498,7 @@ impl AppState {
         if let Some(id) = chat_id.as_deref() {
             // A chat implies its project (or the lack of one); `select_chat(None)`
             // (the new-session canvas) keeps the current project pick.
-            if let Some(chat) = self.chats.iter().find(|c| c.id == id) {
-                match chat.space_id.clone() {
-                    Some(space_id) => {
-                        self.selected_space = Some(space_id);
-                        self.no_project = false;
-                    }
-                    None => {
-                        self.selected_space = None;
-                        self.no_project = true;
-                        self.selected_device = Some(chat.device_id.clone());
-                    }
-                }
-            }
+            self.adopt_selected_chat_placement();
             self.mark_chat_seen(id, cx);
         }
         if let Some(chat_id) = chat_id {
@@ -2506,6 +2510,27 @@ impl AppState {
             }
         }
         cx.notify();
+    }
+
+    /// Point the composer's project/device pick at the selected chat's
+    /// placement. Runs on selection and again when the selected chat moves to
+    /// another device, so the pickers and chips follow it to its new host.
+    fn adopt_selected_chat_placement(&mut self) {
+        let Some(chat) = self.selected_chat_row() else {
+            return;
+        };
+        match chat.space_id.clone() {
+            Some(space_id) => {
+                self.selected_space = Some(space_id);
+                self.no_project = false;
+            }
+            None => {
+                let device = chat.device_id.clone();
+                self.selected_space = None;
+                self.no_project = true;
+                self.selected_device = Some(device);
+            }
+        }
     }
 
     /// Replace the selected chat's queue subscription without clearing its
@@ -4568,6 +4593,39 @@ mod tests {
         state.selected_chat = Some("b".into());
         state.apply_chats(vec![chat("b", 1, None), chat("c", 2, None)]);
         assert_eq!(state.selected_chat.as_deref(), Some("b"));
+    }
+
+    #[test]
+    fn selected_chat_moving_to_another_device_retargets_the_composer() {
+        let mut state = AppState::new();
+        let mut a = chat("a", 0, None);
+        a.space_id = Some("laptop-project".into());
+        state.apply_chats(vec![a.clone(), chat("b", 1, None)]);
+        state.selected_chat = Some("a".into());
+        state.selected_space = Some("laptop-project".into());
+
+        // Unrelated churn (another chat, a title) leaves the pick alone.
+        state.selected_space = Some("user-pick".into());
+        let mut retitled = a.clone();
+        retitled.title = Some("Renamed".into());
+        state.apply_chats(vec![retitled.clone(), chat("b", 1, None)]);
+        assert_eq!(state.selected_space.as_deref(), Some("user-pick"));
+
+        // The move lands: new host, new project.
+        let mut moved = retitled;
+        moved.device_id = "desk".into();
+        moved.space_id = Some("desk-project".into());
+        state.apply_chats(vec![moved.clone(), chat("b", 1, None)]);
+        assert_eq!(state.selected_space.as_deref(), Some("desk-project"));
+        assert!(!state.no_project);
+
+        // A project-less chat follows its host through `selected_device`.
+        moved.space_id = None;
+        moved.device_id = "box".into();
+        state.apply_chats(vec![moved, chat("b", 1, None)]);
+        assert_eq!(state.selected_space, None);
+        assert!(state.no_project);
+        assert_eq!(state.selected_device.as_deref(), Some("box"));
     }
 
     #[test]
