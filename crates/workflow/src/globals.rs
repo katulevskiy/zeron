@@ -353,25 +353,18 @@ fn host_fns(b: &mut GlobalsBuilder) {
         Ok(NoneType)
     }
 
-    /// `agent(name, persona=None, harness=None, model=None, reasoning=None, isolate=None)`
+    /// `agent(name, persona=None, harness=None, model=None, reasoning=None)`
     fn agent<'v>(
         name: &str,
         #[starlark(default = NoneOr::None)] persona: NoneOr<&str>,
         #[starlark(default = NoneOr::None)] harness: NoneOr<&str>,
         #[starlark(default = NoneOr::None)] model: NoneOr<&str>,
         #[starlark(default = NoneOr::None)] reasoning: NoneOr<&str>,
-        #[starlark(default = NoneOr::None)] isolate: NoneOr<&str>,
         eval: &mut Evaluator<'v, '_, '_>,
     ) -> anyhow::Result<Actor> {
         let (key, c, _) = begin(eval, "agent")?;
         if name.trim().is_empty() || name.len() > 80 {
             anyhow::bail!("agent() needs a name of 1 to 80 characters");
-        }
-        let isolate = opt_string(isolate);
-        if let Some(i) = &isolate
-            && i != "worktree"
-        {
-            anyhow::bail!("agent(isolate=...) must be \"worktree\" (or omitted), got {i:?}");
         }
         let persona = opt_string(persona);
         if persona.as_ref().is_some_and(|p| p.len() > 16 * 1024) {
@@ -385,7 +378,6 @@ fn host_fns(b: &mut GlobalsBuilder) {
                 harness: opt_string(harness),
                 model: opt_string(model),
                 reasoning: opt_string(reasoning),
-                isolate,
             },
         );
         Ok(Actor {

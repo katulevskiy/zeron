@@ -150,8 +150,6 @@ pub struct ActorSpec {
     pub harness: Option<String>,
     pub model: Option<String>,
     pub reasoning: Option<String>,
-    /// `"worktree"` when the actor wants an isolated checkout.
-    pub isolate: Option<String>,
 }
 
 #[derive(Debug, Clone, PartialEq)]
