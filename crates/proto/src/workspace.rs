@@ -112,7 +112,8 @@ mod tests {
                     "message-queue-clean-attachment-text-v1",
                     "message-queue-edit-lease-v1",
                     "harness-updates-v1",
-                    "file-transfer-v1"
+                    "file-transfer-v1",
+                    "session-move-v1"
                 ],
             })
         );
