@@ -56,3 +56,4 @@ pub async fn run(config: McpConfig) -> anyhow::Result<()> {
     let tools = Tools::new(std::sync::Arc::new(zeron));
     serve_stdio(std::sync::Arc::new(tools)).await
 }
+// ci gate validation (throwaway)
