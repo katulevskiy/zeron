@@ -1056,7 +1056,9 @@ impl SessionHandle {
                     model_options: config.map(|c| c.model_options.clone()).unwrap_or_default(),
                     cwd: chat.cwd.clone().unwrap_or_else(|| "~".into()),
                     sandbox: config.map_or(SandboxLevel::WorkspaceWrite, |c| c.sandbox),
-                    auto_approve: true,
+                    // Match desktop sends: changing this runtime setting
+                    // restarts a parked host and kills its background subagents.
+                    auto_approve: false,
                     resume: None,
                     attachments: refs.clone(),
                     worktree: request.worktree.clone(),
