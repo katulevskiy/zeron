@@ -93,8 +93,10 @@ fn route_chrome_opacities(new_thread_chrome: f32) -> (f32, f32) {
 }
 /// Ignore subpixel noise when the shell reports the conversation width.
 const COMPOSER_WIDTH_EPSILON: f32 = 0.5;
-/// Below this pill input width the composer always expands.
-pub const MIN_COMPACT_INPUT_WIDTH: f32 = 200.0;
+/// Below this pill input width the composer always expands. The permission
+/// mode chip sits in the compact row (at the narrowest thread width the input
+/// has ~170px beside it), so the floor is a little under that.
+pub const MIN_COMPACT_INPUT_WIDTH: f32 = 160.0;
 /// Input text metrics: `text-[14px] leading-relaxed` = 14 × 1.625 = 22.75.
 pub const INPUT_LINE_HEIGHT: f32 = 22.75;
 pub const INPUT_TEXT_SIZE: f32 = 14.0;
@@ -13148,8 +13150,8 @@ mod tests {
         assert!(composer_flip(false, 10.0, 300.0, true, false));
         assert!(composer_flip(true, 10.0, 300.0, true, true));
         // Narrow column (< MIN_COMPACT_INPUT_WIDTH) always expands.
-        assert!(composer_flip(false, 10.0, 199.0, false, false));
-        assert!(!composer_flip(false, 10.0, 200.0, false, false));
+        assert!(composer_flip(false, 10.0, 159.0, false, false));
+        assert!(!composer_flip(false, 10.0, 160.0, false, false));
     }
 
     #[test]

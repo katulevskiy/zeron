@@ -3707,7 +3707,10 @@ impl Pickers {
             .flex_row()
             .items_center()
             .gap(px(5.0))
-            .px(px(if chip_label(mode).is_some() { 8.0 } else { 7.0 }))
+            // The icon-only chip (Bypass) is the everyday state and sits in the
+            // compact row, where every pixel counts against the input's
+            // minimum width.
+            .px(px(if chip_label(mode).is_some() { 8.0 } else { 4.0 }))
             .rounded(px(8.0))
             .text_size(crate::typography::ui_rems(12.0))
             .font_weight(gpui::FontWeight::MEDIUM)
@@ -5785,7 +5788,7 @@ impl Render for Pickers {
             // labels paint over the attach/send buttons at narrow widths
             // instead of truncating (user report).
             .min_w_0()
-            .gap(px(4.0))
+            .gap(px(2.0))
             .child(model_chip)
             .children(mode_chip)
     }
