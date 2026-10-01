@@ -1,5 +1,5 @@
 import { describe, expect, it } from "vitest";
-import type { StorageLike } from "../src/lib/engine-store";
+import type { StorageLike } from "../src/lib/storage";
 import { SidebarStore } from "../src/lib/sidebar-store";
 import { healSidebarSectionsByProfile, type SidebarSection } from "../src/state/ui-settings";
 import {
@@ -163,11 +163,11 @@ describe("SidebarStore sections", () => {
     expect(store.getSnapshot().sectionsByProfile.local).toBeUndefined();
     expect(store.getSnapshot().sectionsByProfile["synced:d1"]).toHaveLength(1);
 
-    // Persistence: a fresh store over the same storage reloads the map.
+    // Private section names/IDs stay live for this window, never reload into another owner.
+    expect(store.getSnapshot().sectionsByProfile["synced:d1"]![0]!.name).toBe("Remote");
+    expect(store.getSnapshot().sectionsByProfile["synced:d1"]![0]!.sessionIds).toEqual([]);
     const reloaded = new SidebarStore({ storage }).getSnapshot().sectionsByProfile;
-    expect(reloaded["synced:d1"]).toHaveLength(1);
-    expect(reloaded["synced:d1"]![0]!.name).toBe("Remote");
-    expect(reloaded["synced:d1"]![0]!.sessionIds).toEqual([]);
+    expect(reloaded).toEqual({});
   });
 
   it("sections_transfer_between_pins_sections_and_regular_without_duplicates", () => {

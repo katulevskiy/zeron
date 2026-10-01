@@ -1,22 +1,19 @@
+import { useSyncExternalStore } from "react";
 import { engineRegistry } from "./fleet";
 import { sidebarPinProfileKey } from "../lib/sidebar-pins";
 import { SidebarStateSync } from "../lib/sidebar-state-sync";
 import { uiSettings } from "./ui-settings";
 
-/**
- * The app-global sidebar state bridge (ticket 11): one `SidebarStateSync`
- * over the `ui-settings` store, driven by the engine registry — the web
- * peer of the desktop's `Shell::sidebar_state_sync`. Every paired engine
- * gets a bridge while it is supervised; a forgotten engine loses its
- * bridge (its cached state stays in `localStorage`, the offline cache).
- *
- * The wiring mirrors `state/fleet.ts`'s registry reconciliation: the
- * registry follows the pairing store, and this follows the registry.
- * Consumers import this module for its side effect; the sidebar keeps
- * reading `sidebarStore` / `uiSettings` unchanged.
+/** Cookie-discovered engine workspace preferences. Local settings are a cache,
+ * never imported into the registry on attach or reconnect. Owner boundaries
+ * invalidate outstanding frames and writes via private-session generation.
  */
 
 export const sidebarStateSync = new SidebarStateSync(uiSettings);
+
+export function useSidebarSyncStatus() {
+  return useSyncExternalStore(sidebarStateSync.subscribe, sidebarStateSync.getSnapshot, sidebarStateSync.getSnapshot);
+}
 
 function syncBridges(): void {
   const snapshot = engineRegistry.getSnapshot();

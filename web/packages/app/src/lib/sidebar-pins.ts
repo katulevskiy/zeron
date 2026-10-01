@@ -1,21 +1,12 @@
-/**
- * Pinned sidebar sessions — the web peer of the desktop's pin machinery
- * (`shell.rs` + `shell/spaces.rs`, upstream zeron fd42e2ab…da041aab, ported
- * local-only: NO registry sync). Pins are a device-local, presentation-only
- * preference persisted in `ui-settings.ts`, bucketed per workspace profile
- * (3cad1c25); the pure projection, reorder, cleanup, and drag-geometry rules
- * live here so the components stay thin and the unit tests mirror the Rust
- * `pinned_session_tests` one-for-one.
+/** Pure pin projection, reorder, cleanup and drag geometry, mirroring the
+ * desktop. UiSettings holds the scoped session cache; SidebarStateSync
+ * reads upstream workspace preferences and sends per-item mutations.
  */
 import type { WorkspaceScope } from "@zeron/proto";
 
-/**
- * `settings.rs::sidebar_pin_profile_key` — the bucket one workspace
- * profile's pins live under. Zeron has no account sign-in, so a non-local
- * scope keys on the engine's device id; null means "identity not ready"
- * (callers skip destructive cleanup against it). Every zeron engine is
- * local-scoped in practice, so the fleet usually shares the one "local"
- * bucket — scoped chat ids keep engines apart inside it.
+/** Workspace-profile cache key. Remote engine identity keeps scoped
+ * projections apart; owner boundaries erase these private buckets. Null
+ * means identity is not ready and destructive cleanup must wait.
  */
 export function sidebarPinProfileKey(
   scope: WorkspaceScope | null,

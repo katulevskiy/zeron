@@ -2,9 +2,8 @@ import { useSyncExternalStore } from "react";
 import { SidebarStore, type SidebarState } from "../lib/sidebar-store";
 
 /**
- * The sidebar UI-state singleton. One per page load; the space filter and
- * last selected space persist in browser storage (the desktop's
- * ui-settings.json peer), the archived disclosure stays in-memory.
+ * The sidebar UI-state singleton. Private space/chat identities and archived
+ * disclosure stay in session memory; nonprivate customization remains durable.
  */
 export const sidebarStore = new SidebarStore();
 

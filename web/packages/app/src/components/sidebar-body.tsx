@@ -9,6 +9,8 @@ import { ConnectionPill } from "./connection-pill";
 import { UpdateStrip } from "./update-strip";
 import { AddSpacePalette } from "./add-space-palette";
 import { CommandPalette } from "./command-palette";
+import { useSidebarSyncStatus } from "../state/sidebar-state-sync";
+import { SidebarSyncStatusNotice } from "./sidebar-sync-status";
 
 /**
  * The sidebar's column — the desktop's `render_chat_sidebar`: the space
@@ -34,6 +36,7 @@ import { CommandPalette } from "./command-palette";
  * through `commandPaletteStore`.
  */
 export function SidebarBody() {
+  const sidebarSyncStatuses = useSidebarSyncStatus();
   return (
     <>
       <NewChatListener />
@@ -49,6 +52,7 @@ export function SidebarBody() {
       </SidebarScroll>
       <ConnectionPill />
       <SidebarNotice />
+      <SidebarSyncStatusNotice statuses={sidebarSyncStatuses} />
       <UpdateStrip />
       <AccountRow />
       <AddSpacePalette />

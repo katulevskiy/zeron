@@ -1,6 +1,6 @@
 import { useSyncExternalStore } from "react";
 import type { AccentPresetId } from "@zeron/theme";
-import type { StorageLike } from "../lib/engine-store";
+import type { StorageLike } from "../lib/storage";
 
 /**
  * Every device-local preference, in one store — the web peer of the desktop's
@@ -189,8 +189,8 @@ export interface NewThreadComposerBackground {
 /**
  * A user-named sidebar section (`settings.rs::SidebarSection`, upstream
  * 86249cf0). Archived sessions keep their membership so unarchiving restores
- * the section; deleting a section never deletes sessions. Device-local and
- * profile-isolated like the pin buckets — never synchronized.
+ * the section; deleting a section never deletes sessions. This is a scoped
+ * private cache projection, not the snake_case upstream wire section.
  */
 export interface SidebarSection {
   readonly id: string;
@@ -228,15 +228,15 @@ export interface UiSettings {
   readonly lastProjectActionBySpaceId: Record<string, string>;
   readonly spaceFilter: string | null;
   /**
-   * Device-local pinned sessions in visual order, isolated by workspace
-   * profile (`UiSettings::sidebar_pinned_session_ids_by_profile`).
-   * Presentation-only; never synchronized.
+   * Session-memory projection of upstream workspace pins, in visual order.
+   * Scoped IDs and profile buckets isolate engine projections; the sync
+   * bridge owns authoritative reads and per-item writes.
    */
   readonly sidebarPinnedSessionIdsByProfile: Readonly<Record<string, readonly string[]>>;
   /**
    * Custom sidebar sections per workspace profile
    * (`UiSettings::sidebar_sections_by_profile`, upstream 86249cf0).
-   * Device-local presentation state; never synchronized.
+   * Session-memory projection reconciled by SidebarStateSync.
    */
   readonly sidebarSectionsByProfile: Readonly<Record<string, readonly SidebarSection[]>>;
   readonly soundEnabled: boolean;
@@ -856,6 +856,16 @@ function defaultStorage(): StorageLike {
   }
 }
 
+// Host/session identities are ephemeral. Appearance, keybindings, geometry
+// and other user customization remain durable on this origin.
+const PRIVATE_UI_SETTINGS = {
+  lastSpaceId: null,
+  spaceFilter: null,
+  lastProjectActionBySpaceId: {},
+  sidebarPinnedSessionIdsByProfile: {},
+  sidebarSectionsByProfile: {},
+} satisfies Partial<UiSettings>;
+
 export class UiSettingsStore {
   readonly #storage: StorageLike;
   #settings: UiSettings;
@@ -867,12 +877,10 @@ export class UiSettingsStore {
     this.#storage = options.storage ?? defaultStorage();
     const stored = parse(this.#read(UI_SETTINGS_STORAGE_KEY));
     const consolidated = typeof stored === "object" && stored !== null && !Array.isArray(stored);
-    this.#settings = healUiSettings(consolidated ? stored : migrateLegacy(this.#storage));
+    this.#settings = { ...healUiSettings(consolidated ? stored : migrateLegacy(this.#storage)), ...PRIVATE_UI_SETTINGS };
     this.#serialized = JSON.stringify(this.#settings);
-    if (!consolidated) {
-      // Write the merged snapshot now so the fold-in only ever happens once.
-      this.#write();
-    }
+    // Also retire private fields from older consolidated snapshots.
+    this.#write();
   }
 
   getSnapshot = (): UiSettings => this.#settings;
@@ -905,6 +913,14 @@ export class UiSettingsStore {
     for (const listener of this.#listeners) {
       listener();
     }
+  }
+
+  /** End the private viewport without discarding user customization. */
+  resetPrivateState(): void {
+    if (this.#timer !== null) clearTimeout(this.#timer);
+    this.#timer = null;
+    this.update(PRIVATE_UI_SETTINGS);
+    this.#write();
   }
 
   /** A discrete choice — theme, a toggle, a keybinding. */
@@ -946,7 +962,7 @@ export class UiSettingsStore {
 
   #write(): void {
     try {
-      this.#storage.setItem(UI_SETTINGS_STORAGE_KEY, this.#serialized);
+      this.#storage.setItem(UI_SETTINGS_STORAGE_KEY, JSON.stringify({ ...this.#settings, ...PRIVATE_UI_SETTINGS }));
     } catch {
       // Private mode or a full quota — a preference is not worth a crash.
     }

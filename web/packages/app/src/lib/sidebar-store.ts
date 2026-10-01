@@ -1,4 +1,4 @@
-import type { StorageLike } from "./engine-store";
+import type { StorageLike } from "./storage";
 import { projectSidebarPinChange, retainKnownPins, type SidebarPinChange } from "./sidebar-pins";
 import {
   assignSidebarSection,
@@ -47,17 +47,12 @@ export interface SidebarState {
    * session-transient (in-memory, like the desktop's Archived shelf).
    */
   readonly pinnedOpen: boolean;
-  /**
-   * Device-local pinned sessions per workspace profile, in visual order
-   * (`UiSettings::sidebar_pinned_session_ids_by_profile`; ui-settings, never
-   * synced). Callers resolve the active bucket(s) off the fleet registry.
+  /** Scoped workspace pins in visual order; SidebarStateSync owns the
+   * authoritative watch and per-item write-through.
    */
   readonly pinnedByProfile: Readonly<Record<string, readonly string[]>>;
-  /**
-   * Custom sidebar sections per workspace profile, in order (upstream
-   * 86249cf0's `sidebar_sections_by_profile`): device-local, profile-
-   * isolated, never synced. Empty sections are retained so a "Drop sessions
-   * here" target survives a reload.
+  /** Scoped workspace sections. Empty sections remain visible as drop
+   * targets; membership and fields synchronize through upstream intents.
    */
   readonly sectionsByProfile: Readonly<Record<string, readonly SidebarSection[]>>;
   /**
@@ -87,6 +82,13 @@ export interface SidebarStoreOptions {
 }
 
 export class SidebarStore {
+  resetPrivateState(): void {
+    this.#archivedOpen = false;
+    this.#pinnedOpen = true;
+    this.#sectionDialogOpen = false;
+    this.#settings.resetPrivateState();
+    this.#emit(this.#project(this.#settings.getSnapshot()));
+  }
   readonly #settings: UiSettingsStore;
   #archivedOpen = false;
   // `Shell::pinned_open`: pins are visible by default (a pin the section
@@ -230,7 +232,7 @@ export class SidebarStore {
     this.#settings.update(patch, "immediate");
   }
 
-  // ── Custom sections (upstream 86249cf0, local-only) ─────────────────────
+  // ── Custom sections (upstream workspace preferences) ───────────────────
 
   /**
    * `submit_section_dialog`'s create arm: a trimmed, non-empty name (≤120

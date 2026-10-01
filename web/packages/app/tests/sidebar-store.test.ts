@@ -1,5 +1,5 @@
 import { describe, expect, it } from "vitest";
-import type { StorageLike } from "../src/lib/engine-store";
+import type { StorageLike } from "../src/lib/storage";
 import { SidebarStore } from "../src/lib/sidebar-store";
 import { UiSettingsStore } from "../src/state/ui-settings";
 
@@ -62,17 +62,17 @@ describe("SidebarStore", () => {
     expect(second.getSnapshot().organization).toBe("byProject");
   });
 
-  it("persists the filter and the last selected space across reloads", () => {
+  it("retains the filter in-session but never restores another session's last selected space", () => {
     const storage = memoryStorage();
     const first = new SidebarStore({ storage });
     first.setSpaceFilter("space-1");
     first.setSpaceFilter("space-2");
     first.setSpaceFilter(null);
     const second = new SidebarStore({ storage });
-    // "All projects" is the filter; the last picked space survives as the
-    // new-chat fallback, exactly like the desktop's last_space_id.
+    // The current window retains its fallback; a reload drops private IDs.
+    expect(first.getSnapshot().lastSpaceId).toBe("space-2");
     expect(second.getSnapshot().spaceFilter).toBe(null);
-    expect(second.getSnapshot().lastSpaceId).toBe("space-2");
+    expect(second.getSnapshot().lastSpaceId).toBeNull();
   });
 
   it("keeps the archived disclosure in memory only", () => {
@@ -90,10 +90,11 @@ describe("SidebarStore", () => {
     first.setPinnedOpen(false);
     expect(first.getSnapshot().pinnedOpen).toBe(false);
     // `Shell::pinned_open` never reaches storage: a fresh store over the
-    // same storage re-expands (and the pins themselves survive).
+    // same storage re-expands; private pin IDs do not survive a reload.
     const second = new SidebarStore({ storage });
     expect(second.getSnapshot().pinnedOpen).toBe(true);
-    expect(second.getSnapshot().pinnedByProfile).toEqual({ local: ["a"] });
+    expect(first.getSnapshot().pinnedByProfile).toEqual({ local: ["a"] });
+    expect(second.getSnapshot().pinnedByProfile).toEqual({});
   });
 
   it("ignores corrupted legacy state without destroying it", () => {
@@ -157,14 +158,15 @@ describe("SidebarStore", () => {
     expect(store.getSnapshot().pinnedByProfile).toEqual({ local: ["a"] });
   });
 
-  it("local_synced_local_switch_restores_each_profiles_pins", () => {
+  it("profile switching retains in-session pins without storing them across reloads", () => {
     const storage = memoryStorage();
     const first = new SidebarStore({ storage });
     first.setChatPinned("local", "a", true);
     first.setChatPinned("local", "b", true);
     first.replacePinsByProfile({ local: ["b", "a"], "synced:device-1": ["s1"] });
     const second = new SidebarStore({ storage });
-    expect(second.getSnapshot().pinnedByProfile).toEqual({ local: ["b", "a"], "synced:device-1": ["s1"] });
+    expect(first.getSnapshot().pinnedByProfile).toEqual({ local: ["b", "a"], "synced:device-1": ["s1"] });
+    expect(second.getSnapshot().pinnedByProfile).toEqual({});
   });
 
   it("pin_cleanup_for_one_profile_leaves_other_profiles_untouched", () => {

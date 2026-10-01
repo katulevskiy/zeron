@@ -1,5 +1,5 @@
 import { afterEach, describe, expect, it, vi } from "vitest";
-import type { StorageLike } from "../src/lib/engine-store";
+import type { StorageLike } from "../src/lib/storage";
 import {
   JUMP_DEFAULTS,
   LEGACY_APPEARANCE_KEY,
@@ -277,12 +277,12 @@ describe("heal", () => {
 
   it("sidebarPinnedSessionIdsByProfile — per-profile id lists, healed per entry", () => {
     expect(
-      storedWith({ sidebarPinnedSessionIdsByProfile: { local: ["a", "a", 7, "", "b"] } })
+      healUiSettings({ sidebarPinnedSessionIdsByProfile: { local: ["a", "a", 7, "", "b"] } })
         .sidebarPinnedSessionIdsByProfile,
     ).toEqual({ local: ["a", "b"] });
     // An emptied bucket heals out of the map; junk keys and junk values go.
     expect(
-      storedWith({ sidebarPinnedSessionIdsByProfile: { "": ["a"], local: ["", 7], "synced:d1": "a" } })
+      healUiSettings({ sidebarPinnedSessionIdsByProfile: { "": ["a"], local: ["", 7], "synced:d1": "a" } })
         .sidebarPinnedSessionIdsByProfile,
     ).toEqual({});
     expect(storedWith({ sidebarPinnedSessionIdsByProfile: "local" }).sidebarPinnedSessionIdsByProfile).toEqual(
@@ -291,12 +291,12 @@ describe("heal", () => {
     expect(storedWith({}).sidebarPinnedSessionIdsByProfile).toEqual({});
   });
 
-  it("lastProjectActionBySpaceId — defaults empty, heals per-field, survives round trips", () => {
+  it("lastProjectActionBySpaceId — heals in-session but never persists private IDs", () => {
     // Default: no preferred action anywhere.
     expect(new UiSettingsStore({ storage: memoryStorage() }).getSnapshot().lastProjectActionBySpaceId).toEqual({});
     // Healing keeps only non-empty string values (settings.rs parity: the
     // map is `skip_serializing_if = "HashMap::is_empty"`).
-    const healed = storedWith({
+    const healed = healUiSettings({
       lastProjectActionBySpaceId: { "space-1": "dev", "space-2": "", "space-3": 7 },
     });
     expect(healed.lastProjectActionBySpaceId).toEqual({ "space-1": "dev" });
@@ -307,7 +307,8 @@ describe("heal", () => {
     store.updateDebounced({ lastProjectActionBySpaceId: { "space-1": "dev" } });
     vi.advanceTimersByTime(SAVE_DEBOUNCE_MS);
     const persisted = JSON.parse(storage.getItem(UI_SETTINGS_STORAGE_KEY)!) as UiSettings;
-    expect(persisted.lastProjectActionBySpaceId).toEqual({ "space-1": "dev" });
+    expect(store.getSnapshot().lastProjectActionBySpaceId).toEqual({ "space-1": "dev" });
+    expect(persisted.lastProjectActionBySpaceId).toEqual({});
   });
 });
 
@@ -339,8 +340,8 @@ describe("migration", () => {
 
     expect(settings.sidebarWidth).toBe(312);
     expect(settings.sidebarCollapsed).toBe(true);
-    expect(settings.spaceFilter).toBe("space-1");
-    expect(settings.lastSpaceId).toBe("space-2");
+    expect(settings.spaceFilter).toBeNull();
+    expect(settings.lastSpaceId).toBeNull();
     expect(settings.appearance).toBe("dark");
     expect(settings.themeSelection).toEqual({ light: "github-light", dark: "nord" });
     expect(settings.accent).toBe("pink");
@@ -414,7 +415,8 @@ describe("per-field healing", () => {
     expect(settings.terminalHeight).toBe(400);
     expect(settings.appearance).toBe("dark");
     expect(settings.soundEnabled).toBe(false);
-    expect(settings.spaceFilter).toBe("space-7");
+    // Private targets are not restored, even when their stored shape is valid.
+    expect(settings.spaceFilter).toBeNull();
     expect(settings.keymap.saveFile).toBe("mod-alt-s");
     expect(settings.keymap.jumpSession).toEqual(JUMP_DEFAULTS);
   });

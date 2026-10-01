@@ -1,11 +1,6 @@
-/**
- * Custom sidebar sections — the web peer of the desktop's
- * `shell/sidebar_sections.rs` (upstream zeron 86249cf0, ported local-only:
- * NO sync). Sections are a device-local, presentation-only preference
- * persisted in `ui-settings.ts` under the active workspace profile, exactly
- * like the pin buckets; the pure CRUD, membership, grouping, and drop rules
- * live here so the components stay thin and the unit tests mirror the Rust
- * `sidebar_sections.rs` tests one-for-one.
+/** Pure section CRUD/membership projections, mirroring the desktop.
+ * SidebarStateSync reconciles the scoped cache with upstream workspace
+ * section intents; these helpers do not define a replacement wire model.
  */
 import type { SidebarSection } from "../state/ui-settings";
 

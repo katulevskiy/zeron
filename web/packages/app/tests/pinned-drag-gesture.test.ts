@@ -38,11 +38,11 @@
 import { act, createElement } from "react";
 import { createRoot, type Root } from "react-dom/client";
 import { afterAll, afterEach, beforeAll, beforeEach, describe, expect, it, vi } from "vitest";
-import { encodeScopedId, methods } from "@zeron/engine-client";
-import type { Chat, SidebarStateSnapshot } from "@zeron/proto";
+import { encodeScopedId } from "@zeron/engine-client";
+import type { Chat } from "@zeron/proto";
 import { ChatList } from "../src/components/chat-list";
-import { SIDEBAR_SESSION_SLOT } from "../src/lib/sidebar-pins";
-import { SidebarStateSync, type SidebarStateClient } from "../src/lib/sidebar-state-sync";
+import { SIDEBAR_SESSION_SLOT, projectSidebarPinChange, type SidebarPinChange } from "../src/lib/sidebar-pins";
+import { SidebarStateSync, type SidebarStateClient, type SidebarPreferencesState } from "../src/lib/sidebar-state-sync";
 import { sidebarStore } from "../src/state/sidebar";
 import { uiSettings, UI_SETTINGS_STORAGE_KEY, type UiSettings } from "../src/state/ui-settings";
 
@@ -60,7 +60,7 @@ const h = vi.hoisted(() => {
     (HTMLImageElement.prototype as unknown as { decode: () => Promise<void> }).decode =
       () => Promise.resolve();
   }
-  const engines = [{ key: "eng-1", label: "Local Engine", baseUrl: "local" }];
+  const engines = [{ key: "eng-1", label: "Local Engine", endpoint: "wss://relay.example.test/api/browser/device/dev-1/ws", deviceId: "dev-1" }];
   const sessions = new Map<string, unknown>();
   const navigateCalls: Array<{ to: string }> = [];
   /** The one paired engine — local scope, chats loaded, no spaces. */
@@ -222,75 +222,43 @@ afterAll(() => {
   Element.prototype.getBoundingClientRect = realGetBoundingClientRect;
 });
 
-// ── The fake engine (ticket 11's suite idiom, leaned down) ─────────────────
-
+// Scripted wire boundary for the mounted gesture test. Real engine proof is
+// in engine-client/tests/sidebar-relay.test.ts, not this double.
 interface WatchHandlers {
-  onItem: (item: SidebarStateSnapshot, context: { generation: number }) => void;
+  onItem: (item: SidebarPreferencesState, context: { generation: number }) => void;
 }
-
-interface Call {
-  readonly method: string;
-  readonly params: unknown;
-}
-
-/** The engine's sidebar-state store, in miniature. */
+interface Call { readonly method: string; readonly params: unknown; }
 class FakeEngineStore {
-  pinsByProfile: Record<string, string[]> = {};
+  pins: string[] = [];
+  revision = 1;
   readonly watchers: Array<{ handlers: WatchHandlers; cancelled: boolean }> = [];
-
-  setPins(profileKey: string, sessionIds: readonly string[]): SidebarStateSnapshot {
-    if (sessionIds.length === 0) {
-      delete this.pinsByProfile[profileKey];
-    } else {
-      this.pinsByProfile[profileKey] = [...sessionIds];
-    }
-    return this.publish();
+  snapshot(): SidebarPreferencesState {
+    return { revision: this.revision, synced: true, initialized: true, pinnedSessionIds: [...this.pins], sections: [] };
   }
-
-  private publish(): SidebarStateSnapshot {
-    const snapshot: SidebarStateSnapshot = {
-      pinsByProfile: { ...this.pinsByProfile },
-      sectionsByProfile: {},
-    };
-    for (const watch of this.watchers) {
-      if (!watch.cancelled) {
-        watch.handlers.onItem(snapshot, { generation: 1 });
-      }
-    }
+  change(change: SidebarPinChange): SidebarPreferencesState {
+    this.pins = projectSidebarPinChange(this.pins, change);
+    this.revision++;
+    const snapshot = this.snapshot();
+    for (const watch of this.watchers) if (!watch.cancelled) watch.handlers.onItem(snapshot, { generation: 1 });
     return snapshot;
   }
 }
-
 class FakeClient {
   readonly calls: Call[] = [];
-  readonly engine: FakeEngineStore;
-
-  constructor(engine: FakeEngineStore) {
-    this.engine = engine;
-  }
-
-  async call<T>(method: string, params?: unknown): Promise<T> {
-    // A real EngineClient never runs a request in the task that wrote the
-    // store — defer one tick so synchronous setup applies first.
-    await new Promise((resolve) => setTimeout(resolve, 0));
+  constructor(readonly engine: FakeEngineStore) {}
+  async call<T>(method: string, params: unknown): Promise<T> {
+    await new Promise(resolve => setTimeout(resolve, 0));
     this.calls.push({ method, params });
-    if (method === methods.SET_SIDEBAR_PINS) {
-      const { profileKey, sessionIds } = params as { profileKey: string; sessionIds: string[] };
-      return this.engine.setPins(profileKey, sessionIds) as T;
-    }
-    if (method === methods.SET_SIDEBAR_SECTIONS) {
-      return { pinsByProfile: { ...this.engine.pinsByProfile }, sectionsByProfile: {} } as T;
-    }
-    throw new Error(`unknown method: ${method}`);
+    expect(method).toBe("Mutate");
+    const envelope = params as { op: string; change: SidebarPinChange };
+    expect(envelope.op).toBe("changeSidebarPin");
+    return { sidebarPreferences: this.engine.change(envelope.change) } as T;
   }
-
-  watch(_method: string, _params: unknown, handlers: WatchHandlers): { cancel: () => void } {
+  watch(method: string, _params: unknown, handlers: WatchHandlers): { cancel: () => void } {
+    expect(method).toBe("WatchSidebarPreferences");
     const watch = { handlers, cancelled: false };
     this.engine.watchers.push(watch);
-    // The stream's first item is the current value — engine parity.
-    handlers.onItem({ pinsByProfile: { ...this.engine.pinsByProfile }, sectionsByProfile: {} }, {
-      generation: 1,
-    });
+    handlers.onItem(this.engine.snapshot(), { generation: 1 });
     return { cancel: () => { watch.cancelled = true; } };
   }
 }
@@ -580,10 +548,10 @@ describe("the drag gesture owns the press (ticket 13's root cause)", () => {
 });
 
 describe("the reorder commit persists through ticket 11's synced surface", () => {
-  it("writes the reordered bucket to the engine over SetSidebarPins, caching locally", async () => {
+  it("writes the reordered pin as an upstream Mutate intent, caching only in session memory", async () => {
     // Engine-side pre-seeded (raw ids): the bridge adopts, never fights.
     const engine = new FakeEngineStore();
-    engine.setPins("local", [PIN_1, PIN_2]);
+    engine.pins = [PIN_1, PIN_2];
     const client = new FakeClient(engine);
     const sync = new SidebarStateSync(uiSettings);
     try {
@@ -597,20 +565,20 @@ describe("the reorder commit persists through ticket 11's synced surface", () =>
       expect(pins()).toEqual([sc(PIN_2), sc(PIN_1)]);
       await settle();
 
-      // The RPC write: the profile bucket, raw engine ids, in the new
-      // order — exactly what the engine persists engine-side.
-      const writes = client.calls.filter((call) => call.method === methods.SET_SIDEBAR_PINS);
-      expect(writes.length).toBeGreaterThan(0);
-      expect(writes[writes.length - 1]!.params).toEqual({
-        profileKey: "local",
-        sessionIds: [PIN_2, PIN_1],
+      // The gesture sends one anchored move, never a bucket replacement.
+      const writes = client.calls.filter(call => call.method === "Mutate");
+      expect(writes).toHaveLength(1);
+      expect(writes[0]!.params).toEqual({
+        op: "changeSidebarPin",
+        change: { action: "move", sessionId: PIN_2, after: null, before: PIN_1 },
       });
-      expect(engine.pinsByProfile["local"]).toEqual([PIN_2, PIN_1]);
-      // The offline cache (localStorage) holds the optimistic bucket.
+      expect(engine.pins).toEqual([PIN_2, PIN_1]);
+      // The optimistic bucket stays in session memory, not ownerless disk storage.
       const persisted = JSON.parse(
         window.localStorage.getItem(UI_SETTINGS_STORAGE_KEY)!,
       ) as UiSettings;
-      expect(persisted.sidebarPinnedSessionIdsByProfile["local"]).toEqual([sc(PIN_2), sc(PIN_1)]);
+      expect(uiSettings.getSnapshot().sidebarPinnedSessionIdsByProfile["local"]).toEqual([sc(PIN_2), sc(PIN_1)]);
+      expect(persisted.sidebarPinnedSessionIdsByProfile).toEqual({});
     } finally {
       sync.dispose();
     }
