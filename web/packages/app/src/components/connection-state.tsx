@@ -28,6 +28,8 @@ export function connectionState(status: EngineStatus | null): ConnectionStateVie
         parked: false,
         pairable: false,
       };
+    case "offline":
+      return { className: "conn-closed", dot: "dot-closed", label: "Engine offline", detail: "Cached history is read-only until the host returns.", parked: false, pairable: false };
     case "parked":
       return {
         className: "conn-parked",
@@ -35,10 +37,10 @@ export function connectionState(status: EngineStatus | null): ConnectionStateVie
         label: status.reason === "identity-changed" ? "Engine changed" : "Session revoked",
         detail: status.detail,
         parked: true,
-        pairable: true,
+        pairable: false,
       };
     case "closed":
-      return { className: "conn-closed", dot: "dot-closed", label: "Disconnected", detail: null, parked: false, pairable: true };
+      return { className: "conn-closed", dot: "dot-closed", label: "Disconnected", detail: null, parked: false, pairable: false };
   }
 }
 

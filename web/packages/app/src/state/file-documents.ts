@@ -54,6 +54,11 @@ export class FileDocumentRegistry {
     };
   }
 
+  /** Authentication ended: discard buffers, cancel autosave and late loads. */
+  resetPrivateState(): void {
+    for (const id of [...this.#bySurface.keys()]) this.disposeSurface(id);
+  }
+
   /** The close path's teardown: the surface is really going away. */
   disposeSurface(surfaceId: string): void {
     const entry = this.#bySurface.get(surfaceId);

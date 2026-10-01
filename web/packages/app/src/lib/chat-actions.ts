@@ -95,6 +95,10 @@ export async function deleteChat(caller: MutateCaller, chatId: string): Promise<
  */
 const seenAt = new Map<string, number>();
 
+export function resetPrivateChatSeen(): void {
+  seenAt.clear();
+}
+
 /** The optimistic `lastSeenAt` for a chat, or null if it has not been stamped. */
 export function chatSeenAt(chatId: string): number | null {
   return seenAt.get(chatId) ?? null;

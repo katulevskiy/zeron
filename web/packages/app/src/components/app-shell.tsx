@@ -231,9 +231,8 @@ export function AppShell() {
 
   const onNewChat = useCallback(() => {
     if (fleet.engines.length === 0) {
-      // No engine paired: keyboard shortcut is the equivalent of the welcome
-      // "Pair an engine" button.
-      void navigate({ to: "/pair" });
+      // Discovery, not manual pairing: explain how to register an owned host.
+      void navigate({ to: "/connect" });
       return;
     }
     emitShortcut("new-chat");
@@ -747,10 +746,10 @@ export function AppShell() {
                       {state.label}
                     </span>
                     {state.detail !== null && <span className="banner-detail">{state.detail}</span>}
-                    {state.pairable && (
-                      <button type="button" className="btn btn-solid" onClick={() => void navigate({ to: "/pair" })}>
-                        Pair again
-                      </button>
+                    {state.parked && (
+                      <Link className="btn btn-solid" to="/connect">
+                        Connection help
+                      </Link>
                     )}
                   </div>
                 ) : null}
@@ -982,9 +981,9 @@ function Welcome() {
     <div className="empty-state">
       <Icon name="zeronLogo" size={44} className="empty-state-mark" />
       <h1>Zeron</h1>
-      <p>This browser has no paired engine yet.</p>
-      <Link className="btn btn-solid" to="/pair">
-        Pair an engine
+      <p>No engines are registered to your account yet.</p>
+      <Link className="btn btn-solid" to="/connect">
+        Find your engines
       </Link>
     </div>
   );

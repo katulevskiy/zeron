@@ -1,7 +1,7 @@
 import { useState } from "react";
 import type { ReactElement } from "react";
 import { Icon } from "@zeron/icons";
-import { engineConnection, settingsDeviceName, settingsEngineLabel } from "../lib/settings-engine";
+import { engineConnection, settingsDeviceName, settingsEngineKey, settingsEngineLabel } from "../lib/settings-engine";
 import { setActiveDevice, useFleet, useFleetRegistry } from "../state/fleet";
 import { PickerCard } from "./ui/PickerCard";
 import { MenuRow } from "./ui/MenuRows";
@@ -61,18 +61,19 @@ export function SettingsEngineIndicator() {
       trigger={trigger}
     >
       {fleet.engines.map((engine) => {
-        const isActive = engine.baseUrl === fleet.active;
+        const key = settingsEngineKey(engine);
+        const isActive = key === fleet.active;
         return (
           <MenuRow
-            key={engine.baseUrl}
-            fadeKey={`settings-engine-${engine.baseUrl}`}
+            key={key}
+            fadeKey={`settings-engine-${key}`}
             selected={isActive}
             onClick={() => {
-              setActiveDevice(engine.baseUrl);
+              setActiveDevice(key);
               setOpen(false);
             }}
           >
-            <span className={`dot ${engineConnection(byKey.get(engine.baseUrl) ?? null).dot}`} />
+            <span className={`dot ${engineConnection(byKey.get(key) ?? null).dot}`} />
             <span className="settings-engine-row-host">{settingsDeviceName(engine, registry)}</span>
             {isActive && <Icon name="check" size={12} className="settings-engine-row-check" />}
           </MenuRow>

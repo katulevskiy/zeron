@@ -63,69 +63,16 @@ import { TerminalDock } from "../terminal/terminal-dock";
 import { drawerTerminalStore } from "../terminal/store";
 import type { MarkdownSurface } from "../components/markdown";
 import { echoStore, TranscriptStore, chatDeliveryDegraded, type TranscriptCache } from "../state/transcript-store";
+import { privateTranscriptCacheFor } from "../state/private-transcript-cache";
 
 /**
- * Ticket 81 — WHEN each offline transcript save happened, per
- * `(engineKey, rawChatId)` key, in one small localStorage JSON map. The
- * registry cache itself stays entries-in/entries-out (engine-client shape),
- * so the stamp lives here: `save` records the wall clock alongside the
- * durable write, `load` reads it back. A seconds-old stamp marks a LIVE
- * mid-run snapshot (seeded verbatim — the tail group renders open
- * immediately, like the desktop's state-preserved switch); anything older
- * or absent is a dead session's leftover (downgraded at seed time, ticket
- * 80). Absent or unwritable storage reads as unstamped (0 ⇒ stale).
- */
-const TRANSCRIPT_SEED_STAMPS_KEY = "zeron.transcriptSeedStamps.v1";
-
-function readSeedStamps(): Record<string, number> {
-  try {
-    const raw = window.localStorage.getItem(TRANSCRIPT_SEED_STAMPS_KEY);
-    if (raw === null) {
-      return {};
-    }
-    const parsed: unknown = JSON.parse(raw);
-    if (typeof parsed !== "object" || parsed === null || Array.isArray(parsed)) {
-      return {};
-    }
-    return parsed as Record<string, number>;
-  } catch {
-    return {};
-  }
-}
-
-function writeSeedStamp(key: string, savedAtMs: number): void {
-  try {
-    const stamps = readSeedStamps();
-    stamps[key] = savedAtMs;
-    window.localStorage.setItem(TRANSCRIPT_SEED_STAMPS_KEY, JSON.stringify(stamps));
-  } catch {
-    // Unwritable storage: the next load reads the seed as unstamped (stale).
-  }
-}
-
-/**
- * The chat transcript's offline cache handle: `(engineKey, rawChatId)`
+ * The chat transcript's session-memory handle: `(engineKey, rawChatId)`
  * resolved off the scoped URL id, backed by the fleet registry's cache.
  */
 function transcriptCacheFor(engineKey: string, scopedChatId: string): TranscriptCache | undefined {
   try {
     const raw = parseScopedId(scopedChatId).rawId;
-    const cache = engineRegistry.cache;
-    const stampKey = `${engineKey}:${raw}`;
-    return {
-      load: async () => {
-        const entries = await cache.loadTranscript(engineKey, raw);
-        if (entries === null) {
-          return null;
-        }
-        const stamp = readSeedStamps()[stampKey];
-        return { entries, savedAtMs: typeof stamp === "number" ? stamp : 0 };
-      },
-      save: async (entries) => {
-        await cache.saveTranscript(engineKey, raw, entries);
-        writeSeedStamp(stampKey, Date.now());
-      },
-    };
+    return privateTranscriptCacheFor(engineRegistry.cache, engineKey, raw);
   } catch {
     return undefined;
   }
@@ -349,7 +296,7 @@ export function ConversationPage() {
     if (session === null || chatId === "") {
       return null;
     }
-    return session.transcripts.get(chatId, transcriptCacheFor(session.engine.baseUrl, chatId));
+    return session.transcripts.get(chatId, transcriptCacheFor(session.engine.key, chatId));
   }, [session, chatId]);
   // The LIVE store: the departing transcript (undocking back to the canvas)
   // keeps painting from the source chat's stream until the route finishes
@@ -1185,7 +1132,7 @@ export function ConversationPage() {
       // all scoped, so the URL id then matches `chatPageRow`'s exact
       // compare and the not-found page stays a last resort for genuinely
       // foreign ids.
-      const scoped = session === null ? mintedId : encodeScopedId(session.engine.baseUrl, mintedId);
+      const scoped = session === null ? mintedId : encodeScopedId(session.engine.key, mintedId);
       void navigate({ to: "/chat/$chatId", params: { chatId: scoped } });
     },
     [navigate, session],
@@ -1207,6 +1154,14 @@ export function ConversationPage() {
     [chatId, row?.chat.id, row?.chat.title, row?.folder, row?.harness],
   );
 
+  if ((!snapshot.chats.loaded && session === null) || (session?.client.state === "offline" && row === undefined)) {
+    return (
+      <div className="empty-state" role="status">
+        <p>Engine unavailable. Sending is disabled until the host connects.</p>
+        <Link to="/connect" className="btn btn-ghost">Connection help</Link>
+      </div>
+    );
+  }
   if (!snapshot.chats.loaded) {
     return <div className="chat-page" />;
   }

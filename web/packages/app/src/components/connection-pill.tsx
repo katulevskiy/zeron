@@ -10,9 +10,9 @@ import { useConnectionState } from "./connection-state";
  * No surface and no border (v0.2.12 feedback) — a bare spinner beside a
  * faint 11px caption while reconnecting, a 5px warning dot when the browser
  * says the OS is offline (the desktop's `ConnectivityState::Offline`, with
- * the same "sends are saved" string). The transport error itself belongs
+ * sending disabled; the browser never silently queues an offline Run). The transport error belongs
  * in logs, not the sidebar, so only the state's label shows here; the main
- * card's banner carries the detail and the re-pair affordance, and a raw
+ * card's banner carries detail and owned-discovery help, and a raw
  * "Attempt N" never reaches this copy.
  */
 export function ConnectionPill() {
@@ -38,7 +38,7 @@ export function ConnectionPill() {
     return (
       <div className="connection-pill" role="status">
         <span className="dot dot-offline" />
-        <span className="connection-pill-label">Offline — sends are saved</span>
+        <span className="connection-pill-label">Offline — sending unavailable</span>
       </div>
     );
   }

@@ -4,6 +4,7 @@ import { Icon, harnessBrandIcon } from "@zeron/icons";
 import type { HarnessDescriptor, HarnessId, Model, TitleSettings } from "@zeron/proto";
 import { RbSwitch } from "../components/base/switch";
 import { SettingsEngineIndicator } from "../components/settings-engine-indicator";
+import { settingsEngineKey } from "../lib/settings-engine";
 import { MenuRow } from "../components/ui/MenuRows";
 import { PickerCard } from "../components/ui/PickerCard";
 import { SkeletonRows } from "../components/ui/Skeleton";
@@ -63,6 +64,12 @@ interface SignInFailure {
 
 export function AgentsSettingsPage() {
   const session = useEngineSession();
+  // Keep catalogs, title choices and sign-in state local to this device.
+  // React drops late replies belonging to an unmounted device's page.
+  return <EngineAgentsSettings key={session === null ? "disconnected" : settingsEngineKey(session.engine)} session={session} />;
+}
+
+function EngineAgentsSettings({ session }: { session: ReturnType<typeof useEngineSession> }) {
   const client = session?.client ?? null;
   // The edge fleet routes this settings page to the selected engine. Never
   // forward via a second, independent device target.

@@ -847,6 +847,11 @@ export class HistoryStore {
  */
 const instances = new Map<string, HistoryStore>();
 
+export function resetPrivateHistoryStores(): void {
+  for (const store of instances.values()) store.dispose();
+  instances.clear();
+}
+
 function instanceKey(chatId: string, surfaceId: string): string {
   return `${chatId}\u0000${surfaceId}`;
 }

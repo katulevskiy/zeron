@@ -10,7 +10,7 @@
  * The contract under test: `useFleet().engines` must keep its identity
  * across re-renders and across device polls that report the same devices.
  * The session provider reconciles on that array, and
- * `reconcileEngineSessions` clones every session whose StoredEngine
+ * `reconcileEngineSessions` clones every session whose OwnedEngine
  * wrapper identity changed (engine-session.ts:112) — an unstable engines
  * array re-ran that effect on every render, cloning sessions forever and
  * taking React down with it.
@@ -19,13 +19,15 @@
 import { act, createElement } from "react";
 import { createRoot, type Root } from "react-dom/client";
 import { afterEach, describe, expect, test, vi } from "vitest";
-import type { StoredEngine } from "../src/lib/engine-store";
+import type { OwnedEngine } from "../src/lib/owned-engine";
 
 const h = vi.hoisted(() => {
   let deviceCalls = 0;
   const devices = [{ id: "engine-1", name: "Engine one", online: true }];
   return {
     session: { authenticated: true, ownerId: "user_1", csrfToken: "csrf" },
+    sync: vi.fn(),
+    setOnline: (online: boolean): void => { devices[0]!.online = online; },
     // A fresh array per call, like a real fetch: identity churn is the
     // hostile input the store must absorb.
     deviceList: (): Array<{ id: string; name: string; online: boolean }> => {
@@ -39,7 +41,7 @@ const h = vi.hoisted(() => {
 vi.mock("@zeron/engine-client", () => ({
   EngineRegistry: class {
     constructor(_options: unknown) {}
-    sync(): void {}
+    sync = h.sync;
     subscribe(): () => void {
       return () => {};
     }
@@ -69,7 +71,7 @@ vi.mock("@zeron/engine-client", () => ({
 describe("useFleet engine identity stability", () => {
   let container: HTMLDivElement;
   let root: Root;
-  let latest: readonly StoredEngine[] | undefined;
+  let latest: readonly OwnedEngine[] | undefined;
 
   afterEach(() => {
     act(() => {
@@ -108,6 +110,12 @@ describe("useFleet engine identity stability", () => {
     expect(latest).toBeDefined();
     expect(latest).toHaveLength(1);
     expect(latest?.[0]?.deviceId).toBe("engine-1");
+    expect(latest?.[0]?.key).toBe("engine-1");
+    expect(latest?.[0]?.endpoint).toBe("wss://relay.test/device/engine-1/ws");
+    expect(latest?.[0]?.label).toBe("Engine one");
+    expect(latest?.[0]?.deviceId).toBe("engine-1");
+    expect(latest?.[0]).not.toHaveProperty("credential");
+    expect(latest?.[0]).not.toHaveProperty("baseUrl");
     const first = latest!;
     const firstEntry = first[0]!;
 
@@ -126,5 +134,23 @@ describe("useFleet engine identity stability", () => {
     render(2);
     expect(latest).toBe(first);
     expect(latest?.[0]).toBe(firstEntry);
+
+    // Discovery must suspend an unavailable owned host, not forget its
+    // registry entry and the session/transcript resources attached to it.
+    h.setOnline(false);
+    await act(async () => {
+      await vi.advanceTimersByTimeAsync(10_000);
+    });
+    expect(latest).toHaveLength(1);
+    expect(h.sync).toHaveBeenLastCalledWith([
+      expect.objectContaining({ key: "engine-1", expectedDeviceId: "engine-1", available: false }),
+    ], null);
+    h.setOnline(true);
+    await act(async () => {
+      await vi.advanceTimersByTimeAsync(10_000);
+    });
+    expect(h.sync).toHaveBeenLastCalledWith([
+      expect.objectContaining({ key: "engine-1", available: true }),
+    ], null);
   });
 });

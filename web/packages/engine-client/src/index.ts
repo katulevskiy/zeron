@@ -34,14 +34,6 @@ export {
   type DecodedMessage,
   type ServerFrame,
 } from "./codec";
-export {
-  exchangeSignInCode,
-  fetchSignInConfig,
-  parseEngineUrl,
-  type AuthFetchOptions,
-  type SignInConfig,
-  type SignInTokens,
-} from "./auth";
 export { RpcError, wireError, type RpcErrorKind } from "./rpc-error";
 export {
   browserWebSocket,
@@ -102,6 +94,8 @@ export {
   type DeviceFrameHeader,
 } from "./device-frame";
 export {
+  BrowserApiError,
+  browserActivity,
   browserLogout,
   fetchBrowserDevices,
   fetchBrowserSession,

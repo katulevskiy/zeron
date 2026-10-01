@@ -11,7 +11,7 @@ import {
   type WebSocketFactory,
   type WsSocket,
 } from "@zeron/engine-client";
-import { EngineStore, engineWsEndpoint, type StorageLike } from "../src/lib/engine-store";
+import type { RegistryEngineConfig } from "@zeron/engine-client";
 import { deviceOnline, spaceDeviceTag } from "../src/lib/view";
 
 /**
@@ -291,15 +291,6 @@ class FakeSocket implements WsSocket {
 // Harness helpers
 // ---------------------------------------------------------------------------
 
-function memoryStorage(): StorageLike & { raw(): string | null } {
-  let value: string | null = null;
-  return {
-    getItem: () => value,
-    setItem: (_key, next) => void (value = next),
-    removeItem: () => void (value = null),
-    raw: () => value,
-  };
-}
 
 function delay(ms: number): Promise<void> {
   return new Promise((resolve) => setTimeout(resolve, ms));
@@ -315,57 +306,30 @@ async function waitUntil(predicate: () => boolean, message = "condition", timeou
   }
 }
 
-/**
- * The fleet wiring under test — the same shape `state/fleet.ts` installs:
- * the pairing store drives the registry's supervised set, and the registry
- * owns one client + watch cache per paired engine.
- */
-function createFleet(
-  storage: StorageLike,
-  cache: MemoryEngineCache,
-  servers: readonly ScriptedEngine[],
-) {
+/** Real registry configuration fixtures; no browser credential store. */
+function registryConfig(server: ScriptedEngine): RegistryEngineConfig {
+  return {
+    key: server.deviceId,
+    endpoint: server.endpoint,
+    credential: server.credential,
+    expectedDeviceId: server.deviceId,
+  };
+}
+
+function createRegistry(cache: MemoryEngineCache, servers: readonly ScriptedEngine[]): EngineRegistry {
   const byEndpoint = new Map(servers.map((server) => [server.endpoint, server]));
   const factory: WebSocketFactory = (url) => {
     const server = byEndpoint.get(url);
-    if (server === undefined) {
-      throw new Error(`no scripted engine for ${url}`);
-    }
+    if (server === undefined) throw new Error(`no scripted engine for ${url}`);
     return server.factory()(url);
   };
-  const store = new EngineStore({ storage });
-  // Sign-in carries the credential directly (the AuthKit/dev sign-in flow
-  // ran before the store saw it); this helper wires each scripted engine's
-  // own credential to its origin, the way the real flow would.
-  const signIn = (server: ScriptedEngine) =>
-    store.signInEngine({
-      baseUrl: server.endpoint.replace(/^ws/, "http"),
-      credential: server.credential,
-      label: "Test web",
-      sessionId: `s-${server.deviceId}`,
-    });
-  const registry = new EngineRegistry({ cache, webSocket: factory, backoff: FAST_BACKOFF });
-  const sync = (): void => {
-    const state = store.getSnapshot();
-    registry.sync(
-      state.engines.map((engine) => ({
-        key: engine.baseUrl,
-        endpoint: engineWsEndpoint(engine.baseUrl),
-        credential: engine.credential,
-        expectedDeviceId: engine.deviceId,
-      })),
-      state.configurationError,
-    );
-  };
-  store.subscribe(sync);
-  sync();
-  return { store, registry, sync, signIn };
+  return new EngineRegistry({ cache, webSocket: factory, backoff: FAST_BACKOFF });
 }
 
 const ENDPOINT_A = "ws://127.0.0.1:27699/";
 const ENDPOINT_B = "ws://192.168.1.20:27699/";
-const URL_A = "http://127.0.0.1:27699";
-const URL_B = "http://192.168.1.20:27699";
+const URL_A = "device-a";
+const URL_B = "device-b";
 
 function engineA(): ScriptedEngine {
   return new ScriptedEngine(ENDPOINT_A, "cred-a", "device-a", {
@@ -390,17 +354,12 @@ function engineB(): ScriptedEngine {
 // ---------------------------------------------------------------------------
 
 describe("EngineRegistry (ticket 31)", () => {
-  it("realEngineReconnectRetainsRowsPersistsPairingAndForgets", async () => {
+  it("registryReconnectRetainsRowsRestoresOwnedCacheAndForgets", async () => {
     const cache = new MemoryEngineCache();
-    const storage = memoryStorage();
     const a = engineA();
     const b = engineB();
-    // Sign in to the FIRST engine while its transport is up — sign-in
-    // starts supervision immediately, no switch step.
-    let fleet = createFleet(storage, cache, [a, b]);
-    await fleet.signIn(a);
-    await fleet.signIn(b);
-    const registry = fleet.registry;
+    const registry = createRegistry(cache, [a, b]);
+    registry.sync([registryConfig(a), registryConfig(b)], null);
 
     // Rows flow from BOTH engines simultaneously, merged under scoped ids.
     await waitUntil(
@@ -458,11 +417,10 @@ describe("EngineRegistry (ticket 31)", () => {
     expect(entryB.generation).toBeGreaterThanOrEqual(2);
     await expect(clientB!.call("EngineInfo", {})).resolves.toBeTruthy();
 
-    // Forgetting: the persisted list, the live connection, AND the cache
-    // entries all drop — task-cancel → flush → delete, no race.
+    // Discovery removes B: the live connection AND its cache must drop.
     await delay(SAVE_DEBOUNCE_MS + 80);
     expect(cache.hasRows(URL_B)).toBe(true);
-    fleet.store.remove(URL_B);
+    registry.sync([registryConfig(a)], null);
     await waitUntil(() => registry.getSnapshot().engines.every((engine) => engine.key !== URL_B), "B forgotten");
     await waitUntil(() => !cache.hasRows(URL_B), "B cache deleted");
     projected = projectRegistrySnapshot(registry.getSnapshot());
@@ -471,16 +429,15 @@ describe("EngineRegistry (ticket 31)", () => {
     expect(forgotten).toBeNull();
     expect(projected.chats[0]!).toBeDefined();
 
-    // "Persists pairing": reopen the whole client (fresh store + fresh
-    // registry, same storage + cache) with BOTH transports down — the
-    // cached history keeps the sidebar rendering (engine A's rows).
+    // Reopen with an owned-device configuration from discovery and both
+    // transports down. The surviving cached history still renders.
     b.drop();
     a.drop();
     a.up = false;
     b.up = false;
     await registry.shutdown();
-    fleet = createFleet(storage, cache, [a, b]);
-    const reopened = fleet.registry;
+    const reopened = createRegistry(cache, [a, b]);
+    reopened.sync([registryConfig(a)], null);
     await waitUntil(() => reopened.getSnapshot().engines.length === 1, "reopened registry loads engine A");
     await delay(SAVE_DEBOUNCE_MS);
     projected = projectRegistrySnapshot(reopened.getSnapshot());
@@ -491,7 +448,7 @@ describe("EngineRegistry (ticket 31)", () => {
     const offline = reopened.getSnapshot().engines[0]!;
     expect(offline.state).not.toBe("connected");
     expect(offline.chats.loaded).toBe(true);
-    await fleet.registry.shutdown();
+    await reopened.shutdown();
   }, 20_000);
 
   it("reconnectBackoffDoublesAndResetsAfterALongLivedConnection", async () => {
@@ -578,25 +535,19 @@ describe("EngineRegistry (ticket 31)", () => {
     await registry.shutdown();
   });
 
-  it("damagedPairingConfigPreservesLocalAccessAndOriginalBytes", async () => {
-    // The desktop's local-engine half ("preserves local access") maps to
-    // the web's no-local-engine reality: the app still runs with the
-    // damaged list read as empty, the configuration error surfaces, and
-    // the raw bytes are never overwritten.
-    const storage = memoryStorage();
-    storage.setItem("zeron.fleet.v1", "damaged config");
+  it("surfacesDiscoveryConfigurationErrorsWithoutInventingEngineConnections", async () => {
     const a = engineA();
     const cache = new MemoryEngineCache();
-    const fleet = createFleet(storage, cache, [a]);
-    expect(fleet.store.getSnapshot().configurationError).not.toBe(null);
-    expect(fleet.store.getSnapshot().engines).toHaveLength(0);
-    expect(fleet.registry.getSnapshot().configurationError).not.toBe(null);
-    // Sign-in refuses while damaged.
-    await expect(fleet.signIn(a)).rejects.toThrow();
-    // The original bytes survive every refusal untouched.
-    expect(storage.raw()).toBe("damaged config");
+    const registry = createRegistry(cache, [a]);
+    registry.sync([], "Browser API is not configured");
+    expect(registry.getSnapshot().configurationError).toBe("Browser API is not configured");
+    expect(registry.getSnapshot().engines).toHaveLength(0);
+    expect(a.dialedAt).toHaveLength(0);
     expect(cache.hasRows(URL_A)).toBe(false);
-    await fleet.registry.shutdown();
+    registry.sync([registryConfig(a)], null);
+    await waitUntil(() => registry.getSnapshot().engines[0]?.state === "connected");
+    expect(registry.getSnapshot().configurationError).toBe(null);
+    await registry.shutdown();
   });
 
   it("projectedMergesRowsFromEveryPairedEngineUnderScopedIds", () => {

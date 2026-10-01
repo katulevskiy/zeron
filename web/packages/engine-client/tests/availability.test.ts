@@ -1,0 +1,43 @@
+import { afterEach, expect, test } from "vitest";
+import { EngineRegistry } from "../src/registry";
+import { FakeEngine } from "./helpers/fake-engine";
+import { delay, trackedFactory, waitUntil } from "./helpers/ws";
+
+const cleanups: Array<() => Promise<void> | void> = [];
+afterEach(async () => { for (const cleanup of cleanups.splice(0).reverse()) await cleanup(); });
+
+test("owned offline devices retain resources without dialing; availability resumes the same watches", async () => {
+  const fake = new FakeEngine();
+  cleanups.push(() => fake.close());
+  await fake.listen();
+  const tracked = trackedFactory();
+  const registry = new EngineRegistry({ webSocket: tracked.factory, backoff: { initialMs: 15, jitterMs: 1, maxMs: 50 } });
+  cleanups.push(() => registry.shutdown());
+  const config = { key: fake.deviceId, endpoint: fake.endpoint, credential: "good-credential", expectedDeviceId: fake.deviceId, available: false };
+  registry.sync([config], null);
+  const client = registry.clientFor(config.key)!;
+  const cache = registry.watchCacheFor(config.key);
+  let items = 0;
+  client.watch("WatchChats", {}, { onItem: () => { items++; } });
+  fake.streams.WatchChats = reply => { reply.ack(); reply.item([]); };
+  await delay(100);
+  expect(tracked.sockets).toHaveLength(0);
+  expect(registry.getSnapshot().engines[0]?.state).toBe("off");
+  registry.sync([{ ...config, available: true }], null);
+  await waitUntil(() => items === 1, 2000, "first watch after availability");
+  const generation = client.generation;
+  registry.sync([config], null);
+  expect(client.state).toBe("offline");
+  await expect(client.call("Echo", {})).rejects.toThrow(/offline/);
+  await delay(100);
+  const dials = tracked.sockets.length;
+  registry.restart(config.key);
+  await delay(100);
+  expect(tracked.sockets).toHaveLength(dials);
+  expect(registry.clientFor(config.key)).toBe(client);
+  expect(registry.watchCacheFor(config.key)).toBe(cache);
+  registry.sync([{ ...config, available: true }], null);
+  await waitUntil(() => items === 2, 2000, "watch resubscription");
+  expect(client.generation).toBe(generation + 1);
+  expect(registry.clientFor(config.key)).toBe(client);
+});

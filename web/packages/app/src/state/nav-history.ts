@@ -121,13 +121,18 @@ export interface NavSnapshot {
 export const NAV_BOOT_ENTRY: NavEntry = { kind: "chat", chatId: "" };
 
 export class NavHistoryStore {
-  readonly #history: NavHistory;
+  #history: NavHistory;
   readonly #listeners = new Set<() => void>();
   #snapshot: NavSnapshot;
 
   constructor(initial: NavEntry = NAV_BOOT_ENTRY) {
     this.#history = new NavHistory(initial);
     this.#snapshot = this.#take();
+  }
+
+  resetPrivateState(): void {
+    this.#history = new NavHistory(NAV_BOOT_ENTRY);
+    this.#commit();
   }
 
   getSnapshot(): NavSnapshot {

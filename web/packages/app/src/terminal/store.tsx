@@ -550,6 +550,12 @@ export function TerminalProvider({ children }: { children: ReactNode }) {
   useEffect(() => {
     drawerTerminalStore.bindSession(session);
     paneTerminalStore.bindSession(session);
+    // The auth gate unmounts this provider: no session-bound PTY or xterm
+    // buffer may remain in either singleton for the next account.
+    return () => {
+      drawerTerminalStore.bindSession(null);
+      paneTerminalStore.bindSession(null);
+    };
   }, [session]);
 
   useEffect(() => {

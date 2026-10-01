@@ -95,7 +95,7 @@ export function DevicesSettingsPage() {
     }
     // A row backed by a parked engine this client knows: engine-backed, off.
     const parked = fleet.engines.find(
-      (engine) => engine.deviceId === deviceId && engine.baseUrl !== fleet.active,
+      (engine) => engine.deviceId === deviceId && engine.key !== fleet.active,
     );
     return parked === undefined ? null : "off";
   }

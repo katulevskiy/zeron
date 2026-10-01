@@ -12,6 +12,7 @@ import {
   type ReactNode,
 } from "react";
 import { Icon } from "@zeron/icons";
+import { isCurrentPrivateSession, privateSessionGeneration } from "../state/private-session-generation";
 import type { Chat, FileSearchMatch, HarnessDescriptor, HarnessId, UserInputAnswer } from "@zeron/proto";
 import { MESSAGE_QUEUE_ATTACHMENTS_V1, MESSAGE_QUEUE_V1 } from "@zeron/proto";
 import { encodeScopedId, methods, RpcError } from "@zeron/engine-client";
@@ -2096,6 +2097,7 @@ export function Composer({
   // ── The send path (`Composer::send`, composer.rs:6032-6705) ────────────
   const send = useCallback(
     async (typed: string, queue: boolean): Promise<void> => {
+      const privateGeneration = privateSessionGeneration();
       // Existing busy chats always queue; compatibility was checked before
       // taking the draft (the capability gate below).
       if (queue) {
@@ -2151,12 +2153,14 @@ export function Composer({
               config: buildChatConfig(draft),
             },
           );
+          if (!isCurrentPrivateSession(privateGeneration)) return;
           await waitForChatRow(session.cache, chatId);
+          if (!isCurrentPrivateSession(privateGeneration)) return;
         } catch (error) {
           setFailure({ message: `Send failed: ${describeSendError(error)}`, key: null });
           return;
         }
-        pageChatId = encodeScopedId(session.engine.baseUrl, chatId);
+        pageChatId = encodeScopedId(session.engine.key, chatId);
         // The host scopes the id at navigation (§2.3): the raw id stays on
         // the wire, the route carries the scoped form.
         onNewThreadLaunched?.(chatId);
@@ -2180,6 +2184,7 @@ export function Composer({
       // nothing.
       let pushedEchoId: string | null = null;
       const onProgress = (uploaded: number): void => {
+        if (!isCurrentPrivateSession(privateGeneration)) return;
         setUploadProgress(uploaded);
       };
       try {
@@ -2239,6 +2244,7 @@ export function Composer({
           // queued text (`queue_body`, composer.rs:6559-6572) — only the
           // attachment trailer stays out.
           const uploaded = taken.length > 0 ? await uploadAttachments(session.client, taken, onProgress) : [];
+          if (!isCurrentPrivateSession(privateGeneration)) return;
           const folded = withComments(trimmed, takenComments);
           const body = folded.length > 0 ? folded : ATTACHMENT_ONLY_TEXT;
           await queueMessage(
@@ -2261,6 +2267,7 @@ export function Composer({
           );
           // Refresh the echo in place with the attachment-folded prompt so
           // its state never flickers (composer.rs:6401-6423).
+          if (!isCurrentPrivateSession(privateGeneration)) return;
           if (echoStore.get(messageId) !== null) {
             echoStore.removeEcho(messageId);
             echoStore.pushEcho({
@@ -2294,6 +2301,7 @@ export function Composer({
         // during the send survives). The hand-back keys the PAGE id — the
         // route this send navigated to reads its drafts/stash under the
         // scoped form.
+        if (!isCurrentPrivateSession(privateGeneration)) return;
         if (pushedEchoId !== null) {
           echoStore.removeEcho(pushedEchoId);
         }
@@ -2322,13 +2330,13 @@ export function Composer({
           key: pageChatId,
         });
       } finally {
-        if (taken.length > 0) {
+        if (taken.length > 0 && isCurrentPrivateSession(privateGeneration)) {
           endUploadProgress();
         }
         setBusy(false);
       }
     },
-    [chat.id, chat.cwd, draft, session.client, session.engine.baseUrl, staged, engineSupports, onNewThreadLaunched, commentCount],
+    [chat.id, chat.cwd, draft, session.client, session.engine.key, staged, engineSupports, onNewThreadLaunched, commentCount],
   );
 
   // ── The submit dispatch (`on_submit`, composer.rs:5980-6007) ───────────
@@ -2395,7 +2403,7 @@ export function Composer({
         // Condition 4 (composer.rs:5958-5962): the new-chat canvas with a
         // LOADED catalog that reports no agents — offline/loading must not
         // block.
-        newChatNoAgents: newChat && harnesses.loaded && harnesses.rows.length === 0,
+        newChatNoAgents: newChat && harnesses.loaded && offeredHarnesses(harnesses.rows).length === 0,
       })
     ) {
       // A blocked send is a no-op — no failure, no wire call
@@ -2403,7 +2411,7 @@ export function Composer({
       return;
     }
     await send(text, mode === "queue");
-  }, [busy, text, staged, runLive, commentCount, editingMessage, onEditFinish, session.client, interrupt, send, commitQueueEdit]);
+  }, [busy, text, staged, runLive, commentCount, editingMessage, onEditFinish, session.client, interrupt, send, commitQueueEdit, newChat, harnesses.loaded, harnesses.rows]);
 
   // ── Key policy: completions → phone newline → wizard → Enter (§2.7) ────
   // `resolveEnterAction` (lib/composer-send.ts) is the Enter branch's single
@@ -2744,7 +2752,7 @@ export function Composer({
       queueEditFinishing: busy,
       requestTargetDisconnected: session.client.state !== "connected",
       reviewCommentFlushPending: false,
-      newChatNoAgents: newChat && harnesses.loaded && harnesses.rows.length === 0,
+      newChatNoAgents: newChat && harnesses.loaded && offeredHarnesses(harnesses.rows).length === 0,
     });
 
   // ── The queue-degraded caption (§2.3) ───────────────────────────────────
@@ -2760,8 +2768,8 @@ export function Composer({
   const queueOffline = engineState !== "reconnecting";
   const queueNotice = queueDegraded
     ? queueOffline
-      ? "Offline — messages will send when you're back online."
-      : "Messages will send once the connection recovers."
+      ? "Offline — sending is disabled until the host returns."
+      : "Reconnecting — sending is disabled until connected."
     : null;
 
   // The chat-scoped failure filter (composer.rs:7311-7315).

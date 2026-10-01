@@ -2363,6 +2363,31 @@ a:focus-visible,
   }
 }
 
+/* Cookie session gate: private viewports remain unmounted until verification. */
+.browser-session-gate {
+  min-height: 100%;
+  display: grid;
+  place-items: center;
+  padding: 24px;
+  overflow: auto;
+}
+.browser-session-card {
+  width: min(100%, 440px);
+  border: 1px solid var(--rb-border);
+  border-radius: 16px;
+  padding: 24px;
+  background: var(--rb-bg);
+  overflow-wrap: anywhere;
+}
+.browser-session-card h1 { margin-top: 0; font-size: 24px; }
+.browser-session-card p { color: var(--rb-text-muted); }
+.browser-session-actions { display: flex; flex-wrap: wrap; gap: 12px; }
+@media (max-width: 600px) {
+  .browser-session-gate { padding: 16px; }
+  .browser-session-card { padding: 20px; }
+  .browser-session-actions { flex-direction: column; }
+}
+
 /* `GatePhase::Loading` — the desktop renders ONLY the root. Nothing to see. */
 .gate-loading {
   height: 100%;
@@ -2443,10 +2468,15 @@ a:focus-visible,
   background: var(--rb-hover);
 }
 
-/* Web-only: the parked pairing's escape hatch (see root-layout). */
-.gate-pair-link {
+/* Cookie-session recovery under the parked-engine gate. */
+.gate-session-action {
+  padding: 6px 12px;
+  border: 1px solid var(--rb-border);
+  border-radius: 8px;
+  background: transparent;
   font-size: 13px;
   color: var(--rb-accent);
+  cursor: pointer;
 }
 
 /*
@@ -6827,7 +6857,7 @@ a:focus-visible,
   color: var(--rb-text);
 }
 
-.pair-page {
+.connect-page {
   height: 100%;
   display: flex;
   flex-direction: column;
@@ -6838,12 +6868,12 @@ a:focus-visible,
   padding: var(--rb-space-lg);
 }
 
-.pair-page h1 {
+.connect-page h1 {
   font-size: 20px;
   margin: 0;
 }
 
-.pair-status {
+.connect-status {
   color: var(--rb-text-muted);
   margin: 0;
 }

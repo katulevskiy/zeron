@@ -1,20 +1,19 @@
 import { describe, expect, it } from "vitest";
 import type { EngineEntrySnapshot, EngineConnectionState, EngineRegistrySnapshot } from "@zeron/engine-client";
-import type { FleetState, StoredEngine } from "../src/lib/engine-store";
-import { engineConnection, settingsEngineLabel } from "../src/lib/settings-engine";
+import { encodeScopedId, parseScopedId } from "@zeron/engine-client";
+import type { FleetState, OwnedEngine } from "../src/lib/owned-engine";
+import { engineConnection, settingsDeviceName, settingsEngineKey, settingsEngineLabel } from "../src/lib/settings-engine";
 
-function stored(baseUrl: string): StoredEngine {
+function owned(key: string): OwnedEngine {
   return {
-    baseUrl,
-    credential: "credential",
+    key,
+    endpoint: `wss://relay.example.test/api/browser/devices/${key}/relay`,
     label: "Web on Windows",
-    sessionId: "session",
-    pairedAt: 1,
-    deviceId: null,
+    deviceId: key,
   };
 }
 
-function fleetOf(active: string | null, engines: readonly StoredEngine[]): FleetState {
+function fleetOf(active: string | null, engines: readonly OwnedEngine[]): FleetState {
   return { active, engines, configurationError: null };
 }
 
@@ -34,8 +33,8 @@ function entryOf(state: EngineConnectionState, lastError: string | null): Engine
 
 describe("settingsEngineLabel", () => {
   it("names the active edge device only when the fleet is plural", () => {
-    const a = { ...stored("device-a"), label: "Workstation" };
-    const b = { ...stored("device-b"), label: "Laptop" };
+    const a = { ...owned("device-a"), label: "Workstation" };
+    const b = { ...owned("device-b"), label: "Laptop" };
     expect(settingsEngineLabel(fleetOf(null, []))).toBe(null);
     expect(settingsEngineLabel(fleetOf("device-a", [a]))).toBe(null);
     expect(settingsEngineLabel(fleetOf("device-a", [a, b]))).toBe("Workstation");
@@ -45,10 +44,35 @@ describe("settingsEngineLabel", () => {
     expect(settingsEngineLabel(fleetOf("missing", [a, b]))).toBe(null);
   });
 
+  it("keeps a relay UUID separate from its transport URL and display label", () => {
+    const id = "123e4567-e89b-12d3-a456-426614174000";
+    const other = "123e4567-e89b-12d3-a456-426614174001";
+    const a = { ...owned(id), label: "Desktop" };
+    const b = { ...a, key: other, deviceId: other, label: "Laptop" };
+    expect(settingsEngineKey(a)).toBe(id);
+    expect(settingsEngineLabel(fleetOf(other, [a, b]))).toBe("Laptop");
+    expect(settingsDeviceName({ ...a, label: "  " })).toBe(id);
+    expect(settingsEngineKey({ ...a, endpoint: "wss://another-relay.example.test/relay" })).toBe(id);
+    const registry = { engines: [{ ...entryOf("connected", null), key: id, devices: { rows: [{ id, name: "Own device" }] } }] } as unknown as EngineRegistrySnapshot;
+    expect(settingsDeviceName(a, registry)).toBe("Own device");
+  });
+  it("routes scoped chat identities by OwnedEngine key, never by a shared relay origin", () => {
+    const a = owned("123e4567-e89b-12d3-a456-426614174000");
+    const b = owned("123e4567-e89b-12d3-a456-426614174001");
+    const fleet = fleetOf(a.key, [a, b]);
+    const chatA = encodeScopedId(a.key, "same-chat");
+    const chatB = encodeScopedId(b.key, "same-chat");
+    expect(new URL(a.endpoint).origin).toBe(new URL(b.endpoint).origin);
+    expect(chatA).not.toBe(chatB);
+    const route = parseScopedId(chatB);
+    expect(route.rawId).toBe("same-chat");
+    expect(fleet.engines.find((engine) => engine.key === route.engine)).toBe(b);
+    expect(Object.keys(b).sort()).toEqual(["deviceId", "endpoint", "key", "label"]);
+  });
   it("shows the engine's own WatchDevices name instead of an edge UUID, including after a rename", () => {
     const id = "123e4567-e89b-12d3-a456-426614174000";
     const other = "123e4567-e89b-12d3-a456-426614174001";
-    const fleet = fleetOf(id, [{ ...stored(id), label: id }, { ...stored(other), label: other }]);
+    const fleet = fleetOf(id, [{ ...owned(id), label: id }, { ...owned(other), label: other }]);
     const own = { id, name: "Work Laptop" };
     const registry = { engines: [
       { ...entryOf("connected", null), key: id, info: { deviceId: id }, devices: { rows: [own, { id: other, name: "Wrong peer copy" }] } },

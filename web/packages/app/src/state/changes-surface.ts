@@ -112,6 +112,17 @@ export class ChangesSurfaceStore {
   #comments: readonly ReviewComment[] = EMPTY_COMMENTS;
   #draft: DiffDraftAnchor | null = null;
 
+  resetPrivateState(): void {
+    if (this.#settleTimer !== null) clearTimeout(this.#settleTimer);
+    this.#settleTimer = null;
+    this.#bySurface.clear();
+    this.#files = [];
+    this.#comments = EMPTY_COMMENTS;
+    this.#draft = null;
+    this.#version += 1;
+    this.#emit();
+  }
+
   getVersion = (): number => this.#version;
 
   subscribe = (listener: () => void): (() => void) => {

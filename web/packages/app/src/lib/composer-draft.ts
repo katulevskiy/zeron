@@ -1,7 +1,7 @@
 import type { Chat, HarnessDescriptor, HarnessId, Model, ReasoningLevel } from "@zeron/proto";
 import type { DraftConfig, DraftConfigUpdate } from "./composer-actions";
 import { buildChatConfig } from "./composer-actions";
-import type { StorageLike } from "./engine-store";
+import type { StorageLike } from "./storage";
 import { clampReasoning, effectiveReasoningLadder, offeredOptions } from "./traits-summary";
 
 /**
@@ -284,7 +284,9 @@ export class ComposerDefaultsStore {
     }
     this.#defaults =
       raw === null ? EMPTY_DEFAULTS : healComposerDefaults(safeParse(raw) ?? EMPTY_DEFAULTS);
+    this.#defaults = { ...this.#defaults, device: null, project: null, noProject: false };
     this.#serialized = JSON.stringify(this.#defaults);
+    if (raw !== null) this.#persist();
   }
 
   getSnapshot(): ComposerDefaults {
@@ -298,6 +300,20 @@ export class ComposerDefaultsStore {
     };
   }
 
+  /** Device/project identities are session-local, unlike model preferences. */
+  resetPrivateTarget(): void {
+    this.update({ device: null, project: null, noProject: false });
+    this.#persist();
+  }
+
+  #persist(): void {
+    try {
+      this.#storage.setItem(COMPOSER_DEFAULTS_KEY, JSON.stringify({ ...this.#defaults, device: null, project: null, noProject: false }));
+    } catch {
+      // Storage unavailable: private targets still never load on restart.
+    }
+  }
+
   /** Apply a patch, heal, persist, notify — the desktop's atomic save. */
   update(patch: DefaultsPatch): void {
     const next = healComposerDefaults({ ...this.#defaults, ...patch });
@@ -307,11 +323,7 @@ export class ComposerDefaultsStore {
     }
     this.#defaults = next;
     this.#serialized = serialized;
-    try {
-      this.#storage.setItem(COMPOSER_DEFAULTS_KEY, serialized);
-    } catch {
-      // Private mode or a full quota — a sticky pick is not worth a crash.
-    }
+    this.#persist();
     for (const listener of [...this.#listeners]) {
       listener();
     }

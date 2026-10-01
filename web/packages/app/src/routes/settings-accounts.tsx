@@ -13,6 +13,7 @@ import {
   DialogTitle,
 } from "../components/ui/Dialog";
 import { SettingsEngineIndicator } from "../components/settings-engine-indicator";
+import { settingsEngineKey } from "../lib/settings-engine";
 import {
   accountInitial,
   accountLabel,
@@ -55,6 +56,12 @@ type LoginFlow =
 
 export function AccountsSettingsPage() {
   const session = useEngineSession();
+  // Device-local state must not survive a selection change. In particular,
+  // a late list/login reply from the old device cannot populate the new one.
+  return <EngineAccountsSettings key={session === null ? "disconnected" : settingsEngineKey(session.engine)} session={session} />;
+}
+
+function EngineAccountsSettings({ session }: { session: ReturnType<typeof useEngineSession> }) {
   const client = session?.client ?? null;
   // The selected edge engine owns these device-local logins; no relay target.
   const target = null;

@@ -8,7 +8,7 @@ import { SettingsEngineIndicator } from "../src/components/settings-engine-indic
 const h = vi.hoisted(() => {
   const ids = ["123e4567-e89b-12d3-a456-426614174000", "123e4567-e89b-12d3-a456-426614174001"];
   let active = ids[0]!;
-  const engines = ids.map((id) => ({ baseUrl: id, label: id, deviceId: id }));
+  const engines = ids.map((id) => ({ key: id, endpoint: `wss://relay.example.test/api/browser/device/${id}/ws`, label: id, deviceId: id }));
   const registry = { engines: ids.map((id, ix) => ({
     key: id, state: "connected", info: { deviceId: id },
     devices: { rows: [{ id, name: ix === 0 ? "Work Laptop" : "Server" }] },

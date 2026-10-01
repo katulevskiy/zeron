@@ -2,7 +2,7 @@ import { createRootRoute, createRoute, createRouter, redirect } from "@tanstack/
 import { RootLayout } from "./routes/root-layout";
 import { AppShell } from "./components/app-shell";
 import { ConversationPage } from "./routes/chat-page";
-import { PairPage } from "./routes/pair-page";
+import { ConnectPage } from "./routes/connect-page";
 import { SettingsLayout } from "./components/settings-layout";
 import { AccountsSettingsPage } from "./routes/settings-accounts";
 import { AppearanceSettingsPage } from "./routes/settings-appearance";
@@ -29,7 +29,13 @@ const chatRoute = createRoute({ getParentRoute: () => shellRoute, path: "/chat/$
 // desktop, and a route for either took the chat off `/chat/$chatId`, which is
 // the only path that owns a pane — the column, its tabs and its toggle all
 // disappeared. `rightPaneStore.show(chatId, "changes" | "files")` opens them.
-const pairRoute = createRoute({ getParentRoute: () => rootRoute, path: "/pair", component: PairPage });
+const connectRoute = createRoute({ getParentRoute: () => rootRoute, path: "/connect", component: ConnectPage });
+// Old bookmarks lead to owned-device discovery, never a manual auth fallback.
+const legacyPairRoute = createRoute({
+  getParentRoute: () => rootRoute,
+  path: "/pair",
+  beforeLoad: () => { throw redirect({ to: "/connect" }); },
+});
 
 const settingsRoute = createRoute({ getParentRoute: () => shellRoute, path: "/settings", component: SettingsLayout });
 const settingsIndexRoute = createRoute({
@@ -65,7 +71,8 @@ const shortcutsRoute = createRoute({ getParentRoute: () => settingsRoute, path: 
 const archivedRoute = createRoute({ getParentRoute: () => settingsRoute, path: "/archived", component: ArchivedSettingsPage });
 
 const routeTree = rootRoute.addChildren([
-  pairRoute,
+  connectRoute,
+  legacyPairRoute,
   shellRoute.addChildren([
     indexRoute,
     chatRoute,
@@ -93,7 +100,7 @@ export {
   harnessesRoute,
   indexRoute,
   notificationsRoute,
-  pairRoute,
+  connectRoute,
   rootRoute,
   settingsRoute,
   shellRoute,

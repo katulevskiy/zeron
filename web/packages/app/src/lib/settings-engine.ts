@@ -1,5 +1,10 @@
 import type { EngineEntrySnapshot, EngineRegistrySnapshot } from "@zeron/engine-client";
-import type { FleetState } from "./engine-store";
+import type { FleetState } from "./owned-engine";
+
+/** Settings address the discovered engine by opaque registry identity. */
+export function settingsEngineKey(engine: FleetState["engines"][number]): string {
+  return engine.key;
+}
 
 /**
  * The engine-addressing settings vocabulary: which engine the settings
@@ -18,16 +23,17 @@ import type { FleetState } from "./engine-store";
  * copy of this row, which may be stale or identify a different engine.
  */
 export function settingsDeviceName(engine: FleetState["engines"][number], registry?: EngineRegistrySnapshot): string {
-  const entry = registry?.engines.find((candidate) => candidate.key === engine.baseUrl);
-  const ownId = entry?.info?.deviceId ?? engine.deviceId ?? engine.baseUrl;
+  const key = settingsEngineKey(engine);
+  const entry = registry?.engines.find((candidate) => candidate.key === key);
+  const ownId = entry?.info?.deviceId ?? engine.deviceId;
   const name = entry?.devices.rows.find((device) => device.id === ownId)?.name?.trim();
-  return name || engine.label || engine.baseUrl;
+  return name || engine.label.trim() || ownId;
 }
 
 /** Name the active engine only when more than one is available. */
 export function settingsEngineLabel(fleet: FleetState, registry?: EngineRegistrySnapshot): string | null {
   if (fleet.engines.length < 2 || fleet.active === null) return null;
-  const engine = fleet.engines.find((entry) => entry.baseUrl === fleet.active);
+  const engine = fleet.engines.find((entry) => settingsEngineKey(entry) === fleet.active);
   return engine === undefined ? null : settingsDeviceName(engine, registry);
 }
 

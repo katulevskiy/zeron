@@ -26,6 +26,7 @@ import {
   type PendingSend,
 } from "../state/transcript-store";
 import { transcriptFoldCache } from "../state/transcript-fold-state";
+import { isCurrentPrivateSession, privateSessionGeneration } from "../state/private-session-generation";
 import { NoticeChip } from "./notice-chip";
 import { useUiSettings } from "../state/ui-settings";
 import {
@@ -380,6 +381,7 @@ function TranscriptSurface({
     return motion;
   }, [chatArrival, engineKey, docId, alignTop]);
   useEffect(() => {
+    const privateGeneration = privateSessionGeneration();
     // StrictMode's simulated remount re-runs this effect after the cleanup
     // below reset the KEPT store instance; re-applying the pins keeps that
     // double mount as faithful as a real remount (idempotent — the snapshot
@@ -391,7 +393,7 @@ function TranscriptSurface({
       }
     }
     return () => {
-      if (!alignTop) {
+      if (!alignTop && isCurrentPrivateSession(privateGeneration)) {
         transcriptFoldCache.capture(engineKey, docId, toolMotion.captureExplicitFolds());
       }
       toolMotion.reset();
@@ -1234,8 +1236,9 @@ function TranscriptScroller({
   // snapshot (a partial replay must not); an unresolved pending restore
   // keeps the older entry.
   useEffect(() => {
+    const privateGeneration = privateSessionGeneration();
     return () => {
-      if (alignTop || pendingViewportRef.current !== null) {
+      if (!isCurrentPrivateSession(privateGeneration) || alignTop || pendingViewportRef.current !== null) {
         return;
       }
       const el = scrollerRef.current;
@@ -1706,7 +1709,7 @@ function offlineStripMessage(alignTop: boolean, status: EngineStatus | null): st
   if (status === null || status.state === "connected") {
     return null;
   }
-  return status.state === "parked" || status.state === "closed"
+  return status.state === "offline" || status.state === "parked" || status.state === "closed"
     ? "Engine off. Cached history is read-only."
     : "Reconnecting… Cached history is read-only.";
 }

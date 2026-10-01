@@ -1,7 +1,7 @@
-import { Outlet, useRouterState } from "@tanstack/react-router";
-import { Link } from "@tanstack/react-router";
+import { Outlet } from "@tanstack/react-router";
 import { EngineSessionProvider, useEngineRetry, useEngineSession } from "../state/session-provider";
-import { useFleet, useFleetRegistry } from "../state/fleet";
+import { engineRegistry, retryBrowserSession, signIn, signOut, useFleet, useFleetRegistry } from "../state/fleet";
+import { BrowserSessionGate } from "../components/browser-session-gate";
 import { useEngineStatus } from "../state/hooks";
 import { GateCard } from "../components/gate-card";
 import { useConnectionState } from "../components/connection-state";
@@ -23,11 +23,19 @@ import { useConnectionState } from "../components/connection-state";
  * - **Loading** — the first dial is in flight and nothing has connected or
  *   seeded yet: a plain empty root, no overlay (the boot splash is a
  *   deliberate open question and is NOT built here).
- *
- * `/pair` always shows the page: it is the one route that can FIX a dead
- * pairing, so the gate must never cover it.
+ * Browser authentication is an outer gate; no manual pairing fallback exists.
  */
 export function RootLayout() {
+  const fleet = useFleet();
+  if (!fleet.session.authenticated) {
+    return <BrowserSessionGate
+      status={fleet.status}
+      error={fleet.configurationError}
+      onSignIn={() => { void signIn(); }}
+      onRetry={() => { void retryBrowserSession().catch(() => {}); }}
+      onRetrySignOut={() => { void signOut().catch(() => {}); }}
+    />;
+  }
   return (
     <EngineSessionProvider>
       <GateAndPage />
@@ -42,15 +50,17 @@ function GateAndPage() {
   const fleet = useFleet();
   const registry = useFleetRegistry();
   const retry = useEngineRetry();
-  const onPair = useRouterState({ select: (s) => s.location.pathname === "/pair" });
 
   const engines = registry.engines;
   const paired = fleet.engines.length > 0;
-  const allOff = paired && engines.length > 0 && engines.every((engine) => engine.state === "off");
+  // Registry `off` covers both a suspended owned host and fatal parking.
+  // Only the latter can gate the page; offline sessions remain read-only.
+  const offline = engines.some((engine) => engineRegistry.clientFor(engine.key)?.state === "offline");
+  const allFailed = paired && engines.length > 0 && !offline && engines.every((engine) => engine.state === "off");
   const anythingLive =
-    engines.some((engine) => engine.state === "connected" || engine.chats.loaded || engine.spaces.loaded);
+    offline || engines.some((engine) => engine.state === "connected" || engine.chats.loaded || engine.spaces.loaded);
 
-  const phase = paired && !onPair ? (allOff ? "failed" : anythingLive ? "ready" : "loading") : "ready";
+  const phase = paired && engines.length > 0 ? (allFailed ? "failed" : anythingLive ? "ready" : "loading") : "ready";
 
   if (phase === "loading") {
     // GatePhase::Loading — the desktop renders ONLY the root (plus a splash
@@ -64,15 +74,9 @@ function GateAndPage() {
       ?? state.label;
     return (
       <GateCard error={error ?? "Engine connection failed"} onRetry={retry}>
-        {/*
-          Web-only escape hatch, flagged in the ticket's Comments: a parked
-          credential cannot be fixed by retrying, and the gate covers every
-          route that could re-pair — without this link the dead session
-          would strand the browser.
-        */}
-        <Link to="/pair" className="gate-pair-link">
-          Pair again
-        </Link>
+        <button type="button" className="gate-session-action" onClick={() => { void signOut().catch(() => {}); }}>
+          Sign out
+        </button>
       </GateCard>
     );
   }

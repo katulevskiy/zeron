@@ -2016,6 +2016,9 @@ export function ownTurnObservesPrompt(anchor: OwnTurnAnchor, exists: boolean): b
  * own-turn anchor.
  */
 export class PendingQueuedTurns {
+  clear(): void {
+    this.#items = [];
+  }
   #items: Array<{ chatId: string; messageId: string }> = [];
 
   /** Test seam. */

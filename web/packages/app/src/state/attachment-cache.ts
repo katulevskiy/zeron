@@ -77,6 +77,7 @@ function emptySnapshot(): AttachmentImageSnapshot {
 /** Module-level so a freshly-mounted row picks up the seed from a prior
  *  send (the desktop's `seed_attachment` call). */
 const cache = new Map<string, CacheEntry>();
+let cacheGeneration = 0;
 const listeners = new Map<string, Set<() => void>>();
 /** Monotonic access clock for LRU ordering (`ImageCache.tick`). */
 let tick = 0;
@@ -294,10 +295,12 @@ export async function loadAttachment(
   deviceId: string,
   path: string,
 ): Promise<void> {
+  const generation = cacheGeneration;
   if (!beginAttachmentLoad(deviceId, path)) {
     return;
   }
   const image = await readAttachmentImage(client, path);
+  if (generation !== cacheGeneration) return;
   if (image === null) {
     storeAttachmentError(deviceId, path);
     return;
@@ -379,15 +382,23 @@ export function useUploadProgressPercent(): number | null {
   );
 }
 
-/** Test-only escape hatch. Clears the module-level cache so each test
- *  starts from a clean slate. */
-export function __resetAttachmentCacheForTests(): void {
+/** Drop private bytes/progress, keeping mounted subscribers alive to observe the clear. */
+export function resetAttachmentCache(): void {
+  cacheGeneration += 1;
   cache.clear();
-  listeners.clear();
   tick = 0;
   loadedBytes = 0;
   protectedKeys = new Set();
   uploadProgress = null;
+  for (const key of listeners.keys()) notify(key);
+  notifyUpload();
+}
+
+/** Test-only escape hatch. Clears the module-level cache so each test
+ *  starts from a clean slate. */
+export function __resetAttachmentCacheForTests(): void {
+  resetAttachmentCache();
+  listeners.clear();
   uploadListeners.clear();
 }
 

@@ -1,7 +1,7 @@
 import { describe, expect, it, vi } from "vitest";
 import type { EngineClient, EngineWatchCache } from "@zeron/engine-client";
 import type { SessionMessageEntry, TranscriptUpdate } from "@zeron/proto";
-import type { StoredEngine } from "../src/lib/engine-store";
+import type { OwnedEngine } from "../src/lib/owned-engine";
 import { createEngineSession, disposeEngineSession, reconcileEngineSessions } from "../src/state/engine-session";
 import { TranscriptPool, WARM_TRANSCRIPT_LIMIT } from "../src/state/transcript-pool";
 
@@ -60,19 +60,19 @@ describe("warm transcript pool", () => {
 
   it("retains stores through metadata refresh, isolates engines, and closes them on session replacement", () => {
     const c = client();
-    const engine = { baseUrl: "https://engine.test", credential: "test" } as StoredEngine;
+    const engine: OwnedEngine = { key: "engine_test", endpoint: "ws://edge.test/api/browser/device/engine_test/ws", label: "Test engine", deviceId: "engine_test" };
     const cache = {} as EngineWatchCache;
     const session = createEngineSession(engine, c.value, cache);
     const a = session.transcripts.get("A");
-    const refreshed = reconcileEngineSessions(new Map([[engine.baseUrl, session]]),
+    const refreshed = reconcileEngineSessions(new Map([[engine.key, session]]),
       [{ ...engine, label: "Renamed" }], () => ({ client: c.value, cache }));
     expect(refreshed.displaced).toEqual([]);
-    expect(refreshed.sessions.get(engine.baseUrl)!.transcripts.get("A")).toBe(a);
+    expect(refreshed.sessions.get(engine.key)!.transcripts.get("A")).toBe(a);
     const replacementClient = client();
     const replaced = reconcileEngineSessions(refreshed.sessions, [engine],
       () => ({ client: replacementClient.value, cache }));
     expect(replaced.displaced).toHaveLength(1);
-    const next = replaced.sessions.get(engine.baseUrl)!;
+    const next = replaced.sessions.get(engine.key)!;
     expect(next.transcripts.get("A")).not.toBe(a);
     for (const displaced of replaced.displaced) disposeEngineSession(displaced);
     expect(c.watches[0]!.cancel).toHaveBeenCalledOnce();

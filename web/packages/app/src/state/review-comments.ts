@@ -70,6 +70,16 @@ class ReviewCommentStore {
   readonly #listeners = new Set<() => void>();
   #version = 0;
 
+  resetPrivateState(): void {
+    this.#staged.clear();
+    this.#diffDrafts.clear();
+    this.#editorDrafts.clear();
+    this.#activeEditor.clear();
+    this.#snapshots.clear();
+    this.#version += 1;
+    for (const listener of this.#listeners) listener();
+  }
+
   getVersion = (): number => this.#version;
 
   subscribe = (listener: () => void): (() => void) => {

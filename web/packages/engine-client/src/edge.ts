@@ -7,6 +7,26 @@
 
 const JSON_HEADERS = { accept: "application/json" };
 
+/** HTTP failures retain their status so supervision can distinguish expiry from an outage. */
+export class BrowserApiError extends Error {
+  constructor(readonly status: number, operation: string) {
+    super(`${operation} returned HTTP ${status}`);
+    this.name = "BrowserApiError";
+  }
+}
+
+async function browserJson(response: Response, operation: string): Promise<Record<string, unknown>> {
+  if (!response.ok) throw new BrowserApiError(response.status, operation);
+  if (!response.headers.get("content-type")?.toLowerCase().includes("application/json")) {
+    throw new Error("Browser API did not return JSON. Check the same-origin browser backend configuration.");
+  }
+  const value: unknown = await response.json();
+  if (typeof value !== "object" || value === null || Array.isArray(value)) {
+    throw new Error(`${operation} returned an invalid JSON object`);
+  }
+  return value as Record<string, unknown>;
+}
+
 export interface BrowserProfile {
   readonly firstName?: string;
   readonly lastName?: string;
@@ -52,10 +72,11 @@ export async function fetchBrowserSession(): Promise<BrowserSession> {
     credentials: "same-origin",
     cache: "no-store",
   });
-  if (!response.ok) {
-    throw new Error(`browser session check returned HTTP ${response.status}`);
+  const record = await browserJson(response, "browser session check");
+  if (typeof record.authenticated !== "boolean") throw new Error("Invalid browser session response");
+  if (record.authenticated && (typeof record.ownerId !== "string" || !record.ownerId || typeof record.csrfToken !== "string" || !record.csrfToken)) {
+    throw new Error("Incomplete browser session: owner and CSRF token are required");
   }
-  const record = (await response.json()) as Record<string, unknown>;
   return {
     authenticated: record.authenticated === true,
     ownerId: typeof record.ownerId === "string" ? record.ownerId : undefined,
@@ -79,10 +100,7 @@ export async function startBrowserLogin(): Promise<string> {
     credentials: "same-origin",
     cache: "no-store",
   });
-  if (!response.ok) {
-    throw new Error(`browser login returned HTTP ${response.status}`);
-  }
-  const record = (await response.json()) as Record<string, unknown>;
+  const record = await browserJson(response, "browser login");
   if (typeof record.authorizationUrl !== "string") {
     throw new Error("browser login response is missing the authorization URL");
   }
@@ -96,13 +114,7 @@ export async function fetchBrowserDevices(): Promise<readonly BrowserDevice[]> {
     credentials: "same-origin",
     cache: "no-store",
   });
-  if (response.status === 401) {
-    throw new Error("Not signed in");
-  }
-  if (!response.ok) {
-    throw new Error(`browser devices returned HTTP ${response.status}`);
-  }
-  const record = (await response.json()) as Record<string, unknown>;
+  const record = await browserJson(response, "browser devices");
   const devices = Array.isArray(record.devices) ? record.devices : [];
   return devices.filter(
     (device): device is BrowserDevice =>
@@ -113,20 +125,35 @@ export async function fetchBrowserDevices(): Promise<readonly BrowserDevice[]> {
 
 /** `POST /api/browser/logout` (CSRF-guarded) — revoke and clear the cookie. */
 export async function browserLogout(csrfToken: string): Promise<void> {
-  await fetch("/api/browser/logout", {
+  if (!csrfToken) throw new Error("Sign-out requires the browser session CSRF token");
+  const response = await fetch("/api/browser/logout", {
     method: "POST",
     headers: { ...JSON_HEADERS, "x-csrf-token": csrfToken },
     credentials: "same-origin",
     cache: "no-store",
   });
+  if (!response.ok) throw new BrowserApiError(response.status, "browser logout");
+}
+
+/** Only genuine foreground interaction calls this; polling must never extend idle life. */
+export async function browserActivity(csrfToken: string): Promise<void> {
+  if (!csrfToken) throw new Error("Browser activity requires the session CSRF token");
+  const response = await fetch("/api/browser/activity", {
+    method: "POST",
+    headers: { ...JSON_HEADERS, "x-csrf-token": csrfToken },
+    credentials: "same-origin",
+    cache: "no-store",
+  });
+  const record = await browserJson(response, "browser activity");
+  if (record.authenticated !== true) throw new BrowserApiError(401, "browser activity");
 }
 
 /**
  * The device relay WebSocket: same-origin, the browser's session cookie
- * authenticates the upgrade. The device id is `[A-Za-z0-9-]`.
+ * authenticates the upgrade. Canonical device IDs include underscores.
  */
 export function relayDeviceUrl(deviceId: string): string {
-  if (!/^[A-Za-z0-9-]{1,128}$/.test(deviceId)) {
+  if (!/^[A-Za-z0-9_-]{1,128}$/.test(deviceId)) {
     throw new Error("Invalid remote device id");
   }
   const protocol = window.location.protocol === "https:" ? "wss" : "ws";

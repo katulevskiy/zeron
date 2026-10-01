@@ -198,7 +198,7 @@ function ChatMenuPages({
       <MenuRow
         fadeKey="pin"
         onClick={() => {
-          // `set_chat_pinned`: device-local, no engine roundtrip; the click
+          // The sync bridge turns this projection into a per-pin intent; the click
           // closes the menu like the desktop's `close_chat_menu`.
           onClose();
           sidebarStore.setChatPinned(pinProfileKey, chat.id, !isPinned);

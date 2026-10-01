@@ -248,6 +248,23 @@ export class RightPaneStore {
     this.#terminals = terminals;
   }
 
+  /** Session teardown never saves dirty files or carries paths into another owner. */
+  resetPrivateState(): void {
+    for (const [chatId, state] of this.#byChat) {
+      for (const surface of state.tabs) {
+        if (surface.kind === "terminal") this.#terminals?.closeTab(chatId, surface.id);
+      }
+    }
+    this.#byChat.clear();
+    this.#files.clear();
+    this.#fileKeys.clear();
+    this.#diffMeta.clear();
+    this.#subagentMeta.clear();
+    this.#closeRequests.clear();
+    this.#pendingReveal = null;
+    this.#notify();
+  }
+
   getVersion = (): number => this.#version;
 
   subscribe = (listener: () => void): (() => void) => {

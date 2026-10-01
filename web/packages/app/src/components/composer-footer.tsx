@@ -88,7 +88,7 @@ export function ComposerFooter({ chat, crSummary, contextUsage }: ComposerFooter
   const ownRawDeviceId = session?.client.engineInfo?.deviceId ?? null;
   const ownDeviceId =
     session !== null && ownRawDeviceId !== null
-      ? encodeScopedId(session.engine.baseUrl, ownRawDeviceId)
+      ? encodeScopedId(session.engine.key, ownRawDeviceId)
       : null;
   const effectiveDeviceId = space?.deviceId ?? ownDeviceId;
   const effectiveDevice = devices.find((device) => device.id === effectiveDeviceId) ?? null;

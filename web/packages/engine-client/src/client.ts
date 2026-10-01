@@ -25,9 +25,10 @@ export type ParkedReason = "invalid-credential" | "identity-changed";
  * Connected/Reconnecting/Off: the web splits "Off" into parked (re-pair
  * required, never retried) and closed (this client is done).
  */
-export type EngineClientState = "connecting" | "connected" | "reconnecting" | "parked" | "closed";
+export type EngineClientState = "connecting" | "connected" | "reconnecting" | "offline" | "parked" | "closed";
 
 export type EngineStatus =
+  | { state: "offline"; generation: number }
   | { state: "connecting"; attempt: number }
   | { state: "connected"; info: EngineInfo; generation: number }
   | { state: "reconnecting"; lastError: string; generation: number; attempt: number }
@@ -136,7 +137,7 @@ type Pending =
     }
   | { kind: "watch"; token: number; timer: Timer };
 
-type RunState = "idle" | "running" | "parked" | "closed";
+type RunState = "idle" | "running" | "suspended" | "parked" | "closed";
 
 /**
  * A supervised connection to one engine: dial, authenticate with the
@@ -220,15 +221,30 @@ export class EngineClient {
     return this.#status?.state ?? "connecting";
   }
 
-  /** Start supervision. A no-op unless the client is fresh. */
+  /** Start or resume supervision. Closed/identity-parked clients never resume. */
   connect(): void {
-    if (this.#runState !== "idle") {
+    if (this.#runState !== "idle" && this.#runState !== "suspended") {
       return;
     }
     this.#runState = "running";
     this.#dial();
   }
 
+  /** Presence says the owned host is offline: retain watches, never replay calls. */
+  suspend(): void {
+    if (this.#runState === "closed" || this.#runState === "parked" || this.#runState === "suspended") return;
+    this.#runState = "suspended";
+    clearTimeout(this.#reconnectTimer);
+    this.#reconnectTimer = undefined;
+    const dial = this.#currentDial;
+    clearTimeout(this.#dialTimer);
+    this.#dialTimer = undefined;
+    const socket = this.#socket;
+    if (dial !== null) this.#teardown(dial, new RpcError("transport", "Engine is offline"));
+    this.#socket = null;
+    socket?.close(1000, "host offline");
+    this.#emit({ state: "offline", generation: this.#generation });
+  }
   onStatus(listener: (status: EngineStatus) => void): () => void {
     this.#statusListeners.add(listener);
     return () => this.#statusListeners.delete(listener);
@@ -414,7 +430,7 @@ export class EngineClient {
       } else if (info.deviceId !== this.#expectedDeviceId) {
         this.#park(
           "identity-changed",
-          `Engine identity changed; pair again (expected ${this.#expectedDeviceId}, found ${info.deviceId})`,
+          `Engine identity changed; connection blocked (expected ${this.#expectedDeviceId}, found ${info.deviceId})`,
         );
         return;
       }
@@ -469,7 +485,7 @@ export class EngineClient {
     clearTimeout(this.#dialTimer);
     this.#dialTimer = undefined;
     if (isPermanentRefusal(event)) {
-      this.#park("invalid-credential", "Session credential was revoked or refused; pair again");
+      this.#park("invalid-credential", "Session authentication was revoked or refused; sign in again");
       return;
     }
     if (event.code === CLOSE_UNAUTHORIZED) {
@@ -514,7 +530,9 @@ export class EngineClient {
       this.#teardown(dial, new RpcError("parked", detail));
     }
     this.#socket = null;
-    socket?.close(CLOSE_UNAUTHORIZED, detail);
+    // DOM WebSocket close reasons are limited to 123 UTF-8 bytes. Keep the
+    // full UUID diagnostic in status; a long reason must not prevent parking.
+    socket?.close(CLOSE_UNAUTHORIZED, reason);
     for (const entry of this.#watches.values()) {
       entry.currentId = null;
       this.#deliverWatchEnd(entry, new RpcError("parked", detail));

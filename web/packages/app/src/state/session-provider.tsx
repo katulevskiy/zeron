@@ -63,9 +63,9 @@ export function EngineSessionProvider({ children }: { children: ReactNode }) {
   // catalog, and disposing a retained catalog was the first-pair "loading
   // forever" defect (ticket 67).
   useEffect(() => {
-    const plan = reconcileEngineSessions(sessionsRef.current, fleet.engines, (baseUrl) => {
-      const client = engineRegistry.clientFor(baseUrl);
-      const cache = engineRegistry.watchCacheFor(baseUrl);
+    const plan = reconcileEngineSessions(sessionsRef.current, fleet.engines, (key) => {
+      const client = engineRegistry.clientFor(key);
+      const cache = engineRegistry.watchCacheFor(key);
       return client === null || cache === null ? null : { client, cache };
     });
     // Dispose each displaced catalog exactly once; retained catalogs —
@@ -103,9 +103,9 @@ export function EngineSessionProvider({ children }: { children: ReactNode }) {
     () => routedEngineKey(pathname, sidebarFilter, fleet.active),
     [pathname, sidebarFilter, fleet.active],
   );
-  const routed =
-    (routedKey !== null ? sessions.get(routedKey) ?? null : null) ??
-    (fleet.active !== null ? sessions.get(fleet.active) ?? null : null);
+  // A scoped chat stays bound to its owner even while that device is absent.
+  // Falling back to active would hand unrelated device resources to this route.
+  const routed = routedKey === null ? null : sessions.get(routedKey) ?? null;
 
   const retry = useCallback(() => {
     const snapshot = engineRegistry.getSnapshot();
@@ -194,7 +194,7 @@ function SessionNotificationDriver({ session }: { session: EngineSession }) {
       }
       // `send_pending`: the overlay is keyed by the scoped PAGE id, so the
       // probe scopes this row's RAW chat id to the session's engine first.
-      const sendPending = echoSendPending(echoStore, session.engine.baseUrl, status.chatId, now);
+      const sendPending = echoSendPending(echoStore, session.engine.key, status.chatId, now);
       const sound = soundSince(baseline, prev, sendPending);
       if (sound === null) {
         continue;
@@ -273,7 +273,7 @@ export function useEngineSession(): EngineSession | null {
   return useContext(SessionContext);
 }
 
-/** Every paired engine's session, keyed by engine key (`baseUrl`). */
+/** Every owned engine's session, keyed by its opaque device key. */
 export function useEngineSessions(): ReadonlyMap<string, EngineSession> {
   return useContext(SessionsContext);
 }

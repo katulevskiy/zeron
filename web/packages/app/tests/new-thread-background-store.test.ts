@@ -8,7 +8,7 @@ import {
 import { idbBackgroundBlobStore } from "../src/lib/background-blob-store";
 import { NewThreadArtworkStore, type NewThreadArtwork } from "../src/state/appearance";
 import { UiSettingsStore } from "../src/state/ui-settings";
-import type { StorageLike } from "../src/lib/engine-store";
+import type { StorageLike } from "../src/lib/storage";
 
 /**
  * Ticket 35 — the shell-scoped new-thread background store and the hero

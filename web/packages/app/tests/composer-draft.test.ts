@@ -13,7 +13,7 @@ import {
   reconcileDraftModel,
   rememberNoProject,
 } from "../src/lib/composer-draft";
-import type { StorageLike } from "../src/lib/engine-store";
+import type { StorageLike } from "../src/lib/storage";
 
 function memoryStorage(): StorageLike {
   const map = new Map<string, string>();

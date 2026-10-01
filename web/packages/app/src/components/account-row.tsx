@@ -55,7 +55,7 @@ export function AccountRow() {
   // loading — the engine label the surfaces already show. The subline is
   // gone (f9563394) — the name rides the trigger's aria label and the
   // card's account block.
-  const engine = fleet.engines.find((candidate) => candidate.baseUrl === fleet.active) ?? null;
+  const engine = fleet.engines.find((candidate) => candidate.key === fleet.active) ?? null;
   const deviceId = session?.client.engineInfo?.deviceId ?? null;
   const device =
     deviceId === null ? undefined : snapshot?.devices.rows.find((row) => row.id === deviceId);

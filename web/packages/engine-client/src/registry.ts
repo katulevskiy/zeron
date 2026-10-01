@@ -67,6 +67,8 @@ export interface RegistryEngineConfig {
   readonly credential: string;
   /** The pinned identity to verify on every (re)connect; null adopts the first. */
   readonly expectedDeviceId?: string | null;
+  /** Owned but absent hosts retain their cached resources without dialing. Defaults to true. */
+  readonly available?: boolean;
 }
 
 export interface EngineRegistryOptions {
@@ -89,6 +91,8 @@ interface Entry {
   readonly watchCache: EngineWatchCache;
   readonly offWatchCache: () => void;
   readonly offStatus: () => void;
+  available: boolean;
+  seeded: boolean;
   state: EngineConnectionState;
   info: EngineInfo | null;
   lastError: string | null;
@@ -175,6 +179,15 @@ export class EngineRegistry {
         // parked client (permanent for an instance) starts over fresh. The
         // cache SURVIVES — the last-known rows are still that engine's.
         this.#teardown(entry);
+      } else if (entry.available !== (config.available !== false)) {
+        entry.available = config.available !== false;
+        if (entry.available) {
+          if (entry.seeded) entry.client.connect();
+        } else {
+          entry.client.suspend();
+          entry.state = "off";
+          entry.lastError = "Engine is offline";
+        }
       }
     }
     for (const config of configs) {
@@ -220,7 +233,7 @@ export class EngineRegistry {
    */
   restart(key: string, expectedDeviceId?: string | null): void {
     const entry = this.#entries.get(key);
-    if (entry === undefined || this.#shutdown) {
+    if (entry === undefined || this.#shutdown || !entry.available) {
       return;
     }
     const expected = expectedDeviceId ?? entry.info?.deviceId ?? null;
@@ -256,7 +269,9 @@ export class EngineRegistry {
       watchCache,
       offWatchCache: watchCache.subscribe(() => this.#onRows(entry)),
       offStatus: client.onStatus((status) => this.#onStatus(entry, status)),
-      state: "reconnecting",
+      available: config.available !== false,
+      seeded: false,
+      state: config.available === false ? "off" : "reconnecting",
       info: null,
       lastError: null,
       generation: 0,
@@ -272,12 +287,14 @@ export class EngineRegistry {
       snapshot: null,
     };
     this.#entries.set(config.key, entry);
+    if (!entry.available) client.suspend();
     // Seed the offline cache BEFORE the first dial so the last-known rows
     // render while the connection establishes (engine_registry.rs:395-404).
     void this.#seed(entry)
       .catch(() => {})
       .finally(() => {
-        if (!entry.forgotten && this.#entries.get(config.key) === entry) {
+        entry.seeded = true;
+        if (!entry.forgotten && entry.available && this.#entries.get(config.key) === entry) {
           client.connect();
         }
       });
@@ -340,8 +357,12 @@ export class EngineRegistry {
         break;
       case "connecting":
       case "reconnecting":
-        entry.state = "reconnecting";
+        entry.state = entry.available ? "reconnecting" : "off";
         entry.lastError = status.state === "reconnecting" ? status.lastError : entry.lastError;
+        break;
+      case "offline":
+        entry.state = "off";
+        entry.lastError = "Engine is offline";
         break;
       case "parked":
         // Park-on-revoked: permanent for this engine key until an explicit

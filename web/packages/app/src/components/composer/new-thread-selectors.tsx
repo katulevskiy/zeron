@@ -75,7 +75,7 @@ export function useNewThreadTarget(): NewThreadTarget {
     const ownRawDeviceId = session?.client.engineInfo?.deviceId ?? null;
     const own =
       session !== null && ownRawDeviceId !== null
-        ? encodeScopedId(session.engine.baseUrl, ownRawDeviceId)
+        ? encodeScopedId(session.engine.key, ownRawDeviceId)
         : null;
     const effectiveDeviceId = space?.deviceId ?? defaults.device ?? own;
     const effectiveDevice = devices.find((device) => device.id === effectiveDeviceId) ?? null;
@@ -92,7 +92,7 @@ export function useNewThreadTarget(): NewThreadTarget {
 function ownDeviceKey(session: ReturnType<typeof useEngineSession>): string | null {
   const deviceId = session?.client.engineInfo?.deviceId ?? null;
   return session !== null && deviceId !== null
-    ? encodeScopedId(session.engine.baseUrl, deviceId)
+    ? encodeScopedId(session.engine.key, deviceId)
     : null;
 }
 
