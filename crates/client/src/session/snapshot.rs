@@ -334,3 +334,109 @@ pub fn latest_todo(entries: &[Arc<Entry>]) -> Option<Arc<Vec<TodoItem>>> {
         })?;
     (!items.is_empty()).then(|| Arc::new(items.clone()))
 }
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+    use zeron_doc::SessionMessageEntry;
+
+    fn items(spec: &str) -> Vec<TodoItem> {
+        // x = completed, > = in progress, . = pending
+        spec.chars()
+            .enumerate()
+            .map(|(i, c)| {
+                TodoItem::new(
+                    format!("item {i}"),
+                    match c {
+                        'x' => zeron_proto::TodoStatus::Completed,
+                        '>' => zeron_proto::TodoStatus::InProgress,
+                        _ => zeron_proto::TodoStatus::Pending,
+                    },
+                )
+            })
+            .collect()
+    }
+
+    fn todo_entry(id: &str, role: MessageRole, lists: &[(&str, Vec<TodoItem>)]) -> Arc<Entry> {
+        let parts = lists
+            .iter()
+            .map(|(part, list)| MessagePart::Tool {
+                id: (*part).into(),
+                call: ToolCall::Todo { items: list.clone() },
+                is_error: false,
+                resolved: true,
+                output: None,
+                diff: None,
+                output_ref: None,
+                output_bytes: None,
+                diff_ref: None,
+                diff_stats: None,
+                subagent_ref: None,
+                subagent_status: None,
+                subagent_tail: None,
+            })
+            .collect();
+        Arc::new(Entry {
+            id: id.into(),
+            rev: 1,
+            message: Arc::new(SessionMessageEntry {
+                origin: None,
+                id: id.into(),
+                role,
+                parts,
+                created_at: 0,
+                device_id: "d".into(),
+                status: None,
+                continuation_of: None,
+                duration_ms: None,
+            }),
+            echo: None,
+            append: None,
+        })
+    }
+
+    #[test]
+    fn the_newest_list_wins_across_and_within_entries() {
+        let first = todo_entry("a", MessageRole::Assistant, &[("p", items("x.."))]);
+        let second = todo_entry(
+            "b",
+            MessageRole::Assistant,
+            &[("p1", items("xx.")), ("p2", items("xx>"))],
+        );
+        let latest = latest_todo(&[first, second]).unwrap();
+        assert_eq!(*latest, items("xx>"));
+        // An ACP plan reuses one tool id; the newer segment still wins.
+        let old = todo_entry("c", MessageRole::Assistant, &[("plan", items(">.."))]);
+        let new = todo_entry("d", MessageRole::Assistant, &[("plan", items("x>."))]);
+        assert_eq!(*latest_todo(&[old, new]).unwrap(), items("x>."));
+    }
+
+    #[test]
+    fn an_empty_write_clears_and_user_entries_are_ignored() {
+        let list = todo_entry("a", MessageRole::Assistant, &[("p", items("x."))]);
+        let cleared = todo_entry("b", MessageRole::Assistant, &[("q", Vec::new())]);
+        assert!(latest_todo(&[list.clone(), cleared]).is_none());
+        let user = todo_entry("u", MessageRole::User, &[("p", items("."))]);
+        assert!(latest_todo(&[user]).is_none());
+        assert!(latest_todo(&[]).is_none());
+        assert_eq!(*latest_todo(&[list]).unwrap(), items("x."));
+    }
+
+    #[test]
+    fn a_reply_becomes_a_page_and_binary_has_no_text() {
+        let page = super::super::ArtifactPage::from_reply(&serde_json::json!({
+            "version": {"version": 2, "contentType": "text/markdown", "title": "Doc"},
+            "offset": 0, "total": 5, "encoding": "utf8", "data": "# Doc",
+        }))
+        .unwrap();
+        assert_eq!((page.version, page.total), (2, 5));
+        assert_eq!(page.text.as_deref(), Some("# Doc"));
+        let bin = super::super::ArtifactPage::from_reply(&serde_json::json!({
+            "version": {"version": 1, "contentType": "application/octet-stream"},
+            "total": 9, "encoding": "base64", "data": "AAAA",
+        }))
+        .unwrap();
+        assert!(bin.text.is_none());
+        assert!(super::super::ArtifactPage::from_reply(&serde_json::json!({})).is_none());
+    }
+}

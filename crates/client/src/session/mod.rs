@@ -1690,3 +1690,17 @@ impl SessionHandle {
         Ok(())
     }
 }
+
+#[cfg(test)]
+mod workflow_request_tests {
+    use super::*;
+
+    #[test]
+    fn workflow_questions_have_their_own_request_ids() {
+        let id = workflow_request_id("run-1", "q:2");
+        assert_eq!(parse_workflow_request_id(&id), Some(("run-1", "q:2")));
+        // The doc's own questions keep going through the ledger.
+        assert_eq!(parse_workflow_request_id("req-9"), None);
+        assert_eq!(parse_workflow_request_id("workflow:nocolon"), None);
+    }
+}
