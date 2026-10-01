@@ -1922,6 +1922,21 @@ impl RpcService for EngineRpc {
                     .ok_or_else(|| RpcError::Failed("asks are not available".into()))?;
                 RpcReply::value(&asks.submit(&p.chat_id, &p.ask_id, p.result))
             }
+            methods::SUBMIT_PLAN => {
+                #[derive(Deserialize)]
+                #[serde(rename_all = "camelCase")]
+                struct PlanParams {
+                    chat_id: String,
+                    plan: String,
+                }
+                let p: PlanParams = parse_params(params)?;
+                let reply = self
+                    .doc_host
+                    .present_plan(&p.chat_id, &p.plan)
+                    .await
+                    .map_err(|e| RpcError::Failed(e.to_string()))?;
+                RpcReply::value(&reply)
+            }
             methods::FORK_SIDE_CHAT => {
                 #[derive(Deserialize)]
                 #[serde(rename_all = "camelCase")]

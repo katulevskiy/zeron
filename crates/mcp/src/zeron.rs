@@ -373,6 +373,20 @@ impl Zeron {
         serde_json::from_value(value).context("SubmitAskResult: unexpected shape")
     }
 
+    /// `submit_plan`: the engine asks the user and answers with the decision.
+    pub async fn submit_plan(&self, plan: &str) -> anyhow::Result<zeron_proto::policy::PlanSubmitReply> {
+        let Some(chat_id) = self.origin.chat_id.as_deref() else {
+            bail!("this server doesn't speak for a chat");
+        };
+        let value = self
+            .call(
+                methods::SUBMIT_PLAN,
+                json!({ "chatId": chat_id, "plan": plan }),
+            )
+            .await?;
+        serde_json::from_value(value).context("SubmitPlan: unexpected shape")
+    }
+
     fn ask_ids(&self) -> anyhow::Result<(&str, &str)> {
         match (&self.origin.chat_id, &self.origin.ask_id) {
             (Some(chat), Some(ask)) => Ok((chat, ask)),

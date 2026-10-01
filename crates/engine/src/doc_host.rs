@@ -3484,6 +3484,45 @@ impl DocHost {
         self.queue_message_with_behavior(chat_id, text, attachments, false)
     }
 
+    /// `submit_plan`: present the agent's plan to the user and report the
+    /// decision. An approval leaves the chat in the mode they picked and
+    /// queues the follow-up turn that carries the plan out (a fresh runtime:
+    /// the agent that asked is still running in Plan mode).
+    pub async fn present_plan(
+        &self,
+        chat_id: &str,
+        plan: &str,
+    ) -> Result<zeron_proto::policy::PlanSubmitReply, EngineError> {
+        use zeron_proto::policy::{PlanSubmitReply, PlanVerdict};
+        let sessions = self
+            .sessions()
+            .ok_or_else(|| EngineError::Other("plans are not available".into()))?;
+        Ok(match sessions.present_plan(chat_id, plan).await? {
+            PlanVerdict::Approve(mode) => {
+                self.queue_message_with_behavior(
+                    chat_id,
+                    "The plan was approved. Carry it out.",
+                    Vec::new(),
+                    true,
+                )?;
+                PlanSubmitReply {
+                    approved: true,
+                    mode: Some(mode),
+                    message: format!(
+                        "The user approved the plan and moved this chat to {} mode. Say that it \
+                         was approved and end your turn now: the work continues in a new turn.",
+                        mode.label()
+                    ),
+                }
+            }
+            PlanVerdict::Revise(feedback) => PlanSubmitReply {
+                approved: false,
+                mode: None,
+                message: zeron_harness::policy::revise_message(feedback.as_deref()),
+            },
+        })
+    }
+
     /// Append a message while preserving the submitter's active-turn policy
     /// on the synchronized row. This matters when another device hosts the
     /// chat: the host, not the submitting UI, decides when to drain it.
@@ -5380,6 +5419,7 @@ impl DocHost {
                 answers,
             } => {
                 if sessions.respond_input(chat_id, request_id, answers.clone())? {
+                    self.resume_goal_after_plan(handle, answers).await;
                     return Ok((SessionCommandStatus::Applied, None));
                 }
                 // No live resolver. Only a request id the doc shows as an

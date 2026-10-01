@@ -153,7 +153,7 @@ pub async fn handle_request(tools: &Tools, id: Value, method: &str, params: Valu
                         "name": "zeron",
                         "version": env!("CARGO_PKG_VERSION"),
                     },
-                    "instructions": INSTRUCTIONS,
+                    "instructions": tools.instructions(INSTRUCTIONS),
                 }),
             )
         }

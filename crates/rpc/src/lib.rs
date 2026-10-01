@@ -70,6 +70,9 @@ pub mod methods {
     /// `submit_result`: validate and accept (or bounce with violations) a
     /// child ask's typed result. Params `{chatId, askId, result}`; IPC-only.
     pub const SUBMIT_ASK_RESULT: &str = "SubmitAskResult";
+    /// `submit_plan`: present a plan for approval and wait for the user's
+    /// decision. Params `{chatId, plan}` → `PlanSubmitReply`; IPC-only.
+    pub const SUBMIT_PLAN: &str = "SubmitPlan";
     pub const WATCH_DOC_MESSAGES: &str = "WatchDocMessages";
     /// Explicit user navigation, `{chatId}`. Prioritizes this device's sync
     /// connection; automatic subscriptions and retries must not call it.

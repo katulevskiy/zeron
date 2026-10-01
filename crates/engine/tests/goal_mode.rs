@@ -11,7 +11,7 @@ use std::time::Duration;
 use serde_json::json;
 use support::*;
 use tokio::sync::Notify;
-use zeron_doc::{MessageRole, SessionCommandPayload, SessionCommandStatus};
+use zeron_doc::{MessagePart, MessageRole, SessionCommandPayload, SessionCommandStatus};
 use zeron_engine::ask::{AskError, AskUsage, FakeAsk, FakeReply};
 use zeron_proto::{
     Goal, GoalCommand, GoalEventKind, GoalLimits, GoalReasonKind, GoalStatus, MessageOrigin,
@@ -311,6 +311,88 @@ async fn a_read_only_chat_records_the_goal_but_never_pursues_it() {
     assert_eq!(goal.reason.as_ref().unwrap().kind, GoalReasonKind::ReadOnly);
     assert!(rig.env.runs.lock().unwrap().is_empty());
     assert!(rig.ask.calls().is_empty());
+}
+
+#[tokio::test]
+async fn approving_a_plan_resumes_the_goal_that_waited_for_it() {
+    use zeron_harness::policy::plan_question;
+    use zeron_proto::policy::plan_approve_label;
+    use zeron_proto::{AgentPolicy, ChatConfig, HarnessId, PermissionMode, UserInputAnswer};
+    let plan = plan_question("1. fix the flaky test\n2. run the suite");
+    let asked = plan.clone();
+    let rig = rig_with(Arc::new(move |index, request, out, controls| {
+        let asked = asked.clone();
+        tokio::spawn(async move {
+            // The first turn presents its plan and waits for the decision.
+            if index == 0 {
+                let _ = (controls.request_input)(vec![asked]).await;
+            }
+            text_turn(
+                &out,
+                &format!("worked on: {}", request.prompt.len()),
+                Some((400, 200)),
+            );
+        });
+    }));
+    rig.ask.push_result(pass());
+    // The chat is planning, so the goal is recorded and waits.
+    rig.env
+        .core
+        .workspace
+        .set_chat_config(
+            CHAT,
+            &ChatConfig {
+                policy: AgentPolicy::with_mode(PermissionMode::Plan),
+                harness: HarnessId::Mock,
+                model: None,
+                reasoning: None,
+                model_options: Default::default(),
+                sandbox: SandboxLevel::WorkspaceWrite,
+            },
+        )
+        .unwrap();
+    rig.env.set_goal(CHAT, "Fix the flaky test");
+    wait_status(&rig, GoalStatus::Paused).await;
+    assert_eq!(
+        goal_of(&rig).reason.as_ref().unwrap().kind,
+        GoalReasonKind::ReadOnly
+    );
+    // The agent presents its plan; the user approves it, continuing in Bypass
+    // (the scripted harness honours no other mode).
+    run_command(&rig.env.core, "plan the fix", "u-plan");
+    let open_request = || {
+        rig.env.entries(CHAT).iter().find_map(|e| {
+            e.parts.iter().find_map(|p| match p {
+                MessagePart::Input {
+                    request_id,
+                    resolved: false,
+                    ..
+                } => Some(request_id.clone()),
+                _ => None,
+            })
+        })
+    };
+    wait_for(|| open_request().is_some(), "the plan to be presented").await;
+    rig.env
+        .core
+        .doc_host
+        .queue_command(
+            CHAT,
+            SessionCommandPayload::RespondInput {
+                request_id: open_request().unwrap(),
+                answers: vec![UserInputAnswer {
+                    question_id: plan.id.clone(),
+                    labels: vec![plan_approve_label(PermissionMode::Bypass)],
+                }],
+            },
+        )
+        .unwrap();
+    wait_status(&rig, GoalStatus::Complete).await;
+    assert_eq!(
+        rig.env.core.workspace.chat_config(CHAT).unwrap().policy.mode,
+        PermissionMode::Bypass
+    );
+    assert!(markers(&rig).contains(&GoalEventKind::Resumed));
 }
 
 #[tokio::test]

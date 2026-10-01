@@ -61,6 +61,9 @@ type PendingInputs = Arc<Mutex<HashMap<String, oneshot::Sender<Vec<UserInputAnsw
 /// request id → the rules its approval questions would add on "Always
 /// allow" (question id, rule), as the harness asked them.
 type PendingApprovalRules = Arc<Mutex<HashMap<String, Vec<(String, zeron_proto::PolicyRule)>>>>;
+/// request id → the ids of the plan questions in it (docs/plan-mode.md), so
+/// an approval can move the chat to the mode the user picked.
+type PendingPlans = Arc<Mutex<HashMap<String, Vec<String>>>>;
 
 /// The (question id, rule) pairs of the approval questions in `questions`
 /// whose "Always allow" can become a standing rule.
@@ -141,6 +144,7 @@ struct RunHandle {
     engine_tx: mpsc::UnboundedSender<AgentEvent>,
     pending_inputs: PendingInputs,
     approval_rules: PendingApprovalRules,
+    pending_plans: PendingPlans,
     /// Steers accepted into the mailbox but not yet confirmed by a `Steered`
     /// event — the at-least-once ledger. A run can die with accepted steers
     /// still in its mailbox (idle reaper vs. a routed send; a mid-turn error
@@ -611,12 +615,14 @@ impl SessionsEngine {
         let (engine_tx, engine_rx) = mpsc::unbounded_channel::<AgentEvent>();
         let pending_inputs: PendingInputs = Arc::new(Mutex::new(HashMap::new()));
         let approval_rules: PendingApprovalRules = Arc::new(Mutex::new(HashMap::new()));
+        let pending_plans: PendingPlans = Arc::new(Mutex::new(HashMap::new()));
 
         // Input bridge: the harness asks questions; we mint the request id, park the
         // resolver for `respond_input`, and surface the event through the run pipeline.
         let request_input = {
             let pending = pending_inputs.clone();
             let rules = approval_rules.clone();
+            let plans = pending_plans.clone();
             let engine_tx = engine_tx.clone();
             Box::new(move |questions: Vec<UserInputQuestion>| {
                 let (mut tx, rx) = oneshot::channel();
@@ -626,6 +632,14 @@ impl SessionsEngine {
                 let asked = self::approval_rules(&questions);
                 if !asked.is_empty() {
                     lock(&rules).insert(request_id.clone(), asked);
+                }
+                let planned: Vec<String> = questions
+                    .iter()
+                    .filter(|q| zeron_proto::policy::is_plan_question(&q.id))
+                    .map(|q| q.id.clone())
+                    .collect();
+                if !planned.is_empty() {
+                    lock(&plans).insert(request_id.clone(), planned);
                 }
                 let _ = engine_tx.send(AgentEvent::InputRequested {
                     request_id: request_id.clone(),
@@ -671,6 +685,7 @@ impl SessionsEngine {
                 engine_tx,
                 pending_inputs,
                 approval_rules,
+                pending_plans,
                 routed_steers: Arc::new(Mutex::new(std::collections::VecDeque::new())),
                 fork_history_sent: fork_history_sent.clone(),
             },
@@ -905,10 +920,11 @@ impl SessionsEngine {
             (
                 h.pending_inputs.clone(),
                 h.approval_rules.clone(),
+                h.pending_plans.clone(),
                 h.engine_tx.clone(),
             )
         });
-        let Some((pending, rules, engine_tx)) = target else {
+        let Some((pending, rules, plans, engine_tx)) = target else {
             return Ok(false);
         };
         let Some(resolver) = lock(&pending).remove(request_id) else {
@@ -916,11 +932,93 @@ impl SessionsEngine {
         };
         let asked = lock(&rules).remove(request_id).unwrap_or_default();
         self.remember_always_allowed(&asked, &answers);
+        let planned = lock(&plans).remove(request_id).unwrap_or_default();
+        self.apply_plan_approval(chat_id, &planned, &answers);
         let _ = resolver.send(answers);
         let _ = engine_tx.send(AgentEvent::InputResolved {
             request_id: request_id.to_string(),
         });
         Ok(true)
+    }
+
+    /// Put `plan` to the user as a question on the chat's live run and wait
+    /// for the decision (the `submit_plan` tool of harnesses without a native
+    /// plan mode). An approval has already moved the chat to the picked mode
+    /// by the time this returns.
+    pub async fn present_plan(
+        &self,
+        chat_id: &str,
+        plan: &str,
+    ) -> Result<zeron_proto::policy::PlanVerdict, EngineError> {
+        let in_plan_mode = self
+            .inner
+            .workspace()
+            .and_then(|ws| ws.chat_config(chat_id))
+            .is_some_and(|c| c.policy.mode == zeron_proto::PermissionMode::Plan);
+        if !in_plan_mode {
+            return Err(EngineError::Other("This chat isn't in plan mode.".into()));
+        }
+        let target = lock(&self.inner.runs).get(chat_id).map(|h| {
+            (
+                h.pending_inputs.clone(),
+                h.pending_plans.clone(),
+                h.engine_tx.clone(),
+            )
+        });
+        let Some((pending, plans, engine_tx)) = target else {
+            return Err(EngineError::Other(
+                "This chat has no turn in progress to present a plan in.".into(),
+            ));
+        };
+        let question = zeron_harness::policy::plan_question(plan);
+        let request_id = new_id();
+        let (answer_tx, answer_rx) = oneshot::channel();
+        lock(&pending).insert(request_id.clone(), answer_tx);
+        lock(&plans).insert(request_id.clone(), vec![question.id.clone()]);
+        let _ = engine_tx.send(AgentEvent::InputRequested {
+            request_id: request_id.clone(),
+            questions: vec![question.clone()],
+        });
+        // The resolver is dropped (never answered) when the run ends or is
+        // interrupted: that sends the plan back, like an unanswered question.
+        let answers = answer_rx.await.unwrap_or_default();
+        lock(&plans).remove(&request_id);
+        Ok(zeron_harness::policy::read_plan(&question, &answers))
+    }
+
+    /// A plan the user approved moves the chat to the mode they picked, so
+    /// the agent's next turn (and every other device) runs in it. Only the
+    /// plan questions the harness itself asked count.
+    pub(crate) fn apply_plan_approval(
+        &self,
+        chat_id: &str,
+        planned: &[String],
+        answers: &[UserInputAnswer],
+    ) {
+        use zeron_proto::policy::{PlanVerdict, plan_verdict};
+        let approved = answers
+            .iter()
+            .filter(|a| planned.contains(&a.question_id))
+            .find_map(|a| match plan_verdict(&a.labels) {
+                PlanVerdict::Approve(mode) => Some(mode),
+                PlanVerdict::Revise(_) => None,
+            });
+        let Some(mode) = approved else {
+            return;
+        };
+        let Some(ws) = self.inner.workspace() else {
+            return;
+        };
+        let Some(mut config) = ws.chat_config(chat_id) else {
+            return;
+        };
+        if config.policy.mode == mode {
+            return;
+        }
+        config.policy.mode = mode;
+        if let Err(err) = ws.set_chat_config(chat_id, &config) {
+            tracing::warn!(chat = %chat_id, error = %err, "plan approval could not save the new mode");
+        }
     }
 
     /// Keep the rule behind every "Always allow" in `answers` (only for the
@@ -1958,7 +2056,16 @@ async fn drive_run(
     // The host stamps its own MCP server onto every run it drives, so the
     // agent can spawn and talk to side chats through the engine it runs in.
     if request.mcp.is_none() {
-        request.mcp = inner.zeron_mcp(&chat_id);
+        // A harness without a native plan mode presents its plan through the
+        // server's `submit_plan` tool (docs/plan-mode.md).
+        let planning = request.policy.mode == zeron_proto::PermissionMode::Plan
+            && !request.policy.unattended
+            && !harness.policy_caps().native_plan;
+        request.mcp = if planning {
+            inner.zeron_mcp_with(&chat_id, &[("ZERON_PLAN_MODE", "1")])
+        } else {
+            inner.zeron_mcp(&chat_id)
+        };
     }
     // Kept whole for the startup-crash retry (same user entry; dispatch
     // re-injects the stored resume id). Option so the retry branch (inside

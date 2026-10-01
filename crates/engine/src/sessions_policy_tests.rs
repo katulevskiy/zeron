@@ -7,9 +7,11 @@ use std::time::Duration;
 
 use futures::StreamExt;
 use zeron_doc::MessagePart;
-use zeron_harness::policy::{Action, approval_question};
+use zeron_harness::policy::{Action, approval_question, plan_question};
 use zeron_harness::{Harness, HarnessError, RunControls};
-use zeron_proto::policy::{APPROVAL_ALLOW_ALWAYS, APPROVAL_ALLOW_ONCE};
+use zeron_proto::policy::{
+    APPROVAL_ALLOW_ALWAYS, APPROVAL_ALLOW_ONCE, PLAN_KEEP_PLANNING, plan_approve_label,
+};
 use zeron_proto::{
     ActionKind, AgentEvent, AgentPolicy, ChatConfig, DoneStatus, HarnessId, Model, PermissionMode,
     PolicyCaps, PolicyRule, ReasoningLevel, RuleEffect, RunRequest, SandboxLevel, SandboxMode,
@@ -308,6 +310,193 @@ async fn always_allow_answers_become_standing_rules() {
             "make deploy",
             RuleEffect::Allow
         )]
+    );
+    rig.core.sessions.shutdown().await;
+}
+
+/// Dispatch a Plan-mode run that presents `plan`, answer it with `labels`, and
+/// give back the mode the chat is left in.
+async fn mode_after_plan_answer(labels: Vec<String>, forged: bool) -> PermissionMode {
+    let plan = plan_question("1. edit src/lib.rs\n2. run the tests");
+    let rig = rig(PolicyCaps::all_modes(), Some(vec![plan.clone()]));
+    let chat = "chat-plan";
+    rig.core
+        .workspace
+        .create_chat(chat, None, Some(&rig.core.device_id), None, None)
+        .unwrap();
+    rig.core
+        .workspace
+        .set_chat_config(
+            chat,
+            &ChatConfig {
+                policy: AgentPolicy::with_mode(PermissionMode::Plan),
+                harness: HarnessId::Mock,
+                model: None,
+                reasoning: None,
+                model_options: Default::default(),
+                sandbox: SandboxLevel::WorkspaceWrite,
+            },
+        )
+        .unwrap();
+    let (_, mut events) = rig.core.sessions.subscribe(chat, 0).unwrap();
+    rig.core
+        .sessions
+        .dispatch(
+            chat,
+            HarnessId::Mock,
+            request("/tmp", PermissionMode::Plan),
+            None,
+        )
+        .await
+        .unwrap();
+    let request_id = tokio::time::timeout(Duration::from_secs(5), async {
+        loop {
+            if let AgentEvent::InputRequested { request_id, .. } =
+                events.recv().await.unwrap().event
+            {
+                return request_id;
+            }
+        }
+    })
+    .await
+    .unwrap();
+    // A forged answer names a plan question the harness never asked.
+    let question_id = if forged {
+        plan_question("something else").id
+    } else {
+        plan.id.clone()
+    };
+    assert!(
+        rig.core
+            .sessions
+            .respond_input(chat, &request_id, vec![UserInputAnswer { question_id, labels }])
+            .unwrap()
+    );
+    let mode = rig.core.workspace.chat_config(chat).unwrap().policy.mode;
+    rig.core.sessions.shutdown().await;
+    mode
+}
+
+#[tokio::test]
+async fn approving_a_plan_saves_the_mode_the_user_picked() {
+    for mode in [
+        PermissionMode::Auto,
+        PermissionMode::AcceptEdits,
+        PermissionMode::Ask,
+        PermissionMode::Bypass,
+    ] {
+        assert_eq!(
+            mode_after_plan_answer(vec![plan_approve_label(mode)], false).await,
+            mode
+        );
+    }
+}
+
+#[tokio::test]
+async fn a_plan_sent_back_or_forged_leaves_the_chat_in_plan_mode() {
+    assert_eq!(
+        mode_after_plan_answer(vec![PLAN_KEEP_PLANNING.into()], false).await,
+        PermissionMode::Plan
+    );
+    assert_eq!(
+        mode_after_plan_answer(vec!["split step 2".into()], false).await,
+        PermissionMode::Plan
+    );
+    assert_eq!(
+        mode_after_plan_answer(vec![plan_approve_label(PermissionMode::Bypass)], true).await,
+        PermissionMode::Plan
+    );
+}
+
+#[tokio::test]
+async fn submit_plan_waits_for_the_decision_and_saves_the_picked_mode() {
+    use zeron_proto::policy::PlanVerdict;
+    // The harness keeps the run alive by holding a question of its own.
+    let rig = rig(
+        PolicyCaps::all_modes(),
+        Some(vec![approval_question(&Action::exec("Bash", "make"))]),
+    );
+    let chat = "chat-submit-plan";
+    rig.core
+        .workspace
+        .create_chat(chat, None, Some(&rig.core.device_id), None, None)
+        .unwrap();
+    // Not in plan mode yet: a plan has nowhere to go.
+    let config = |mode| ChatConfig {
+        policy: AgentPolicy::with_mode(mode),
+        harness: HarnessId::Mock,
+        model: None,
+        reasoning: None,
+        model_options: Default::default(),
+        sandbox: SandboxLevel::WorkspaceWrite,
+    };
+    rig.core
+        .workspace
+        .set_chat_config(chat, &config(PermissionMode::Ask))
+        .unwrap();
+    assert!(rig.core.sessions.present_plan(chat, "x").await.is_err());
+    rig.core
+        .workspace
+        .set_chat_config(chat, &config(PermissionMode::Plan))
+        .unwrap();
+    let (_, mut events) = rig.core.sessions.subscribe(chat, 0).unwrap();
+    rig.core
+        .sessions
+        .dispatch(
+            chat,
+            HarnessId::Mock,
+            request("/tmp", PermissionMode::Plan),
+            None,
+        )
+        .await
+        .unwrap();
+    let sessions = rig.core.sessions.clone();
+    let presenting = tokio::spawn(async move {
+        // Retry until the run is registered.
+        loop {
+            match sessions.present_plan(chat, "1. edit a.rs").await {
+                Err(_) => tokio::time::sleep(Duration::from_millis(10)).await,
+                done => return done,
+            }
+        }
+    });
+    let request_id = tokio::time::timeout(Duration::from_secs(5), async {
+        loop {
+            if let AgentEvent::InputRequested {
+                request_id,
+                questions,
+            } = events.recv().await.unwrap().event
+                && questions
+                    .iter()
+                    .any(|q| zeron_proto::policy::is_plan_question(&q.id))
+            {
+                return (request_id, questions);
+            }
+        }
+    })
+    .await
+    .unwrap();
+    let (request_id, questions) = request_id;
+    assert_eq!(questions[0].question, "1. edit a.rs");
+    assert!(!presenting.is_finished(), "it waits for the user");
+    assert!(
+        rig.core
+            .sessions
+            .respond_input(
+                chat,
+                &request_id,
+                vec![UserInputAnswer {
+                    question_id: questions[0].id.clone(),
+                    labels: vec![plan_approve_label(PermissionMode::Ask)],
+                }],
+            )
+            .unwrap()
+    );
+    let verdict = presenting.await.unwrap().unwrap();
+    assert_eq!(verdict, PlanVerdict::Approve(PermissionMode::Ask));
+    assert_eq!(
+        rig.core.workspace.chat_config(chat).unwrap().policy.mode,
+        PermissionMode::Ask
     );
     rig.core.sessions.shutdown().await;
 }

@@ -424,6 +424,31 @@ impl DocHost {
         }
     }
 
+    /// A plan the user just approved ends the chat's read-only stretch: a goal
+    /// that was recorded but not pursued because the chat was planning
+    /// (docs/plan-mode.md) starts now, under the mode they picked.
+    pub(super) async fn resume_goal_after_plan(
+        &self,
+        handle: &Arc<ChatDocHandle>,
+        answers: &[zeron_proto::UserInputAnswer],
+    ) {
+        use zeron_proto::policy::{PlanVerdict, is_plan_question, plan_verdict};
+        let approved = answers.iter().any(|a| {
+            is_plan_question(&a.question_id)
+                && matches!(plan_verdict(&a.labels), PlanVerdict::Approve(_))
+        });
+        let waiting = handle.doc.goal().is_some_and(|goal| {
+            goal.status == GoalStatus::Paused
+                && goal
+                    .reason
+                    .as_ref()
+                    .is_some_and(|r| r.kind == GoalReasonKind::ReadOnly)
+        });
+        if approved && waiting {
+            let _ = self.apply_goal_command(handle, &GoalCommand::Resume).await;
+        }
+    }
+
     // ── the controller ─────────────────────────────────────────────────────
 
     /// One controller step for `handle`'s chat. Idempotent and cheap when

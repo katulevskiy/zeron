@@ -38,6 +38,8 @@ pub struct ToolDef {
 
 pub struct Tools {
     pub(crate) zeron: Arc<Zeron>,
+    /// A Plan-mode chat: `submit_plan` is offered.
+    plan_mode: bool,
     /// The advertised `submit_result` (ask servers only), fetched once.
     pub(crate) ask_tool: tokio::sync::OnceCell<crate::ask::AskTool>,
 }
@@ -422,6 +424,22 @@ impl Tools {
         Self {
             zeron,
             ask_tool: tokio::sync::OnceCell::new(),
+            plan_mode: std::env::var_os(crate::plan::PLAN_MODE_ENV).is_some_and(|v| v == "1"),
+        }
+    }
+
+    /// Serve `submit_plan` and its instructions (a Plan-mode chat).
+    pub fn with_plan_mode(mut self, on: bool) -> Self {
+        self.plan_mode = on;
+        self
+    }
+
+    /// The server's instructions: the usual text, plus plan mode's.
+    pub fn instructions(&self, base: &str) -> String {
+        if self.plan_mode && self.zeron.origin().ask_id.is_none() {
+            format!("{base}{}", crate::plan::INSTRUCTIONS)
+        } else {
+            base.to_owned()
         }
     }
 
@@ -437,14 +455,19 @@ impl Tools {
             defs.push(self.ask_tool().await.def());
             return defs;
         }
-        catalog()
+        let mut defs = catalog();
+        if self.plan_mode {
+            defs.push(crate::plan::def());
+        }
+        defs
     }
 
     pub fn has(&self, name: &str) -> bool {
         if self.zeron.origin().ask_id.is_some() {
             return name == crate::ask::SUBMIT_RESULT || crate::ask::ASK_READ_TOOLS.contains(&name);
         }
-        catalog().iter().any(|t| t.name == name)
+        (self.plan_mode && name == crate::plan::SUBMIT_PLAN)
+            || catalog().iter().any(|t| t.name == name)
     }
 
     /// `Ok` is the tool's structured result; `Err` is a message the model
@@ -455,6 +478,9 @@ impl Tools {
         }
         if name == crate::ask::SUBMIT_RESULT {
             return self.submit_result(args).await;
+        }
+        if name == crate::plan::SUBMIT_PLAN {
+            return self.submit_plan(args).await;
         }
         let result = match name {
             "get_goal" => self.get_goal(parse(args)?).await,
@@ -1203,6 +1229,8 @@ mod tests {
         goal_on_command: Mutex<Option<Value>>,
         /// What `SubmitAskResult` answers.
         submit_reply: Mutex<Option<Value>>,
+        /// What `SubmitPlan` answers.
+        plan_reply: Mutex<Option<Value>>,
         /// Alpha's permission mode (absent = no policy on its config).
         alpha_mode: Option<&'static str>,
         /// The device's default mode (absent = an engine predating it).
@@ -1284,6 +1312,15 @@ mod tests {
                     },
                     "resultDescription": "the verdict",
                 })),
+                methods::SUBMIT_PLAN => {
+                    self.writes
+                        .lock()
+                        .unwrap()
+                        .push((method.to_owned(), params));
+                    RpcReply::Value(self.plan_reply.lock().unwrap().clone().unwrap_or(json!({
+                        "approved": true, "mode": "auto", "message": "Approved."
+                    })))
+                }
                 methods::SUBMIT_ASK_RESULT => {
                     self.writes
                         .lock()
@@ -1320,6 +1357,59 @@ mod tests {
     fn tools(world: Arc<World>, origin: Origin) -> Tools {
         let client = memory_client(world);
         Tools::new(Arc::new(Zeron::with_client(client, origin)))
+    }
+
+    #[tokio::test]
+    async fn submit_plan_exists_only_in_a_plan_mode_chat() {
+        let origin = Origin {
+            chat_id: Some("alpha".into()),
+            ..Default::default()
+        };
+        let normal = tools(Arc::new(World::default()), origin.clone());
+        assert!(!normal.has("submit_plan"));
+        assert!(normal.list().await.iter().all(|d| d.name != "submit_plan"));
+        assert!(!normal.instructions("base").contains("plan mode"));
+        let planning =
+            tools(Arc::new(World::default()), origin).with_plan_mode(true);
+        assert!(planning.has("submit_plan"));
+        let listed = planning.list().await;
+        let def = listed.iter().find(|d| d.name == "submit_plan").unwrap();
+        assert_eq!(def.input_schema["required"][0], "plan");
+        assert!(planning.instructions("base").starts_with("base"));
+        assert!(planning.instructions("base").contains("plan mode"));
+    }
+
+    #[tokio::test]
+    async fn submit_plan_forwards_the_plan_and_reports_the_decision() {
+        let origin = Origin {
+            chat_id: Some("alpha".into()),
+            ..Default::default()
+        };
+        let world = Arc::new(World::default());
+        let tools = tools(world.clone(), origin).with_plan_mode(true);
+        let approved = tools
+            .call("submit_plan", json!({ "plan": "  1. edit a.rs  " }))
+            .await
+            .unwrap();
+        assert_eq!(approved["approved"], true);
+        assert_eq!(approved["mode"], "auto");
+        let writes = world.writes.lock().unwrap().clone();
+        assert_eq!(
+            writes.last().unwrap(),
+            &(
+                methods::SUBMIT_PLAN.to_owned(),
+                json!({ "chatId": "alpha", "plan": "1. edit a.rs" })
+            )
+        );
+        *world.plan_reply.lock().unwrap() = Some(json!({
+            "approved": false, "message": "Split step 2 in two."
+        }));
+        let error = tools
+            .call("submit_plan", json!({ "plan": "1. edit a.rs" }))
+            .await
+            .unwrap_err();
+        assert_eq!(error, "Split step 2 in two.");
+        assert!(tools.call("submit_plan", json!({})).await.is_err());
     }
 
     #[tokio::test]
