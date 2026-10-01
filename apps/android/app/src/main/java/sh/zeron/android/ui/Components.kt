@@ -139,7 +139,10 @@ fun StatusLabel(row: SessionRow) {
         }
     }
     when (row.indicator) {
-        ChatIndicator.WORKING -> LoadingIndicator(Modifier.size(26.dp))
+        // A hidden page (or one that has only just appeared) shows the indicator still, see LocalMotionActive.
+        ChatIndicator.WORKING ->
+            if (LocalMotionActive.current) LoadingIndicator(Modifier.size(26.dp))
+            else LoadingIndicator(progress = { 0f }, Modifier.size(26.dp))
         ChatIndicator.AWAITING_INPUT -> label("Input", MaterialTheme.colorScheme.primary, dot = true)
         ChatIndicator.ERRORED -> label("Failed", MaterialTheme.colorScheme.error, dot = true)
         ChatIndicator.COMPLETED -> label("Done", successColor(), dot = false)

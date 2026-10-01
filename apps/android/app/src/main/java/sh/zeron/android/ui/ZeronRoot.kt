@@ -26,6 +26,8 @@ import androidx.compose.runtime.Composable
 import androidx.compose.runtime.DisposableEffect
 import androidx.compose.runtime.LaunchedEffect
 import androidx.compose.runtime.collectAsState
+import androidx.compose.runtime.withFrameNanos
+import kotlinx.coroutines.delay
 import androidx.compose.runtime.getValue
 import androidx.compose.runtime.mutableStateOf
 import androidx.compose.runtime.saveable.rememberSaveable
@@ -257,22 +259,50 @@ private fun MainNav(model: AppModel) {
 
 private enum class Tab { Sessions, Settings }
 
+private fun String?.toTab(): Tab? = when (this) {
+    "sessions" -> Tab.Sessions
+    "settings" -> Tab.Settings
+    else -> null
+}
+
 @Composable
 private fun Home(model: AppModel, nav: NavHostController) {
-    var tab by rememberSaveable { mutableStateOf(if (model.launch.route == "settings") Tab.Settings else Tab.Sessions) }
+    // A cold-open benchmark (`--ez cold true` on the debug tab event) rebuilds the page like coming back from a chat does.
+    val epoch by model.homeEpoch.collectAsState()
+    androidx.compose.runtime.key(epoch) { HomeTabs(model, nav) }
+}
+
+@Composable
+private fun HomeTabs(model: AppModel, nav: NavHostController) {
+    var tab by rememberSaveable { mutableStateOf(model.tabRequest.value.toTab() ?: if (model.launch.route == "settings") Tab.Settings else Tab.Sessions) }
     // Debug builds: `--es kind tab --es tab sessions|settings` flips the tab (scripts/android/measure-tab-switch.sh).
     val tabRequest by model.tabRequest.collectAsState()
     LaunchedEffect(tabRequest) {
-        tabRequest?.let { tab = if (it == "settings") Tab.Settings else Tab.Sessions }
+        tabRequest?.toTab()?.let { tab = it }
         model.tabRequest.value = null
     }
     sh.zeron.android.core.PerfFrame(tab)
-    val workspace by model.workspace.collectAsState()
+    // Both tabs stay composed once they have been, so switching is a re-placement rather than a composition.
+    // The one shown first composes at once; the other idles in after the first frames (never in the way of the
+    // launch or the return from a chat). A tab asked for before that shows a wireframe for the frame it takes.
+    var sessionsReady by remember { mutableStateOf(tab == Tab.Sessions) }
+    var settingsReady by remember { mutableStateOf(tab == Tab.Settings) }
+    LaunchedEffect(tab) {
+        withFrameNanos { }
+        if (tab == Tab.Sessions) sessionsReady = true else settingsReady = true
+        delay(350)
+        withFrameNanos { }
+        sessionsReady = true
+        settingsReady = true
+    }
+    val workspace = model.workspace.collectAsStateWhile(tab == Tab.Sessions)
     val summary = remember(workspace) { workspace?.let { liveSummary(it) } }
     Box(Modifier.fillMaxSize().background(MaterialTheme.colorScheme.background)) {
-        when (tab) {
-            Tab.Sessions -> SessionsScreen(model, onOpen = { nav.open(Routes.chat(it)) })
-            Tab.Settings -> SettingsScreen(model, onOpen = { nav.open(it) })
+        TabPage(active = tab == Tab.Sessions, ready = sessionsReady, skeleton = { SessionsSkeleton() }) {
+            SessionsScreen(model, onOpen = { nav.open(Routes.chat(it)) }, active = tab == Tab.Sessions)
+        }
+        TabPage(active = tab == Tab.Settings, ready = settingsReady, skeleton = { SettingsSkeleton() }) {
+            SettingsScreen(model, onOpen = { nav.open(it) }, active = tab == Tab.Settings)
         }
         // Floating chrome over a soft scrim: new session, then the nav capsule.
         Column(

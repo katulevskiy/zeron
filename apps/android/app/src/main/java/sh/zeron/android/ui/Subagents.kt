@@ -43,6 +43,9 @@ import androidx.compose.material3.Text
 import androidx.compose.material3.TextButton
 import androidx.compose.runtime.Composable
 import androidx.compose.runtime.LaunchedEffect
+import androidx.compose.runtime.State
+import androidx.compose.runtime.mutableFloatStateOf
+import androidx.compose.ui.graphics.graphicsLayer
 import androidx.compose.runtime.getValue
 import androidx.compose.runtime.mutableLongStateOf
 import androidx.compose.runtime.mutableStateOf
@@ -72,17 +75,20 @@ import uniffi.zeron_core.SubagentView
 @Composable
 fun activityColor(): Color = MaterialTheme.colorScheme.primary
 
-/** 0.45 → 1 → 0.45 while [active]; a steady 1 otherwise. */
+/**
+ * 0.45 → 1 → 0.45 while [active] (and the page showing it is: see [LocalMotionActive]); a steady 1 otherwise.
+ * A State, so a caller reads it in a draw block and the animation never recomposes anything.
+ */
 @Composable
-private fun breath(active: Boolean): Float {
+private fun breath(active: Boolean): State<Float> {
+    if (!active || !LocalMotionActive.current) return remember { mutableFloatStateOf(1f) }
     val transition = rememberInfiniteTransition(label = "breath")
-    val value by transition.animateFloat(
+    return transition.animateFloat(
         initialValue = 0.45f,
         targetValue = 1f,
         animationSpec = infiniteRepeatable(tween(1100, easing = FastOutSlowInEasing), RepeatMode.Reverse),
         label = "breath",
     )
-    return if (active) value else 1f
 }
 
 /** Wall clock, ticking while [live] (running ages). */
@@ -119,7 +125,7 @@ fun RunningPill(count: Int, modifier: Modifier = Modifier) {
             Modifier.heightIn(min = 20.dp).padding(start = 7.dp, end = 8.dp),
             verticalAlignment = Alignment.CenterVertically,
         ) {
-            Box(Modifier.size(6.dp).clip(CircleShape).background(tone.copy(alpha = pulse)))
+            Box(Modifier.size(6.dp).graphicsLayer { alpha = pulse.value }.clip(CircleShape).background(tone))
             Spacer(Modifier.width(4.dp))
             Text(
                 Subagents.countLabel(count),
@@ -141,7 +147,7 @@ fun RunningPill(count: Int, modifier: Modifier = Modifier) {
 @Composable
 fun SubagentsButton(running: Int, onClick: () -> Unit) {
     val scheme = MaterialTheme.colorScheme
-    val pulse = breath(running > 0)
+    val pulse by breath(running > 0)
     val face = if (running > 0) lerp(scheme.surfaceContainerHighest, scheme.primaryContainer, pulse) else scheme.surfaceContainerHighest
     BadgedBox(
         badge = {

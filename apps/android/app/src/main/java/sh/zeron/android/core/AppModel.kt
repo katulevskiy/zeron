@@ -118,6 +118,9 @@ class AppModel(private val app: Application) {
     /** Debug builds: a bottom-nav tab to switch to ("sessions" | "settings"), see the DEBUG_EVENT `tab` kind. */
     val tabRequest = MutableStateFlow<String?>(null)
 
+    /** Debug builds: bumped to rebuild the home page from scratch, the way coming back from a chat does. */
+    val homeEpoch = MutableStateFlow(0)
+
     private val _client = MutableStateFlow<CoreClient?>(null)
     val client: StateFlow<CoreClient?> = _client.asStateFlow()
 
@@ -299,11 +302,19 @@ class AppModel(private val app: Application) {
             override fun onReceive(context: android.content.Context, intent: android.content.Intent) {
                 // Device events: engine-setup | engine-failed | transfer-asked | -received | -sent | -failed.
                 when (val kind = intent.getStringExtra("kind").orEmpty()) {
+                    // `--es kind profile --ei ms 3000`: sample the main thread for a while (what an idle screen costs).
+                    "profile" -> {
+                        Perf.sampling = true
+                        Perf.begin("window")
+                        main.postDelayed({ Perf.finish("window") }, intent.getIntExtra("ms", 3000).toLong())
+                        return
+                    }
                     "tab" -> {
                         val tab = intent.getStringExtra("tab").orEmpty()
                         Perf.sampling = intent.getBooleanExtra("sample", false)
                         Perf.begin("tab->$tab")
                         tabRequest.value = tab
+                        if (intent.getBooleanExtra("cold", false)) homeEpoch.value++
                         return
                     }
                     "engine-setup" -> deviceFeedback.engine(sh.zeron.android.feedback.EngineEvent.SetupDone).also { return }
