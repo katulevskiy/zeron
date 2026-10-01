@@ -4,6 +4,7 @@ import androidx.compose.animation.AnimatedContent
 import androidx.compose.animation.AnimatedVisibility
 import androidx.compose.animation.SizeTransform
 import androidx.compose.animation.animateColorAsState
+import androidx.compose.animation.animateContentSize
 import androidx.compose.animation.core.animateDpAsState
 import androidx.compose.animation.core.animateFloatAsState
 import androidx.compose.animation.core.tween
@@ -29,9 +30,11 @@ import androidx.compose.foundation.layout.Spacer
 import androidx.compose.foundation.layout.fillMaxWidth
 import androidx.compose.foundation.layout.height
 import androidx.compose.foundation.layout.heightIn
+import androidx.compose.foundation.layout.offset
 import androidx.compose.foundation.layout.padding
 import androidx.compose.foundation.layout.size
 import androidx.compose.foundation.layout.width
+import androidx.compose.foundation.layout.widthIn
 import androidx.compose.foundation.lazy.LazyColumn
 import androidx.compose.foundation.lazy.items
 import androidx.compose.foundation.lazy.rememberLazyListState
@@ -75,6 +78,7 @@ import androidx.compose.ui.text.style.TextAlign
 import androidx.compose.ui.text.style.TextOverflow
 import androidx.compose.ui.unit.IntOffset
 import androidx.compose.ui.unit.dp
+import androidx.compose.ui.unit.sp
 import sh.zeron.android.core.FavoriteModel
 import sh.zeron.android.design.HarnessMark
 import sh.zeron.android.design.LocalDarkTheme
@@ -241,12 +245,13 @@ private fun ColumnScope.SettingsCard(
                 transitionSpec = { fadeIn(tween(120)) togetherWith fadeOut(tween(90)) },
                 label = "title",
             ) { text ->
-                Text(text, style = MaterialTheme.typography.headlineSmallEmphasized, maxLines = 1, overflow = TextOverflow.Ellipsis)
+                Text(text, style = MaterialTheme.typography.headlineSmallEmphasized.copy(lineHeight = 30.sp), maxLines = 1, overflow = TextOverflow.Ellipsis)
             }
             Row(
                 Modifier
+                    .offset(y = (-4).dp)
                     .clip(RoundedCornerShape(12.dp))
-                    .heightIn(min = 40.dp)
+                    .heightIn(min = 36.dp)
                     .clickable(role = Role.Button, onClickLabel = "Choose a model", onClick = onModels)
                     .padding(end = 8.dp),
                 verticalAlignment = Alignment.CenterVertically,
@@ -438,17 +443,26 @@ private fun ColumnScope.ModelList(
     var follow by remember { mutableStateOf<String?>(null) }
     LaunchedEffect(entries.map { it.key }, follow) {
         val key = follow ?: return@LaunchedEffect
+        // Let the list lay the reordered rows out before reading where they sit.
+        androidx.compose.runtime.withFrameNanos { }
+        androidx.compose.runtime.withFrameNanos { }
         val at = entries.indexOfFirst { it.key == key }
         val visible = list.layoutInfo.visibleItemsInfo
         ModelPickerRules.followScroll(at, visible.firstOrNull()?.index ?: 0, visible.lastOrNull()?.index ?: 0)?.let { list.animateScrollToItem(it) }
         follow = null
     }
 
+    // A new search starts from its best match.
+    LaunchedEffect(query) { list.scrollToItem(0) }
     PageHeader("Models", onBack)
     SearchField(query, onChange = { query = it })
     HorizontalDivider(color = MaterialTheme.colorScheme.outlineVariant.copy(alpha = 0.6f))
     val loading = statuses.any { it.error == null }
-    Box(Modifier.weight(1f, fill = false).heightIn(max = RowHeight * ModelPickerRules.VISIBLE_ROWS + 12.dp)) {
+    Box(
+        Modifier.weight(1f, fill = false)
+            .animateContentSize(MaterialTheme.motionScheme.defaultSpatialSpec())
+            .heightIn(max = RowHeight * ModelPickerRules.VISIBLE_ROWS + 12.dp),
+    ) {
         LazyColumn(
             state = list,
             contentPadding = PaddingValues(horizontal = 8.dp, vertical = 6.dp),
@@ -677,7 +691,7 @@ fun ModelPickerChip(
                 horizontalArrangement = Arrangement.spacedBy(6.dp),
             ) {
                 HarnessMark(harness, 16.dp)
-                Text(parts.model, style = MaterialTheme.typography.labelLarge, maxLines = 1, overflow = TextOverflow.Ellipsis, modifier = Modifier.weight(1f, fill = false))
+                Text(parts.model, style = MaterialTheme.typography.labelLarge, maxLines = 1, overflow = TextOverflow.Ellipsis, modifier = Modifier.widthIn(max = 168.dp))
                 parts.effort?.let {
                     Text(
                         it,
