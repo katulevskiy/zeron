@@ -26,7 +26,7 @@ class SoundBank(private val context: Context) {
 
     init {
         pool.setOnLoadCompleteListener { _, sampleId, status ->
-            if (status == 0) { ready.add(sampleId); Log.d(AndroidFeedback.TAG, "sound $sampleId loaded") } else Log.w(AndroidFeedback.TAG, "sound $sampleId failed to load: $status")
+            if (status == 0) ready.add(sampleId) else Log.w(AndroidFeedback.TAG, "sound $sampleId failed to load: $status")
         }
     }
 
