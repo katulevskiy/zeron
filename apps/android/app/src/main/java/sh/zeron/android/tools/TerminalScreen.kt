@@ -1,7 +1,6 @@
 package sh.zeron.android.tools
 
 import sh.zeron.android.feedback.tapAction
-import sh.zeron.android.feedback.QuietTaps
 import sh.zeron.android.feedback.LocalFeedback
 import sh.zeron.android.feedback.Haptic
 import sh.zeron.android.feedback.Cue
@@ -293,15 +292,13 @@ fun TerminalScreen(model: AppModel, ref: WorkspaceRef, onBack: () -> Unit) {
                     "Restart" to { open(replacing = selected.id) },
                 )
             }
-            QuietTaps {
-                ExtraKeys(
-                    sticky = sticky,
-                    onKey = { k -> session?.pressKey(k, sticky) },
-                    onText = { t -> session?.typeText(t, sticky) },
-                    onKeyboard = { holder.view?.toggleKeyboard() },
-                    onPaste = ::paste,
-                )
-            }
+            ExtraKeys(
+                sticky = sticky,
+                onKey = { k -> session?.pressKey(k, sticky) },
+                onText = { t -> session?.typeText(t, sticky) },
+                onKeyboard = { holder.view?.toggleKeyboard() },
+                onPaste = ::paste,
+            )
         }
     }
 }
@@ -413,7 +410,8 @@ private fun ExtraKey(
         label = "key",
     )
     Surface(
-        onClick = tapAction {
+        // Keys tick but do not click: a sound per key press would turn into typing noise.
+        onClick = {
             fb.haptic(Haptic.Tick)
             onClick()
         },

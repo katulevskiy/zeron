@@ -155,8 +155,9 @@ private fun VolumeRow(engine: AndroidFeedback, s: FeedbackSettings) {
                     Spacer(Modifier.size(16.dp))
                     Column(Modifier.weight(1f)) {
                         Text("Volume", style = MaterialTheme.typography.titleMedium)
-                        Text("How loud Zeron's sounds are, within your phone's volume", style = MaterialTheme.typography.bodyMedium, color = MaterialTheme.colorScheme.onSurfaceVariant)
+                        Text("Relative to your phone's volume", style = MaterialTheme.typography.bodyMedium, color = MaterialTheme.colorScheme.onSurfaceVariant)
                     }
+                    Spacer(Modifier.size(12.dp))
                     Text("${(s.volume * 100).toInt()}%", style = MaterialTheme.typography.labelLarge, color = MaterialTheme.colorScheme.onSurfaceVariant)
                 }
                 Slider(

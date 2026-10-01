@@ -1,5 +1,6 @@
 package sh.zeron.android.ui
 
+import sh.zeron.android.feedback.ExpandedFeedback
 import sh.zeron.android.feedback.TapFeedback
 import sh.zeron.android.feedback.play
 import sh.zeron.android.feedback.OpenCloseFeedback
@@ -176,8 +177,8 @@ class MenuAction(
 @Composable
 fun ActionMenu(expanded: Boolean, onDismiss: () -> Unit, actions: List<MenuAction>) {
     val fb = LocalFeedback.current
+    ExpandedFeedback(expanded)
     DropdownMenuPopup(expanded = expanded, onDismissRequest = onDismiss) {
-        OpenCloseFeedback()
         DropdownMenuGroup(shapes = MenuDefaults.groupShape(0, 1)) {
             actions.forEachIndexed { i, a ->
                 val tint = if (a.destructive) MaterialTheme.colorScheme.error else MaterialTheme.colorScheme.onSurface

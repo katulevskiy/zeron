@@ -15,7 +15,10 @@ import androidx.compose.runtime.LaunchedEffect
 import androidx.compose.runtime.snapshotFlow
 import kotlinx.coroutines.flow.distinctUntilChanged
 import androidx.compose.runtime.DisposableEffect
+import androidx.compose.runtime.getValue
+import androidx.compose.runtime.mutableStateOf
 import androidx.compose.runtime.remember
+import androidx.compose.runtime.setValue
 import androidx.compose.runtime.staticCompositionLocalOf
 import androidx.compose.runtime.rememberUpdatedState
 import androidx.compose.ui.Modifier
@@ -31,8 +34,11 @@ import androidx.compose.foundation.clickable as foundationClickable
 
 /**
  * Installs the engine for a subtree: [LocalFeedback], the window view for
- * OEM-tuned haptics, and the press-answering indication that gives every
- * pressable control a default tap (see [ClaimTracker]).
+ * OEM-tuned haptics, and an indication wrapper that gives plain
+ * `Modifier.clickable` rows (the ones that draw the theme's ripple through
+ * [LocalIndication]) a default tap. Material 3 buttons and surfaces bring
+ * their own ripple, so those are wrapped with [tapAction] at their call sites
+ * (see [ClaimTracker] for how the default yields to explicit feedback).
  */
 @Composable
 fun ProvideFeedback(feedback: AndroidFeedback, content: @Composable () -> Unit) {
@@ -46,61 +52,8 @@ fun ProvideFeedback(feedback: AndroidFeedback, content: @Composable () -> Unit) 
     CompositionLocalProvider(
         LocalFeedback provides feedback,
         LocalIndication provides indication,
-        LocalPlainIndication provides base,
         content = content,
     )
-}
-
-/** The theme's own indication, without the default tap. */
-val LocalPlainIndication = staticCompositionLocalOf<Indication?> { null }
-
-/**
- * Controls inside answer with their own haptic and no default tap sound:
- * for dense, repeated surfaces (the terminal's extra keys) where a sound per
- * press would turn into typing noise.
- */
-@Composable
-fun QuietTaps(content: @Composable () -> Unit) {
-    val plain = LocalPlainIndication.current
-    if (plain == null) content() else CompositionLocalProvider(LocalIndication provides plain, content = content)
-}
-
-/**
- * Wraps the theme's indication (the ripple): the visuals are untouched, and
- * every press released inside its target also asks the engine for the default
- * tap. Presses that turn into drags are cancelled by Compose and never reach
- * here; long presses are ignored (they have their own feedback).
- */
-class FeedbackIndication(private val base: IndicationNodeFactory) : IndicationNodeFactory {
-    override fun create(interactionSource: InteractionSource): DelegatableNode = Node(interactionSource, base.create(interactionSource))
-
-    override fun equals(other: Any?) = other is FeedbackIndication && other.base == base
-    override fun hashCode() = base.hashCode() * 31 + 1
-
-    private class Node(
-        private val source: InteractionSource,
-        private val inner: DelegatableNode,
-    ) : DelegatingNode(), CompositionLocalConsumerModifierNode {
-        init {
-            delegate(inner)
-        }
-
-        override fun onAttach() {
-            coroutineScope.launch {
-                var pressedAt = 0L
-                source.interactions.collect { interaction ->
-                    when (interaction) {
-                        is PressInteraction.Press -> pressedAt = System.nanoTime()
-                        is PressInteraction.Release -> {
-                            val held = (System.nanoTime() - pressedAt) / 1_000_000
-                            (currentValueOf(LocalFeedback) as? TapFeedback)?.defaultTap(held)
-                        }
-                        else -> Unit
-                    }
-                }
-            }
-        }
-    }
 }
 
 /** A click that answers with [haptic] and [cue] (null = none) before running [onClick]. */
@@ -183,8 +136,9 @@ fun toggleAction(onChange: (Boolean) -> Unit): (Boolean) -> Unit {
     val latest = rememberUpdatedState(onChange)
     return remember(fb) {
         { on: Boolean ->
-            fb.both(if (on) Haptic.ToggleOn else Haptic.ToggleOff, if (on) Cue.ToggleOn else Cue.ToggleOff)
+            // The change lands first: a setting that governs sound is heard (or not) in its new state.
             latest.value(on)
+            fb.both(if (on) Haptic.ToggleOn else Haptic.ToggleOff, if (on) Cue.ToggleOn else Cue.ToggleOff)
         }
     }
 }
@@ -202,6 +156,20 @@ fun OpenCloseFeedback(open: Cue? = Cue.Open, close: Cue? = Cue.Close) {
         onDispose {
             if (close != null) (fb as? TapFeedback)?.cueUnlessRecent(close) ?: fb.cue(close)
         }
+    }
+}
+
+/**
+ * For a menu or popover driven by an `expanded` flag: Open as it appears, Close as it is dismissed (not when
+ * its exit animation finishes), unless the choice that closed it already sounded.
+ */
+@Composable
+fun ExpandedFeedback(expanded: Boolean) {
+    val fb = LocalFeedback.current
+    var was by remember { mutableStateOf(false) }
+    LaunchedEffect(expanded) {
+        if (expanded) fb.cue(Cue.Open) else if (was) (fb as? TapFeedback)?.cueUnlessRecent(Cue.Close) ?: fb.cue(Cue.Close)
+        was = expanded
     }
 }
 

@@ -1,5 +1,6 @@
 package sh.zeron.android.ui
 
+import sh.zeron.android.feedback.ExpandedFeedback
 import sh.zeron.android.feedback.TapFeedback
 import sh.zeron.android.feedback.tapAction
 import sh.zeron.android.feedback.feedbackClickable
@@ -280,8 +281,8 @@ fun MentionSuggestions(model: ComposerModel, search: suspend (String) -> List<Fi
 @Composable
 fun ChoiceMenu(expanded: Boolean, onDismiss: () -> Unit, sections: List<MenuSection>, steps: Boolean = false) {
     val fb = LocalFeedback.current
+    ExpandedFeedback(expanded)
     DropdownMenuPopup(expanded = expanded, onDismissRequest = onDismiss) {
-        OpenCloseFeedback()
         val groups = sections.filter { it.choices.isNotEmpty() }
         val all = groups.sumOf { it.choices.size }
         DropdownMenuGroup(shapes = MenuDefaults.groupShape(0, 1)) {
