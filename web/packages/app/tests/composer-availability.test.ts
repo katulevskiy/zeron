@@ -178,6 +178,7 @@ interface MountedComposer {
   readonly catalog: PickerCatalog;
   readonly textarea: HTMLTextAreaElement;
   readonly sendButton: HTMLButtonElement;
+  setTargetUnavailable(unavailable: boolean): void;
 }
 
 let root: Root | null = null;
@@ -259,7 +260,7 @@ afterEach(() => {
   sidebarStore.resetPrivateState();
 });
 
-function mountComposer(): MountedComposer {
+function mountComposer(targetUnavailable = false): MountedComposer {
   const cache = new FakeCache();
   const client = new FakeClient(cache);
   const catalog = new PickerCatalog(client);
@@ -287,6 +288,7 @@ function mountComposer(): MountedComposer {
     catalog,
     transcript: null,
     availableWidth: 720,
+    targetUnavailable,
   } as Parameters<ComposerComponentType>[0];
   host = document.createElement("div");
   document.body.appendChild(host);
@@ -295,7 +297,12 @@ function mountComposer(): MountedComposer {
   const textarea = host.querySelector<HTMLTextAreaElement>("textarea.composer-input");
   const sendButton = host.querySelector<HTMLButtonElement>("button.composer-send");
   if (textarea === null || sendButton === null) throw new Error("Fresh Composer controls did not mount");
-  return { host, client, cache, catalog, textarea, sendButton };
+  return {
+    host, client, cache, catalog, textarea, sendButton,
+    setTargetUnavailable: (unavailable) => {
+      act(() => root!.render(createElement(ComposerImpl, { ...props, targetUnavailable: unavailable })));
+    },
+  };
 }
 
 function setTextareaValue(textarea: HTMLTextAreaElement, value: string): void {
@@ -387,6 +394,27 @@ function expectIntentStillPresent(mounted: MountedComposer): void {
 }
 
 describe("fresh composer harness availability", () => {
+  it("blocks an unresolved project without losing the draft and resumes after resolution", async () => {
+    const mounted = mountComposer(true);
+    await stageDraft(mounted);
+    await completeHarnessCatalog(mounted);
+    await waitFor(() => mounted.catalog.getModels("claude-code").loaded, "offered model catalog");
+
+    expect(mounted.sendButton.disabled).toBe(true);
+    pressEnter(mounted.textarea);
+    pressSend(mounted);
+    await act(async () => tick());
+    expect(mounted.client.durableCalls()).toHaveLength(0);
+    expectIntentStillPresent(mounted);
+
+    mounted.setTargetUnavailable(false);
+    expect(mounted.sendButton.disabled).toBe(false);
+    expectIntentStillPresent(mounted);
+    pressSend(mounted);
+    await finishRun(mounted);
+    expect(mounted.client.calls.some(({ method }) => method === methods.QUEUE_COMMAND)).toBe(true);
+  });
+
   it("disables Send while the selected engine's harness catalog is loading", async () => {
     const mounted = mountComposer();
     await stageDraft(mounted);

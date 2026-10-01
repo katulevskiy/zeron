@@ -227,14 +227,19 @@ export function ConversationPage() {
     setContextUsage(null);
   }, [chatId]);
 
+  // Resolve before catalog loading: a remembered project without a live row
+  // must never discover models or create a chat on a substitute target.
+  const target = useNewThreadTarget();
+  const targetUnavailable = !hasSelection && target.targetUnavailable;
+
   // Lazily fetch the harness catalog once per chat page open so the
   // composer chips aren't blank behind a stale "Loading." pill.
   useEffect(() => {
-    if (session === null) {
+    if (session === null || targetUnavailable) {
       return;
     }
     void session.catalog.loadHarnesses();
-  }, [session, chatId]);
+  }, [session, chatId, targetUnavailable]);
 
   const deviceId = status?.state === "connected" ? status.info.deviceId : null;
   const chat = !snapshot.chats.loaded
@@ -250,7 +255,6 @@ export function ConversationPage() {
   // `effective_device_id` (state.rs:1314-1320). The stub's id is the DRAFT
   // key `""` (the desktop's `current_key` for the new-thread canvas), so
   // the canvas draft survives every round trip.
-  const target = useNewThreadTarget();
   const stubChat = useMemo<Chat>(
     () => ({
       id: chatId,
@@ -264,9 +268,11 @@ export function ConversationPage() {
       lastMessagePreview: null,
       lastMessageAt: null,
       createdAt: new Date(0).toISOString(),
-      spaceId: target.space?.id ?? null,
+      // Keep the selected scoped identity in the draft target even when its
+      // live row disappeared; creation is blocked below until it resolves.
+      spaceId: target.space?.id ?? target.projectId ?? null,
     }),
-    [chatId, target.effectiveDeviceId, target.space?.id, target.space?.path],
+    [chatId, target.effectiveDeviceId, target.projectId, target.space?.id, target.space?.path],
   );
   // While a freshly minted chat's row is still landing, the stub stands in
   // (same id, so the composer never re-swaps its draft).
@@ -1154,7 +1160,11 @@ export function ConversationPage() {
     [chatId, row?.chat.id, row?.chat.title, row?.folder, row?.harness],
   );
 
-  if ((!snapshot.chats.loaded && session === null) || (session?.client.state === "offline" && row === undefined)) {
+  if (
+    (!hasSelection && session === null) ||
+    (!snapshot.chats.loaded && session === null) ||
+    (session?.client.state === "offline" && row === undefined)
+  ) {
     return (
       <div className="empty-state" role="status">
         <p>Engine unavailable. Sending is disabled until the host connects.</p>
@@ -1254,6 +1264,13 @@ export function ConversationPage() {
         */}
         <div className="bottom-stack" ref={bottomStackRef}>
           <StatusStrip status={row?.status ?? "idle"} sending={sending} />
+          {targetUnavailable && (
+            <div className="composer-target-warning" role="status">
+              {target.projectUnavailable
+                ? "Selected project unavailable. Choose another project before sending."
+                : "Selected project loading. Wait for it to resolve before sending."}
+            </div>
+          )}
           {session !== null && (
             <div
               className="persistent-composer"
@@ -1269,6 +1286,7 @@ export function ConversationPage() {
             >
               <Composer
                 session={session}
+                targetUnavailable={targetUnavailable}
                 chat={effectiveChat}
                 catalog={session.catalog}
                 // The LIVE store, never the swap-retained one: the

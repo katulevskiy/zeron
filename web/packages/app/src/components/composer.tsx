@@ -341,6 +341,8 @@ interface ComposerProps {
    * correction are DOM writes; only the settle republishes `layout`.
    */
   readonly dockEvaluateRef?: { current: (() => void) | null };
+  /** A canvas project is loading or missing; preserve the draft but block sends. */
+  readonly targetUnavailable?: boolean;
 }
 
 export function Composer({
@@ -362,6 +364,7 @@ export function Composer({
   dockEvaluateRef,
   onNewThreadLaunched,
   dockCorrectionRef,
+  targetUnavailable = false,
 }: ComposerProps) {
   // The MERGED fleet snapshot: the composer's per-chat status lookups read
   // scoped rows across engines; the calls themselves go through the routed
@@ -2387,7 +2390,7 @@ export function Composer({
     if (
       sendBlocked({
         queueEditFinishing: busy,
-        requestTargetDisconnected: session.client.state !== "connected",
+        requestTargetDisconnected: targetUnavailable || session.client.state !== "connected",
         reviewCommentFlushPending: false,
         // A settled empty catalog and an unconfirmed selected harness are
         // separate gates; loading preserves the draft, not send permission.
@@ -2400,7 +2403,7 @@ export function Composer({
       return;
     }
     await send(text, mode === "queue");
-  }, [busy, text, staged, runLive, commentCount, editingMessage, onEditFinish, session.client, interrupt, send, commitQueueEdit, newChat, harnesses.loaded, harnesses.rows, selectedHarnessUnavailable]);
+  }, [busy, text, staged, runLive, commentCount, editingMessage, onEditFinish, session.client, interrupt, send, commitQueueEdit, newChat, harnesses.loaded, harnesses.rows, selectedHarnessUnavailable, targetUnavailable]);
 
   // ── Key policy: completions → phone newline → wizard → Enter (§2.7) ────
   // `resolveEnterAction` (lib/composer-send.ts) is the Enter branch's single
@@ -2739,7 +2742,7 @@ export function Composer({
     mode !== "stop" &&
     sendBlocked({
       queueEditFinishing: busy,
-      requestTargetDisconnected: session.client.state !== "connected",
+      requestTargetDisconnected: targetUnavailable || session.client.state !== "connected",
       reviewCommentFlushPending: false,
       newChatNoAgents: newChat && harnesses.loaded && offeredHarnesses(harnesses.rows).length === 0,
       selectedHarnessUnavailable,

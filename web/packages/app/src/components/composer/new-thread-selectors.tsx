@@ -35,11 +35,19 @@ export interface NewThreadTarget {
   readonly devices: readonly Device[];
   readonly spaces: readonly Space[];
   readonly ownDeviceId: string | null;
-  /** The picked space row, or null ("no project" / nothing remembered). */
+  /** The selected project identity, retained even when its live row is absent. */
+  readonly projectId: string | null;
+  /** The picked space row, or null ("no project" / unavailable selection). */
   readonly space: Space | null;
   /** The device that runs the agents for this target. */
   readonly effectiveDevice: Device | null;
   readonly effectiveDeviceId: string | null;
+  /** A remembered project vanished after the relevant project list loaded. */
+  readonly projectUnavailable: boolean;
+  /** The selected project has not loaded yet; it is still a blocked target. */
+  readonly projectLoading: boolean;
+  /** No canvas RPC or creation may proceed without the selected project row. */
+  readonly targetUnavailable: boolean;
 }
 
 /**
@@ -67,6 +75,9 @@ export function useNewThreadTarget(): NewThreadTarget {
     // labels, catalogs, and chat creation therefore share the same owner.
     const canvasTarget = resolveNewChatTarget(defaults, sidebar, session?.engine.key ?? null);
     const space = canvasTarget.projectId === null ? null : spaces.find((row) => row.id === canvasTarget.projectId) ?? null;
+    const targetUnavailable = canvasTarget.projectId !== null && space === null;
+    const projectUnavailable = targetUnavailable && snapshot?.spaces.loaded === true;
+    const projectLoading = targetUnavailable && !projectUnavailable;
     // The routed engine's own device, SCOPED to match the merged rows.
     const ownRawDeviceId = session?.client.engineInfo?.deviceId ?? null;
     const own =
@@ -76,11 +87,22 @@ export function useNewThreadTarget(): NewThreadTarget {
     const effectiveDeviceId = space?.deviceId ?? canvasTarget.deviceId ?? own;
     const effectiveDevice = devices.find((device) => device.id === effectiveDeviceId) ?? null;
     // Every canvas RPC already uses the resolved owner's client.
-    return { devices, spaces, ownDeviceId: own, space, effectiveDevice, effectiveDeviceId };
+    return {
+      devices,
+      spaces,
+      ownDeviceId: own,
+      projectId: canvasTarget.projectId,
+      space,
+      effectiveDevice,
+      effectiveDeviceId,
+      projectUnavailable,
+      projectLoading,
+      targetUnavailable,
+    };
     // `defaults` is a cached snapshot object; the memo keys on its identity,
     // which changes only when a pick lands.
     // eslint-disable-next-line react-hooks/exhaustive-deps
-  }, [snapshot?.devices.rows, snapshot?.spaces.rows, defaults, ownDeviceKey(session), sidebar.spaceFilter, sidebar.lastSpaceId]);
+  }, [snapshot?.devices.rows, snapshot?.spaces.rows, snapshot?.spaces.loaded, defaults, ownDeviceKey(session), sidebar.spaceFilter, sidebar.lastSpaceId]);
 }
 
 /** The routed session's own (scoped) device id as a memo key. */
@@ -117,9 +139,15 @@ export function NewThreadTargetSelectors() {
       />
       <ProjectChip
         spaces={target.spaces}
-        currentSpaceId={target.space?.id ?? null}
+        currentSpaceId={target.space?.id ?? target.projectId}
         currentDeviceId={target.effectiveDeviceId}
-        fallbackLabel="No project"
+        fallbackLabel={
+          target.projectUnavailable
+            ? "Selected project unavailable"
+            : target.projectLoading
+              ? "Selected project loading"
+              : "No project"
+        }
       />
     </div>
   );
