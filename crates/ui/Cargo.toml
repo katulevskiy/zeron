@@ -34,6 +34,10 @@ name = "appshots-fixture"
 required-features = ["appshots-fixture"]
 
 [[example]]
+name = "cloud-fixture"
+required-features = ["appshots-fixture"]
+
+[[example]]
 name = "new-project-fixture"
 required-features = ["project-palette-fixture"]
 
@@ -51,6 +55,7 @@ required-features = ["project-palette-fixture"]
 
 [dependencies]
 url = "2"
+zeron-cloud.workspace = true
 zeron-proto.workspace = true
 similar.workspace = true
 zeron-doc.workspace = true
@@ -114,6 +119,7 @@ url = "2"
 x11rb = { version = "0.14.0", features = ["image"] }
 
 [dev-dependencies]
+zeron-cloud = { workspace = true, features = ["mock"] }
 gpui = { workspace = true, features = ["test-support"] }
 tempfile.workspace = true
 mimalloc.workspace = true

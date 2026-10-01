@@ -179,7 +179,9 @@ fn main() -> anyhow::Result<()> {
     // A cloud box's credential (docs/cloud.md §6) is read and scrubbed from the
     // environment first, while the process is still single-threaded, so no
     // agent or terminal the engine spawns inherits it.
-    let device_credential = if matches!(&cli.command, Some(Command::Headless)) {
+    let device_credential = if matches!(&cli.command, Some(Command::Headless))
+        || is_cloud_boot(&cli.command)
+    {
         // SAFETY: nothing has spawned a thread yet (logging, the malloc
         // trimmer and the runtime all start below).
         unsafe { zeron_engine::DeviceCredential::take_from_env() }?
@@ -333,7 +335,10 @@ fn main() -> anyhow::Result<()> {
             let env = zeron_engine::cloud::CloudEnv::from_env()?;
             let runtime = tokio::runtime::Runtime::new()?;
             runtime.block_on(async {
-                zeron_engine::cloud::CloudBoot::new(engine_config_from_env(), env)
+                // The box signs in as its device (§6), like `headless` does.
+                let mut config = engine_config_from_env();
+                config.device_credential = device_credential;
+                zeron_engine::cloud::CloudBoot::new(config, env)
                     .run(async {
                         if let Err(error) = shutdown_signal().await {
                             tracing::error!(%error, "signal handler failed; stopping");

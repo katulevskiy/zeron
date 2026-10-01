@@ -641,6 +641,7 @@ async fn cloud_boot_restores_then_checkpoints_on_stop() {
         org_id: None,
         workos_client_id: None,
         dev_user_id: None,
+        device_credential: None,
     };
     let env = CloudEnv {
         device_id: Some("cloud-box-device-1".into()),

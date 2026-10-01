@@ -16119,6 +16119,10 @@ impl Shell {
             self.close_settings(cx);
         }
     }
+    /// Screenshot fixtures: open Settings → Devices.
+    pub fn fixture_open_devices_settings(&mut self, cx: &mut Context<Self>) {
+        self.open_settings(SettingsSection::Devices, cx);
+    }
     pub fn fixture_appshots_composer(&self) -> Entity<Composer> {
         self.composer.clone()
     }

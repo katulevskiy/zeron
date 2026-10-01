@@ -377,3 +377,29 @@ Token permissions (account-scoped):
 - **Starting the move.** `StartMove` to a box that is offline first calls
   `wake` and waits up to 120 s for the box's presence, then continues as an
   ordinary move. The banner detail reads "Waking the cloud box".
+
+### 9. In the app
+
+Settings → Devices → **Cloud**:
+
+- **No token yet:** a field for the Cloudflare API token and the four
+  permissions it needs. `CloudConnect` checks it before keeping it.
+- **Connected, no box:** a name, a size (`basic` to `standard-4`) and how long
+  an idle box stays awake (5, 15, 30 or 60 minutes), with a monthly cost hint
+  from `zeron_cloud::estimate` (about 60 hours of use; idle time is free).
+  **Create box** runs `CloudProvision`, which takes a minute or two.
+- **With boxes:** each box with its state and **Wake**, **Stop** and **Remove**.
+  Remove deletes the box's Cloudflare resources and revokes its device
+  credential.
+
+The card only shows in a synced workspace: a box needs an account to enrol with.
+
+## What has and hasn't been exercised
+
+Everything here ran against fakes: a fake Cloudflare REST API (`zeron_cloud::mock`),
+a fake edge for enrolment, a fake R2 checkpoint store, the Worker under Node with
+a fake `ctx.container`, and the real edge Worker under `workerd`. **No box has been
+provisioned in a real Cloudflare account, the container image hasn't been built or
+pushed, and no agent has run in a real box.** The first live run is likely to turn
+up differences in Cloudflare's API responses and container lifecycle that the
+fakes can't show.

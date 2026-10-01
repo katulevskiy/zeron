@@ -74,6 +74,8 @@ pub struct DevicesPage {
     /// until `GetFileTransferSettings` answers.
     transfer_settings: Option<zeron_proto::FileTransferSettings>,
     transfer_task: Option<Task<()>>,
+    /// Continue-in-the-cloud boxes (docs/cloud.md).
+    cloud: Entity<crate::settings::cloud::CloudCard>,
     _observe: Subscription,
 }
 
@@ -97,6 +99,10 @@ fn inbox_path(settings: &zeron_proto::FileTransferSettings) -> Option<std::path:
 impl DevicesPage {
     pub fn new(state: Entity<AppState>, cx: &mut Context<Self>) -> Self {
         let observe = cx.observe(&state, |_, _, cx| cx.notify());
+        let cloud = {
+            let state = state.clone();
+            cx.new(|cx| crate::settings::cloud::CloudCard::new(state, cx))
+        };
         Self {
             state,
             scroll: widgets::PageScroll::default(),
@@ -107,6 +113,7 @@ impl DevicesPage {
             copy_task: None,
             transfer_settings: None,
             transfer_task: None,
+            cloud,
             _observe: observe,
         }
     }
@@ -593,6 +600,11 @@ impl Render for DevicesPage {
             .when(workspace_scope != Some(WorkspaceScope::Local), |el| {
                 el.child(widgets::section_label(&theme, "Other devices").mt(px(28.0)))
                     .child(others_block)
+            })
+            // Boxes need an account to enrol with, which local mode has none of.
+            .when(workspace_scope != Some(WorkspaceScope::Local), |el| {
+                el.child(widgets::section_label(&theme, "Cloud").mt(px(28.0)))
+                    .child(self.cloud.clone())
             });
 
         let scrollbar = popover::rail(self, "devices-page-scrollbar", &theme, cx);
