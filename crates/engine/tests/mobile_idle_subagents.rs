@@ -396,3 +396,62 @@ async fn parked_background_callbacks_do_not_unpark_the_main_thread() {
     core.sessions.shutdown().await;
     wait_for("runtime shutdown clears pending callbacks", || idle_with(0)).await;
 }
+
+/// Counts follow confirmed child lifecycles even if no child has emitted text.
+#[tokio::test(flavor = "multi_thread")]
+async fn idle_parent_counts_silent_children_and_deduplicates_lifecycle_events() {
+    let child = |id: &str, event| AgentEvent::Subagent {
+        parent_tool_use_id: id.into(),
+        event: Box::new(event),
+    };
+    let start = || AgentEvent::Steered {
+        assistant_message_id: None,
+        next_assistant_message_id: None,
+    };
+    let dir = tempfile::tempdir().unwrap();
+    let registry = HarnessRegistry::new();
+    registry.register(Arc::new(BackgroundHarness {
+        starts: Arc::new(AtomicUsize::new(0)),
+        interrupted: Arc::new(AtomicBool::new(false)),
+        callback_script: Some(vec![
+            child("one", start()),
+            child("one", start()),
+            child("two", start()),
+            AgentEvent::TextDelta {
+                text: "Waiting for the children".into(),
+            },
+            done(),
+            child("one", done()),
+            child("one", done()),
+            child("two", start()),
+            child("two", done()),
+        ]),
+    }));
+    let core = EngineCore::assemble(dir.path(), Arc::new(registry), HarnessId::Mock, None).unwrap();
+    core.sessions
+        .dispatch(CHAT, HarnessId::Mock, run_request("fan out"), None)
+        .await
+        .unwrap();
+    let idle_with = |count| {
+        core.sessions
+            .session_status(CHAT)
+            .is_some_and(|s| s.status == SessionStatus::Idle && s.running_subagents == count)
+    };
+    wait_for("two silent children with main idle", || idle_with(2)).await;
+    let completion = core
+        .sessions
+        .session_status(CHAT)
+        .unwrap()
+        .last_completed_turn;
+    wait_for("one child completes", || idle_with(1)).await;
+    wait_for("all children complete", || idle_with(0)).await;
+    assert_eq!(
+        core.sessions
+            .session_status(CHAT)
+            .unwrap()
+            .last_completed_turn,
+        completion,
+        "child lifecycle cannot fabricate another main turn"
+    );
+    core.shutdown().await;
+}

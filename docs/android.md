@@ -465,7 +465,8 @@ The desktop's Subagents view (#638, #647), on the phone:
 
 - **Where the data comes from.** Two sources, both shared with the desktop.
   The session row carries `running_subagents` (the engine publishes it as
-  subagent sinks open and settle and clears it when the run ends; stale rows
+  confirmed child starts open sinks and completions settle them; it clears
+  when the run ends. Silent starts count too, and stale rows
   count zero, like the working indicator), so the sessions list can badge a
   chat that is not open. The list itself is read from the open chat's
   transcript: every spawn chip with a stamped doc ref is one subagent
@@ -474,13 +475,24 @@ The desktop's Subagents view (#638, #647), on the phone:
   running first, longest-running on top, then unstamped; finished ones split
   into Completed and Failed, newest first.
 - **Sessions list**: a purple badge at the provider tile's top-right shows
-  the active subagent count, grows with the digits, and caps at "99+". It is
-  hidden at zero. The rotating Material shape is purple while the main thread
+  the active subagent count in bold, centered numerals and caps at "99+".
+  Material cookie shapes gain scallops as the count rises: 4 sides for 1–4,
+  6 for 5–6, 7 for 7, 9 for 8–9, and 12 for 10 or more. The badge measures
+  its text (including accessibility font scaling), reserves space above the
+  logo, and is hidden at zero. `ActivityBadgePreview` shows 1–12, 67, 99,
+  99+, and the hidden state in the app theme. The rotating Material shape is purple while the main thread
   runs, yellow when the main thread is idle with running subagents, and blue
   when an idle main thread has a confirmed background callback. Input and
   Failed labels remain visible when the main thread needs attention.
   Chats with active subagents or callbacks count toward **Working**, including
-  the filter, its count, and the bottom summary.
+  the filter, its count, and the bottom summary. Each activity shape runs its
+  own Material animation; starts are staggered by a frame rather than phase
+  locked. The count shapes themselves stay still so the number stays readable.
+- **Lifecycle identity**: Claude task IDs and Codex child thread IDs retain
+  their original spawn identity across resumes. Completion and interruption
+  settle that original child even without a fresh transcript sink; engine
+  restart recovery clears abandoned local running chips. For remote chats,
+  the hosting engine must also contain these lifecycle fixes.
 - **Background callbacks**: the host engine reports Claude's main-thread
   background shell tasks and monitors, and successful `ScheduleWakeup` timers.
   Completion, cancellation, expiry, and runtime shutdown clear them; nested
