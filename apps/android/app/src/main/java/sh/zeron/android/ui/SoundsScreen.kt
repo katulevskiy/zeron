@@ -86,12 +86,11 @@ fun SoundsScreen(model: AppModel, onBack: () -> Unit) {
             val granted = access.granted
             Group {
                 SegmentedListItem(
-                    onClick = tapAction(action = access.ask),
-                    enabled = !granted,
+                    onClick = tapAction(action = if (granted) access.settings else access.ask),
                     shapes = segmentedShapes(0, 1),
                     colors = ListItemDefaults.segmentedColors(containerColor = cardColor()),
                     leadingContent = { IconTile(ZIcons.Bell) },
-                    supportingContent = { Text(if (granted) "On: sessions can alert you while Zeron is closed" else "Needed to alert you while Zeron is in the background") },
+                    supportingContent = { Text(if (granted) "On: sessions alert you while Zeron is closed. Tap for system settings" else "Needed to alert you while Zeron is in the background") },
                 ) { Text(if (granted) "Background alerts" else "Allow notifications") }
             }
         }
@@ -247,7 +246,7 @@ private fun PreviewRows(engine: AndroidFeedback, s: FeedbackSettings, fb: sh.zer
     Group {
         samples.forEachIndexed { i, sample ->
             SegmentedListItem(
-                onClick = tapAction { running = i },
+                onClick = { running = i }, // the preview is the answer; no extra tap on top
                 enabled = running == -1 && (s.sounds || s.haptics),
                 shapes = segmentedShapes(i, samples.size),
                 colors = ListItemDefaults.segmentedColors(containerColor = cardColor()),

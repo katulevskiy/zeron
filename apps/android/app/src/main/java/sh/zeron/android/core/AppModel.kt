@@ -183,6 +183,7 @@ class AppModel(private val app: Application) {
     fun boot(options: LaunchOptions) {
         launch = options
         if (_client.value != null) return
+        if (isDebuggable) registerDebugAlerts()
         if (options.signedOut) credentials.clear()
         watchNetwork()
         // `wallpaper <path>` / `wallpaper none` and `wallpaper-effect <name>`:
@@ -207,6 +208,29 @@ class AppModel(private val app: Application) {
                 refreshWorkspace(announce = false)
             }
         }
+    }
+
+    /**
+     * Debuggable builds: `adb shell am broadcast -a sh.zeron.android.DEBUG_EVENT -p sh.zeron.android --es kind
+     * done|input|failed [--es chat <id>]` runs a session event through the real policy (in-app cue in front,
+     * notification behind), to check the sensory layer without waiting for an agent.
+     */
+    private fun registerDebugAlerts() {
+        val receiver = object : android.content.BroadcastReceiver() {
+            override fun onReceive(context: android.content.Context, intent: android.content.Intent) {
+                val event = when (intent.getStringExtra("kind")) {
+                    "input" -> sh.zeron.android.feedback.SessionEvent.NeedsInput
+                    "failed" -> sh.zeron.android.feedback.SessionEvent.Failed
+                    else -> sh.zeron.android.feedback.SessionEvent.Done
+                }
+                val chat = intent.getStringExtra("chat") ?: _workspace.value?.let { phases(it).keys.firstOrNull() } ?: return
+                // `--ez background true` takes the backgrounded branch while the app stays up (emulators crash on task changes).
+                if (intent.getBooleanExtra("background", false)) notifier.alert(chat, event) else sessionFeedback.session(chat, event)
+            }
+        }
+        androidx.core.content.ContextCompat.registerReceiver(
+            app, receiver, android.content.IntentFilter("sh.zeron.android.DEBUG_EVENT"), androidx.core.content.ContextCompat.RECEIVER_EXPORTED,
+        )
     }
 
     fun demoOptions() = DemoOptions(

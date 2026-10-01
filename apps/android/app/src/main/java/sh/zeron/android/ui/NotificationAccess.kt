@@ -19,7 +19,7 @@ import sh.zeron.android.core.AppModel
  * It is asked for once, in context (the first message you send), and can be
  * asked again from Settings > Sounds & haptics.
  */
-class NotificationAccess(val granted: Boolean, val askOnce: () -> Unit, val ask: () -> Unit)
+class NotificationAccess(val granted: Boolean, val askOnce: () -> Unit, val ask: () -> Unit, val settings: () -> Unit)
 
 @Composable
 fun rememberNotificationAccess(model: AppModel): NotificationAccess {
@@ -30,18 +30,19 @@ fun rememberNotificationAccess(model: AppModel): NotificationAccess {
         onPauseOrDispose {}
     }
     var explicit by remember { mutableStateOf(false) }
+    fun openSettings() {
+        runCatching {
+            context.startActivity(
+                Intent(Settings.ACTION_APP_NOTIFICATION_SETTINGS)
+                    .putExtra(Settings.EXTRA_APP_PACKAGE, context.packageName)
+                    .addFlags(Intent.FLAG_ACTIVITY_NEW_TASK),
+            )
+        }
+    }
     val launcher = rememberLauncherForActivityResult(ActivityResultContracts.RequestPermission()) { ok ->
         granted = ok
         // Denied for good (the system no longer shows the prompt): send people to the switch instead.
-        if (!ok && explicit) {
-            runCatching {
-                context.startActivity(
-                    Intent(Settings.ACTION_APP_NOTIFICATION_SETTINGS)
-                        .putExtra(Settings.EXTRA_APP_PACKAGE, context.packageName)
-                        .addFlags(Intent.FLAG_ACTIVITY_NEW_TASK),
-                )
-            }
-        }
+        if (!ok && explicit) openSettings()
     }
     return remember(model, launcher, granted) {
         NotificationAccess(
@@ -58,6 +59,7 @@ fun rememberNotificationAccess(model: AppModel): NotificationAccess {
                 explicit = true
                 launcher.launch(Manifest.permission.POST_NOTIFICATIONS)
             },
+            settings = ::openSettings,
         )
     }
 }

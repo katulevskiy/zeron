@@ -102,7 +102,10 @@ class Notifier(private val context: Context, private val settings: () -> Feedbac
 
     /** A session event while the app is in the background; the in-app switches pick the channel. */
     override fun alert(chatId: String, event: SessionEvent) {
-        if (!permitted) return
+        if (!permitted) {
+            android.util.Log.d("ZeronFeedback", "notification $event for $chatId skipped: notifications not allowed")
+            return
+        }
         val kind = Kind.entries.first { it.event == event }
         val s = settings()
         val sound = s.allows(kind.category)
@@ -126,6 +129,7 @@ class Notifier(private val context: Context, private val settings: () -> Feedbac
             .setContentIntent(tap)
             .setAutoCancel(true)
             .build()
+        android.util.Log.d("ZeronFeedback", "notification $event for $chatId on channel ${n.channelId}")
         try {
             NotificationManagerCompat.from(context).notify("session:$chatId".hashCode(), n)
         } catch (_: SecurityException) {
