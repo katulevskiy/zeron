@@ -56,6 +56,14 @@ pub(crate) fn wire(policy: &AgentPolicy, title_only: bool) -> Wire {
         _ => "untrusted",
     };
     let sandbox = match (policy.mode, policy.sandbox) {
+        // Zeron's OS sandbox already confines the whole app-server (and
+        // macOS refuses a Seatbelt profile inside another): Codex's own
+        // stays out of the way, approvals still go through the gate.
+        (_, SandboxMode::WorkspaceWrite | SandboxMode::ReadOnly)
+            if crate::sandboxing::os_sandboxes().contains(&policy.sandbox) =>
+        {
+            SandboxLevel::DangerFullAccess
+        }
         (PermissionMode::Plan, _) | (_, SandboxMode::ReadOnly) => SandboxLevel::ReadOnly,
         (_, SandboxMode::WorkspaceWrite) => SandboxLevel::WorkspaceWrite,
         (_, SandboxMode::Off) => SandboxLevel::DangerFullAccess,
@@ -163,13 +171,24 @@ mod tests {
                 w(mode, SandboxMode::Off).sandbox,
                 SandboxLevel::DangerFullAccess
             );
+            // Zeron's OS sandbox confines Codex where this machine has one;
+            // Codex's own sandbox stands in where it doesn't.
+            let os = crate::sandboxing::os_sandboxes().len() > 1;
             assert_eq!(
                 w(mode, SandboxMode::WorkspaceWrite).sandbox,
-                SandboxLevel::WorkspaceWrite
+                if os {
+                    SandboxLevel::DangerFullAccess
+                } else {
+                    SandboxLevel::WorkspaceWrite
+                }
             );
             assert_eq!(
                 w(mode, SandboxMode::ReadOnly).sandbox,
-                SandboxLevel::ReadOnly
+                if os {
+                    SandboxLevel::DangerFullAccess
+                } else {
+                    SandboxLevel::ReadOnly
+                }
             );
         }
         let plan = w(PermissionMode::Plan, SandboxMode::Off);

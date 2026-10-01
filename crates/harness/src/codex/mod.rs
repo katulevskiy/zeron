@@ -721,7 +721,12 @@ impl CodexHarness {
         // policy; `request.sandbox` is never the source.
         let wire = permissions::wire(&request.policy, title_only);
         request.sandbox = wire.sandbox;
-        let mut cmd = Command::new(&exe);
+        let mut cmd = crate::sandboxing::agent_command(
+            HarnessId::Codex,
+            &request,
+            &exe,
+            std::path::Path::new(&request.cwd),
+        )?;
         cmd.arg("app-server");
         crate::compose_child_path(&mut cmd, &exe);
         if !request.cwd.is_empty() {

@@ -488,6 +488,21 @@ impl SessionsEngine {
             self.refuse_run(chat_id, message_id.as_deref(), &request.prompt, &reason);
             return Err(EngineError::Other(reason));
         }
+        // Likewise a sandbox this device can't provide. An unattended run
+        // drops it instead: its read-only intent is still held by its mode.
+        let sandboxes = self.inner.registry.policy_caps(harness_id).sandboxes;
+        if !sandboxes.contains(&request.policy.sandbox) {
+            if request.policy.unattended {
+                request.policy.sandbox = zeron_proto::SandboxMode::Off;
+            } else {
+                let reason = format!(
+                    "This device can't sandbox {} for this chat. Turn the sandbox off to run it.",
+                    self.inner.registry.display_name(harness_id)
+                );
+                self.refuse_run(chat_id, message_id.as_deref(), &request.prompt, &reason);
+                return Err(EngineError::Other(reason));
+            }
+        }
         let routed = lock(&self.inner.runs).get(chat_id).map(|h| {
             (
                 h.run_id.clone(),

@@ -95,7 +95,7 @@ impl PiHarness {
         })
     }
     async fn probe(&self, cwd: &Path, models: bool) -> Result<Value, HarnessError> {
-        let mut process = self.spawn(cwd, &["--no-session".into()], None)?;
+        let mut process = self.spawn(cwd, &["--no-session".into()], None, None)?;
         let (mut tx, rx) = tokio::sync::oneshot::channel();
         let grace = self.kill_grace;
         tokio::spawn(async move {
@@ -117,6 +117,7 @@ impl PiHarness {
         cwd: &Path,
         args: &[String],
         mcp: Option<&zeron_proto::McpServer>,
+        policy: Option<&zeron_proto::AgentPolicy>,
     ) -> Result<Process, HarnessError> {
         let exe = self.resolve_executable()?;
         if self.executable.is_none() {
@@ -128,7 +129,12 @@ impl PiHarness {
                 }
             }
         }
-        let mut cmd = Command::new(&exe);
+        let mut cmd = match policy {
+            Some(policy) => {
+                crate::sandboxing::policy_command(HarnessId::Pi, policy, mcp, &exe, cwd)?
+            }
+            None => Command::new(&exe),
+        };
         // Process group plus the same env scrubbing the ACP launch applied.
         crate::process::owned::configure(&mut cmd);
         crate::compose_child_path(&mut cmd, &exe);
@@ -260,7 +266,10 @@ impl Harness for PiHarness {
     /// without asking anyone — so no policy can answer for it. The stricter
     /// modes wait for an OS sandbox that confines the process.
     fn policy_caps(&self) -> zeron_proto::PolicyCaps {
-        zeron_proto::PolicyCaps::bypass_only()
+        zeron_proto::PolicyCaps {
+            sandboxes: crate::sandboxing::os_sandboxes(),
+            ..zeron_proto::PolicyCaps::bypass_only()
+        }
     }
     fn installed(&self) -> bool {
         self.resolve_executable().is_ok()
@@ -353,7 +362,12 @@ impl Harness for PiHarness {
         if lost_context.is_some() {
             request.resume = None;
         }
-        let process = self.spawn(Path::new(&request.cwd), &args, request.mcp.as_ref())?;
+        let process = self.spawn(
+            Path::new(&request.cwd),
+            &args,
+            request.mcp.as_ref(),
+            Some(&request.policy),
+        )?;
         let (tx, rx) = mpsc::channel(256);
         let kill_grace = self.kill_grace;
         let interrupt_grace = self.interrupt_grace;
@@ -1008,10 +1022,9 @@ mod tests {
     #[test]
     fn pi_offers_only_bypass() {
         use crate::Harness;
-        assert_eq!(
-            super::PiHarness::new().policy_caps(),
-            zeron_proto::PolicyCaps::bypass_only()
-        );
+        let caps = super::PiHarness::new().policy_caps();
+        assert_eq!(caps.modes, vec![zeron_proto::PermissionMode::Bypass]);
+        assert_eq!(caps.sandboxes, crate::sandboxing::os_sandboxes());
     }
 
     #[tokio::test]

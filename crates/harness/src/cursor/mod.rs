@@ -240,7 +240,10 @@ impl Harness for CursorHarness {
     /// agent never asks before a tool and no policy can answer for it. The
     /// stricter modes wait for an OS sandbox that confines the process.
     fn policy_caps(&self) -> zeron_proto::PolicyCaps {
-        zeron_proto::PolicyCaps::bypass_only()
+        zeron_proto::PolicyCaps {
+            sandboxes: crate::sandboxing::os_sandboxes(),
+            ..zeron_proto::PolicyCaps::bypass_only()
+        }
     }
     /// "Installed" means the user's own cursor-agent CLI is present — the
     /// user-visible signal they use Cursor (the SDK itself is a managed
@@ -311,7 +314,12 @@ impl Harness for CursorHarness {
             None
         };
         let (exe, args) = self.resolve_shim().await?;
-        let mut cmd = Command::new(&exe);
+        let mut cmd = crate::sandboxing::agent_command(
+            HarnessId::Cursor,
+            &request,
+            &exe,
+            std::path::Path::new(&request.cwd),
+        )?;
         cmd.args(&args);
         if lease.is_some() {
             cmd.env("ZERON_CURSOR_STATE_DIR", state::state_root());
@@ -1037,9 +1045,8 @@ mod policy_tests {
 
     #[test]
     fn cursor_offers_only_bypass() {
-        assert_eq!(
-            CursorHarness::new().policy_caps(),
-            zeron_proto::PolicyCaps::bypass_only()
-        );
+        let caps = CursorHarness::new().policy_caps();
+        assert_eq!(caps.modes, vec![zeron_proto::PermissionMode::Bypass]);
+        assert_eq!(caps.sandboxes, crate::sandboxing::os_sandboxes());
     }
 }

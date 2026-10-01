@@ -190,6 +190,7 @@ pub(crate) mod jsonrpc;
 pub mod mock;
 mod model_context;
 pub mod opencode;
+pub mod sandboxing;
 pub mod policy;
 pub mod pi;
 pub mod process;

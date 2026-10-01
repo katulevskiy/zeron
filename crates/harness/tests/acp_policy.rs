@@ -296,11 +296,14 @@ async fn legacy_modes_switch_through_set_mode_outside_bypass_only() {
 
 #[test]
 fn caps_are_honest_per_agent() {
-    assert_eq!(AcpHarness::grok().policy_caps(), PolicyCaps::bypass_only());
-    assert_eq!(
+    for caps in [
+        AcpHarness::grok().policy_caps(),
         AcpHarness::hermes().policy_caps(),
-        PolicyCaps::bypass_only()
-    );
+    ] {
+        assert_eq!(caps.modes, PolicyCaps::bypass_only().modes);
+        // Any agent can run inside Zeron's OS sandbox.
+        assert_eq!(caps.sandboxes, zeron_harness::sandboxing::os_sandboxes());
+    }
     let devin = AcpHarness::devin().policy_caps();
     assert_eq!(devin.modes, PermissionMode::ALL.to_vec());
     assert!(devin.native_plan);

@@ -12179,6 +12179,7 @@ dependencies = [
  "zeron-engine",
  "zeron-mcp",
  "zeron-rpc",
+ "zeron-sandbox",
  "zeron-ui",
  "zeron-update",
 ]
@@ -12286,6 +12287,7 @@ dependencies = [
  "uuid",
  "windows-sys 0.61.2",
  "zeron-proto",
+ "zeron-sandbox",
  "zip",
 ]
 

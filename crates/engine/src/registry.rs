@@ -484,19 +484,19 @@ impl HarnessRegistry {
         }
     }
 
+    /// The harness's name as users see it.
+    pub fn display_name(&self, id: HarnessId) -> String {
+        match self.slots().get(&id) {
+            Some(Slot::Ready(harness)) => harness.display_name().to_string(),
+            Some(Slot::Lazy { descriptor, .. }) => descriptor.name.clone(),
+            None => format!("{id:?}"),
+        }
+    }
+
     /// `Err(reason)` when `id` can't honour `mode`: hosts refuse such a run
     /// instead of running it looser than the user asked.
     pub fn check_policy(&self, id: HarnessId, mode: PermissionMode) -> Result<(), String> {
-        let (name, caps) = match self.slots().get(&id) {
-            Some(Slot::Ready(harness)) => {
-                (harness.display_name().to_string(), harness.policy_caps())
-            }
-            Some(Slot::Lazy { descriptor, .. }) => {
-                (descriptor.name.clone(), descriptor.policy.clone())
-            }
-            None => (format!("{id:?}"), PolicyCaps::bypass_only()),
-        };
-        match caps.refusal(&name, mode) {
+        match self.policy_caps(id).refusal(&self.display_name(id), mode) {
             Some(reason) => Err(reason),
             None => Ok(()),
         }

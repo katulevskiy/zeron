@@ -287,19 +287,20 @@ impl OpencodeHarness {
         cwd: Option<&str>,
         mcp: Option<&zeron_proto::McpServer>,
         ask_permissions: bool,
+        policy: Option<&zeron_proto::AgentPolicy>,
     ) -> Result<Server, HarnessError> {
         if let Some(base) = &self.base_url {
             return Ok(Server::attached(base.clone()));
         }
         let exe = self.resolve_executable()?;
-        Server::spawn(&exe, cwd, self.startup_timeout, mcp, ask_permissions).await
+        Server::spawn(&exe, cwd, self.startup_timeout, mcp, ask_permissions, policy).await
     }
 
     /// One short-lived server answers both discovery calls. Also primes the
     /// commands cache so concurrent picker/composer fetches share one boot.
     async fn probe_models(&self) -> Result<Vec<Model>, HarnessError> {
         let _guard = self.probe_lock.lock().await;
-        let mut server = self.server(None, None, false).await?;
+        let mut server = self.server(None, None, false, None).await?;
         let result = async {
             let providers = server.provider_catalog(None).await?;
             let mut models = models_from_providers(&providers);
@@ -331,7 +332,7 @@ impl OpencodeHarness {
         if let Some(commands) = self.commands_cache.get() {
             return Ok(commands.clone());
         }
-        let mut server = self.server(None, None, false).await?;
+        let mut server = self.server(None, None, false, None).await?;
         let result = server
             .commands_wire(None)
             .await
@@ -412,7 +413,7 @@ impl Harness for OpencodeHarness {
         let directory = cwd
             .to_str()
             .ok_or_else(|| HarnessError::Protocol("Project path is not UTF-8".into()))?;
-        let mut server = self.server(Some(directory), None, false).await?;
+        let mut server = self.server(Some(directory), None, false, None).await?;
         let result = server.commands_wire(Some(directory)).await;
         server.shutdown(self.kill_grace).await;
         let commands = result?;
@@ -432,7 +433,7 @@ impl Harness for OpencodeHarness {
         let directory = cwd
             .to_str()
             .ok_or_else(|| HarnessError::Protocol("Project path is not UTF-8".into()))?;
-        let mut server = self.server(Some(directory), None, false).await?;
+        let mut server = self.server(Some(directory), None, false, None).await?;
         let result = server
             .commands_wire(Some(directory))
             .await
@@ -446,6 +447,7 @@ impl Harness for OpencodeHarness {
     /// Plan also selects opencode's own `plan` agent.
     fn policy_caps(&self) -> zeron_proto::PolicyCaps {
         zeron_proto::PolicyCaps {
+            sandboxes: crate::sandboxing::os_sandboxes(),
             native_plan: true,
             ..zeron_proto::PolicyCaps::all_modes()
         }
@@ -466,7 +468,12 @@ impl Harness for OpencodeHarness {
         // every other mode makes the server ask so the policy answers.
         let ask_permissions = request.policy.mode != zeron_proto::PermissionMode::Bypass;
         let server = self
-            .server(cwd.as_deref(), request.mcp.as_ref(), ask_permissions)
+            .server(
+                cwd.as_deref(),
+                request.mcp.as_ref(),
+                ask_permissions,
+                Some(&request.policy),
+            )
             .await?;
         let (event_tx, event_rx) = mpsc::channel::<Result<AgentEvent, HarnessError>>(256);
         tokio::spawn(run_session(Session {
@@ -617,12 +624,23 @@ impl Server {
         startup: Duration,
         mcp: Option<&zeron_proto::McpServer>,
         ask_permissions: bool,
+        policy: Option<&zeron_proto::AgentPolicy>,
     ) -> Result<Self, HarnessError> {
         let port = free_localhost_port().ok_or_else(|| {
             HarnessError::Protocol("no free localhost port for opencode serve".into())
         })?;
         let password = uuid::Uuid::new_v4().to_string();
-        let mut cmd = Command::new(exe);
+        // Probes run unconfined; a run's server runs in its chat's sandbox.
+        let mut cmd = match policy {
+            Some(policy) => crate::sandboxing::policy_command(
+                HarnessId::Opencode,
+                policy,
+                mcp,
+                exe,
+                std::path::Path::new(cwd.unwrap_or_default()),
+            )?,
+            None => Command::new(exe),
+        };
         cmd.arg("serve")
             .arg("--port")
             .arg(port.to_string())
@@ -4670,6 +4688,7 @@ http.createServer((req, res) => {{
                 Duration::from_secs(5),
                 Some(&first),
                 false,
+                None,
             )
             .await
             .unwrap();
@@ -4679,6 +4698,7 @@ http.createServer((req, res) => {{
                 Duration::from_secs(5),
                 Some(&second),
                 false,
+                None,
             )
             .await
             .unwrap();

@@ -6,7 +6,7 @@
 //! Rendering lives with the other composer pickers (`pickers.rs`).
 
 use zeron_proto::policy::{APPROVAL_ALLOW_ALWAYS, APPROVAL_ALLOW_ONCE, APPROVAL_DENY};
-use zeron_proto::{PermissionMode, PolicyCaps};
+use zeron_proto::{PermissionMode, PolicyCaps, SandboxMode};
 
 /// The device's default permission mode (Settings → General), once known.
 /// Composers seed new chats from it; the settings card updates it on save.
@@ -65,6 +65,75 @@ pub fn mode_rows(
             description: mode.description(),
             selected: mode == current,
             unsupported: caps.and_then(|caps| caps.unsupported_reason(harness, mode)),
+        })
+        .collect()
+}
+
+/// The sandbox choices, in menu order.
+pub const SANDBOXES: [SandboxMode; 3] = [
+    SandboxMode::Off,
+    SandboxMode::WorkspaceWrite,
+    SandboxMode::ReadOnly,
+];
+
+/// One row of the menu's sandbox section.
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub struct SandboxRow {
+    pub sandbox: SandboxMode,
+    pub label: &'static str,
+    pub description: &'static str,
+    pub selected: bool,
+    /// Why this device can't sandbox the harness this way; `None` = offered.
+    pub unsupported: Option<String>,
+}
+
+impl SandboxRow {
+    pub fn enabled(&self) -> bool {
+        self.unsupported.is_none()
+    }
+}
+
+pub fn sandbox_description(sandbox: SandboxMode) -> &'static str {
+    match sandbox {
+        SandboxMode::Off => "The agent can touch anything you can",
+        SandboxMode::WorkspaceWrite => "Writes only inside the project; secrets hidden",
+        SandboxMode::ReadOnly => "Writes nothing outside its own state; secrets hidden",
+    }
+}
+
+pub fn sandbox_icon(sandbox: SandboxMode) -> &'static str {
+    match sandbox {
+        SandboxMode::Off => crate::icons::FAST_TIER,
+        SandboxMode::WorkspaceWrite => crate::icons::FOLDER_WITH_FILES,
+        SandboxMode::ReadOnly => crate::icons::EYE,
+    }
+}
+
+/// Why `harness` can't run in `sandbox` here; `None` when it can (or the
+/// caps aren't known yet: the host still refuses what it can't provide).
+pub fn sandbox_unsupported(
+    caps: Option<&PolicyCaps>,
+    harness: &str,
+    sandbox: SandboxMode,
+) -> Option<String> {
+    let caps = caps?;
+    (!caps.sandboxes.contains(&sandbox))
+        .then(|| format!("This device can't sandbox {harness}"))
+}
+
+pub fn sandbox_rows(
+    caps: Option<&PolicyCaps>,
+    harness: &str,
+    current: SandboxMode,
+) -> Vec<SandboxRow> {
+    SANDBOXES
+        .iter()
+        .map(|&sandbox| SandboxRow {
+            sandbox,
+            label: sandbox.label(),
+            description: sandbox_description(sandbox),
+            selected: sandbox == current,
+            unsupported: sandbox_unsupported(caps, harness, sandbox),
         })
         .collect()
 }
@@ -172,6 +241,29 @@ mod tests {
         assert!(rows.iter().all(ModeRow::enabled));
         assert_eq!(rows.iter().filter(|r| r.selected).count(), 1);
         assert!(rows[4].selected);
+    }
+
+    #[test]
+    fn sandbox_rows_grey_what_this_device_cant_provide() {
+        let none = PolicyCaps::bypass_only();
+        let rows = sandbox_rows(Some(&none), "Pi", SandboxMode::Off);
+        assert_eq!(rows.len(), 3);
+        assert!(rows[0].enabled() && rows[0].selected);
+        assert_eq!(
+            rows[1].unsupported.as_deref(),
+            Some("This device can't sandbox Pi")
+        );
+        assert!(!rows[2].enabled());
+        let all = PolicyCaps {
+            sandboxes: SANDBOXES.to_vec(),
+            ..PolicyCaps::bypass_only()
+        };
+        let rows = sandbox_rows(Some(&all), "Pi", SandboxMode::ReadOnly);
+        assert!(rows.iter().all(SandboxRow::enabled));
+        assert!(rows[2].selected);
+        assert!(sandbox_rows(None, "Pi", SandboxMode::Off)
+            .iter()
+            .all(SandboxRow::enabled));
     }
 
     #[test]

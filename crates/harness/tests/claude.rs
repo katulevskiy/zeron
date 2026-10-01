@@ -1107,7 +1107,7 @@ async fn approving_the_plan_leaves_plan_mode_for_ask() {
 fn claude_honours_every_mode_with_a_native_plan() {
     let caps = ClaudeHarness::new().policy_caps();
     assert_eq!(caps.modes, zeron_proto::PermissionMode::ALL.to_vec());
-    assert_eq!(caps.sandboxes, vec![zeron_proto::SandboxMode::Off]);
+    assert_eq!(caps.sandboxes, zeron_harness::sandboxing::os_sandboxes());
     assert!(caps.native_plan);
     assert!(!caps.live_mode_switch);
 }

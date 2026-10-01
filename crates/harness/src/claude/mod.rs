@@ -168,8 +168,13 @@ impl ClaudeHarness {
         })
     }
 
-    fn build_command(&self, exe: &PathBuf, request: &RunRequest) -> Command {
-        let mut cmd = Command::new(exe);
+    fn build_command(&self, exe: &PathBuf, request: &RunRequest) -> Result<Command, HarnessError> {
+        let mut cmd = crate::sandboxing::agent_command(
+            HarnessId::ClaudeCode,
+            request,
+            exe,
+            std::path::Path::new(&request.cwd),
+        )?;
         crate::compose_child_path(&mut cmd, exe);
         cmd.args([
             "--print",
@@ -235,7 +240,7 @@ impl ClaudeHarness {
             .stdout(Stdio::piped())
             .stderr(Stdio::piped())
             .kill_on_drop(true);
-        cmd
+        Ok(cmd)
     }
 
     /// Share the complete initialize response between model and command discovery.
@@ -399,6 +404,7 @@ impl Harness for ClaudeHarness {
     /// (see [`permissions`]). No sandbox until Zeron's OS sandbox lands.
     fn policy_caps(&self) -> PolicyCaps {
         PolicyCaps {
+            sandboxes: crate::sandboxing::os_sandboxes(),
             native_plan: true,
             live_mode_switch: false,
             ..PolicyCaps::all_modes()
@@ -532,7 +538,7 @@ impl ClaudeHarness {
         title_only: bool,
     ) -> Result<BoxStream<'static, Result<AgentEvent, HarnessError>>, HarnessError> {
         let exe = self.resolve_executable()?;
-        let mut cmd = self.build_command(&exe, &request);
+        let mut cmd = self.build_command(&exe, &request)?;
         if title_only {
             cmd.args([
                 "--system-prompt",

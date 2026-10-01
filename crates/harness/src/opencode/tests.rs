@@ -2066,6 +2066,7 @@ http.createServer((req, res) => {
             Duration::from_secs(5),
             None,
             ask,
+            None,
         )
         .await
         .unwrap();
@@ -2090,7 +2091,7 @@ fn opencode_offers_every_mode_with_its_own_plan_agent() {
     let caps = OpencodeHarness::new().policy_caps();
     assert_eq!(caps.modes, PermissionMode::ALL.to_vec());
     assert!(caps.native_plan);
-    assert_eq!(caps.sandboxes, vec![zeron_proto::SandboxMode::Off]);
+    assert_eq!(caps.sandboxes, crate::sandboxing::os_sandboxes());
 }
 
 #[tokio::test]

@@ -203,7 +203,9 @@ async fn the_child_never_runs_wider_than_its_parent() {
     assert!(seen[0].2.unattended && seen[1].2.unattended);
     assert!(seen[1].2.is_read_only());
     assert_eq!(seen[1].2.mode, zeron_proto::PermissionMode::Plan);
-    assert_eq!(seen[1].2.sandbox, zeron_proto::SandboxMode::ReadOnly);
+    // The scripted harness has no sandbox to offer; an unattended run drops
+    // it rather than being refused, and Plan's rules still hold.
+    assert_eq!(seen[1].2.sandbox, zeron_proto::SandboxMode::Off);
 }
 
 #[tokio::test]

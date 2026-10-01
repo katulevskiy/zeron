@@ -270,25 +270,36 @@ runs only on Linux.
   because the agent always runs on the same Linux. A network namespace with a
   loopback relay for the engine port would also remove the port-only caveat.
 
-## Wiring (follow-up)
+## Wiring
 
-Not wired yet. The follow-up should do the following:
-
-1. Call `zeron_sandbox::run_helper_if_requested()` first thing in
-   `apps/zeron/src/main.rs`, before clap and the runtime, and add
-   `zeron-sandbox` to its dependencies.
-2. At each harness spawn site, after building the `Command`:
-   1. Build `SandboxSpec::for_agent(harness, &request.policy, cwd, home)`,
-      adding `.with_loopback_port(ipc_port)` when the run carries the Zeron
-      MCP server.
-   2. Call `wrap(&spec, &exe, &args)`.
-   3. Spawn `wrapped.program` with `wrapped.args`, adding `wrapped.env` and
-      `default_agent_paths(..).env`. Keep `current_dir`, stdio,
-      `kill_on_drop` and the existing env.
-   4. Surface `enforcement` (log it, and show it in the policy UI when it
-      isn't complete).
-   5. On `SandboxError` with a mode other than `Off`, refuse the run. Don't
-      silently run it unconfined.
-3. Keep Codex's own sandbox at `danger-full-access` while the OS sandbox is
-   on (nested Seatbelt is refused). Its approvals still go through Zeron's
-   policy engine.
+- **Picking it.** The composer's permissions menu has a **Sandbox** section
+  below the modes: *No sandbox* (the default), *Workspace write* and
+  *Read-only*. The choice is stored on the chat (`ChatConfig.policy.sandbox`)
+  and the mode chip shows a small icon while it's on. Choices this device
+  can't provide are greyed with the reason.
+- **What each harness offers.** `Harness::policy_caps().sandboxes` is
+  `zeron_harness::sandboxing::os_sandboxes()`: all three where
+  `best_backend()` finds one, otherwise only *No sandbox*. Codex keeps its
+  native sandbox as the fallback, so it offers all three everywhere.
+- **Dispatch.** The host refuses an attended run that asks for a sandbox its
+  harness can't have, with the reason in the transcript. An unattended run (a
+  goal's verifier, a child ask) drops the sandbox instead; Plan's rules still
+  keep it read-only.
+- **Spawn.** Every agent spawn site for a run asks
+  `zeron_harness::sandboxing::agent_command` (or `policy_command`) for its
+  `Command` instead of `Command::new(exe)`:
+  - Claude Code, Codex (`app-server`), the OpenCode server, ACP agents,
+    the Cursor shim and Pi.
+  - It builds `SandboxSpec::for_agent`, opens the run's `ZERON_IPC_PORT` on
+    loopback, wraps the executable and adds the wrapper's and the agent's
+    environment. Whatever the site adds afterwards (arguments, env, folder,
+    stdio) applies to the agent unchanged.
+  - Probes, model listing and sign-in run unconfined.
+  - A wrap failure refuses the run ("This chat asks for a … sandbox, but it
+    couldn't be applied: …"). It is never run unconfined.
+- **Codex.** While Zeron's sandbox confines it, Codex's own sandbox is
+  `danger-full-access` (nested Seatbelt is refused). Its approvals still go
+  through the policy.
+- **The Landlock helper.** `apps/zeron` calls
+  `zeron_sandbox::run_helper_if_requested()` first thing in `main`, so the
+  app binary is its own `sandbox-exec` helper.

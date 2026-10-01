@@ -1311,7 +1311,7 @@ impl AcpHarness {
     pub async fn sign_out(&self) -> Result<(), HarnessError> {
         let home = std::env::var("HOME").ok();
         let (_scratch, mut child, _stderr, sign_in_prompted) =
-            self.spawn_agent(home.as_deref(), false, &[], None).await?;
+            self.spawn_agent(home.as_deref(), false, &[], None, None).await?;
         let (client, mut incoming) = match (child.stdin.take(), child.stdout.take()) {
             (Some(stdin), Some(stdout)) => {
                 client_with_sign_in_prompt(stdin, stdout, self.spec.id, &sign_in_prompted)
@@ -1695,7 +1695,8 @@ impl AcpHarness {
         cwd: Option<&str>,
         block_on_install: bool,
         extra_args: &[String],
-        _mcp: Option<&zeron_proto::McpServer>,
+        mcp: Option<&zeron_proto::McpServer>,
+        policy: Option<&zeron_proto::AgentPolicy>,
     ) -> Result<
         (
             Option<ScratchDir>,
@@ -1706,7 +1707,18 @@ impl AcpHarness {
         HarnessError,
     > {
         let (exe, args) = self.resolve_program(block_on_install).await?;
-        let mut cmd = Command::new(&exe);
+        // Probes and sign-in run unconfined; a run's agent runs in its
+        // chat's sandbox.
+        let mut cmd = match policy {
+            Some(policy) => crate::sandboxing::policy_command(
+                self.spec.id,
+                policy,
+                mcp,
+                &exe,
+                Path::new(cwd.unwrap_or_default()),
+            )?,
+            None => Command::new(&exe),
+        };
         cmd.args(args);
         cmd.args(extra_args);
         child::configure(&mut cmd);
@@ -1775,7 +1787,7 @@ impl AcpHarness {
         cwd: Option<&std::path::Path>,
     ) -> Result<Vec<SlashCommand>, HarnessError> {
         let (_scratch, mut child, _stderr, sign_in_prompted) = self
-            .spawn_agent(cwd.and_then(|p| p.to_str()), false, &[], None)
+            .spawn_agent(cwd.and_then(|p| p.to_str()), false, &[], None, None)
             .await?;
         let (client, mut incoming) = match (child.stdin.take(), child.stdout.take()) {
             (Some(stdin), Some(stdout)) => {
@@ -1847,7 +1859,7 @@ impl AcpHarness {
     /// matching entries and names the pick when the agent advertises nothing.
     async fn discover_models(&self) -> Result<Vec<Model>, HarnessError> {
         let (_scratch, mut child, stderr_tail, sign_in_prompted) =
-            self.spawn_agent(None, false, &[], None).await?;
+            self.spawn_agent(None, false, &[], None, None).await?;
         let (client, _incoming) = match (child.stdin.take(), child.stdout.take()) {
             (Some(stdin), Some(stdout)) => {
                 client_with_sign_in_prompt(stdin, stdout, self.spec.id, &sign_in_prompted)
@@ -2174,7 +2186,10 @@ impl Harness for AcpHarness {
     /// Per agent (see `acp::policy`): every mode where the agent has a mode
     /// that asks before writes and commands, Bypass only where it doesn't.
     fn policy_caps(&self) -> zeron_proto::PolicyCaps {
-        (self.spec.policy_caps)()
+        zeron_proto::PolicyCaps {
+            sandboxes: crate::sandboxing::os_sandboxes(),
+            ..(self.spec.policy_caps)()
+        }
     }
 
     /// The agent's own CLI, not the adapter: `claude` counts as installed even
@@ -2349,7 +2364,13 @@ impl Harness for AcpHarness {
         controls: RunControls,
     ) -> Result<BoxStream<'static, Result<AgentEvent, HarnessError>>, HarnessError> {
         let (scratch, mut child, stderr_tail, sign_in_prompted) = self
-            .spawn_agent(Some(&request.cwd), true, &[], request.mcp.as_ref())
+            .spawn_agent(
+                Some(&request.cwd),
+                true,
+                &[],
+                request.mcp.as_ref(),
+                Some(&request.policy),
+            )
             .await?;
         let stdin = child
             .stdin

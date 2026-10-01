@@ -23,6 +23,7 @@ use gpui::{
 use zeron_engine::registry::{HarnessDescriptor, TitleSettings};
 use zeron_proto::{
     AgentPolicy, ChatConfig, FolderListing, HarnessId, Model, PermissionMode, PolicyCaps,
+    SandboxMode,
     ReasoningLevel, RepoRef, SandboxLevel, Space,
 };
 use zeron_rpc::methods;
@@ -104,6 +105,8 @@ pub struct DraftConfig {
     /// The permission mode picked on the new-chat canvas (`None` = the
     /// device default).
     pub mode: Option<PermissionMode>,
+    /// The sandbox picked on the new-chat canvas (`None` = off).
+    pub sandbox: Option<SandboxMode>,
 }
 
 /// Where a new session runs (t3code's env-mode: `local | worktree`). "Current
@@ -694,6 +697,7 @@ impl Pickers {
                 this.config.model = None;
                 this.config.reasoning = None;
                 this.config.mode = None;
+                this.config.sandbox = None;
                 this.switch_error = None;
             }
             // A space switch invalidates the branch draft + cache — the folder
@@ -1108,7 +1112,16 @@ impl Pickers {
             .map(|c| c.policy.clone())
             .unwrap_or_default();
         policy.mode = self.effective_mode(cx);
+        if let Some(sandbox) = self.config.sandbox {
+            policy.sandbox = sandbox;
+        }
         policy
+    }
+
+    /// The chat's sandbox: the draft pick, else the chat's own setting
+    /// (off for new chats).
+    pub fn effective_sandbox(&self, cx: &App) -> SandboxMode {
+        self.effective_policy(cx).sandbox
     }
 
     /// Why the selected harness can't run in the chosen mode (the composer
@@ -1118,7 +1131,45 @@ impl Pickers {
             return None;
         }
         let (name, caps) = self.mode_caps(cx)?;
-        caps.refusal(&name, self.effective_mode(cx))
+        caps.refusal(&name, self.effective_mode(cx)).or_else(|| {
+            crate::permission_mode::sandbox_unsupported(
+                Some(&caps),
+                &name,
+                self.effective_sandbox(cx),
+            )
+        })
+    }
+
+    fn sandbox_rows(&self, cx: &App) -> Vec<crate::permission_mode::SandboxRow> {
+        let caps = self.mode_caps(cx);
+        crate::permission_mode::sandbox_rows(
+            caps.as_ref().map(|(_, caps)| caps),
+            caps.as_ref().map_or("This agent", |(name, _)| name.as_str()),
+            self.effective_sandbox(cx),
+        )
+    }
+
+    /// Pick a sandbox, like [`Self::pick_mode`]. One this device can't
+    /// provide for the harness is never picked.
+    pub fn pick_sandbox(&mut self, sandbox: SandboxMode, cx: &mut Context<Self>) {
+        if self.title.is_some() {
+            return;
+        }
+        if self
+            .mode_caps(cx)
+            .is_some_and(|(_, caps)| !caps.sandboxes.contains(&sandbox))
+        {
+            return;
+        }
+        if self.state.read(cx).selected_chat.is_some() {
+            self.update_chat_config(cx, move |config| config.policy.sandbox = sandbox);
+        } else {
+            self.config.sandbox = Some(sandbox);
+        }
+        if self.open_kind() == Some(PickerKind::Mode) {
+            self.animate_close(cx);
+        }
+        cx.notify();
     }
 
     fn mode_rows(&self, cx: &App) -> Vec<crate::permission_mode::ModeRow> {
@@ -2751,7 +2802,9 @@ impl Pickers {
                     }
                     Some(PickerKind::Space) => self.filtered_space_rows(cx).len() + 1,
                     Some(PickerKind::Device) => self.filtered_device_rows(cx).len(),
-                    Some(PickerKind::Mode) => PermissionMode::ALL.len(),
+                    Some(PickerKind::Mode) => {
+                        PermissionMode::ALL.len() + crate::permission_mode::SANDBOXES.len()
+                    }
                     None => 0,
                 };
                 let current = (self.active != NO_ACTIVE_ROW).then_some(self.active);
@@ -2773,8 +2826,15 @@ impl Pickers {
                 if self.open_kind() == Some(PickerKind::HarnessModel) {
                     self.activate_model_row(cx);
                 } else if self.open_kind() == Some(PickerKind::Mode) {
+                    let modes = PermissionMode::ALL.len();
                     if let Some(mode) = PermissionMode::ALL.get(self.active) {
                         self.pick_mode(*mode, cx);
+                    } else if let Some(sandbox) = self
+                        .active
+                        .checked_sub(modes)
+                        .and_then(|ix| crate::permission_mode::SANDBOXES.get(ix))
+                    {
+                        self.pick_sandbox(*sandbox, cx);
                     }
                 } else if self.open_kind() == Some(PickerKind::Checkout) {
                     let kind = if self.active == 0 {
@@ -3709,8 +3769,15 @@ impl Pickers {
         };
         // Icons take their colour from the element itself, not the row's text.
         let fg = motion::hover_blend(&id, tint, theme.text);
+        let sandbox = self.effective_sandbox(cx);
         let tooltip = match &refusal {
-            Some(reason) => format!("{reason}. Choose another mode."),
+            Some(reason) => format!("{reason}. Choose another mode or sandbox."),
+            None if sandbox != SandboxMode::Off => format!(
+                "{} — {}. Sandbox: {}. Shift+Tab to switch.",
+                mode.label(),
+                mode.description(),
+                sandbox.label()
+            ),
             None => format!("{} — {}. Shift+Tab to switch.", mode.label(), mode.description()),
         };
         div()
@@ -3723,10 +3790,14 @@ impl Pickers {
             .flex_row()
             .items_center()
             .gap(px(5.0))
-            // The icon-only chip (Bypass) is the everyday state and sits in the
-            // compact row, where every pixel counts against the input's
-            // minimum width.
-            .px(px(if chip_label(mode).is_some() { 8.0 } else { 4.0 }))
+            // The icon-only chip (Bypass, no sandbox) is the everyday state and
+            // sits in the compact row, where every pixel counts against the
+            // input's minimum width.
+            .px(px(if chip_label(mode).is_some() || sandbox != SandboxMode::Off {
+                8.0
+            } else {
+                4.0
+            }))
             .rounded(px(8.0))
             .text_size(crate::typography::ui_rems(12.0))
             .font_weight(gpui::FontWeight::MEDIUM)
@@ -3762,14 +3833,25 @@ impl Pickers {
             .when_some(chip_label(mode), |chip, label| {
                 chip.child(div().flex_none().child(SharedString::from(label)))
             })
+            .when(sandbox != SandboxMode::Off, |chip| {
+                chip.child(
+                    crate::icons::icon(crate::permission_mode::sandbox_icon(sandbox))
+                        .size(px(13.0))
+                        .flex_none()
+                        .text_color(fg),
+                )
+            })
     }
 
-    /// The five modes with their descriptions; the ones the harness can't
-    /// honour stay listed but greyed, saying why.
+    /// The five modes with their descriptions, then the sandbox; what the
+    /// harness (or this device) can't honour stays listed but greyed, saying
+    /// why.
     fn render_mode_popover(&mut self, cx: &mut Context<Self>) -> AnyElement {
         let theme = Theme::of(cx).for_popup();
         let rows = self.mode_rows(cx);
+        let sandbox_rows = self.sandbox_rows(cx);
         let active = self.active;
+        let modes = PermissionMode::ALL.len();
         div()
             .flex()
             .flex_col()
@@ -3818,6 +3900,59 @@ impl Pickers {
                     );
                 if enabled {
                     el = el.on_click(cx.listener(move |this, _, _, cx| this.pick_mode(mode, cx)));
+                } else {
+                    el = el.opacity(0.45).cursor_default();
+                    if let Some(reason) = row.unsupported {
+                        el = el.tooltip(crate::settings::widgets::text_tooltip(reason));
+                    }
+                }
+                el
+            }))
+            .child(popover::menu_heading(&theme, "Sandbox"))
+            .children(sandbox_rows.into_iter().enumerate().map(|(ix, row)| {
+                let enabled = row.enabled();
+                let sandbox = row.sandbox;
+                let fade = format!("sandbox-row-{ix}-{}", cx.entity_id());
+                let mut el =
+                    popover::menu_row_nav(&theme, row.selected, modes + ix == active, fade)
+                        .id(("sandbox-row", ix))
+                        .items_start()
+                        .child(
+                            crate::icons::icon(crate::permission_mode::sandbox_icon(sandbox))
+                                .mt(px(2.0))
+                                .size(px(14.0))
+                                .flex_none()
+                                .text_color(theme.text_muted),
+                        )
+                        .child(
+                            div()
+                                .flex_1()
+                                .min_w_0()
+                                .flex()
+                                .flex_col()
+                                .child(SharedString::from(row.label))
+                                .child(
+                                    div()
+                                        .text_size(crate::typography::ui_rems(11.5))
+                                        .text_color(theme.text_muted)
+                                        .child(SharedString::from(
+                                            row.unsupported.clone().unwrap_or_else(|| {
+                                                row.description.to_string()
+                                            }),
+                                        )),
+                                ),
+                        )
+                        .child(div().w(px(16.0)).flex_none().when(row.selected, |slot| {
+                            slot.child(
+                                crate::icons::icon(crate::icons::CHECK)
+                                    .size(px(14.0))
+                                    .text_color(theme.accent),
+                            )
+                        }));
+                if enabled {
+                    el = el.on_click(
+                        cx.listener(move |this, _, _, cx| this.pick_sandbox(sandbox, cx)),
+                    );
                 } else {
                     el = el.opacity(0.45).cursor_default();
                     if let Some(reason) = row.unsupported {
@@ -7599,6 +7734,49 @@ mod tests {
             assert_eq!(pickers.effective_mode(cx), PermissionMode::AcceptEdits);
             pickers.cycle_mode(cx);
             assert_eq!(pickers.effective_mode(cx), PermissionMode::Bypass);
+            assert_eq!(pickers.mode_refusal(cx), None);
+        });
+    }
+
+    #[gpui::test]
+    fn the_sandbox_is_off_by_default_and_only_offered_where_it_can_run(
+        cx: &mut gpui::TestAppContext,
+    ) {
+        cx.update(|cx| cx.set_global(Theme::dark()));
+        let state = cx.new(|_| AppState::new());
+        let pickers = cx.new(|cx| Pickers::new(state, cx));
+        pickers.update(cx, |pickers, cx| {
+            let mut claude = descriptor(HarnessId::ClaudeCode, "Claude Code");
+            claude.policy = PolicyCaps {
+                sandboxes: crate::permission_mode::SANDBOXES.to_vec(),
+                ..PolicyCaps::all_modes()
+            };
+            let pi = descriptor(HarnessId::Pi, "Pi");
+            pickers.harnesses = Loadable::Ready(vec![claude, pi]);
+            pickers.config.harness = Some(HarnessId::ClaudeCode);
+
+            assert_eq!(pickers.effective_sandbox(cx), SandboxMode::Off);
+            pickers.pick_sandbox(SandboxMode::WorkspaceWrite, cx);
+            let resolved = pickers.resolved(cx);
+            assert_eq!(resolved.policy.sandbox, SandboxMode::WorkspaceWrite);
+            assert_eq!(
+                resolved.chat_config().unwrap().policy.sandbox,
+                SandboxMode::WorkspaceWrite
+            );
+            assert_eq!(pickers.mode_refusal(cx), None);
+
+            // No sandbox for Pi on this (pretend) device: greyed, a pick is
+            // ignored, and the kept pick is refused before sending.
+            pickers.config.harness = Some(HarnessId::Pi);
+            let rows = pickers.sandbox_rows(cx);
+            assert_eq!(rows.iter().filter(|r| r.enabled()).count(), 1);
+            pickers.pick_sandbox(SandboxMode::ReadOnly, cx);
+            assert_eq!(pickers.effective_sandbox(cx), SandboxMode::WorkspaceWrite);
+            assert_eq!(
+                pickers.mode_refusal(cx).as_deref(),
+                Some("This device can't sandbox Pi")
+            );
+            pickers.pick_sandbox(SandboxMode::Off, cx);
             assert_eq!(pickers.mode_refusal(cx), None);
         });
     }

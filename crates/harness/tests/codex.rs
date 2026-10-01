@@ -1687,7 +1687,7 @@ async fn auto_mode_runs_dev_commands_asks_risky_and_refuses_destructive() {
 }
 
 #[tokio::test]
-async fn accept_edits_allows_project_edits_and_sandboxes_natively() {
+async fn accept_edits_allows_project_edits_and_sandboxes() {
     let policy = zeron_proto::AgentPolicy {
         mode: zeron_proto::PermissionMode::AcceptEdits,
         sandbox: zeron_proto::SandboxMode::WorkspaceWrite,
@@ -1696,10 +1696,20 @@ async fn accept_edits_allows_project_edits_and_sandboxes_natively() {
         unattended: false,
     };
     let (text, asked) = gated(policy, vec!["Deny"]).await;
+    // Where Zeron's OS sandbox confines the process, Codex's own sandbox
+    // steps aside (nested Seatbelt profiles are refused); elsewhere Codex
+    // sandboxes natively.
+    let sandbox = if zeron_harness::sandboxing::os_sandboxes().len() > 1 {
+        "danger-full-access:type:dangerFullAccess"
+    } else {
+        "workspace-write:networkAccess:false,type:workspaceWrite"
+    };
     assert_eq!(
         text,
-        "policy:untrusted:workspace-write:networkAccess:false,type:workspaceWrite\
-         |301:decline|302:decline|303:decline|304:accept|305:decline"
+        format!(
+            "policy:untrusted:{sandbox}\
+             |301:decline|302:decline|303:decline|304:accept|305:decline"
+        )
     );
     assert!(
         !asked.iter().any(|q| q.question.contains("a.rs")),
