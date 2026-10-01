@@ -1074,37 +1074,14 @@ async fn own_engine_calls_and_streams_use_its_ipc_port() {
     client.shutdown();
 }
 
-/// Hosts that predate `Session::running_subagents` (every released desktop
-/// engine at the time of writing) publish the status row without a count.
-/// A chat the phone has warm still knows its subagents from the spawn chips
-/// in its synced transcript, so the Sessions list must badge it from those
-/// -- no need to be looking at the chat -- and follow the count as chips
-/// settle.
-#[tokio::test(flavor = "multi_thread", worker_threads = 2)]
-async fn legacy_host_rows_take_their_subagent_count_from_a_warm_chats_chips() {
-    use zeron_doc::SubagentStatus;
-    use zeron_proto::{Session, SessionStatus, ToolCall};
-
-    let edge = MockEdge::start().await;
-    let host = HostRegistry::start(&edge).await;
-    {
-        // The legacy shape: a fresh row, a parked parent, no count.
-        let mut doc = host.doc.lock().unwrap();
-        doc.upsert_session(&Session {
-            last_completed_turn: None,
-            chat_id: CHAT.into(),
-            device_id: HOST.into(),
-            status: SessionStatus::Idle,
-            started_at: None,
-            updated_at: Utc::now(),
-            running_subagents: 0,
-            pending_callbacks: 0,
-        })
-        .unwrap();
-    }
-    host.client.nudge();
-
-    // The parent's transcript: three spawn chips, two still running.
+/// A parent transcript with one spawn chip per `(id, status)`, injected into
+/// `chat`'s room as the host would.
+fn host_transcript_with_chips(
+    edge: &MockEdge,
+    chat: &str,
+    chips: &[(&str, Option<zeron_doc::SubagentStatus>)],
+) -> (LoroDoc, SessionDoc) {
+    use zeron_proto::ToolCall;
     let host_doc = LoroDoc::new();
     let session = SessionDoc::from_doc(host_doc.clone());
     let spawn = |id: &str, status| MessagePart::Tool {
@@ -1121,7 +1098,7 @@ async fn legacy_host_rows_take_their_subagent_count_from_a_warm_chats_chips() {
         output_bytes: None,
         diff_ref: None,
         diff_stats: None,
-        subagent_ref: Some(format!("{CHAT}--sub--{id}")),
+        subagent_ref: Some(format!("{chat}--sub--{id}")),
         subagent_status: status,
         subagent_tail: None,
     };
@@ -1129,11 +1106,7 @@ async fn legacy_host_rows_take_their_subagent_count_from_a_warm_chats_chips() {
         .push_message(&SessionMessageEntry {
             id: "parent-turn".into(),
             role: MessageRole::Assistant,
-            parts: vec![
-                spawn("a", Some(SubagentStatus::Running)),
-                spawn("b", Some(SubagentStatus::Running)),
-                spawn("c", Some(SubagentStatus::Done)),
-            ],
+            parts: chips.iter().map(|(id, status)| spawn(id, *status)).collect(),
             created_at: zeron_client_now(),
             device_id: HOST.into(),
             status: Some(zeron_doc::MessageStatus::Complete),
@@ -1142,15 +1115,48 @@ async fn legacy_host_rows_take_their_subagent_count_from_a_warm_chats_chips() {
         })
         .unwrap();
     host_doc.commit();
-    edge.inject(CHAT, HOST, host_doc.export(ExportMode::all_updates()).unwrap());
+    edge.inject(chat, HOST, host_doc.export(ExportMode::all_updates()).unwrap());
+    (host_doc, session)
+}
+
+/// The legacy shape of a chat's status row: fresh, parent parked, no count.
+fn legacy_idle_row(chat: &str) -> zeron_proto::Session {
+    zeron_proto::Session {
+        last_completed_turn: None,
+        chat_id: chat.into(),
+        device_id: HOST.into(),
+        status: zeron_proto::SessionStatus::Idle,
+        started_at: None,
+        updated_at: Utc::now(),
+        running_subagents: 0,
+        pending_callbacks: 0,
+    }
+}
+
+/// Hosts that predate `Session::running_subagents` (every released desktop
+/// engine at the time of writing) publish the status row without a count.
+/// A chat the phone has warm still knows its subagents from the spawn chips
+/// in its synced transcript, so the Sessions list must badge it from those
+/// -- no need to be looking at the chat -- and follow the count as chips
+/// settle.
+#[tokio::test(flavor = "multi_thread", worker_threads = 2)]
+async fn legacy_host_rows_take_their_subagent_count_from_a_warm_chats_chips() {
+    use zeron_doc::SubagentStatus::{Done, Running};
+
+    let edge = MockEdge::start().await;
+    let host = HostRegistry::start(&edge).await;
+    host.doc.lock().unwrap().upsert_session(&legacy_idle_row(CHAT)).unwrap();
+    host.client.nudge();
+    let (host_doc, session) = host_transcript_with_chips(
+        &edge,
+        CHAT,
+        &[("a", Some(Running)), ("b", Some(Running)), ("c", Some(Done))],
+    );
 
     let dir = tempfile::tempdir().unwrap();
     let client = phone(&edge, dir.path());
-    let counted = |client: &Client| {
-        client
-            .workspace()
-            .session(CHAT)
-            .map(|row| row.running_subagents)
+    let counted = |client: &Client, chat: &str| {
+        client.workspace().session(chat).map(|row| row.running_subagents)
     };
     tokio::task::spawn_blocking({
         let client = client.clone();
@@ -1159,11 +1165,10 @@ async fn legacy_host_rows_take_their_subagent_count_from_a_warm_chats_chips() {
                 client.workspace().device(HOST).is_some_and(|d| d.online)
                     && client.workspace().session(CHAT).is_some()
             });
-            assert_eq!(counted(&client), Some(0), "nothing warm, nothing published");
             // What the app does on start: warm the front page's chats.
             client.preload_sessions();
             wait_for("two running chips counted", Duration::from_secs(10), || {
-                counted(&client) == Some(2)
+                counted(&client, CHAT) == Some(2)
             });
         }
     })
@@ -1179,7 +1184,58 @@ async fn legacy_host_rows_take_their_subagent_count_from_a_warm_chats_chips() {
         let client = client.clone();
         move || {
             wait_for("one running chip", Duration::from_secs(10), || {
-                counted(&client) == Some(1)
+                counted(&client, CHAT) == Some(1)
+            })
+        }
+    })
+    .await
+    .unwrap();
+    client.shutdown();
+}
+
+/// The phone is already running when a chat goes live on a legacy host (the
+/// user started it from the desktop, or it was created while the app was
+/// closed): the client warms it by itself, nobody calls `preload_sessions`.
+#[tokio::test(flavor = "multi_thread", worker_threads = 2)]
+async fn a_chat_that_goes_live_after_the_phone_started_is_warmed_and_badged() {
+    use zeron_doc::SubagentStatus::Running;
+    const LATE: &str = "chat-late";
+
+    let edge = MockEdge::start().await;
+    let host = HostRegistry::start(&edge).await;
+    let dir = tempfile::tempdir().unwrap();
+    let client = phone(&edge, dir.path());
+    tokio::task::spawn_blocking({
+        let client = client.clone();
+        move || {
+            wait_for("the first sync", Duration::from_secs(10), || {
+                client.workspace().device(HOST).is_some_and(|d| d.online)
+                    && client.workspace().session(CHAT).is_some()
+            })
+        }
+    })
+    .await
+    .unwrap();
+
+    // Now the chat appears on the host, running two subagents.
+    {
+        let (_, _, mut chat) = host_rows(Utc::now());
+        chat.id = LATE.into();
+        chat.title = Some("Late chat".into());
+        let mut doc = host.doc.lock().unwrap();
+        doc.upsert_chat(&chat).unwrap();
+        doc.upsert_session(&legacy_idle_row(LATE)).unwrap();
+    }
+    host.client.nudge();
+    host_transcript_with_chips(&edge, LATE, &[("x", Some(Running)), ("y", Some(Running))]);
+    tokio::task::spawn_blocking({
+        let client = client.clone();
+        move || {
+            wait_for("the late chat badged", Duration::from_secs(15), || {
+                client
+                    .workspace()
+                    .session(LATE)
+                    .is_some_and(|row| row.running_subagents == 2)
             })
         }
     })

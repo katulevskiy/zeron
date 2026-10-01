@@ -526,9 +526,20 @@ The desktop's Subagents view (#638, #647), on the phone:
   reports the chips' count to `AppModel.liveSubagents` while the chat is open
   (`core/LiveSubagents.kt`); a chat that closes keeps its count 20 s, and a
   transient zero read 3 s, so nothing flickers and the Sessions list the user
-  lands on says what the thread did. After that the engine's row is the only
-  source, so an old engine's count shows in the list while the chat is open
-  and for 20 s after, not indefinitely.
+  lands on says what the thread did. Underneath, the **Rust client does the
+  same for every warm chat** (`SessionCore::chip_subagents`, merged into
+  `SessionRow.running_subagents` as the larger of published and chips): the
+  client keeps up to `WARM_SESSION_CAP` chats' docs and rooms live, and
+  `preload_sessions` (at start, whenever the synced registry changes, and on every
+  return to the foreground) warms the live and recently active chats first. A
+  warm chat's chips only count while its transcript is hydrated, its room is
+  connected and its host is online, so a replica restored from disk or a host
+  that went away cannot badge. **Hosts that publish no count** (every released
+  desktop engine as of 0.2.100: the field is not in the binary) are exactly
+  this case: their rows say 0, so the list is right only for warm chats
+  (the 4 most active at start, up to 6 kept warm), and only a host running
+  this branch's engine badges every chat. Beyond that the 20 s grace above is
+  all that is left.
 - **Lifecycle identity**: Claude task IDs and Codex child thread IDs retain
   their original spawn identity across resumes. Completion and interruption
   settle that original child even without a fresh transcript sink; engine

@@ -196,15 +196,7 @@ impl ClientInner {
         let Some(live) = self.live() else { return };
         let posture = live.registry_posture();
         if posture.synced {
-            let first_sync = !self.synced.swap(true, Ordering::AcqRel);
-            if first_sync {
-                // The rows are now the server's, not last session's cache:
-                // warm the chats that are live (see `preload_sessions`).
-                Client {
-                    inner: Arc::clone(self),
-                }
-                .preload_sessions();
-            }
+            self.synced.store(true, Ordering::Release);
             // Initialize prefs / prune pins of deleted chats (authoritative
             // only once a server state applied — never on a cold replica).
             match self
@@ -226,6 +218,15 @@ impl ClientInner {
         // New rows may flip a chat's roomGen / host: attach rooms.
         for core in self.cores() {
             core.ensure_room(self);
+        }
+        // The rows are now the server's, not last session's cache, and a chat
+        // may have gone live since: keep the live chats warm (see
+        // `preload_sessions` -- it only opens what is not already open).
+        if posture.synced && self.foreground.load(Ordering::Acquire) {
+            Client {
+                inner: Arc::clone(self),
+            }
+            .preload_sessions();
         }
     }
 
@@ -1605,8 +1606,8 @@ impl Client {
     /// hosts that publish no count), then the front page's order (pinned,
     /// sections, recent). Opening is instant (local snapshot); live rooms dial
     /// behind the client's dial cap. Idempotent and cheap: the app calls it at
-    /// start, and the client again when the registry first syncs and on every
-    /// return to the foreground.
+    /// start, and the client again whenever the synced registry changes and on
+    /// every return to the foreground.
     pub fn preload_sessions(&self) {
         let workspace = self.workspace();
         for id in preload_ids(&workspace.front, now_ms()) {
