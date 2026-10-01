@@ -7,26 +7,133 @@ import android.app.PendingIntent
 import android.content.Context
 import android.content.Intent
 import android.content.pm.PackageManager
+import android.media.AudioAttributes
+import android.net.Uri
 import android.os.Build
 import androidx.core.app.NotificationCompat
 import androidx.core.app.NotificationManagerCompat
 import androidx.core.content.ContextCompat
+import sh.zeron.android.MainActivity
 import sh.zeron.android.R
+import sh.zeron.android.feedback.CueCategory
+import sh.zeron.android.feedback.FeedbackSettings
+import sh.zeron.android.feedback.SessionAlerts
+import sh.zeron.android.feedback.SessionEvent
 
 /**
- * Local notifications: Save to Downloads progress from the developer tools
- * (the tools show the same progress on screen). Posted only when Android
- * permits notifications for the app.
+ * Local notifications, posted only when Android permits them:
+ *
+ *  - Save to Downloads progress from the developer tools.
+ *  - Session events while the app is in the background (finished, needs your
+ *    input, failed), sounding the same cues the app plays in front: the
+ *    desktop's done / request / attention chimes as channel sounds, with
+ *    vibration patterns matching the in-app haptics.
+ *
+ * Channel sounds are immutable once a channel exists, so session channels
+ * carry a version in their id ([CHANNEL_VERSION]); [migrateChannels] deletes
+ * the ones from other versions. One channel exists per kind and per
+ * sound / vibration combination the in-app switches ask for, created lazily.
  */
-class Notifier(private val context: Context) {
+class Notifier(private val context: Context, private val settings: () -> FeedbackSettings = { FeedbackSettings() }) : SessionAlerts {
+    private val manager = context.getSystemService(NotificationManager::class.java)
+
     init {
-        val manager = context.getSystemService(NotificationManager::class.java)
         manager.createNotificationChannel(
             NotificationChannel(DOWNLOADS_CHANNEL, "Downloads", NotificationManager.IMPORTANCE_LOW).apply {
                 description = "Files saved to Downloads from your devices"
             },
         )
+        migrateChannels()
     }
+
+    /** Session notification kinds: wording, channel importance, chime and vibration. */
+    enum class Kind(
+        val key: String,
+        val label: String,
+        val description: String,
+        val importance: Int,
+        val sound: String,
+        val category: CueCategory,
+        /** Off / on pairs in ms, matching the in-app haptic of the same moment. */
+        val pattern: LongArray,
+        val event: SessionEvent,
+    ) {
+        Done("done", "Task completed", "A session finished its turn", NotificationManager.IMPORTANCE_DEFAULT, "fx_done", CueCategory.Completion, longArrayOf(0, 24, 40, 30), SessionEvent.Done),
+        Input("input", "Input required", "A session is waiting on your answer or approval", NotificationManager.IMPORTANCE_HIGH, "fx_request", CueCategory.Input, longArrayOf(0, 18, 90, 18), SessionEvent.NeedsInput),
+        Failed("failed", "Errors", "A session failed", NotificationManager.IMPORTANCE_HIGH, "fx_attention", CueCategory.Errors, longArrayOf(0, 35, 55, 45), SessionEvent.Failed),
+    }
+
+    /** A session channel id, e.g. `session-done-v1-sv` (sound + vibration), `-s`, `-v` or `-q` (silent). */
+    fun channelId(kind: Kind, sound: Boolean, vibrate: Boolean): String =
+        "$SESSION_PREFIX${kind.key}-v$CHANNEL_VERSION-" + (if (sound) "s" else "") + (if (vibrate) "v" else "") + (if (!sound && !vibrate) "q" else "")
+
+    private fun ensureChannel(kind: Kind, sound: Boolean, vibrate: Boolean): String {
+        val id = channelId(kind, sound, vibrate)
+        if (manager.getNotificationChannel(id) != null) return id
+        val suffix = when {
+            sound && vibrate -> ""
+            sound -> " (sound only)"
+            vibrate -> " (vibration only)"
+            else -> " (silent)"
+        }
+        val channel = NotificationChannel(id, kind.label + suffix, if (sound || vibrate) kind.importance else NotificationManager.IMPORTANCE_LOW)
+        channel.description = kind.description
+        if (sound) {
+            channel.setSound(
+                Uri.parse("android.resource://${context.packageName}/raw/${kind.sound}"),
+                AudioAttributes.Builder().setUsage(AudioAttributes.USAGE_NOTIFICATION).setContentType(AudioAttributes.CONTENT_TYPE_SONIFICATION).build(),
+            )
+        } else {
+            channel.setSound(null, null)
+        }
+        channel.enableVibration(vibrate)
+        if (vibrate) channel.vibrationPattern = kind.pattern
+        manager.createNotificationChannel(channel)
+        return id
+    }
+
+    /** Remove session channels left by other versions (their sounds cannot be edited in place). */
+    fun migrateChannels() {
+        val current = "-v$CHANNEL_VERSION-"
+        manager.notificationChannels
+            .filter { it.id.startsWith(SESSION_PREFIX) && !it.id.contains(current) }
+            .forEach { manager.deleteNotificationChannel(it.id) }
+    }
+
+    /** A session event while the app is in the background; the in-app switches pick the channel. */
+    override fun alert(chatId: String, event: SessionEvent) {
+        if (!permitted) return
+        val kind = Kind.entries.first { it.event == event }
+        val s = settings()
+        val sound = s.allows(kind.category)
+        val vibrate = s.haptics
+        val row = runCatching { (context.applicationContext as sh.zeron.android.ZeronApplication).model.row(chatId) }.getOrNull()
+        val title = row?.title ?: "Zeron"
+        val text = when (event) {
+            SessionEvent.Done -> "Finished"
+            SessionEvent.NeedsInput -> "Needs your input"
+            SessionEvent.Failed -> "Something went wrong"
+        }
+        val open = Intent(context, MainActivity::class.java)
+            .putExtra("route", "chat:$chatId")
+            .addFlags(Intent.FLAG_ACTIVITY_NEW_TASK or Intent.FLAG_ACTIVITY_SINGLE_TOP)
+        val tap = PendingIntent.getActivity(context, "session:$chatId".hashCode(), open, PendingIntent.FLAG_IMMUTABLE or PendingIntent.FLAG_UPDATE_CURRENT)
+        val n = NotificationCompat.Builder(context, ensureChannel(kind, sound, vibrate))
+            .setSmallIcon(R.drawable.ic_stat_zeron)
+            .setContentTitle(title)
+            .setContentText(text)
+            .setCategory(if (event == SessionEvent.NeedsInput) NotificationCompat.CATEGORY_MESSAGE else NotificationCompat.CATEGORY_STATUS)
+            .setContentIntent(tap)
+            .setAutoCancel(true)
+            .build()
+        try {
+            NotificationManagerCompat.from(context).notify("session:$chatId".hashCode(), n)
+        } catch (_: SecurityException) {
+        }
+    }
+
+    /** The app came to the front: its sessions are on screen, clear the alerts. */
+    fun clearSessionAlerts() = manager.activeNotifications.filter { it.notification.channelId?.startsWith(SESSION_PREFIX) == true }.forEach { manager.cancel(it.id) }
 
     val permitted: Boolean
         get() = Build.VERSION.SDK_INT < 33 ||
@@ -57,5 +164,9 @@ class Notifier(private val context: Context) {
 
     companion object {
         const val DOWNLOADS_CHANNEL = "downloads"
+        const val SESSION_PREFIX = "session-"
+
+        /** Bump when a session channel's sound or pattern changes: channel sounds are immutable once created. */
+        const val CHANNEL_VERSION = 1
     }
 }
