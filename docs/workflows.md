@@ -40,8 +40,12 @@ crates/doc        workflow_runs.rs   meta.workflowRuns in the chat's session doc
 crates/mcp        workflows.rs  the tools · docs/workflow-guide.md (embedded)
 ```
 
-`zeron-client`, `zeron-mobile`, `zeron-ui` and `zeron-doc` never depend on `zeron-workflow`: they
-read `zeron_proto::WorkflowRunsState` and friends.
+`zeron-client`, `zeron-mobile`, `zeron-ui` and `zeron-doc` have no dependency on `zeron-workflow`:
+they read `zeron_proto::WorkflowRunsState` and friends. The mobile core (`zeron-mobile`,
+`zeron-client`, `zeron-doc`) links no interpreter at all; `zeron-ui` reaches it only through
+`zeron-engine`, which the desktop app embeds for its in-process mode. `starlark` and `blake3`
+(`features = ["pure"]`) are pure Rust, so aarch64 / musl / Android builds of `zeron-workflow` need no
+C compiler (`cargo check -p zeron-workflow --target aarch64-unknown-linux-musl` is clean).
 
 ## The language
 
