@@ -83,6 +83,8 @@ a sidebar run line. The right pane is the app's existing place for "a second vie
 beside it, it is keyboard-reachable like any tab, and the tab shows a spinner while the run is
 live. One tab per run; opening the run again focuses it (and a "+n more" lands on that phase).
 
+![A 200-step run in progress: pills fold, the pane pages](screenshots/workflows-card/run-200-nodes.png)
+
 *Contents, top to bottom:* status, name, usage (elapsed · tokens · steps), Stop / Resume; notices
 (error, stop reason, stall, trimmed view); **Waiting for you** — each pending question with the
 asking agent, the question, its context and an inline answer box (Enter or the button sends
@@ -95,10 +97,15 @@ working ones first, 10 at a time); **Steps** by phase (state, agent, instruction
 `resumed from`, script hash). A run that fell out of the live state is read once with
 `WorkflowGet`.
 
+![An agent's chat opened read-only beside the run](screenshots/workflows-card/agent-chat-readonly.png)
+
 *Open an agent.* An agent row, a step row or a card pill emits `OpenActor`; the shell opens the
 child chat through the existing subagent surface (`add_subagent_surface`: a read-only transcript
 pinned to that doc, watched live). The engine already stamps the child with `meta.workflowActor`
 and creates it archived, readable by id; **no engine or client change was needed**.
+
+![A run waiting for an answer](screenshots/workflows-card/pending-question.png)
+![A run a provider error stopped](screenshots/workflows-card/stopped-provider-resume.png)
 
 ## Artifacts
 
@@ -159,6 +166,8 @@ that opens to the result (monospace, 1600 characters), the reason and the artifa
 maximize button into the run. The row is built from the message text, and from the live run when
 the state has it; without the run the chips name artifacts but do not open. The question an agent
 raised keeps the one-line marker.
+
+![A narrow window](screenshots/workflows-card/narrow-window.png)
 
 ## Motion, accessibility, cost
 
