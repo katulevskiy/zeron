@@ -23,10 +23,17 @@ use crate::goal::{
     turn_pending, verdict_schema, verifier_prompt, verify_pending,
 };
 
-/// A verifier running in this process.
+/// A verification of one round of one goal, from the moment the controller
+/// commits to it (reserved under `goal_lock` together with the `Verifying`
+/// ledger write) until its verdict has been applied (released under the same
+/// lock). The entry is the "in flight or verdict pending apply" marker that
+/// makes starting a verification idempotent per `(goal, round)`.
 pub(super) struct GoalRun {
     pub goal_id: String,
     pub round: u32,
+    /// Tells this run apart from a later one for the same chat, so a stale
+    /// finisher never releases its successor's entry.
+    pub run_id: String,
     pub cancel: CancellationToken,
 }
 
@@ -448,7 +455,7 @@ impl DocHost {
             GoalStep::Done => {}
             GoalStep::Drain => self.drain_queue(handle).await,
             GoalStep::Recheck(after) => self.schedule_goal_tick(handle, after),
-            GoalStep::Verify(goal, round) => self.spawn_verification(handle, *goal, round),
+            GoalStep::Verify(run) => self.spawn_verification(handle, *run),
         }
     }
 
@@ -507,6 +514,11 @@ impl DocHost {
                 GoalStep::Drain
             }
             Action::BeginVerification { round } | Action::RestartVerification { round } => {
+                // One verification per (goal, round): a verdict that has not
+                // been applied yet still counts as running.
+                if self.goal_run_exists(&handle.chat_id, &goal.id, round) {
+                    return GoalStep::Done;
+                }
                 self.fold_turn(handle, &mut goal, now);
                 if let Some(kind) = goal.exhausted_budget() {
                     let stop = crate::goal::decide_budget_stop(&goal, kind);
@@ -521,7 +533,29 @@ impl DocHost {
                     tracing::warn!(chat = %handle.chat_id, error = %err, "goal ledger write failed");
                     return GoalStep::Done;
                 }
-                GoalStep::Verify(Box::new(goal), round)
+                // Reserved before `goal_lock` is released and kept until the
+                // verdict is applied, so no tick can see the ledger saying
+                // "verifying" with nothing running.
+                let cancel = CancellationToken::new();
+                let run_id = new_id();
+                let replaced = lock(&self.inner.goal_runs).insert(
+                    handle.chat_id.clone(),
+                    GoalRun {
+                        goal_id: goal.id.clone(),
+                        round,
+                        run_id: run_id.clone(),
+                        cancel: cancel.clone(),
+                    },
+                );
+                if let Some(old) = replaced {
+                    old.cancel.cancel();
+                }
+                GoalStep::Verify(Box::new(Verification {
+                    goal,
+                    round,
+                    cancel,
+                    run_id,
+                }))
             }
             stop @ Action::Stop { .. } => {
                 self.fold_turn(handle, &mut goal, now);
@@ -619,10 +653,20 @@ impl DocHost {
                 .workspace()
                 .and_then(|ws| ws.chat_config(&handle.chat_id))
                 .is_some_and(|c| c.sandbox == zeron_proto::SandboxLevel::ReadOnly),
-            verifier_live: lock(&self.inner.goal_runs)
-                .get(&handle.chat_id)
-                .is_some_and(|run| run.goal_id == goal.id),
+            verifier_live: goal
+                .pending
+                .as_ref()
+                .filter(|p| p.kind == zeron_proto::GoalPendingKind::Verify)
+                .is_some_and(|p| self.goal_run_exists(&handle.chat_id, &goal.id, p.round)),
         }
+    }
+
+    /// A verification of `round` of `goal_id` is in flight or its verdict is
+    /// waiting to be applied.
+    fn goal_run_exists(&self, chat_id: &str, goal_id: &str, round: u32) -> bool {
+        lock(&self.inner.goal_runs)
+            .get(chat_id)
+            .is_some_and(|run| run.goal_id == goal_id && run.round == round)
     }
 
     /// How the round that began with user message `message_id` ended, and
@@ -679,27 +723,13 @@ impl DocHost {
 
     // ── verification ───────────────────────────────────────────────────────
 
-    fn spawn_verification(&self, handle: &Arc<ChatDocHandle>, goal: Goal, round: u32) {
-        let cancel = CancellationToken::new();
-        {
-            let mut runs = lock(&self.inner.goal_runs);
-            if runs
-                .get(&handle.chat_id)
-                .is_some_and(|run| run.goal_id == goal.id && run.round == round)
-            {
-                return; // already judging this round
-            }
-            if let Some(old) = runs.insert(
-                handle.chat_id.clone(),
-                GoalRun {
-                    goal_id: goal.id.clone(),
-                    round,
-                    cancel: cancel.clone(),
-                },
-            ) {
-                old.cancel.cancel();
-            }
-        }
+    fn spawn_verification(&self, handle: &Arc<ChatDocHandle>, run: Verification) {
+        let Verification {
+            goal,
+            round,
+            cancel,
+            run_id,
+        } = run;
         let host = self.clone();
         let handle = handle.clone();
         self.spawn_worker(async move {
@@ -721,101 +751,120 @@ impl DocHost {
                     "child asks are not available in this engine".into(),
                 ))),
             };
-            host.finish_verification(&handle, &goal.id, round, &cancel, result)
+            host.finish_verification(&handle, &goal.id, round, &run_id, &cancel, result)
                 .await;
         });
     }
 
+    /// Apply a verifier's outcome. The run's marker stays registered until
+    /// the verdict is written, both under `goal_lock`: a tick that lands
+    /// while the verdict is waiting for the lock sees the verification as
+    /// still running instead of starting a second one for the round.
     async fn finish_verification(
+        &self,
+        handle: &Arc<ChatDocHandle>,
+        goal_id: &str,
+        round: u32,
+        run_id: &str,
+        cancel: &CancellationToken,
+        result: Result<AskOutcome, AskFailure>,
+    ) {
+        let applied = {
+            let _guard = handle.goal_lock.lock().await;
+            let applied = self.apply_verification(handle, goal_id, round, cancel, result);
+            let mut runs = lock(&self.inner.goal_runs);
+            if runs
+                .get(&handle.chat_id)
+                .is_some_and(|run| run.run_id == run_id)
+            {
+                runs.remove(&handle.chat_id);
+            }
+            applied
+        };
+        if applied {
+            self.goal_tick(handle).await;
+        }
+    }
+
+    /// Under `goal_lock`. True when a verdict was written.
+    fn apply_verification(
         &self,
         handle: &Arc<ChatDocHandle>,
         goal_id: &str,
         round: u32,
         cancel: &CancellationToken,
         result: Result<AskOutcome, AskFailure>,
-    ) {
-        {
-            let mut runs = lock(&self.inner.goal_runs);
-            if runs
-                .get(&handle.chat_id)
-                .is_some_and(|run| run.goal_id == goal_id && run.round == round)
-            {
-                runs.remove(&handle.chat_id);
-            }
+    ) -> bool {
+        let Some(mut goal) = handle.doc.goal() else {
+            return false;
+        };
+        let current = goal.status == GoalStatus::Verifying
+            && goal.id == goal_id
+            && goal.pending.as_ref().is_some_and(|p| {
+                p.round == round && p.kind == zeron_proto::GoalPendingKind::Verify
+            });
+        if !current {
+            return false; // paused, cleared or replaced while the verifier ran
         }
-        {
-            let _guard = handle.goal_lock.lock().await;
-            let Some(mut goal) = handle.doc.goal() else {
-                return;
-            };
-            let current = goal.status == GoalStatus::Verifying
-                && goal.id == goal_id
-                && goal.pending.as_ref().is_some_and(|p| {
-                    p.round == round && p.kind == zeron_proto::GoalPendingKind::Verify
-                });
-            if !current {
-                return; // paused, cleared or replaced while the verifier ran
+        let (outcome, child, usage) = match result {
+            Ok(done) => {
+                let verdict = serde_json::from_value::<VerifierVerdict>(done.result.clone())
+                    .map_err(|e| {
+                        AskError::InvalidResult(vec![zeron_proto::SchemaViolation {
+                            path: String::new(),
+                            message: e.to_string(),
+                        }])
+                    });
+                (verdict, Some(done.child_chat_id), done.usage)
             }
-            let (outcome, child, usage) = match result {
-                Ok(done) => {
-                    let verdict = serde_json::from_value::<VerifierVerdict>(done.result.clone())
-                        .map_err(|e| {
-                            AskError::InvalidResult(vec![zeron_proto::SchemaViolation {
-                                path: String::new(),
-                                message: e.to_string(),
-                            }])
-                        });
-                    (verdict, Some(done.child_chat_id), done.usage)
+            Err(failure) => {
+                // Cancelled by shutdown (not by a user action, which
+                // changed the goal): leave it Verifying so recovery
+                // judges the round again.
+                if failure.error == AskError::Cancelled || cancel.is_cancelled() {
+                    return false;
                 }
-                Err(failure) => {
-                    // Cancelled by shutdown (not by a user action, which
-                    // changed the goal): leave it Verifying so recovery
-                    // judges the round again.
-                    if failure.error == AskError::Cancelled || cancel.is_cancelled() {
-                        return;
-                    }
-                    (Err(failure.error), failure.child_chat_id, failure.usage)
-                }
-            };
-            let now = now_ms();
-            let message_id = goal.round_message_id(round);
-            let facts = self.round_facts(handle, &message_id);
-            let was_failure = outcome.is_err();
-            let next = apply_verdict(&mut goal, round, outcome, child.clone(), usage, facts, now);
-            if let Err(err) = handle.doc.set_goal(&goal) {
-                tracing::warn!(chat = %handle.chat_id, error = %err, "goal verdict write failed");
-                return;
+                (Err(failure.error), failure.child_chat_id, failure.usage)
             }
-            self.sync_goal_live(handle, Some(&goal));
-            if let Some(verdict) = goal.last_verdict() {
-                let (event, title) = match (verdict.outcome, was_failure) {
-                    (zeron_proto::VerdictOutcome::Pass, _) => {
-                        (GoalEventKind::Complete, goal.summary_title.clone())
-                    }
-                    (zeron_proto::VerdictOutcome::NotSatisfied, _) => (
-                        GoalEventKind::NotSatisfied,
-                        verdict.next_action.clone().unwrap_or_default(),
-                    ),
-                    (zeron_proto::VerdictOutcome::Failed, _) => {
-                        (GoalEventKind::VerifierFailed, String::new())
-                    }
-                };
-                self.goal_marker(
-                    handle,
-                    format!("goal-{}-v{round}", goal.id),
-                    &goal,
-                    event,
-                    round,
-                    &title,
-                    &verdict.reason,
-                    verdict.verifier_chat_id.clone(),
-                );
-            }
-            if next == Next::Stopped && !was_failure {
-                self.stop_marker(handle, &goal);
-            }
+        };
+        let now = now_ms();
+        let message_id = goal.round_message_id(round);
+        let facts = self.round_facts(handle, &message_id);
+        let was_failure = outcome.is_err();
+        let next = apply_verdict(&mut goal, round, outcome, child.clone(), usage, facts, now);
+        if let Err(err) = handle.doc.set_goal(&goal) {
+            tracing::warn!(chat = %handle.chat_id, error = %err, "goal verdict write failed");
+            return false;
         }
-        self.goal_tick(handle).await;
+        self.sync_goal_live(handle, Some(&goal));
+        if let Some(verdict) = goal.last_verdict() {
+            let (event, title) = match verdict.outcome {
+                zeron_proto::VerdictOutcome::Pass => {
+                    (GoalEventKind::Complete, goal.summary_title.clone())
+                }
+                zeron_proto::VerdictOutcome::NotSatisfied => (
+                    GoalEventKind::NotSatisfied,
+                    verdict.next_action.clone().unwrap_or_default(),
+                ),
+                zeron_proto::VerdictOutcome::Failed => {
+                    (GoalEventKind::VerifierFailed, String::new())
+                }
+            };
+            self.goal_marker(
+                handle,
+                format!("goal-{}-v{round}", goal.id),
+                &goal,
+                event,
+                round,
+                &title,
+                &verdict.reason,
+                verdict.verifier_chat_id.clone(),
+            );
+        }
+        if next == Next::Stopped && !was_failure {
+            self.stop_marker(handle, &goal);
+        }
+        true
     }
 }
 
@@ -825,5 +874,14 @@ enum GoalStep {
     /// Run the queue drain (a round prompt was queued).
     Drain,
     Recheck(Duration),
-    Verify(Box<Goal>, u32),
+    /// Run this verification (already registered in `goal_runs`).
+    Verify(Box<Verification>),
+}
+
+/// A committed verification, handed to the worker that runs it.
+struct Verification {
+    goal: Goal,
+    round: u32,
+    cancel: CancellationToken,
+    run_id: String,
 }
