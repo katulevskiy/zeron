@@ -7,7 +7,7 @@ export default defineConfig({
         test: {
           name: "unit",
           environment: "node",
-          include: ["tests/codec.test.ts", "tests/fake-server.test.ts", "tests/watch-cache.test.ts"],
+          include: ["tests/codec.test.ts", "tests/fake-server.test.ts", "tests/watch-cache.test.ts", "tests/engine-fixture.test.ts", "tests/edge.test.ts"],
         },
       },
       {
