@@ -115,6 +115,7 @@ class AndroidFeedback(
         if (heldMs >= ClaimTracker.LONG_PRESS_MS) return
         val released = clock()
         main.postDelayed({
+            claims.quiet() // a press just answered: a popover closing around it stays silent
             if (claims.hapticClaimed(released)) log("haptic Select skip default tap: claimed") else play(Haptic.Select)
             if (claims.cueClaimed(released)) log("cue Tap skip default tap: claimed") else play(Cue.Tap, 0)
         }, ClaimTracker.DEFER_MS)
