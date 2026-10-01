@@ -9,8 +9,8 @@
 //! the version is only recorded once the window has actually opened.
 //!
 //! The window is an in-app modal like the other dialogs, so it behaves the
-//! same on every platform. It can be reopened from the app menu ("What's
-//! New…") or the account menu.
+//! same on every platform. It can be reopened from the app menu ("Show Update
+//! Log…") or the account menu, and Escape, Enter or Space skips it.
 //!
 //! Motion: scrim fade, card rise, a once-only light sweep and logo ring on the
 //! header, a slowly drifting accent glow, and per-row staggered entrances. All
@@ -289,6 +289,11 @@ pub fn show(cx: &mut App) {
     if let Some(changelog) = Changelog::global(cx) {
         changelog.update(cx, |changelog, cx| changelog.show_current(cx));
     }
+}
+
+/// Keys that skip the window: Escape, Enter and Space all dismiss it.
+pub fn is_skip_key(key: &str) -> bool {
+    matches!(key, "escape" | "enter" | "space")
 }
 
 /// Scroll the open window's body to `offset` px from the top. Review
@@ -627,55 +632,43 @@ fn render_header(loaded: &Loaded, theme: &Theme, glow: f32, compact: bool) -> An
         None => format!("Zeron {}", loaded.version).into(),
     };
 
+    // The app icon, with a ring that expands from it once.
+    const TILE: f32 = 64.0;
+    const TILE_RADIUS: f32 = 14.0;
     let tile = div()
         .relative()
         .flex_none()
-        .w(px(52.0))
-        .h(px(52.0))
+        .w(px(TILE))
+        .h(px(TILE))
         .child(
-            // Ring: expands from the tile and fades.
             div()
                 .absolute()
                 .top_0()
                 .left_0()
-                .w(px(52.0))
-                .h(px(52.0))
-                .rounded(px(15.0))
+                .w(px(TILE))
+                .h(px(TILE))
+                .rounded(px(TILE_RADIUS))
                 .border_2()
                 .border_color(theme.accent)
                 .with_animation("changelog-ring", RING.animation(), |el, t| {
-                    let grow = 40.0 * t;
+                    let grow = 44.0 * t;
                     el.relative()
                         .left(px(-grow / 2.0))
                         .top(px(-grow / 2.0))
-                        .w(px(52.0 + grow))
-                        .h(px(52.0 + grow))
+                        .w(px(TILE + grow))
+                        .h(px(TILE + grow))
                         .opacity(0.55 * (1.0 - t))
                 }),
         )
         .child(
-            div()
+            gpui::img(icons::APP_ICON)
                 .absolute()
                 .top_0()
                 .left_0()
-                .w(px(52.0))
-                .h(px(52.0))
-                .rounded(px(15.0))
-                .bg(linear_gradient(
-                    145.0,
-                    linear_color_stop(theme.accent, 0.0),
-                    linear_color_stop(theme.accent_strong, 1.0),
-                ))
-                .border_1()
-                .border_color(theme.on_accent.opacity(0.22))
-                .flex()
-                .items_center()
-                .justify_center()
-                .child(
-                    icon(icons::ZERON_LOGO)
-                        .size(px(28.0))
-                        .text_color(theme.on_accent),
-                ),
+                .w(px(TILE))
+                .h(px(TILE))
+                .rounded(px(TILE_RADIUS))
+                .shadow_md(),
         );
 
     let mut text = div().flex().flex_col().gap(px(3.0)).min_w_0();
@@ -1335,7 +1328,7 @@ mod tests {
     fn opening_records_the_version_and_paints(cx: &mut TestAppContext) {
         let changelog = setup(cx);
         assert!(
-            !cx.update(|cx| dismiss_if_visible(cx)),
+            !cx.update(dismiss_if_visible),
             "hidden: nothing to dismiss"
         );
         cx.update(|cx| {
@@ -1407,6 +1400,16 @@ mod tests {
             "wheel over the body should scroll it, got {:?}",
             scroll.offset()
         );
+    }
+
+    #[test]
+    fn escape_enter_and_space_skip_the_window() {
+        for key in ["escape", "enter", "space"] {
+            assert!(is_skip_key(key), "{key}");
+        }
+        for key in ["a", "tab", "backspace", "left", "down"] {
+            assert!(!is_skip_key(key), "{key}");
+        }
     }
 
     #[test]

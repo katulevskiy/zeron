@@ -175,7 +175,7 @@ pub fn app_menus() -> Vec<Menu> {
         // Sparkle's placement: directly under About. Other platforms reach
         // the same check from the account menu.
         MenuItem::action("Check for Updates…", CheckForUpdates),
-        MenuItem::action("What’s New…", WhatsNew),
+        MenuItem::action("Show Update Log…", WhatsNew),
         MenuItem::separator(),
         MenuItem::action("Settings", shell::OpenSettings),
         MenuItem::separator(),

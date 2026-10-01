@@ -8664,7 +8664,7 @@ impl Shell {
                                     .size(px(16.0))
                                     .text_color(theme.text_muted),
                             )
-                            .child(SharedString::from("What’s new")),
+                            .child(SharedString::from("Show update log")),
                     )
                 })
                 .into_any_element();
@@ -9218,8 +9218,8 @@ impl Shell {
             return;
         }
         // The "What's new" window sits above everything else, so it takes
-        // Escape and Enter (its default action) first.
-        if matches!(event.keystroke.key.as_str(), "escape" | "enter")
+        // Escape, Enter and Space (any of them skips it) first.
+        if crate::changelog::is_skip_key(event.keystroke.key.as_str())
             && crate::changelog::dismiss_if_visible(cx)
         {
             cx.stop_propagation();
