@@ -45,6 +45,7 @@ pub use config::{
 };
 pub use connectivity::{Connectivity, ConnectivityState, SendState};
 pub use error::ClientError;
+pub use demo::workflows as demo_workflows;
 pub use events::{ClientEvent, ClientListener};
 pub use session::{
     ARTIFACT_PREVIEW_BYTES, AppendHint, ArtifactPage, BusyPolicy, ComposerState, Entry, HostCapabilities, HostInfo, InputRequest,

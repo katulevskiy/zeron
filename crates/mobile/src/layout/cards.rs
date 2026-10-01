@@ -28,7 +28,7 @@ pub(crate) mod geom {
     pub const ROW_MIN: f32 = 32.0;
     pub const ROW_PAD: f32 = 6.0;
     pub const GLYPH: f32 = 14.0;
-    pub const CHIP_H: f32 = 28.0;
+    pub const CHIP_H: f32 = 32.0;
     pub const CHIP_GAP: f32 = 6.0;
     pub const BTN_H: f32 = 34.0;
     pub const BTN_GAP: f32 = 8.0;
@@ -66,7 +66,7 @@ pub(crate) struct Header {
     pub icon: Glyph,
     pub title: PText,
     /// A status word in a tinted capsule after the title.
-    pub pill: Option<(PText, ColorRole)>,
+    pub pill: Option<PText>,
     /// Right-aligned on the title row; dropped when it does not fit.
     pub trail: Option<PText>,
     pub sub: Option<PText>,
@@ -103,7 +103,6 @@ pub(crate) struct ChipSpec {
 
 pub(crate) struct Btn {
     pub label: PText,
-    pub color: ColorRole,
     pub act: Act,
 }
 
@@ -230,7 +229,6 @@ fn place_header(h: &Header, px: Px, x: f32, y: f32, cw: f32, mut out: Option<&mu
     let tx = x + pad + icon + px.v(ICON_GAP);
     let mut rx = x + cw - pad;
     let row = h.title.lh.max(px.v(PILL_H));
-    let sub_h = h.sub.as_ref().map_or(0.0, |s| lines_at(s, 1.0e6, h.sub_lines) as f32 * s.lh);
     // Controls (right to left): chevron, then the icon button.
     let mut controls: Vec<(&'static str, ColorRole, f32, Option<&Act>)> = Vec::new();
     if let Some(open) = h.chevron {
@@ -245,7 +243,6 @@ fn place_header(h: &Header, px: Px, x: f32, y: f32, cw: f32, mut out: Option<&mu
     let text_w = (rx - px.v(8.0) - tx).max(px.v(40.0));
     let sub_w = text_w;
     let sub_real = h.sub.as_ref().map_or(0.0, |s| lines_at(s, sub_w, h.sub_lines) as f32 * s.lh);
-    let _ = sub_h;
     let total = row + if sub_real > 0.0 { px.v(2.0) + sub_real } else { 0.0 };
     let Some(o) = out.as_deref_mut() else { return total };
 
@@ -256,7 +253,7 @@ fn place_header(h: &Header, px: Px, x: f32, y: f32, cw: f32, mut out: Option<&mu
     }
     glyph(h.icon, px, x + pad, y + (row - icon) / 2.0, icon, o);
     // Title row: title, pill, trail.
-    let pill_w = h.pill.as_ref().map_or(0.0, |(t, _)| natural(t) + px.v(16.0));
+    let pill_w = h.pill.as_ref().map_or(0.0, |t| natural(t) + px.v(16.0));
     let pill_gap = if h.pill.is_some() { px.v(8.0) } else { 0.0 };
     let spin_w = if h.spinner { px.v(14.0) + px.v(8.0) } else { 0.0 };
     let trail_w = h.trail.as_ref().map_or(0.0, natural);
@@ -267,12 +264,11 @@ fn place_header(h: &Header, px: Px, x: f32, y: f32, cw: f32, mut out: Option<&mu
     title_w = title_w.min((text_w - reserve).max(px.v(30.0)));
     place_text_lines(&h.title, tx, y + (row - h.title.lh) / 2.0, title_w, 1, px, o);
     let mut cx = tx + title_w;
-    if let Some((t, color)) = &h.pill {
+    if let Some(t) = &h.pill {
         cx += pill_gap;
         let ph = px.v(PILL_H);
         o.fill(cx, y + (row - ph) / 2.0, pill_w, ph, ph / 2.0, ColorRole::ChipBackground);
         place_text(t, cx + px.v(8.0), y + (row - t.lh) / 2.0, natural(t), Some(o));
-        let _ = color;
         cx += pill_w;
     }
     if h.spinner {
@@ -434,7 +430,7 @@ pub(crate) fn heap_bytes(card: &Card) -> usize {
     card.items
         .iter()
         .map(|i| match i {
-            Item::Header(h) => t(&h.title) + h.sub.as_ref().map_or(0, t) + h.trail.as_ref().map_or(0, t) + h.pill.as_ref().map_or(0, |(p, _)| t(p)),
+            Item::Header(h) => t(&h.title) + h.sub.as_ref().map_or(0, t) + h.trail.as_ref().map_or(0, t) + h.pill.as_ref().map_or(0, t),
             Item::Line(l) => t(&l.title) + l.sub.as_ref().map_or(0, t) + l.trail.as_ref().map_or(0, t),
             Item::Chips(c) => c.iter().map(|c| t(&c.label) + c.trail.as_ref().map_or(0, t)).sum(),
             Item::Text { text, .. } => t(text),

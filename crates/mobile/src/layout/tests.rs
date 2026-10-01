@@ -3,7 +3,7 @@ use std::time::Instant;
 
 use super::*;
 
-struct Quiet;
+pub(crate) struct Quiet;
 impl LayoutListener for Quiet {
     fn frame_ready(&self, _revision: u64) {}
 }
@@ -39,7 +39,7 @@ pub(crate) fn text_system() -> Arc<TextSystem> {
     TextSystem::new(faces, Some(Arc::new(FixedFallback)))
 }
 
-fn worker(width: f32) -> Worker {
+pub(crate) fn worker(width: f32) -> Worker {
     let ts = text_system();
     let mut w = Worker::new(&ts, Arc::new(Shared::new()), Arc::new(Quiet));
     w.width = width;

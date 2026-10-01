@@ -39,7 +39,7 @@ impl Worker {
                 }
             }
             "wf.toggle" => {
-                let default = self.is_newest(rest);
+                let default = status::default_open(self.is_newest(rest));
                 self.flip(&format!("wf:{rest}"), default);
             }
             "wf.actors" => *self.builder.ui.actor_pages.entry(rest.to_owned()).or_insert(1) += 1,

@@ -26,8 +26,6 @@ use super::cards::{Act, Btn, Card, CardStyles, ChipSpec, Glyph, Header, Item, Li
 use super::display::ColorRole;
 use super::markdown::{Ctx, prepare_block};
 
-/// Agent rows listed per page in an expanded run.
-pub(crate) const ACTORS_PER_PAGE: usize = 8;
 /// Reports listed before "Show all".
 pub(crate) const REPORTS_SHOWN: usize = 3;
 /// Lines of an artifact a phone fetches and draws (a table page, a file head).
@@ -178,7 +176,7 @@ pub(crate) fn goal_card(ctx: &mut Ctx, goal: &Goal, now_ms: i64, open: bool, fai
     let mut items = vec![Item::Header(Header {
         icon: Glyph::Icon("target", goal_tone(chip_tone)),
         title: st.title(ctx, "Goal", ColorRole::Text),
-        pill: Some((st.tiny(ctx, chip_word, goal_tone(chip_tone)), goal_tone(chip_tone))),
+        pill: Some(st.tiny(ctx, chip_word, goal_tone(chip_tone))),
         trail: Some(st.one(ctx, &rounds, ColorRole::TextTertiary)),
         sub: Some(st.text(ctx, &one_line(&headline), ColorRole::TextSecondary)),
         sub_lines: if open { 3 } else { 2 },
@@ -213,14 +211,14 @@ pub(crate) fn goal_card(ctx: &mut Ctx, goal: &Goal, now_ms: i64, open: bool, fai
         let mut buttons = Vec::new();
         match goal.status {
             GoalStatus::Active | GoalStatus::Verifying => {
-                buttons.push(Btn { label: st.label(ctx, "Pause", ColorRole::Text), color: ColorRole::Text, act: Act::new("goal.pause", "Pause goal") });
+                buttons.push(Btn { label: st.label(ctx, "Pause", ColorRole::Text), act: Act::new("goal.pause", "Pause goal") });
             }
             GoalStatus::Paused | GoalStatus::BudgetLimited => {
-                buttons.push(Btn { label: st.label(ctx, "Resume", ColorRole::Accent), color: ColorRole::Accent, act: Act::new("goal.resume", "Resume goal") });
+                buttons.push(Btn { label: st.label(ctx, "Resume", ColorRole::Accent), act: Act::new("goal.resume", "Resume goal") });
             }
             GoalStatus::Complete => {}
         }
-        buttons.push(Btn { label: st.label(ctx, "Clear", ColorRole::Danger), color: ColorRole::Danger, act: Act::new("goal.clear", "Clear goal") });
+        buttons.push(Btn { label: st.label(ctx, "Clear", ColorRole::Danger), act: Act::new("goal.clear", "Clear goal") });
         items.push(Item::Buttons(buttons));
     } else if let Some(f) = failure {
         items.push(Item::Space(6.0));
@@ -426,11 +424,12 @@ pub(crate) fn workflow_card(ctx: &mut Ctx, run: &WorkflowRun, rc: &RunContext) -
     // Open: what the run is waiting on, who is doing what, what it made.
     for q in pane.questions.iter().take(3) {
         items.push(Item::Space(10.0));
-        let mut text = format!("{}: {}", q.actor, one_line(&q.question));
+        let text = format!("{}: {}", q.actor, one_line(&q.question));
+        items.push(Item::Text { text: st.text(ctx, &text, ColorRole::Text), lines: 4, lead: Glyph::Icon("questionmark.bubble", ColorRole::Warning) });
         if !q.context.trim().is_empty() {
-            text.push_str(&format!("\n{}", zeron_proto::truncate_chars(one_line(&q.context).as_str(), 160)));
+            items.push(Item::Space(2.0));
+            items.push(Item::Text { text: st.text(ctx, &zeron_proto::truncate_chars(one_line(&q.context).as_str(), 160), ColorRole::TextTertiary), lines: 3, lead: Glyph::None });
         }
-        items.push(Item::Text { text: st.text(ctx, &text, ColorRole::Text), lines: 5, lead: Glyph::Icon("questionmark.bubble", ColorRole::Warning) });
     }
     if !pane.questions.is_empty() {
         items.push(Item::Space(4.0));
@@ -459,7 +458,7 @@ pub(crate) fn workflow_card(ctx: &mut Ctx, run: &WorkflowRun, rc: &RunContext) -
         let shown = pane.actors.len() as u32;
         if shown < pane.actors_total {
             let more = pane.actors_total - shown;
-            let label = format!("Show {} more", more.min(ACTORS_PER_PAGE as u32));
+            let label = format!("Show {} more", more.min(workflow_view::PANE_ACTORS_PER_PAGE as u32));
             items.push(Item::Line(Line {
                 glyph: Glyph::Icon("chevron.down", ColorRole::TextTertiary),
                 title: st.one(ctx, &label, ColorRole::TextTertiary),
@@ -582,26 +581,27 @@ pub(crate) fn workflow_card(ctx: &mut Ctx, run: &WorkflowRun, rc: &RunContext) -
     {
         meta.push(c.clone());
     }
-    if !meta.is_empty() {
-        items.push(Item::Space(12.0));
-        items.push(Item::Text { text: st.text(ctx, &meta.join("\n"), ColorRole::TextTertiary), lines: 4, lead: Glyph::None });
+    for (i, line) in meta.iter().enumerate() {
+        items.push(Item::Space(if i == 0 { 12.0 } else { 2.0 }));
+        items.push(Item::Text { text: st.text(ctx, line, ColorRole::TextTertiary), lines: 2, lead: Glyph::None });
     }
 
     if card.can_stop || card.can_resume {
         items.push(Item::Space(12.0));
         let btn = if card.can_stop {
-            Btn { label: st.label(ctx, "Stop workflow", ColorRole::Danger), color: ColorRole::Danger, act: Act::new(format!("wf.stop:{run_id}"), "Stop the workflow") }
+            Btn { label: st.label(ctx, "Stop workflow", ColorRole::Danger), act: Act::new(format!("wf.stop:{run_id}"), "Stop the workflow") }
         } else {
-            Btn { label: st.label(ctx, "Resume workflow", ColorRole::Accent), color: ColorRole::Accent, act: Act::new(format!("wf.resume:{run_id}"), "Resume the workflow") }
+            Btn { label: st.label(ctx, "Resume workflow", ColorRole::Accent), act: Act::new(format!("wf.resume:{run_id}"), "Resume the workflow") }
         };
         items.push(Item::Buttons(vec![btn]));
     }
     (Card { items }, card.summary())
 }
 
-/// Whether a run's card starts open: the newest run does, like the desktop.
-pub(crate) fn default_open(newest: bool) -> bool {
-    newest
+/// Whether a run's card starts open. Folded: an open run is a screenful, and
+/// what needs the person (a waiting agent, a failure) shows on the folded card.
+pub(crate) fn default_open(_newest: bool) -> bool {
+    false
 }
 
 /// A card's version is what it draws: the model, the open choice and the
