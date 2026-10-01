@@ -370,9 +370,12 @@ fn warm_sessions_are_capped_and_preload_follows_the_front_page() {
     let (client, _dir) = demo(fast());
     client.preload_sessions();
     let open = client.open_session_ids();
-    assert_eq!(open.len(), zeron_client::PRELOAD_CAP);
-    for id in ["chat-veil", "chat-picker", "chat-tabs", "chat-errored"] {
-        assert!(open.iter().any(|o| o == id), "{id} preloaded");
+    assert_eq!(open.len(), zeron_client::PRELOAD_CAP, "{open:?}");
+    // The front page's order, except that chats live right now come first:
+    // the fan-out chat (subagents running) is warmed ahead of the settled
+    // errored one.
+    for id in ["chat-veil", "chat-picker", "chat-tabs", "chat-fanout"] {
+        assert!(open.iter().any(|o| o == id), "{id} preloaded: {open:?}");
     }
     let attached = client.open_session("chat-home").unwrap();
     attached.set_view_attached(true);
