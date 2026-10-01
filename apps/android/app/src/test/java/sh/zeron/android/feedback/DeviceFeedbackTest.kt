@@ -60,16 +60,16 @@ class DeviceFeedbackPolicyTest {
 
     @Test fun transferCues() {
         policy.transfer("t1", TransferEvent.Asked)
-        assertEquals(listOf("h:Attention", "c:Request"), rec.events)
+        assertEquals(listOf("c:Request", "h:Attention"), rec.events)
         rec.events.clear()
         policy.transfer("t1", TransferEvent.Received)
-        assertEquals(listOf("h:Success", "c:UploadReady"), rec.events)
+        assertEquals(listOf("c:UploadReady", "h:Success"), rec.events)
         rec.events.clear()
         policy.transfer("t2", TransferEvent.Sent)
-        assertEquals(listOf("h:Success", "c:UploadReady"), rec.events)
+        assertEquals(listOf("c:UploadReady", "h:Success"), rec.events)
         rec.events.clear()
         policy.transfer("t3", TransferEvent.Failed)
-        assertEquals(listOf("h:Error", "c:Attention"), rec.events)
+        assertEquals(listOf("c:Attention", "h:Error"), rec.events)
     }
 
     @Test fun sameEventForSameTransferFiresOnce() {
@@ -90,9 +90,9 @@ class DeviceFeedbackPolicyTest {
 
     @Test fun engineCues() {
         policy.engine(EngineEvent.SetupDone)
-        assertEquals(listOf("h:Success", "c:UploadReady"), rec.events)
+        assertEquals(listOf("c:UploadReady", "h:Success"), rec.events)
         rec.events.clear()
         policy.engine(EngineEvent.Failed)
-        assertEquals(listOf("h:Error", "c:Error"), rec.events)
+        assertEquals(listOf("c:Error", "h:Error"), rec.events)
     }
 }
