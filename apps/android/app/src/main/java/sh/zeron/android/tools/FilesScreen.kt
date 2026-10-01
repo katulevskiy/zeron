@@ -1,5 +1,9 @@
 package sh.zeron.android.tools
 
+import sh.zeron.android.feedback.feedbackCombinedClickable
+import sh.zeron.android.feedback.feedbackAction
+import sh.zeron.android.feedback.Haptic
+import sh.zeron.android.feedback.Cue
 import androidx.compose.animation.core.animateFloatAsState
 import androidx.compose.foundation.ExperimentalFoundationApi
 import androidx.compose.foundation.background
@@ -227,7 +231,7 @@ fun FilesScreen(
                     listOf(
                         MenuAction(if (includeIgnored) "Hide ignored files" else "Show ignored files", if (includeIgnored) ZIcons.EyeClosed else ZIcons.Eye) { includeIgnored = !includeIgnored },
                         MenuAction("Collapse all", ZIcons.Collapse) { expanded.clear() },
-                        MenuAction("Refresh", ZIcons.Refresh) { reloadLoaded() },
+                        MenuAction("Refresh", ZIcons.Refresh, haptic = Haptic.Select, cue = Cue.Refresh) { reloadLoaded() },
                         MenuAction("Copy folder path", ZIcons.Copy, haptic = sh.zeron.android.feedback.Haptic.Confirm, cue = sh.zeron.android.feedback.Cue.Copy) { clipboard.setText(AnnotatedString(ref.root ?: "")) },
                     ),
                 )
@@ -293,7 +297,7 @@ fun FilesScreen(
                     ToolbarButton(ZIcons.Terminal, "Terminal", onTerminal)
                     ToolbarButton(ZIcons.Globe, "Browser") { onBrowser(null) }
                     ToolbarButton(ZIcons.Save, "Save project to Downloads") { model.downloads.saveFolder(ref, "", includeIgnored) }
-                    ToolbarButton(ZIcons.Refresh, "Refresh") { reloadLoaded() }
+                    ToolbarButton(ZIcons.Refresh, "Refresh", feedbackAction(Haptic.Select, Cue.Refresh) { reloadLoaded() })
                 }
             }
         }
@@ -343,7 +347,7 @@ private fun TreeRow(row: TreeRowModel, open: Boolean, busy: Boolean, mark: GitMa
     Row(
         Modifier
             .fillMaxWidth()
-            .combinedClickable(onClick = onClick, onLongClick = onLongClick)
+            .feedbackCombinedClickable(Haptic.Tick, Cue.Tap, onLongClick = onLongClick, onClick = onClick)
             .padding(start = 12.dp + 18.dp * row.depth, end = 16.dp)
             .height(40.dp)
             .alpha(if (e.ignored) 0.5f else 1f),
@@ -382,7 +386,7 @@ private fun TreeRow(row: TreeRowModel, open: Boolean, busy: Boolean, mark: GitMa
 @Composable
 private fun SearchRow(e: Entry, mark: GitMark?, onClick: () -> Unit, onLongClick: () -> Unit) {
     Row(
-        Modifier.fillMaxWidth().combinedClickable(onClick = onClick, onLongClick = onLongClick).padding(horizontal = 20.dp, vertical = 10.dp),
+        Modifier.fillMaxWidth().feedbackCombinedClickable(Haptic.Select, Cue.Tap, onLongClick = onLongClick, onClick = onClick).padding(horizontal = 20.dp, vertical = 10.dp),
         verticalAlignment = Alignment.CenterVertically,
     ) {
         FileIcon(e.path, e.isDir)

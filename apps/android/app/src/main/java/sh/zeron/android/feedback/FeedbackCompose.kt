@@ -16,6 +16,7 @@ import androidx.compose.runtime.snapshotFlow
 import kotlinx.coroutines.flow.distinctUntilChanged
 import androidx.compose.runtime.DisposableEffect
 import androidx.compose.runtime.remember
+import androidx.compose.runtime.staticCompositionLocalOf
 import androidx.compose.runtime.rememberUpdatedState
 import androidx.compose.ui.Modifier
 import androidx.compose.ui.composed
@@ -42,7 +43,26 @@ fun ProvideFeedback(feedback: AndroidFeedback, content: @Composable () -> Unit) 
     }
     val base = LocalIndication.current
     val indication = remember(base) { if (base is IndicationNodeFactory) FeedbackIndication(base) else base }
-    CompositionLocalProvider(LocalFeedback provides feedback, LocalIndication provides indication, content = content)
+    CompositionLocalProvider(
+        LocalFeedback provides feedback,
+        LocalIndication provides indication,
+        LocalPlainIndication provides base,
+        content = content,
+    )
+}
+
+/** The theme's own indication, without the default tap. */
+val LocalPlainIndication = staticCompositionLocalOf<Indication?> { null }
+
+/**
+ * Controls inside answer with their own haptic and no default tap sound:
+ * for dense, repeated surfaces (the terminal's extra keys) where a sound per
+ * press would turn into typing noise.
+ */
+@Composable
+fun QuietTaps(content: @Composable () -> Unit) {
+    val plain = LocalPlainIndication.current
+    if (plain == null) content() else CompositionLocalProvider(LocalIndication provides plain, content = content)
 }
 
 /**

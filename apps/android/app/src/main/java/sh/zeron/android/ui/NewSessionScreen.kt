@@ -1,5 +1,10 @@
 package sh.zeron.android.ui
 
+import sh.zeron.android.feedback.feedbackAction
+import sh.zeron.android.feedback.LocalFeedback
+import sh.zeron.android.feedback.Haptic
+import sh.zeron.android.feedback.Cue
+import sh.zeron.android.feedback.OpenCloseFeedback
 import androidx.compose.foundation.layout.Arrangement
 import androidx.compose.foundation.layout.Box
 import androidx.compose.foundation.layout.Column
@@ -83,6 +88,7 @@ fun NewSessionScreen(model: AppModel, onClose: () -> Unit, onCreated: (String) -
     val focus = remember { FocusRequester() }
     val snackbar = remember { SnackbarHostState() }
     val scope = rememberCoroutineScope()
+    val fb = LocalFeedback.current
 
     val projects = workspace?.projects.orEmpty()
     val hosts = workspace?.devices.orEmpty().filter { it.isExecutionHost }
@@ -142,7 +148,10 @@ fun NewSessionScreen(model: AppModel, onClose: () -> Unit, onCreated: (String) -
         // No pick: the session runs on (and is labelled with) the checked-out branch.
         val branch = draft.branch ?: currentBranch.takeIf { latestProject?.gitDetected == true }
         val id = model.createSession(draft.copy(model = draft.model ?: latestChoice?.model?.id, branch = branch), composer.encoded(), composer.images.map { it.outgoing })
-        if (id != null) onCreated(id) else scope.launch { snackbar.showSnackbar("Choose a project or a host that can run it.") }
+        if (id != null) onCreated(id) else {
+            fb.both(Haptic.Error, Cue.Error)
+            scope.launch { snackbar.showSnackbar("Choose a project or a host that can run it.") }
+        }
     }
 
     var composerBounds by remember { mutableStateOf<androidx.compose.ui.geometry.Rect?>(null) }
@@ -224,6 +233,7 @@ fun NewSessionScreen(model: AppModel, onClose: () -> Unit, onCreated: (String) -
     adding?.let { source ->
         NewProjectDialog(source, target, onDismiss = { adding = null }) { input ->
             model.addProject(targetDevice, source, input).onSuccess { id ->
+                fb.both(Haptic.Success, Cue.UploadReady)
                 adding = null
                 draft = draft.copy(projectId = id, hostId = null, branch = null, cwd = null)
             }.exceptionOrNull()?.userMessage()
@@ -259,6 +269,7 @@ private fun NewProjectDialog(source: ProjectSource, device: DeviceView?, onDismi
         icon = { ZIcon(if (clone) ZIcons.Branch else ZIcons.Folder, null) },
         title = { Text(if (clone) "Clone a repository" else "New project") },
         text = {
+            OpenCloseFeedback()
             Column {
                 Text(
                     projectDestination(source, device),
@@ -293,7 +304,7 @@ private fun NewProjectDialog(source: ProjectSource, device: DeviceView?, onDismi
             }
         },
         confirmButton = {
-            androidx.compose.material3.TextButton(onClick = ::go, enabled = valid && !busy) { Text(if (clone) "Clone" else "Create") }
+            androidx.compose.material3.TextButton(onClick = feedbackAction(Haptic.Confirm, Cue.Select, ::go), enabled = valid && !busy) { Text(if (clone) "Clone" else "Create") }
         },
         dismissButton = { androidx.compose.material3.TextButton(onClick = onDismiss, enabled = !busy) { Text("Cancel") } },
     )
@@ -374,6 +385,7 @@ private fun ProjectSheet(
         sheetState = sheet,
         containerColor = MaterialTheme.colorScheme.surfaceContainerLow,
     ) {
+        OpenCloseFeedback()
         androidx.compose.foundation.lazy.LazyColumn(contentPadding = androidx.compose.foundation.layout.PaddingValues(bottom = 24.dp)) {
             item {
                 Text(
@@ -553,6 +565,6 @@ private fun EffortChip(effort: String, efforts: List<String>, onPick: (String) -
     ContextChip(reasoningLabel(effort), leading = { ZIcon(ZIcons.Effort, null, Modifier.size(16.dp)) }, onClick = { open = true }) {
         ChoiceMenu(open, { open = false }, listOf(MenuSection("Reasoning effort", efforts.map { e ->
             MenuChoice(reasoningLabel(e), e == effort) { onPick(e) }
-        })))
+        })), steps = true)
     }
 }

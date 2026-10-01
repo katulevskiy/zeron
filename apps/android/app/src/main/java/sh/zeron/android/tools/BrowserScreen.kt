@@ -306,6 +306,7 @@ fun BrowserScreen(model: AppModel, ref: WorkspaceRef?, initialUrl: String?, onBa
 
     if (showPreviews) {
         ModalBottomSheet(onDismissRequest = { showPreviews = false }) {
+            sh.zeron.android.feedback.OpenCloseFeedback()
             PreviewsSheet(previews, ref) { target ->
                 showPreviews = false
                 go(target)

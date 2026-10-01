@@ -1,5 +1,10 @@
 package sh.zeron.android.ui
 
+import sh.zeron.android.feedback.feedbackAction
+import sh.zeron.android.feedback.LocalFeedback
+import sh.zeron.android.feedback.Haptic
+import sh.zeron.android.feedback.Cue
+import sh.zeron.android.feedback.OpenCloseFeedback
 import android.net.Uri
 import androidx.browser.customtabs.CustomTabsIntent
 import androidx.compose.foundation.Image
@@ -53,6 +58,7 @@ fun SignInScreen(model: AppModel) {
     // Developer sign-in (debuggable builds): seven taps on the mark.
     var taps by remember { mutableIntStateOf(0) }
     var developer by remember { mutableStateOf(false) }
+    val fb = LocalFeedback.current
     Column(
         Modifier.fillMaxSize().safeDrawingPadding().padding(horizontal = 28.dp),
         horizontalAlignment = Alignment.CenterHorizontally,
@@ -64,7 +70,17 @@ fun SignInScreen(model: AppModel) {
             Modifier.size(148.dp).clip(MaterialShapes.Cookie12Sided.toShape()).clickable(
                 interactionSource = remember { MutableInteractionSource() },
                 indication = null,
-            ) { if (model.isDebuggable && ++taps >= 7) developer = true },
+            ) {
+                if (model.isDebuggable) {
+                    // The hidden developer door: a tick per tap, a confirmation when it opens.
+                    if (++taps >= 7) {
+                        developer = true
+                        fb.both(Haptic.Success, Cue.Open)
+                    } else {
+                        fb.haptic(Haptic.Tick)
+                    }
+                }
+            },
         )
         Spacer(Modifier.height(32.dp))
         Text("Zeron", style = MaterialTheme.typography.displayMedium)
@@ -89,7 +105,7 @@ fun SignInScreen(model: AppModel) {
         }
         Spacer(Modifier.height(12.dp))
         OutlinedButton(
-            onClick = { model.startDemo() },
+            onClick = feedbackAction(Haptic.Confirm, Cue.Open) { model.startDemo() },
             modifier = Modifier.fillMaxWidth().heightIn(min = ButtonDefaults.MediumContainerHeight),
             shapes = ButtonDefaults.shapes(),
         ) {
@@ -109,6 +125,7 @@ fun SignInScreen(model: AppModel) {
             onDismissRequest = { choice.complete(null) },
             title = { Text("Choose an organization") },
             text = {
+                OpenCloseFeedback()
                 Column {
                     for (org in list) {
                         ListItem(
@@ -139,6 +156,7 @@ private fun DevSignInDialog(onDismiss: () -> Unit, onSignIn: (String, String, St
         onDismissRequest = onDismiss,
         title = { Text("Developer sign-in") },
         text = {
+            OpenCloseFeedback()
             Column {
                 Text(
                     "Join a development edge (AUTH_MODE=dev) without WorkOS.",
@@ -151,7 +169,7 @@ private fun DevSignInDialog(onDismiss: () -> Unit, onSignIn: (String, String, St
                 OutlinedTextField(org, { org = it }, label = { Text("Organization id") }, singleLine = true, modifier = Modifier.fillMaxWidth())
             }
         },
-        confirmButton = { TextButton(onClick = { onSignIn(edge, user, org) }) { Text("Sign in") } },
+        confirmButton = { TextButton(onClick = feedbackAction(Haptic.Confirm, Cue.Select) { onSignIn(edge, user, org) }) { Text("Sign in") } },
         dismissButton = { TextButton(onClick = onDismiss) { Text("Cancel") } },
     )
 }
