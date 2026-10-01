@@ -411,9 +411,9 @@ fun EffortSlider(
                             }
                             if (!change.pressed) break
                         }
-                        // A tap lands on the stop under the finger; a drag on the stop nearest the (speed-limited) thumb.
-                        // No fling: a flick must not carry the selection past what the drag itself covered.
-                        val landAt = if (engaged) effective[0] / span else EffortScale.fractionAt(down.position.x, width, inset)
+                        // A tap lands on the stop under the finger; a drag on the stop nearest the (speed-limited) thumb, carried a
+                        // half step toward the finger. No fling: a flick must not throw the selection past what the drag covered.
+                        val landAt = if (engaged) EffortDrag.landing(effective[0], finger[0]) / span else EffortScale.fractionAt(down.position.x, width, inset)
                         val land = EffortScale.nearestStep(landAt.coerceIn(0f, 1f), count)
                         if (land != tracker.step) {
                             tracker.jump(land)

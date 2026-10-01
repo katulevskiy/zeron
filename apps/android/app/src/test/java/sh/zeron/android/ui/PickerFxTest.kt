@@ -432,6 +432,18 @@ class EffortDragTest {
         assertEquals(0.05f, EffortDrag.advance(0f, 0.05f, dt), 1e-6f)
     }
 
+    @Test fun aReleaseCarriesTheThumbAHalfStepAtMostSoAFlickMovesOneLevel() {
+        // The finger is far ahead, the speed limit has only got the thumb 0.4 steps along: it lands one level on.
+        assertEquals(1, EffortScale.nearestStep(EffortDrag.landing(0.4f, 4f) / 4f, 5))
+        // But never two, however far the finger went, in either direction.
+        assertEquals(1.1f, EffortDrag.landing(0.6f, 100f), 1e-6f)
+        assertEquals(1, EffortScale.nearestStep(EffortDrag.landing(0.6f, 100f) / 4f, 5))
+        assertEquals(2.1f, EffortDrag.landing(2.6f, -50f), 1e-5f)
+        assertEquals(2, EffortScale.nearestStep(EffortDrag.landing(2.6f, -50f) / 4f, 5))
+        // A thumb that caught up with the finger stays put.
+        assertEquals(2f, EffortDrag.landing(2f, 2f), 0f)
+    }
+
     @Test fun selectionNeverRunsAheadOfTheMovementBudget() {
         // Whatever the finger does, the selection after t seconds is within MAX_STEPS_PER_SECOND * t + 1 of the start.
         val dt = 1f / 120f

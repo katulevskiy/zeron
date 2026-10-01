@@ -139,6 +139,12 @@ object EffortTuning {
     const val REBOUND_STIFFNESS = 420f
     const val REBOUND_DAMPING_RATIO = 0.3f
 
+    /**
+     * On release the thumb is carried at most this far (in steps) toward where the finger is, beyond where the speed limit had
+     * got it: a short quick flick still moves one level, but can never throw the selection further.
+     */
+    const val RELEASE_CARRY_STEPS = 0.5f
+
     /** The thumb grows by this many px (per side) for each px it is stretched past an end. */
     const val THUMB_STRETCH_GAIN = 0.3f
 
@@ -174,6 +180,13 @@ object EffortDrag {
         val t = p - base
         return base + smooth((t - well) / (1f - 2f * well))
     }
+
+    /**
+     * The position (steps) a release settles toward: the speed-limited [pEffective], carried up to
+     * [EffortTuning.RELEASE_CARRY_STEPS] toward the [finger]. The nearest level to it is the landing.
+     */
+    fun landing(pEffective: Float, finger: Float): Float =
+        pEffective + (finger - pEffective).coerceIn(-EffortTuning.RELEASE_CARRY_STEPS, EffortTuning.RELEASE_CARRY_STEPS)
 
     /** One frame of the finger as the slider sees it: [pEffective] moves toward [finger] at most [MAX_STEPS][EffortTuning.MAX_STEPS_PER_SECOND] a second. */
     fun advance(pEffective: Float, finger: Float, dt: Float, maxStepsPerSecond: Float = EffortTuning.MAX_STEPS_PER_SECOND): Float {
