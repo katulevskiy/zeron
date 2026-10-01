@@ -220,6 +220,12 @@ class AndroidFeedback(
         play(haptic)
     }
 
+    /** [level] 0..1 shapes the haptics that have a range (EffortStep: crisp tick to heavy thunk; Stretch: harder the further pulled). */
+    override fun haptic(haptic: Haptic, level: Float) {
+        claims.claimHaptic()
+        play(haptic, level = level)
+    }
+
     override fun cue(cue: Cue, step: Int) {
         claims.claimCue()
         play(cue, step)
@@ -271,19 +277,19 @@ class AndroidFeedback(
 
     // ── haptics ────────────────────────────────────────────────────────────
 
-    private fun play(haptic: Haptic, preview: Boolean = false) {
+    private fun play(haptic: Haptic, preview: Boolean = false, level: Float = 0.5f) {
         when (val d = gate.haptic(haptic, preview)) {
             is Decision.Skip -> log("haptic $haptic skip: ${d.why.label}")
             Decision.Play -> {
                 val view = viewRef.get()?.takeIf { it.isAttachedToWindow }
                 val strength = store.current.strength
-                var plan = HapticPlanner.plan(haptic, strength, caps(view != null))
+                var plan = HapticPlanner.plan(haptic, strength, caps(view != null), level)
                 var ok = perform(plan, view)
                 if (!ok && plan is HapticPlan.ViewConstant) {
-                    plan = HapticPlanner.plan(haptic, strength, caps(false))
+                    plan = HapticPlanner.plan(haptic, strength, caps(false), level)
                     ok = perform(plan, null)
                 }
-                log("haptic $haptic ${if (ok) "play" else "skip"} $plan")
+                log("haptic $haptic${if (haptic in HapticTable.leveled) " level=${"%.2f".format(level)}" else ""} ${if (ok) "play" else "skip"} $plan")
             }
         }
     }
