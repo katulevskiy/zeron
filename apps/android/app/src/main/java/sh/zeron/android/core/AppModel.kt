@@ -286,7 +286,7 @@ class AppModel(private val app: Application) {
 
     /**
      * Debuggable builds: `adb shell am broadcast -a sh.zeron.android.DEBUG_EVENT -p sh.zeron.android --es kind
-     * done|input|failed [--es chat <id>]` (or engine-setup|engine-failed|transfer-asked|received|sent|failed) runs an event through the real policy (in-app cue in front,
+     * done|input|failed [--es chat <id>]` (or `haptic` / `cue` with `--es name <entry>`, or engine-setup|engine-failed|transfer-asked|received|sent|failed) runs an event through the real policy (in-app cue in front,
      * notification behind), to check the sensory layer without waiting for an agent.
      */
     val isDebuggable: Boolean get() = (app.applicationInfo.flags and android.content.pm.ApplicationInfo.FLAG_DEBUGGABLE) != 0
@@ -294,6 +294,15 @@ class AppModel(private val app: Application) {
     private fun registerDebugAlerts() {
         val receiver = object : android.content.BroadcastReceiver() {
             override fun onReceive(context: android.content.Context, intent: android.content.Intent) {
+                // `--es kind haptic --es name Surge [--ef level 0.5]` / `--es kind cue --es name ProviderClaude`
+                // play one vocabulary entry straight through the engine (logs, dumpsys vibrator_manager).
+                when (intent.getStringExtra("kind")) {
+                    "haptic" -> sh.zeron.android.feedback.Haptic.entries.firstOrNull { it.name == intent.getStringExtra("name") }?.let {
+                        feedback.haptic(it, intent.getFloatExtra("level", 0.5f))
+                    }
+                    "cue" -> sh.zeron.android.feedback.Cue.entries.firstOrNull { it.name == intent.getStringExtra("name") }?.let { feedback.cue(it) }
+                }
+                if (intent.getStringExtra("kind") in setOf("haptic", "cue")) return
                 // Device events: engine-setup | engine-failed | transfer-asked | -received | -sent | -failed.
                 when (val kind = intent.getStringExtra("kind").orEmpty()) {
                     "engine-setup" -> deviceFeedback.engine(sh.zeron.android.feedback.EngineEvent.SetupDone).also { return }

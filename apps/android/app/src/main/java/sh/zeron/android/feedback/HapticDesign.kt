@@ -22,7 +22,7 @@ data class Segment(val ms: Long, val amplitude: Int)
  * 4. The designed [waveform] (amplitude control), then the predefined effect,
  *    then the waveform without amplitudes.
  */
-class HapticSpec(
+data class HapticSpec(
     val haptic: Haptic,
     val preferView: Boolean,
     /** SDK level -> `HapticFeedbackConstants` value, or null when this device has none for the moment. */
@@ -43,7 +43,90 @@ object HapticTable {
     private fun api(level: Int, constant: Int): (Int) -> Int? = { sdk -> if (sdk >= level) constant else null }
     private fun api(level: Int, constant: Int, below: Int): (Int) -> Int? = { sdk -> if (sdk >= level) constant else below }
 
-    fun spec(haptic: Haptic): HapticSpec = when (haptic) {
+    /** Haptics whose feel depends on `haptic(h, level)`; every other one ignores the level. */
+    val leveled: Set<Haptic> = setOf(Haptic.EffortStep, Haptic.Stretch)
+
+    /** [level] 0..1 only matters to [leveled] haptics (see [effortStep], [stretch]). */
+    fun spec(haptic: Haptic, level: Float = 0.5f): HapticSpec = when (haptic) {
+        Haptic.EffortStep -> effortStep(level)
+        Haptic.Stretch -> stretch(level)
+        else -> fixed[haptic.ordinal]
+    }
+
+    private val fixed: List<HapticSpec> by lazy { Haptic.entries.map(::build) }
+
+    private fun lerp(a: Float, b: Float, t: Float) = a + (b - a) * t
+
+    /**
+     * A thinking-power detent that grows with [level] (0 = the lowest power, 1 = the highest): from a firm,
+     * crisp click to a heavy thunk, always clearly stronger than [Haptic.Select] and [Haptic.Tick] (TICK 0.7).
+     * Platform view constants have a fixed, lighter strength, so this never takes that rung of the ladder.
+     *
+     *  - primitives: CLICK (0.70 -> 1.00) with, from level 0.2 on, a THUD under it (0.25 -> 1.00) 10 ms later,
+     *    and at the top a second CLICK as the thunk lands;
+     *  - without THUD: two CLICKs, the second as strong as the level (a doubled click reads heavy);
+     *  - without CLICK-class strength: two full TICKs 14 ms apart;
+     *  - waveform: a hard 10 ms hit, a gap, then a body 10-38 ms long, amplitudes 150-255 growing with the level.
+     */
+    fun effortStep(level: Float): HapticSpec {
+        val l = level.coerceIn(0f, 1f)
+        val click = lerp(0.70f, 1f, l)
+        val thud = lerp(0.25f, 1f, ((l - 0.2f) / 0.8f).coerceIn(0f, 1f))
+        val withThud = buildList {
+            add(Step(C.PRIMITIVE_CLICK, click))
+            if (l >= 0.2f) add(Step(C.PRIMITIVE_THUD, thud, 10))
+            if (l >= 0.75f) add(Step(C.PRIMITIVE_CLICK, 1f, 22))
+        }
+        val clicks = buildList {
+            add(Step(C.PRIMITIVE_CLICK, click))
+            add(Step(C.PRIMITIVE_CLICK, lerp(0.45f, 1f, l), 16))
+        }
+        val ticks = listOf(Step(C.PRIMITIVE_TICK, 1f), Step(C.PRIMITIVE_TICK, lerp(0.8f, 1f, l), 14))
+        return HapticSpec(
+            Haptic.EffortStep, false, { null },
+            listOf(withThud, clicks, ticks),
+            if (l < 0.4f) VibrationEffect.EFFECT_CLICK else VibrationEffect.EFFECT_HEAVY_CLICK,
+            listOf(
+                Segment(10, (150 + 105 * l).toInt()),
+                Segment(8, 0),
+                Segment((10 + 28 * l).toLong(), (110 + 145 * l).toInt()),
+            ),
+            designedWaveform = true, priority = 1, minGapMs = 60,
+        )
+    }
+
+    /**
+     * The effort thumb pulled past the end of its track: a light tick that gets firmer the further it is pulled
+     * ([level] 0 = just past the end, 1 = as far as it goes), with a low drag under it from 0.6 on.
+     */
+    fun stretch(level: Float): HapticSpec {
+        val l = level.coerceIn(0f, 1f)
+        val tick = lerp(0.25f, 0.70f, l)
+        val rising = buildList {
+            add(Step(C.PRIMITIVE_TICK, tick))
+            if (l >= 0.6f) add(Step(C.PRIMITIVE_LOW_TICK, lerp(0.35f, 0.8f, (l - 0.6f) / 0.4f), 12))
+        }
+        return HapticSpec(
+            Haptic.Stretch, false, { null },
+            listOf(rising, listOf(Step(C.PRIMITIVE_TICK, tick)), listOf(Step(C.PRIMITIVE_LOW_TICK, lerp(0.3f, 0.9f, l)))),
+            VibrationEffect.EFFECT_TICK,
+            listOf(Segment(8, (40 + 110 * l).toInt())),
+            priority = 0, minGapMs = 45,
+        )
+    }
+
+    /** The rising ticks of [Haptic.Surge]: scale and gap per step, ending in the crack. */
+    internal val surgeRamp: List<Pair<Float, Int>> = listOf(
+        0.20f to 0, 0.30f to 60, 0.42f to 50, 0.56f to 40, 0.70f to 32,
+    )
+
+    private fun surge(finish: Step, closer: Step?): List<Step> = buildList {
+        for ((scale, gap) in surgeRamp) add(Step(C.PRIMITIVE_TICK, scale, gap))
+        add(finish)
+        if (closer != null) add(closer)
+    }
+
+    private fun build(haptic: Haptic): HapticSpec = when (haptic) {
         // The faintest detent: slider steps and discrete pickers. API 34 has a dedicated frequent tick.
         Haptic.Tick -> HapticSpec(
             haptic, true, api(34, H.SEGMENT_FREQUENT_TICK, H.CLOCK_TICK),
@@ -144,9 +227,87 @@ object HapticTable {
             ),
             VibrationEffect.EFFECT_TICK, listOf(Segment(12, 120), Segment(14, 0), Segment(8, 50)), priority = 1, minGapMs = 120,
         )
+
+        // Round 2. EffortStep and Stretch depend on the level and are built by effortStep / stretch.
+        Haptic.EffortStep -> effortStep(0.5f)
+        Haptic.Stretch -> stretch(0.5f)
+
+        // The thumb snaps back: one firm thump that decays at once (a quiet low tick trails it).
+        Haptic.Rebound -> HapticSpec(
+            haptic, false, { null },
+            listOf(
+                listOf(Step(C.PRIMITIVE_THUD, 0.9f), Step(C.PRIMITIVE_LOW_TICK, 0.35f, 30)),
+                listOf(Step(C.PRIMITIVE_CLICK, 1f), Step(C.PRIMITIVE_LOW_TICK, 0.35f, 30)),
+                listOf(Step(C.PRIMITIVE_CLICK, 1f)),
+            ),
+            VibrationEffect.EFFECT_HEAVY_CLICK,
+            listOf(Segment(22, 230), Segment(12, 100), Segment(10, 40)),
+            designedWaveform = true, priority = 1, minGapMs = 150,
+        )
+
+        // The highest power: five ticks that firm up and bunch together, then a hard crack with a thud under it,
+        // about 250 ms in all. Without THUD the crack is a double click; without TICK it is clicks only.
+        Haptic.Surge -> HapticSpec(
+            haptic, false, { null },
+            listOf(
+                surge(Step(C.PRIMITIVE_CLICK, 0.9f, 24), Step(C.PRIMITIVE_THUD, 1f, 8)),
+                surge(Step(C.PRIMITIVE_CLICK, 0.85f, 24), Step(C.PRIMITIVE_CLICK, 1f, 14)),
+                listOf(
+                    Step(C.PRIMITIVE_CLICK, 0.25f), Step(C.PRIMITIVE_CLICK, 0.35f, 60), Step(C.PRIMITIVE_CLICK, 0.5f, 50),
+                    Step(C.PRIMITIVE_CLICK, 0.7f, 40), Step(C.PRIMITIVE_CLICK, 1f, 30),
+                ),
+            ),
+            VibrationEffect.EFFECT_HEAVY_CLICK,
+            listOf(
+                Segment(28, 40), Segment(18, 0), Segment(28, 70), Segment(14, 0), Segment(28, 110), Segment(12, 0),
+                Segment(28, 160), Segment(10, 0), Segment(28, 210), Segment(8, 0), Segment(40, 255),
+            ),
+            designedWaveform = true, priority = 2, minGapMs = 500,
+        )
+
+        // The lowest power: a very short, sharp double tick.
+        Haptic.Zip -> HapticSpec(
+            haptic, false, { null },
+            listOf(
+                listOf(Step(C.PRIMITIVE_TICK, 0.9f), Step(C.PRIMITIVE_TICK, 0.9f, 28)),
+                listOf(Step(C.PRIMITIVE_CLICK, 0.5f), Step(C.PRIMITIVE_CLICK, 0.5f, 28)),
+            ),
+            VibrationEffect.EFFECT_TICK,
+            listOf(Segment(6, 200), Segment(18, 0), Segment(6, 200)),
+            designedWaveform = true, priority = 1, minGapMs = 100,
+        )
+
+        // Fast mode on: an irregular crackle of micro-pulses (uneven strength and gaps) ending in a firm crack,
+        // about 180 ms.
+        Haptic.Lightning -> HapticSpec(
+            haptic, false, { null },
+            listOf(
+                listOf(
+                    Step(C.PRIMITIVE_TICK, 0.45f), Step(C.PRIMITIVE_TICK, 0.80f, 31), Step(C.PRIMITIVE_LOW_TICK, 0.35f, 17),
+                    Step(C.PRIMITIVE_TICK, 0.90f, 44), Step(C.PRIMITIVE_CLICK, 1f, 52),
+                ),
+                listOf(
+                    Step(C.PRIMITIVE_CLICK, 0.40f), Step(C.PRIMITIVE_CLICK, 0.70f, 36), Step(C.PRIMITIVE_CLICK, 0.35f, 20),
+                    Step(C.PRIMITIVE_CLICK, 0.85f, 44), Step(C.PRIMITIVE_CLICK, 1f, 52),
+                ),
+            ),
+            VibrationEffect.EFFECT_DOUBLE_CLICK,
+            listOf(
+                Segment(7, 110), Segment(22, 0), Segment(5, 220), Segment(13, 0), Segment(6, 70), Segment(34, 0),
+                Segment(8, 255), Segment(40, 0), Segment(24, 255),
+            ),
+            designedWaveform = true, priority = 2, minGapMs = 400,
+        )
+
+        // Jumping to a provider on the rail: lighter than a slider Tick, the faintest detent there is.
+        Haptic.RailTick -> HapticSpec(
+            haptic, true, api(34, H.SEGMENT_FREQUENT_TICK, H.CLOCK_TICK),
+            listOf(listOf(Step(C.PRIMITIVE_LOW_TICK, 0.3f)), listOf(Step(C.PRIMITIVE_TICK, 0.2f))),
+            VibrationEffect.EFFECT_TICK, listOf(Segment(6, 28)), priority = 0, minGapMs = 45,
+        )
     }
 
-    val all: List<HapticSpec> get() = Haptic.entries.map(::spec)
+    val all: List<HapticSpec> get() = fixed
 }
 
 /** What the device can do, probed once at start. */
@@ -177,8 +338,8 @@ object HapticPlanner {
     /** Primitive scale at [strength], never inaudible and never above full. */
     fun scaled(scale: Float, strength: HapticStrength): Float = (scale * strength.scale).coerceIn(0.05f, 1f)
 
-    fun plan(haptic: Haptic, strength: HapticStrength, caps: HapticCapabilities): HapticPlan {
-        val spec = HapticTable.spec(haptic)
+    fun plan(haptic: Haptic, strength: HapticStrength, caps: HapticCapabilities, level: Float = 0.5f): HapticPlan {
+        val spec = HapticTable.spec(haptic, level)
         val standard = strength == HapticStrength.Standard
         val view = if (caps.hasView && standard) spec.view(caps.sdk) else null
 

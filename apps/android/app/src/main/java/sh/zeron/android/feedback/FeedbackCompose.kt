@@ -137,8 +137,8 @@ fun Modifier.feedbackCombinedClickable(
 
 /** Play whichever of [haptic] / [cue] is non-null. */
 fun Feedback.play(haptic: Haptic?, cue: Cue?, step: Int = 0) {
+    cue?.let { cue(it, step) } // sound first: it is the channel perceived late
     haptic?.let(::haptic)
-    cue?.let { cue(it, step) }
 }
 
 /** [action] preceded by feedback: for `onClick = ` parameters of stock controls. */

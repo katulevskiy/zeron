@@ -11,7 +11,8 @@ class CueTableTest {
 
     @Test fun everyCueHasASpecWithItsOwnResource() {
         assertEquals(Cue.entries.size, CueTable.all.size)
-        assertEquals(Cue.entries.size, CueTable.all.map { it.resource }.toSet().size)
+        // Every cue has its own file: nothing borrows a neighbour's any more.
+        assertEquals(CueTable.all.size, CueTable.all.map { it.resource }.toSet().size)
         for (spec in CueTable.all) {
             assertTrue(spec.resource, spec.resource.matches(Regex("fx_[a-z_]+")))
             assertTrue(spec.gain in 0.1f..1f)
@@ -21,15 +22,16 @@ class CueTableTest {
     @Test fun everyResourceExistsInTheRepoOrComesFromTheDesktopAssets() {
         for (spec in CueTable.all) {
             val committed = File(raw, spec.resource + ".wav").isFile
-            val fromDesktop = File(desktop, spec.resource.removePrefix("fx_") + ".wav").isFile
-            assertTrue("${spec.cue} -> ${spec.resource}", committed || fromDesktop)
+            assertTrue("${spec.cue} -> ${spec.resource}", committed)
         }
     }
 
-    @Test fun sessionCuesUseTheDesktopBytes() {
-        assertEquals("fx_done", CueTable.spec(Cue.Done).resource)
-        assertEquals("fx_request", CueTable.spec(Cue.Request).resource)
-        assertEquals("fx_attention", CueTable.spec(Cue.Attention).resource)
+    @Test fun sessionCuesAreTheDesktopChimes() {
+        // In-app copies of the desktop chimes (mono, trimmed, boosted); the notification channels keep fx_done & co.
+        assertEquals("fx_chime_done", CueTable.spec(Cue.Done).resource)
+        assertEquals("fx_chime_request", CueTable.spec(Cue.Request).resource)
+        assertEquals("fx_chime_attention", CueTable.spec(Cue.Attention).resource)
+        for (name in listOf("done", "request", "attention")) assertTrue(File(desktop, "$name.wav").isFile)
         assertEquals(CueCategory.Completion, CueTable.spec(Cue.Done).category)
         assertEquals(CueCategory.Input, CueTable.spec(Cue.Request).category)
         assertEquals(CueCategory.Errors, CueTable.spec(Cue.Attention).category)

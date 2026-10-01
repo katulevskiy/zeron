@@ -12,12 +12,23 @@ import androidx.compose.animation.expandVertically
 import androidx.compose.animation.fadeIn
 import androidx.compose.animation.fadeOut
 import androidx.compose.animation.shrinkVertically
+import androidx.compose.animation.scaleIn
+import androidx.compose.animation.scaleOut
 import androidx.compose.animation.slideInHorizontally
 import androidx.compose.animation.slideOutHorizontally
 import androidx.compose.animation.togetherWith
 import androidx.compose.foundation.background
 import androidx.compose.foundation.border
 import androidx.compose.foundation.clickable
+import androidx.compose.foundation.interaction.DragInteraction
+import androidx.compose.runtime.DisposableEffect
+import androidx.compose.runtime.rememberCoroutineScope
+import androidx.compose.runtime.rememberUpdatedState
+import androidx.compose.runtime.snapshotFlow
+import androidx.compose.runtime.derivedStateOf
+import androidx.compose.ui.layout.onGloballyPositioned
+import androidx.compose.ui.platform.LocalDensity
+import kotlinx.coroutines.launch
 import androidx.compose.foundation.interaction.MutableInteractionSource
 import androidx.compose.foundation.interaction.collectIsPressedAsState
 import androidx.compose.foundation.layout.Arrangement
@@ -136,8 +147,14 @@ fun ModelPickerPopover(
     onRetry: (String) -> Unit = {},
 ) {
     val feedback = LocalFeedback.current
+    val rail = remember { RailHost() }
     // Open / Close feedback comes from AnchoredPopover itself (ExpandedFeedback).
-    AnchoredPopover(expanded, onDismiss, width = CardWidth, maxHeight = 560.dp) {
+    AnchoredPopover(
+        expanded, onDismiss, width = CardWidth, maxHeight = 560.dp,
+        // The provider rail straddles the card's start edge, outside what the card clips.
+        overhang = RailOverhang,
+        overlay = { RailOverlay(rail) },
+    ) {
         var view by remember { mutableStateOf<PickerView>(if (current == null) PickerView.Models else PickerView.Settings) }
         val spatial = MaterialTheme.motionScheme.defaultSpatialSpec<IntOffset>()
         val sizeSpec = MaterialTheme.motionScheme.defaultSpatialSpec<androidx.compose.ui.unit.IntSize>()
@@ -155,16 +172,35 @@ fun ModelPickerPopover(
         ) { shown ->
             Column {
                 when (shown) {
-                    PickerView.Settings -> SettingsCard(
-                        current = current,
-                        effort = effort,
-                        options = options,
-                        onEffort = onEffort,
-                        onOptions = onOptions,
-                        onModels = { feedback.haptic(Haptic.Tick); view = PickerView.Models },
-                        onChoices = { feedback.haptic(Haptic.Tick); view = PickerView.Choices(it) },
-                    )
+                    PickerView.Settings -> {
+                        val model = current?.model
+                        val fast = ModelOptions.isFast(model, options)
+                        Box {
+                            // Fast mode's lightning is the bottom layer: above only the card's surface.
+                            FastLightning(active = fast, modifier = Modifier.matchParentSize())
+                            Column {
+                                SettingsCard(
+                                    current = current,
+                                    effort = effort,
+                                    options = options,
+                                    onEffort = onEffort,
+                                    onOptions = onOptions,
+                                    onModels = { feedback.haptic(Haptic.Tick); view = PickerView.Models },
+                                    onChoices = { feedback.haptic(Haptic.Tick); view = PickerView.Choices(it) },
+                                )
+                            }
+                            ResetButton(
+                                visible = ModelOptions.differsFromDefaults(model, effort, options),
+                                modifier = Modifier.align(Alignment.TopEnd),
+                            ) {
+                                feedback.haptic(Haptic.Confirm)
+                                onEffort(null)
+                                onOptions(emptyMap())
+                            }
+                        }
+                    }
                     PickerView.Models -> ModelList(
+                        rail = rail,
                         catalog = catalog,
                         current = current,
                         favorites = favorites,
@@ -223,13 +259,13 @@ private fun ColumnScope.SettingsCard(
     val fastMode = ModelOptions.fastMode(model)
     val fast = ModelOptions.isFast(model, options)
     val rows = ModelOptions.rows(model)
-    val differs = ModelOptions.differsFromDefaults(model, effort, options)
 
     Row(
         Modifier.fillMaxWidth().padding(start = 20.dp, end = 14.dp, top = 14.dp, bottom = 4.dp),
         verticalAlignment = Alignment.Top,
     ) {
-        Column(Modifier.weight(1f)) {
+        // The reset button floats in the card's top-right corner; without a fast button beside it the title keeps clear.
+        Column(Modifier.weight(1f).padding(end = if (fastMode == null) 34.dp else 0.dp)) {
             val title = if (shownEffort != null) reasoningLabel(shownEffort) else model?.label.orEmpty()
             AnimatedContent(
                 targetState = title,
@@ -260,8 +296,15 @@ private fun ColumnScope.SettingsCard(
         }
         if (fastMode != null) {
             Spacer(Modifier.width(12.dp))
-            FastButton(fast) { on ->
-                feedback.both(if (on) Haptic.ToggleOn else Haptic.ToggleOff, if (on) Cue.ToggleOn else Cue.ToggleOff)
+            FastButton(fast, Modifier.padding(top = FastButtonTopPad)) { on ->
+                // A bolt cracks on; the charge drains off.
+                if (on) {
+                    feedback.haptic(Haptic.Lightning)
+                    feedback.cue(Cue.FastOn)
+                } else {
+                    feedback.cue(Cue.FastOff)
+                    feedback.haptic(Haptic.Tick)
+                }
                 ModelOptions.fastToggle(model, options)?.let { (id, choice) ->
                     model?.options?.firstOrNull { it.id == id }?.let { onOptions(ModelOptions.with(options, it, choice)) }
                 }
@@ -277,30 +320,43 @@ private fun ColumnScope.SettingsCard(
             modifier = Modifier.padding(horizontal = 20.dp, vertical = 4.dp),
         )
     }
-    if (rows.isNotEmpty() || differs) Spacer(Modifier.size(4.dp))
+    if (rows.isNotEmpty()) Spacer(Modifier.size(4.dp))
     for (option in rows) {
         OptionRow(option.label, ModelOptions.valueLabel(option, options)) { onChoices(option.id) }
-    }
-    AnimatedVisibility(differs, enter = expandVertically() + fadeIn(), exit = shrinkVertically() + fadeOut()) {
-        TextButton(
-            onClick = {
-                feedback.haptic(Haptic.Confirm)
-                onEffort(null)
-                onOptions(emptyMap())
-            },
-            modifier = Modifier.padding(horizontal = 12.dp),
-        ) {
-            ZIcon(ZIcons.Restart, null, Modifier.size(16.dp))
-            Spacer(Modifier.width(8.dp))
-            Text("Reset to defaults")
-        }
     }
     Spacer(Modifier.size(10.dp))
 }
 
+/**
+ * "Reset to defaults": an icon in the card's top-right corner. It fades and
+ * scales in only while something differs from the defaults and is overlaid, so
+ * its coming and going never moves the layout.
+ */
+@Composable
+private fun ResetButton(visible: Boolean, modifier: Modifier = Modifier, onClick: () -> Unit) {
+    AnimatedVisibility(
+        visible,
+        modifier = modifier.padding(top = 4.dp, end = 6.dp),
+        enter = fadeIn(MaterialTheme.motionScheme.fastEffectsSpec()) + scaleIn(MaterialTheme.motionScheme.fastSpatialSpec(), initialScale = 0.5f),
+        exit = fadeOut(MaterialTheme.motionScheme.fastEffectsSpec()) + scaleOut(MaterialTheme.motionScheme.fastSpatialSpec(), targetScale = 0.5f),
+    ) {
+        Box(
+            Modifier
+                .size(32.dp)
+                .clip(CircleShape)
+                .background(MaterialTheme.colorScheme.surfaceContainerHighest.copy(alpha = 0.85f))
+                .clickable(role = Role.Button, onClickLabel = "Reset to defaults", onClick = tapAction(onClick))
+                .semantics { contentDescription = "Reset to defaults" },
+            contentAlignment = Alignment.Center,
+        ) {
+            ZIcon(ZIcons.Restart, null, Modifier.size(16.dp), tint = MaterialTheme.colorScheme.onSurfaceVariant)
+        }
+    }
+}
+
 /** The square fast-mode toggle: a bolt that lights up and, on, gives off a slow sheen. */
 @Composable
-private fun FastButton(on: Boolean, onToggle: (Boolean) -> Unit) {
+private fun FastButton(on: Boolean, modifier: Modifier = Modifier, onToggle: (Boolean) -> Unit) {
     val interaction = remember { MutableInteractionSource() }
     val pressed by interaction.collectIsPressedAsState()
     val corner by animateDpAsState(if (pressed) 26.dp else 18.dp, MaterialTheme.motionScheme.fastSpatialSpec(), label = "fast corner")
@@ -319,7 +375,7 @@ private fun FastButton(on: Boolean, onToggle: (Boolean) -> Unit) {
     val phase = if (on && !reduceMotion) rememberPhase(2600).value else 0.5f
     val shape = RoundedCornerShape(corner)
     Box(
-        Modifier
+        modifier
             .size(52.dp)
             .clip(shape)
             .background(container)
@@ -413,6 +469,7 @@ private fun PageHeader(title: String, onBack: () -> Unit) {
 
 @Composable
 private fun ColumnScope.ModelList(
+    rail: RailHost,
     catalog: List<ModelChoice>,
     current: ModelChoice?,
     favorites: List<FavoriteModel>,
@@ -424,24 +481,77 @@ private fun ColumnScope.ModelList(
     onPick: (ModelChoice) -> Unit,
 ) {
     val feedback = LocalFeedback.current
+    val density = LocalDensity.current
+    val scope = rememberCoroutineScope()
     var query by remember { mutableStateOf("") }
     val entries = ModelPickerRules.entries(catalog, favorites, query, current, locked)
     val ambiguous = ModelPickerRules.ambiguousLabels(entries)
+    // With two or more sections (Favorites, providers) and no search running the list gains section
+    // headers and the provider rail; otherwise it is the plain list.
+    val railShown = RailRules.visible(entries, query)
+    val layout = remember(entries, railShown) { RailRules.layout(entries, railShown) }
     val list = rememberLazyListState(
-        initialFirstVisibleItemIndex = remember { ModelPickerRules.initialScrollIndex(entries.indexOfFirst { it.choice.key == current?.key }) },
+        initialFirstVisibleItemIndex = remember {
+            ModelPickerRules.initialScrollIndex(layout.items.indexOfFirst { it is RailRules.Item.Row && it.entry.choice.key == current?.key })
+        },
     )
     // A starred row moves; follow it only if it leaves the screen.
     var follow by remember { mutableStateOf<String?>(null) }
-    LaunchedEffect(entries.map { it.key }, follow) {
+    LaunchedEffect(layout, follow) {
         val key = follow ?: return@LaunchedEffect
         // Let the list lay the reordered rows out before reading where they sit.
         androidx.compose.runtime.withFrameNanos { }
         androidx.compose.runtime.withFrameNanos { }
-        val at = entries.indexOfFirst { it.key == key }
+        val at = layout.itemOfKey(key)
         val visible = list.layoutInfo.visibleItemsInfo
         ModelPickerRules.followScroll(at, visible.firstOrNull()?.index ?: 0, visible.lastOrNull()?.index ?: 0)?.let { list.animateScrollToItem(it) }
         follow = null
     }
+
+    // The rail: the section at the top of the list is lit; a tap or a finger dragged down it jumps to a section.
+    // A jump pins the lit section until the finger touches the list itself.
+    var pinned by remember(layout.sections.map { it.id }) { mutableStateOf<Int?>(null) }
+    val atTop = remember(layout) { derivedStateOf { RailRules.current(layout, list.firstVisibleItemIndex, list.canScrollForward) } }
+    val lit = remember(layout) { derivedStateOf { pinned ?: atTop.value } }
+    LaunchedEffect(list) {
+        list.interactionSource.interactions.collect { if (it is DragInteraction.Start) pinned = null }
+    }
+    // Scrolling the list across a section boundary ticks once.
+    LaunchedEffect(layout, railShown) {
+        var last = atTop.value
+        snapshotFlow { atTop.value }.collect { now ->
+            if (now != last) {
+                last = now
+                if (railShown && pinned == null) feedback.haptic(Haptic.RailTick)
+            }
+        }
+    }
+    val select = rememberUpdatedState { index: Int, tap: Boolean ->
+        val section = layout.sections.getOrNull(index)
+        if (section != null) {
+            pinned = index
+            // Each provider has its own sound; the touch itself is a firm select, moving onto the next a tick.
+            feedback.haptic(if (tap) Haptic.Select else Haptic.RailTick)
+            feedback.cue(Cue.forProvider(section.harness))
+            scope.launch { if (tap) list.animateScrollToItem(section.item) else list.scrollToItem(section.item) }
+        }
+    }
+    val railUi = remember(layout) {
+        val ui: @Composable () -> Unit = {
+            ProviderRail(
+                sections = layout.sections,
+                selected = lit,
+                onSelect = { i, tap -> select.value(i, tap) },
+                maxHeight = railMaxHeight(rail.height, density),
+            )
+        }
+        ui
+    }
+    DisposableEffect(railShown, railUi) {
+        rail.content = if (railShown) railUi else null
+        onDispose { if (rail.content === railUi) rail.content = null }
+    }
+    val startPad by animateDpAsState(if (railShown) RailOverhang + 6.dp else 8.dp, MaterialTheme.motionScheme.defaultSpatialSpec(), label = "list start")
 
     // A new search starts from its best match.
     LaunchedEffect(query) { list.scrollToItem(0) }
@@ -451,12 +561,13 @@ private fun ColumnScope.ModelList(
     val loading = statuses.any { it.error == null }
     Box(
         Modifier.weight(1f, fill = false)
+            .onGloballyPositioned { rail.listPlaced(it) }
             .animateContentSize(MaterialTheme.motionScheme.defaultSpatialSpec())
             .heightIn(max = RowHeight * ModelPickerRules.VISIBLE_ROWS + 12.dp),
     ) {
         LazyColumn(
             state = list,
-            contentPadding = PaddingValues(horizontal = 8.dp, vertical = 6.dp),
+            contentPadding = PaddingValues(start = startPad, end = 8.dp, top = 6.dp, bottom = 6.dp),
             verticalArrangement = Arrangement.spacedBy(2.dp),
         ) {
             if (entries.isEmpty() && loading && query.isBlank()) {
@@ -469,25 +580,44 @@ private fun ColumnScope.ModelList(
                     )
                 }
             }
-            items(entries, key = { it.key }) { entry ->
-                ModelRow(
-                    entry,
-                    selected = entry.choice.key == current?.key,
-                    detail = entry.choice.model.description?.trim()?.takeIf { it.isNotEmpty() && entry.choice.model.label in ambiguous },
-                    onClick = { if (!entry.selectedOnly) onPick(entry.choice) },
-                    onStar = {
-                        feedback.both(Haptic.Pop, if (entry.starred) Cue.Unstar else Cue.Star)
-                        follow = entry.key
-                        onToggleFavorite(entry.choice.key)
-                    },
-                    modifier = Modifier.animateItem(),
-                )
+            items(layout.items, key = { it.key }) { item ->
+                when (item) {
+                    is RailRules.Item.Header -> SectionHeader(item.section.label, Modifier.animateItem())
+                    is RailRules.Item.Row -> {
+                        val entry = item.entry
+                        ModelRow(
+                            entry,
+                            selected = entry.choice.key == current?.key,
+                            detail = entry.choice.model.description?.trim()?.takeIf { it.isNotEmpty() && entry.choice.model.label in ambiguous },
+                            onClick = { if (!entry.selectedOnly) onPick(entry.choice) },
+                            onStar = {
+                                feedback.both(Haptic.Pop, if (entry.starred) Cue.Unstar else Cue.Star)
+                                follow = entry.key
+                                onToggleFavorite(entry.choice.key)
+                            },
+                            modifier = Modifier.animateItem(),
+                        )
+                    }
+                }
             }
             items(statuses.filter { entries.isNotEmpty() || it.error != null || query.isNotBlank() }, key = { "status/${it.harness}" }) { status ->
                 StatusRow(status, onRetry = { feedback.both(Haptic.Tick, Cue.Refresh); onRetry(status.harness) }, modifier = Modifier.animateItem())
             }
         }
     }
+}
+
+/** A provider's (or Favorites') heading in the sectioned list. */
+@Composable
+private fun SectionHeader(label: String, modifier: Modifier = Modifier) {
+    Text(
+        label,
+        style = MaterialTheme.typography.labelMedium,
+        color = MaterialTheme.colorScheme.onSurfaceVariant,
+        maxLines = 1,
+        overflow = TextOverflow.Ellipsis,
+        modifier = modifier.fillMaxWidth().padding(start = 12.dp, top = 8.dp, bottom = 2.dp),
+    )
 }
 
 @Composable
