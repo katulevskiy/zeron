@@ -36,6 +36,7 @@ import androidx.compose.runtime.mutableStateOf
 import androidx.compose.runtime.saveable.rememberSaveable
 import androidx.compose.runtime.setValue
 import androidx.compose.ui.Modifier
+import androidx.compose.ui.zIndex
 import androidx.compose.ui.Alignment
 import androidx.compose.ui.graphics.Brush
 import androidx.compose.ui.graphics.Color
@@ -314,7 +315,8 @@ private fun HomeTabs(model: AppModel, nav: NavHostController) {
             ready = { if (retain) settingsReady.value else tab.value == Tab.Settings },
             skeleton = { SettingsSkeleton() },
         ) { SettingsScreen(model, onOpen = { nav.open(it) }) }
-        HomeChrome(model, nav, tab, Modifier.align(Alignment.BottomCenter))
+        // Above the pages: the shown one is lifted over its hidden sibling (see TabPage).
+        HomeChrome(model, nav, tab, Modifier.align(Alignment.BottomCenter).zIndex(2f))
     }
 }
 
