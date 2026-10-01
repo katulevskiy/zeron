@@ -60,6 +60,29 @@ fn main() -> anyhow::Result<()> {
             None,
         )
     })?;
+    // Presets for the agent scenes: two of the user's, one the project ships.
+    {
+        use zeron_proto::{AgentPreset, HarnessId, PermissionMode, ReasoningLevel};
+        let presets = core.sessions.presets().expect("presets store");
+        let mut reviewer = AgentPreset::new("Reviewer", HarnessId::ClaudeCode);
+        reviewer.description = "Reviews a diff and reports; never edits.".into();
+        reviewer.model = Some("claude-sonnet-4-6".into());
+        reviewer.reasoning = Some(ReasoningLevel::High);
+        reviewer.policy.mode = PermissionMode::Ask;
+        reviewer.instructions = Some("Only report what you find. Never edit a file.".into());
+        reviewer.may_spawn = false;
+        presets.upsert(reviewer).expect("save preset");
+        let mut fixer = AgentPreset::new("Fast fixer", HarnessId::ClaudeCode);
+        fixer.description = "Small, careful fixes with tests.".into();
+        fixer.policy.mode = PermissionMode::Auto;
+        presets.upsert(fixer).expect("save preset");
+        let project = std::path::Path::new("/tmp/fieldnotes/.zeron/agents");
+        std::fs::create_dir_all(project)?;
+        std::fs::write(
+            project.join("migrator.md"),
+            "---\nname: Migrator\ndescription: Writes and checks database migrations.\nharness: claude-code\nmode: accept-edits\nworktree: yes\n---\nAlways write a down migration.\n",
+        )?;
+    }
     let ipc_port = port();
     let _ipc = runtime.block_on(zeron_engine::serve_ipc(ipc_port, core.rpc_service()))?;
     let data = temp.path().join("ui");
@@ -226,6 +249,32 @@ fn main() -> anyhow::Result<()> {
                 open_menu(cx)?;
                 pause(cx, 900).await;
                 capture(window.into(), cx, &output, "mode-menu-cursor")?;
+                // The new-chat canvas with the Agent chip.
+                close_menu(cx)?;
+                state.update(cx, |s, cx| {
+                    s.selected_chat = None;
+                    cx.notify();
+                });
+                pause(cx, 2000).await;
+                window.update(cx, |_, w, cx| {
+                    composer.update(cx, |c, cx| {
+                        c.pickers().update(cx, |p, cx| p.fixture_open_preset_menu(w, cx))
+                    })
+                })?;
+                pause(cx, 1200).await;
+                capture(window.into(), cx, &output, "agent-picker")?;
+                window.update(cx, |_, _, cx| {
+                    composer.update(cx, |c, cx| {
+                        c.pickers().update(cx, |p, cx| p.fixture_pick_preset("reviewer", cx))
+                    })
+                })?;
+                pause(cx, 1200).await;
+                capture(window.into(), cx, &output, "agent-picked")?;
+                state.update(cx, |s, cx| {
+                    s.selected_chat = Some("claude-ask".into());
+                    cx.notify();
+                });
+                pause(cx, 800).await;
                 // An approval prompt in the question panel.
                 close_menu(cx)?;
                 state.update(cx, |s, cx| {
@@ -259,6 +308,19 @@ fn main() -> anyhow::Result<()> {
                 });
                 pause(cx, 1200).await;
                 capture(window.into(), cx, &output, "approval-prompt")?;
+                // Settings → General with the agent presets.
+                window.update(cx, |s, w, cx| {
+                    w.resize(size(px(1100.), px(1100.)));
+                    s.fixture_open_general_settings(cx);
+                })?;
+                pause(cx, 1800).await;
+                capture(window.into(), cx, &output, "settings-presets")?;
+                window.update(cx, |s, w, cx| {
+                    w.resize(size(px(1100.), px(1900.)));
+                    s.fixture_open_preset_editor(cx);
+                })?;
+                pause(cx, 1500).await;
+                capture(window.into(), cx, &output, "settings-preset-editor")?;
                 Ok(())
             }
             .await;
