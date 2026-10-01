@@ -2,6 +2,7 @@ package sh.zeron.android
 
 import android.content.Intent
 import android.os.Bundle
+import android.view.MotionEvent
 import androidx.activity.ComponentActivity
 import androidx.activity.compose.setContent
 import androidx.activity.enableEdgeToEdge
@@ -50,6 +51,12 @@ class MainActivity : ComponentActivity() {
             override fun onStop(owner: LifecycleOwner) = model.onBackground()
         })
         setContent { ZeronRoot(model) }
+    }
+
+    /** A finger down anywhere wakes the sound output ahead of the click that will use it (see `WarmPolicy`). */
+    override fun dispatchTouchEvent(ev: MotionEvent): Boolean {
+        if (ev.actionMasked == MotionEvent.ACTION_DOWN) model.feedback.onTouchDown()
+        return super.dispatchTouchEvent(ev)
     }
 
     override fun onNewIntent(intent: Intent) {

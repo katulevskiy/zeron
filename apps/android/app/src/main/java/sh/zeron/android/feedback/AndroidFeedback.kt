@@ -1,8 +1,12 @@
 package sh.zeron.android.feedback
 
 import android.app.NotificationManager
+import android.content.BroadcastReceiver
 import android.content.Context
+import android.content.Intent
+import android.content.IntentFilter
 import android.content.pm.ApplicationInfo
+import android.database.ContentObserver
 import android.media.AudioManager
 import android.os.Build
 import android.os.Handler
@@ -16,6 +20,7 @@ import android.os.VibratorManager
 import android.provider.Settings
 import android.util.Log
 import android.view.View
+import androidx.core.content.ContextCompat
 import java.lang.ref.WeakReference
 
 /** The one place the rest of the app reaches the engine without Compose (view models, `AppModel`, tools). */
@@ -24,28 +29,96 @@ object AppFeedback {
     var current: Feedback = NoFeedback
 }
 
-/** The real [FeedbackEnvironment]: the activity lifecycle plus the system's sound, vibration and DND state. */
-class SystemEnvironment(private val context: Context, val vibrator: Vibrator?) : FeedbackEnvironment {
+/** One read of everything the system says about feedback; cached by [SystemEnvironment]. */
+private class SystemSnapshot(
+    val interactive: Boolean,
+    val touchHaptics: Boolean,
+    val touchSounds: Boolean,
+    val ringerNormal: Boolean,
+    val dnd: Boolean,
+    val streamAudible: Boolean,
+)
+
+/**
+ * The real [FeedbackEnvironment]: the activity lifecycle plus the system's sound, vibration and DND state.
+ *
+ * The system state costs several binder calls and settings reads, which would sit on the tap-to-sound path
+ * if made per event. It is read into one snapshot that lives [TTL_MS] and is dropped at once when the system
+ * says it changed (ringer, volume, interruption filter, screen, the two touch settings; see [watch]).
+ */
+class SystemEnvironment(private val context: Context, val vibrator: Vibrator?, clock: () -> Long = SystemClock::uptimeMillis) : FeedbackEnvironment {
     private val audio = context.getSystemService(AudioManager::class.java)
     private val power = context.getSystemService(PowerManager::class.java)
     private val notifications = context.getSystemService(NotificationManager::class.java)
+    private val main = Handler(Looper.getMainLooper())
 
     @Volatile
     var foreground = false
 
-    override val active: Boolean get() = foreground && power?.isInteractive != false
-    override val systemTouchHaptics: Boolean
-        get() = Settings.System.getInt(context.contentResolver, Settings.System.HAPTIC_FEEDBACK_ENABLED, 1) != 0
-    override val systemTouchSounds: Boolean
-        get() = Settings.System.getInt(context.contentResolver, Settings.System.SOUND_EFFECTS_ENABLED, 1) != 0
-    override val ringerNormal: Boolean get() = audio?.ringerMode != AudioManager.RINGER_MODE_SILENT && audio?.ringerMode != AudioManager.RINGER_MODE_VIBRATE
-    override val silencedByDnd: Boolean
-        get() = when (notifications?.currentInterruptionFilter) {
+    private val snapshot = TtlValue(TTL_MS, clock) { read() }
+    private val motor: Boolean by lazy { vibrator?.hasVibrator() == true }
+
+    private fun read() = SystemSnapshot(
+        interactive = power?.isInteractive != false,
+        touchHaptics = Settings.System.getInt(context.contentResolver, Settings.System.HAPTIC_FEEDBACK_ENABLED, 1) != 0,
+        touchSounds = Settings.System.getInt(context.contentResolver, Settings.System.SOUND_EFFECTS_ENABLED, 1) != 0,
+        ringerNormal = audio?.ringerMode.let { it != AudioManager.RINGER_MODE_SILENT && it != AudioManager.RINGER_MODE_VIBRATE },
+        dnd = when (notifications?.currentInterruptionFilter) {
             NotificationManager.INTERRUPTION_FILTER_NONE, NotificationManager.INTERRUPTION_FILTER_ALARMS -> true
             else -> false
+        },
+        streamAudible = audio == null || audio.getStreamVolume(AudioManager.STREAM_SYSTEM) > 0,
+    )
+
+    override val active: Boolean get() = foreground && snapshot.get().interactive
+    override val systemTouchHaptics: Boolean get() = snapshot.get().touchHaptics
+    override val systemTouchSounds: Boolean get() = snapshot.get().touchSounds
+    override val ringerNormal: Boolean get() = snapshot.get().ringerNormal
+    override val silencedByDnd: Boolean get() = snapshot.get().dnd
+    override val hasVibrator: Boolean get() = motor
+    override val streamAudible: Boolean get() = snapshot.get().streamAudible
+
+    /** Drop the cache: the Settings page reads the truth, and coming back to the foreground starts fresh. */
+    fun refresh() = snapshot.invalidate()
+
+    private val receiver = object : BroadcastReceiver() {
+        override fun onReceive(context: Context?, intent: Intent?) = snapshot.invalidate()
+    }
+    private val observer = object : ContentObserver(main) {
+        override fun onChange(selfChange: Boolean) = snapshot.invalidate()
+    }
+    private var watching = false
+
+    /** Keep the snapshot exact while the app is in the foreground; costs nothing in the background. */
+    fun watch(on: Boolean) {
+        if (on == watching) return
+        watching = on
+        if (on) {
+            val filter = IntentFilter().apply {
+                addAction(AudioManager.RINGER_MODE_CHANGED_ACTION)
+                addAction(VOLUME_CHANGED_ACTION)
+                addAction(NotificationManager.ACTION_INTERRUPTION_FILTER_CHANGED)
+                addAction(Intent.ACTION_SCREEN_ON)
+                addAction(Intent.ACTION_SCREEN_OFF)
+            }
+            ContextCompat.registerReceiver(context, receiver, filter, ContextCompat.RECEIVER_NOT_EXPORTED)
+            for (name in listOf(Settings.System.HAPTIC_FEEDBACK_ENABLED, Settings.System.SOUND_EFFECTS_ENABLED)) {
+                context.contentResolver.registerContentObserver(Settings.System.getUriFor(name), false, observer)
+            }
+            snapshot.invalidate()
+        } else {
+            runCatching { context.unregisterReceiver(receiver) }
+            context.contentResolver.unregisterContentObserver(observer)
         }
-    override val hasVibrator: Boolean get() = vibrator?.hasVibrator() == true
-    override val streamAudible: Boolean get() = audio == null || audio.getStreamVolume(AudioManager.STREAM_SYSTEM) > 0
+    }
+
+    companion object {
+        /** Safety net behind the broadcasts: nothing stays stale longer than this. */
+        const val TTL_MS = 2_000L
+
+        /** `AudioManager.VOLUME_CHANGED_ACTION` is hidden; the string is stable. */
+        private const val VOLUME_CHANGED_ACTION = "android.media.VOLUME_CHANGED_ACTION"
+    }
 }
 
 /**
@@ -73,6 +146,18 @@ class AndroidFeedback(
     private val claims = ClaimTracker(clock)
     private val bank = SoundBank(context)
     private val main = Handler(Looper.getMainLooper())
+    private val warm = WarmPolicy(clock)
+    private var warming = false
+    private val warmCheck = object : Runnable {
+        override fun run() {
+            if (warm.wanted()) {
+                main.postDelayed(this, warm.remainingMs() + 50)
+            } else {
+                bank.keepWarm(false)
+                warming = false
+            }
+        }
+    }
     private var viewRef = WeakReference<View?>(null)
 
     private val primitives: Set<Int> by lazy {
@@ -85,7 +170,13 @@ class AndroidFeedback(
     init {
         // Decode off the main thread; SoundPool.load itself returns at once, this keeps resource lookups off startup.
         Thread({ bank.load() }, "feedback-load").start()
-        if (debug) Log.d(TAG, "ready: primitives=$primitives amplitudeControl=$amplitudeControl vibrator=${vibrator?.hasVibrator()} sdk=${Build.VERSION.SDK_INT}")
+        if (debug) {
+            Log.d(
+                TAG,
+                "ready: primitives=$primitives amplitudeControl=$amplitudeControl vibrator=${vibrator?.hasVibrator()} sdk=${Build.VERSION.SDK_INT} " +
+                    "outputRate=${bank.outputRate} assetRate=${OutputPath.ASSET_RATE} resampled=${OutputPath.needsResampling(bank.outputRate)}",
+            )
+        }
     }
 
     /** The window's view, for `performHapticFeedback` (OEM tuned effects). */
@@ -96,7 +187,30 @@ class AndroidFeedback(
     /** The app is in the foreground (process lifecycle). Nothing plays otherwise: events go to notifications. */
     fun setForeground(foreground: Boolean) {
         env.foreground = foreground
+        env.watch(foreground)
+        if (!foreground) {
+            warm.stop()
+            main.removeCallbacks(warmCheck)
+            bank.keepWarm(false)
+            warming = false
+        }
         if (debug) Log.d(TAG, "foreground=$foreground")
+    }
+
+    /**
+     * A finger went down somewhere in the app (UI thread, `ACTION_DOWN`). Wakes the sound output now so it is
+     * running by the time the click that sounds arrives; see [WarmPolicy].
+     */
+    fun onTouchDown() {
+        if (!env.foreground || !store.current.sounds) return
+        warm.touch()
+        if (!warming) {
+            warming = bank.keepWarm(true)
+            if (warming) {
+                main.removeCallbacks(warmCheck)
+                main.postDelayed(warmCheck, WarmPolicy.IDLE_MS + 50)
+            }
+        }
     }
 
     // ── Feedback ───────────────────────────────────────────────────────────
@@ -106,9 +220,21 @@ class AndroidFeedback(
         play(haptic)
     }
 
+    /** [level] 0..1 shapes the haptics that have a range (EffortStep: crisp tick to heavy thunk; Stretch: harder the further pulled). */
+    override fun haptic(haptic: Haptic, level: Float) {
+        claims.claimHaptic()
+        play(haptic, level = level)
+    }
+
     override fun cue(cue: Cue, step: Int) {
         claims.claimCue()
         play(cue, step)
+    }
+
+    /** Sound first, then the haptic: the same synchronous call, and the late-perceived channel goes out first. */
+    override fun both(haptic: Haptic, cue: Cue, step: Int) {
+        cue(cue, step)
+        haptic(haptic)
     }
 
     override fun defaultTap(heldMs: Long) {
@@ -116,8 +242,10 @@ class AndroidFeedback(
         val released = clock()
         main.postDelayed({
             claims.quiet() // a press just answered: a popover closing around it stays silent
-            if (claims.hapticClaimed(released)) log("haptic Select skip default tap: claimed") else play(Haptic.Select)
+            // The sound first: the vibrator service is a binder call, and the sound is the part that is
+            // perceived late. Both are issued back to back from this one callback.
             if (claims.cueClaimed(released)) log("cue Tap skip default tap: claimed") else play(Cue.Tap, 0)
+            if (claims.hapticClaimed(released)) log("haptic Select skip default tap: claimed") else play(Haptic.Select)
         }, ClaimTracker.DEFER_MS)
     }
 
@@ -129,18 +257,14 @@ class AndroidFeedback(
 
     /** The Settings page auditioning a moment: ignores rate limits and category switches, nothing else. */
     fun preview(haptic: Haptic?, cue: Cue?, step: Int = 0) {
-        haptic?.let { claims.claimHaptic(); play(it, preview = true) }
         cue?.let { claims.claimCue(); play(it, step, preview = true) }
+        haptic?.let { claims.claimHaptic(); play(it, preview = true) }
     }
 
-    /** What the system is doing to this app's feedback right now, for the Settings page (empty when nothing). */
-    fun systemNotes(): List<String> = buildList {
-        if (!env.hasVibrator) add("This device has no vibration motor, so haptics are off.")
-        else if (!env.systemTouchHaptics) add("Touch vibration is turned off in system settings, so haptics are off.")
-        if (!env.ringerNormal) add("The phone is on silent or vibrate, so sounds are muted.")
-        else if (env.silencedByDnd) add("Do Not Disturb is silencing sounds.")
-        else if (!env.streamAudible) add("The system sound volume is at zero.")
-        else if (!env.systemTouchSounds) add("Touch sounds are turned off in system settings, so interface sounds are muted.")
+    /** What the system is doing to this app's feedback right now, for the Settings page (empty when nothing). Reads fresh. */
+    fun systemNotes(): List<SystemNote> {
+        env.refresh()
+        return SystemNotes.build(env, store.current)
     }
 
     /** How richly this vibration motor renders haptics, for the Settings page. */
@@ -153,19 +277,19 @@ class AndroidFeedback(
 
     // ── haptics ────────────────────────────────────────────────────────────
 
-    private fun play(haptic: Haptic, preview: Boolean = false) {
+    private fun play(haptic: Haptic, preview: Boolean = false, level: Float = 0.5f) {
         when (val d = gate.haptic(haptic, preview)) {
             is Decision.Skip -> log("haptic $haptic skip: ${d.why.label}")
             Decision.Play -> {
                 val view = viewRef.get()?.takeIf { it.isAttachedToWindow }
                 val strength = store.current.strength
-                var plan = HapticPlanner.plan(haptic, strength, caps(view != null))
+                var plan = HapticPlanner.plan(haptic, strength, caps(view != null), level)
                 var ok = perform(plan, view)
                 if (!ok && plan is HapticPlan.ViewConstant) {
-                    plan = HapticPlanner.plan(haptic, strength, caps(false))
+                    plan = HapticPlanner.plan(haptic, strength, caps(false), level)
                     ok = perform(plan, null)
                 }
-                log("haptic $haptic ${if (ok) "play" else "skip"} $plan")
+                log("haptic $haptic${if (haptic in HapticTable.leveled) " level=${"%.2f".format(level)}" else ""} ${if (ok) "play" else "skip"} $plan")
             }
         }
     }
@@ -210,7 +334,7 @@ class AndroidFeedback(
             is Decision.Skip -> log("cue $cue skip: ${d.why.label}")
             Decision.Play -> {
                 val spec = CueTable.spec(cue)
-                val volume = (store.current.gain * spec.gain).coerceIn(0f, 1f)
+                val volume = CueTable.volume(spec, store.current.gain)
                 val rate = if (cue == Cue.Detent) DetentLadder.rate(step) else 1f
                 val started = bank.play(cue, volume, rate, spec.priority)
                 log(

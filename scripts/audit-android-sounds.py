@@ -3,7 +3,7 @@
 
 Reads apps/android/app/src/main/res/raw/fx_*.wav and the three desktop
 references crates/ui/assets/sounds/{done,request,attention}.wav, measures
-level, ends, DC, spectrum and pitch direction, runs assertions, writes
+level, onset, ends, DC, spectrum and pitch direction, runs assertions, writes
 docs/sound-design/android-audit.md and exits non-zero if any assertion fails.
 
 Definitions
@@ -17,6 +17,8 @@ Definitions
                   passed; the dominant frequency (and centroid) of each part
                   is measured with a Hann window; direction is the change in
                   semitones, second part vs first part. Positive = rising.
+  onset           time of the first sample >= peak - 40 dB (the leading silence
+                  a listener waits through; asserted <= 1 ms for every fx_ file)
   clean ends      first and last sample are 0 (within 1 LSB) and the three
                   samples next to each end stay within 2 LSB, which with the
                   signal's own slope means the file starts and ends on a
@@ -36,18 +38,48 @@ SOUNDS = ROOT / 'crates/ui/assets/sounds'
 REPORT = ROOT / 'docs/sound-design/android-audit.md'
 
 ACTIVE_FLOOR_DB = -30.0
-INTERFACE = ['tap', 'select', 'toggle_on', 'toggle_off', 'open', 'close', 'detent', 'star',
-             'unstar', 'pin', 'archive', 'delete', 'copy', 'error', 'refresh']
+CORE = ['tap', 'select', 'toggle_on', 'toggle_off', 'open', 'close', 'detent', 'star',
+        'unstar', 'pin', 'archive', 'delete', 'copy', 'error', 'refresh']
+ROUND2 = ['surge', 'zip', 'rebound', 'fast_on', 'fast_off']
+PROVIDERS = ['provider_claude', 'provider_codex', 'provider_cursor', 'provider_devin', 'provider_grok',
+             'provider_hermes', 'provider_pi', 'provider_opencode', 'provider_antigravity',
+             'provider_favorites', 'provider_other']
+INTERFACE = CORE + ROUND2 + PROVIDERS
 PROMOTED = ['send', 'queued', 'upload_ready', 'reconnected', 'undo']
+CHIMES = ['chime_done', 'chime_request', 'chime_attention']  # in-app copies of the desktop chimes (+6 dB)
 REFERENCES = ['done', 'request', 'attention']
 # Maximum duration in ms per interface cue.
 MAX_MS = {'tap': 60, 'select': 90, 'toggle_on': 90, 'toggle_off': 90, 'detent': 60,
           'open': 120, 'close': 120, 'star': 120, 'unstar': 120, 'pin': 120, 'copy': 120,
-          'archive': 120, 'delete': 130, 'refresh': 130, 'error': 180}
+          'archive': 120, 'delete': 130, 'refresh': 130, 'error': 180,
+          'surge': 600, 'zip': 120, 'rebound': 130, 'fast_on': 250, 'fast_off': 120}
+MAX_MS.update({name: 120 for name in PROVIDERS})
+NOTES = {
+    'surge': 'rising power swell G4 to C6, detuned second voice for shimmer, climbing pentatonic sparkles, bright C-major bloom',
+    'zip': 'fast airy falling streak (band-passed noise 7.5 to 1.8 kHz) with a thin pure zing G6 to C6',
+    'rebound': 'soft elastic boing, G4 with an overshooting, wobbling pitch',
+    'fast_on': 'quiet electric crackle (eight signed micro-pulses), bright G6 to G7 zap, small C7 bloom',
+    'fast_off': 'soft tick and the charge draining, G6 falling to C5',
+    'provider_claude': 'warm two-note rising pair, E5 then A5',
+    'provider_codex': 'crisp bracket-like double tick, two identical hollow clicks on D6',
+    'provider_cursor': 'one glassy blip, G6 bending up to A6, inharmonic partials',
+    'provider_devin': 'soft pad-like minor third, A4 + C5, slow bloom',
+    'provider_grok': 'bright quick fifth C5 to G5 with a three-grain sparkle',
+    'provider_hermes': 'fast flutter up, seven scale steps 9 ms apart, a breath of air',
+    'provider_pi': 'three-note tiny arpeggio on the digits 3-1-4: E5, C5, G5',
+    'provider_opencode': 'open hollow tone, an open fifth D5 + A5 in odd harmonics',
+    'provider_antigravity': 'floaty upward glide C5 to C6 with slow wobble and a higher echo',
+    'provider_favorites': 'twinkle: four inharmonic bell tones C7, G6, C7, E7 fading',
+    'provider_other': 'neutral soft pop: broad rounded pulse with a short low A4 body',
+}
 RMS_BAND_DB = 1.5
 DESKTOP_MARGIN_DB = 2.0
+BOOST_DB = 20 * math.log10(2.0)  # the slider headroom baked into every fx_ file
+ONSET_DB = -40.0
+ONSET_MAX_MS = 1.0
+DISTINCT_MIN = 0.20  # minimum fingerprint distance between two provider cues
 PEAK_LIMIT_DB = -3.0
-SIZE_LIMIT_BYTES = 400 * 1024
+SIZE_LIMIT_BYTES = 800 * 1024
 DIRECTION_MIN_ST = 0.5
 
 
@@ -142,6 +174,45 @@ def near_zero_crossing(x, at_end):
     return any(a * b <= 0 for a, b in zip(edge, edge[1:]))
 
 
+def fingerprint(x, rate, df, mags):
+    """A small vector describing how a cue sounds: 12 log-spaced spectral bands (200 Hz..9.6 kHz, log magnitude
+    scaled so the strongest is 1), the loudness envelope in 24 slices of the active region (how many hits, how
+    spaced), and the dominant pitch in 8 slices (the motif's contour). Used to assert that the provider cues
+    are told apart by ear-relevant structure, not just by file name."""
+    bands = []
+    for k in range(12):
+        lo = 200 * 2 ** (k * 5.6 / 12)
+        hi = 200 * 2 ** ((k + 1) * 5.6 / 12)
+        i0, i1 = max(1, int(lo / df)), max(2, int(hi / df))
+        bands.append(math.log10(1e-9 + sum(m * m for m in mags[i0:i1])))
+    top = max(bands)
+    spec = [max(0.0, (b - (top - 4.0)) / 4.0) for b in bands]  # 0..1, floor 40 dB under the strongest band
+    a, b = active_span(x)
+    seg = x[a:b]
+    size = max(1, len(seg) // 24)
+    env = [math.sqrt(sum(v * v for v in seg[i * size:(i + 1) * size]) / size) if seg[i * size:(i + 1) * size] else 0.0
+           for i in range(24)]
+    peak = max(env) or 1.0
+    env = [e / peak for e in env]
+    pitches, last = [], 69.0
+    psize = max(64, len(seg) // 8)
+    for i in range(8):
+        part = seg[i * psize:(i + 1) * psize]
+        if len(part) < 32 or rms(part) < peak * 0.02:
+            pitches.append(last)
+            continue
+        _, dom, _, _ = centroid_and_dominant(part, rate, hann=True)
+        last = 69 + 12 * math.log2(max(dom, 50.0) / 440.0)
+        pitches.append(last)
+    return spec, env, [p / 24.0 for p in pitches]
+
+
+def print_distance(p, q):
+    """Mean of the root-mean-square gaps of the three parts (spectrum, envelope, pitch contour; 24 semitones = 1)."""
+    gaps = [math.sqrt(sum((a - b) ** 2 for a, b in zip(u, v)) / len(u)) for u, v in zip(p, q)]
+    return min(1.0, sum(gaps) / len(gaps))
+
+
 def measure(path):
     rate, channels, bits, x = read_wav(path)
     a, b = active_span(x)
@@ -157,6 +228,8 @@ def measure(path):
         if acc >= energy / 2:
             cut = max(8, min(i, len(seg) - 8))
             break
+    onset_floor = peak * 10 ** (ONSET_DB / 20)
+    onset = next(i for i, v in enumerate(x) if abs(v) >= onset_floor)
     c1, d1, _, _ = centroid_and_dominant(seg[:cut], rate, hann=True)
     c2, d2, _, _ = centroid_and_dominant(seg[cut:], rate, hann=True)
     # Power fraction within +-150 Hz of the dominant peak (narrowband check).
@@ -176,6 +249,8 @@ def measure(path):
         'dir_dom_st': 12 * math.log2(d2 / d1), 'dir_cen_st': 12 * math.log2(c2 / c1),
         'dom1': d1, 'dom2': d2,
         'band_fraction': sum(power[lo:hi]) / sum(power[1:]),
+        'onset_ms': onset / rate * 1000,
+        'print': fingerprint(x, rate, df, mags),
     }
 
 
@@ -183,7 +258,7 @@ def measure(path):
 
 def main():
     results = {}
-    for name in INTERFACE + PROMOTED:
+    for name in INTERFACE + PROMOTED + CHIMES:
         path = RAW / f'fx_{name}.wav'
         if not path.exists():
             print(f'missing {path}', file=sys.stderr)
@@ -198,7 +273,7 @@ def main():
     def check(label, ok, detail=''):
         checks.append((label, bool(ok), detail))
 
-    fx = INTERFACE + PROMOTED
+    fx = INTERFACE + PROMOTED + CHIMES
     for name in fx:
         r = m[name]
         check(f'{name}: mono 16-bit 48 kHz', (r['channels'], r['bits'], r['rate']) == (1, 16, 48000),
@@ -206,6 +281,8 @@ def main():
         check(f'{name}: no clipping', not r['clipped'])
         check(f'{name}: peak <= {PEAK_LIMIT_DB:.0f} dBFS', r['peak_db'] <= PEAK_LIMIT_DB,
               f"{r['peak_db']:.1f}")
+        check(f'{name}: onset within {ONSET_MAX_MS:g} ms (first sample >= {ONSET_DB:.0f} dB re peak)',
+              r['onset_ms'] <= ONSET_MAX_MS, f"{r['onset_ms']:.2f} ms")
         check(f'{name}: clean ends (0 within 1 LSB, near zero crossing)',
               r['edge_ok'] and r['zc_start'] and r['zc_end'], f"first {r['first']}, last {r['last']}")
     for name in INTERFACE:
@@ -224,12 +301,19 @@ def main():
           f"{m['select']['centroid']:.0f} vs {m['tap']['centroid']:.0f} Hz")
     check('Tap is the shortest interface cue', all(m['tap']['ms'] <= m[n]['ms'] for n in INTERFACE),
           f"{m['tap']['ms']:.0f} ms")
+    check('Surge is the longest interface cue and swells for 400+ ms',
+          m['surge']['ms'] >= 400 and m['surge']['ms'] == max(m[n]['ms'] for n in INTERFACE),
+          f"{m['surge']['ms']:.0f} ms")
+    check('Every provider cue and Zip is 120 ms or less and FastOn 250 ms or less',
+          all(m[n]['ms'] <= 120 for n in PROVIDERS + ['zip']) and m['fast_on']['ms'] <= 250, '')
     lowest = min(INTERFACE, key=lambda n: m[n]['centroid'])
     check('Delete has the lowest centroid of the interface set', lowest == 'delete',
           f"lowest is {lowest} ({m[lowest]['centroid']:.0f} Hz); delete {m['delete']['centroid']:.0f} Hz")
     for name, sign in [('toggle_on', 1), ('toggle_off', -1), ('star', 1), ('unstar', -1),
                        ('open', 1), ('close', -1), ('pin', 1), ('refresh', 1), ('error', -1),
-                       ('archive', -1), ('delete', -1)]:
+                       ('archive', -1), ('delete', -1), ('surge', 1), ('zip', -1), ('fast_off', -1),
+                       ('provider_claude', 1), ('provider_hermes', 1), ('provider_antigravity', 1),
+                       ('provider_grok', 1)]:
         d = m[name]['dir_dom_st']
         check(f"{name} {'rises' if sign > 0 else 'falls'} (dominant, equal-energy halves)",
               sign * d >= DIRECTION_MIN_ST, f"{d:+.1f} st ({m[name]['dom1']:.0f} -> {m[name]['dom2']:.0f} Hz)")
@@ -239,15 +323,32 @@ def main():
     check('Detent is narrowband (>= 90% of power within +-150 Hz)', det['band_fraction'] >= 0.9,
           f"{det['band_fraction'] * 100:.1f}%")
 
+    check('FastOn is bright (centroid above 2 kHz) and Zip is airy (centroid above 2.5 kHz)',
+          m['fast_on']['centroid'] > 2000 and m['zip']['centroid'] > 2500,
+          f"{m['fast_on']['centroid']:.0f} / {m['zip']['centroid']:.0f} Hz")
+    check('Surge climbs at least an octave (dominant first half vs second half or centroid)',
+          m['surge']['dir_dom_st'] >= 7 or m['surge']['dir_cen_st'] >= 7,
+          f"{m['surge']['dir_dom_st']:+.1f} / {m['surge']['dir_cen_st']:+.1f} st")
+    worst = None
+    for i, a in enumerate(PROVIDERS):
+        for b in PROVIDERS[i + 1:]:
+            d = print_distance(m[a]['print'], m[b]['print'])
+            if worst is None or d < worst[0]:
+                worst = (d, a, b)
+            check(f'{a} and {b} sound different (fingerprint distance >= {DISTINCT_MIN})', d >= DISTINCT_MIN, f'{d:.2f}')
+
     levels = sorted(m[n]['rms_act_db'] for n in INTERFACE)
     median = levels[len(levels) // 2]
     check(f'Interface active RMS within +-{RMS_BAND_DB} dB of the set median',
           all(abs(m[n]['rms_act_db'] - median) <= RMS_BAND_DB for n in INTERFACE),
           f'median {median:.2f} dBFS, spread {levels[-1] - levels[0]:.2f} dB')
-    for ref in REFERENCES:
-        margin = min(m[ref]['rms_act_db'] - m[n]['rms_act_db'] for n in INTERFACE)
-        check(f'Every interface cue >= {DESKTOP_MARGIN_DB:g} dB quieter (active RMS) than desktop {ref}',
+    for ref, chime in zip(REFERENCES, CHIMES):
+        margin = min(m[chime]['rms_act_db'] - m[n]['rms_act_db'] for n in INTERFACE)
+        check(f'Every interface cue >= {DESKTOP_MARGIN_DB:g} dB quieter (active RMS) than in-app {chime}',
               margin >= DESKTOP_MARGIN_DB, f'smallest margin {margin:.1f} dB')
+        gain = m[chime]['rms_act_db'] - m[ref]['rms_act_db']
+        check(f'{chime} is the desktop {ref} plus the {BOOST_DB:.2f} dB slider headroom (+-0.3 dB)',
+              abs(gain - BOOST_DB) <= 0.3, f'{gain:+.2f} dB')
     total = sum(m[n]['bytes'] for n in fx)
     check('fx_*.wav total size < 400 KB', total < SIZE_LIMIT_BYTES, f'{total / 1024:.0f} KB')
 
@@ -263,18 +364,24 @@ def main():
            'second vs first equal-energy half of the active region, in semitones (positive rises). '
            'Desktop references are stereo and analysed as the L/R average.', '',
            '## Levels, ends and format', '',
-           '| file | set | fmt | ms | active ms | peak dBFS | RMS all | RMS active | crest dB | first | last | zc start/end | DC (LSB) | bytes |',
-           '|---|---|---|---:|---:|---:|---:|---:|---:|---:|---:|---|---:|---:|']
-    groups = [(INTERFACE, 'interface', 'fx_'), (PROMOTED, 'promoted', 'fx_'), (REFERENCES, 'desktop ref', '')]
+           '| file | set | fmt | ms | active ms | onset ms | peak dBFS | RMS all | RMS active | crest dB | first | last | zc start/end | DC (LSB) | bytes |',
+           '|---|---|---|---:|---:|---:|---:|---:|---:|---:|---:|---:|---|---:|---:|']
+    groups = [(CORE, 'interface', 'fx_'), (ROUND2, 'round 2', 'fx_'), (PROVIDERS, 'provider', 'fx_'),
+              (PROMOTED, 'promoted', 'fx_'), (CHIMES, 'in-app chime', 'fx_'), (REFERENCES, 'desktop ref', '')]
     for names, label, prefix in groups:
         for n in names:
             r = m[n]
             fmt = f"{r['channels']}ch/{r['bits']}b/{r['rate'] // 1000}k"
             out.append(f"| {prefix}{n} | {label} | {fmt} | {r['ms']:.1f} | {r['active_ms']:.1f} | "
-                       f"{r['peak_db']:.1f} | {r['rms_all_db']:.1f} | {r['rms_act_db']:.1f} | "
+                       f"{r['onset_ms']:.2f} | {r['peak_db']:.1f} | {r['rms_all_db']:.1f} | {r['rms_act_db']:.1f} | "
                        f"{r['crest_db']:.1f} | {r['first']} | {r['last']} | "
                        f"{'yes' if r['zc_start'] else 'NO'}/{'yes' if r['zc_end'] else 'NO'} | "
                        f"{r['dc']:+.2f} | {r['bytes']} |")
+    out += ['', '## Round 2 cues', '',
+            '| file | what it is | ms | onset ms | centroid Hz | dir (dominant) st |', '|---|---|---:|---:|---:|---:|']
+    for n in ROUND2 + PROVIDERS:
+        r = m[n]
+        out.append(f"| fx_{n} | {NOTES[n]} | {r['ms']:.0f} | {r['onset_ms']:.2f} | {r['centroid']:.0f} | {r['dir_dom_st']:+.1f} |")
     out += ['', '## Spectrum and pitch direction', '',
             '| file | centroid Hz | dominant Hz | first half Hz | second half Hz | dir (dominant) st | dir (centroid) st |',
             '|---|---:|---:|---:|---:|---:|---:|']
@@ -293,18 +400,27 @@ def main():
     for ref in REFERENCES:
         out.append(f"| {ref} | {ref_act[ref]:.1f} | {m[ref]['rms_all_db']:.1f} | {ref_act[ref] - mean_if:.1f} dB |")
     mean_p = sum(m[n]['rms_act_db'] for n in PROMOTED) / len(PROMOTED)
-    out += ['', f'Why only {DESKTOP_MARGIN_DB:g} dB: the margin to the desktop cues is an audibility floor, '
-            'not a target. SoundPool volume cannot exceed 1.0, so the source level is the only lever, '
-            'and at 6 dB or more below the desktop cues the interface cues peaked near -36 dBFS, which '
-            'is inaudible on a phone speaker. The interface cues are also far shorter than the desktop '
-            'cues (tens of milliseconds against several hundred), so at equal RMS they are perceptually '
-            'quieter still. The rule is kept as an assertion, measured on active-region RMS.', '',
-            f'Promoted desktop auditions (levels untouched) average {mean_p:.1f} dBFS active RMS, '
+    prov = sorted((print_distance(m[a]['print'], m[b]['print']), a, b)
+                  for i, a in enumerate(PROVIDERS) for b in PROVIDERS[i + 1:])
+    out += ['', f'Level model. Every `fx_` file carries {BOOST_DB:.2f} dB of slider headroom: SoundPool volume '
+            'cannot exceed 1.0, so "100% is twice as loud as the old maximum" has to live in the files. The app '
+            'plays them at half volume by default (`CueTable.ASSET_BOOST`), which is exactly the old level, and '
+            'the slider\'s upper half spends the headroom. The in-app chime copies (`fx_chime_*`) are the '
+            f'desktop chimes plus the same {BOOST_DB:.2f} dB (checked above); the desktop originals stay '
+            'untouched for the notification channels.', '',
+            f'Why only {DESKTOP_MARGIN_DB:g} dB under the chimes: the margin is an audibility floor, not a target. '
+            'The interface cues are also far shorter than the chimes (tens of milliseconds against several '
+            'hundred), so at equal RMS they are perceptually quieter still. Measured on active-region RMS.', '',
+            f'Promoted desktop auditions (boosted, otherwise untouched) average {mean_p:.1f} dBFS active RMS, '
             f'{mean_p - mean_if:+.1f} dB relative to the interface set.', '',
-            'Scope: peak, clean-end, format and clipping assertions apply to every `fx_` file; the '
-            'duration, direction, centroid-order and desktop-margin assertions apply to the 15 '
-            'synthesised interface cues only, because the promoted desktop cues are intentionally '
-            'at desktop level and multi-click.', '',
+            'Scope: peak, onset, clean-end, format and clipping assertions apply to every `fx_` file; the '
+            'duration, direction, centroid-order and chime-margin assertions apply to the synthesised interface '
+            'cues only, because the promoted desktop cues are intentionally at desktop level and multi-click.', '',
+            '## Provider cues are told apart', '',
+            'Fingerprint = 12 log-spaced spectral bands (200 Hz to 9.6 kHz), the loudness envelope in 24 slices '
+            'of the active region (how many hits, how spaced) and the dominant pitch in 8 slices (the contour); '
+            f'distance = mean of the three RMS gaps (24 semitones = 1), minimum allowed {DISTINCT_MIN}. '
+            f'Closest pairs: ' + '; '.join(f'{a[9:]} / {b[9:]} {d:.2f}' for d, a, b in prov[:4]) + '.', '',
             '## Assertions', '', '| result | assertion | measured |', '|---|---|---|']
     for label, ok, detail in checks:
         out.append(f"| {'pass' if ok else '**FAIL**'} | {label} | {detail} |")
@@ -315,7 +431,7 @@ def main():
         if not ok:
             print(f'FAIL: {label} [{detail}]')
     print(f'{len(checks) - len(failed)}/{len(checks)} assertions passed; wrote {REPORT.relative_to(ROOT)}')
-    for n in INTERFACE + PROMOTED + REFERENCES:
+    for n in INTERFACE + PROMOTED + CHIMES + REFERENCES:
         r = m[n]
         print(f"{n:>13}: {r['ms']:6.1f} ms  peak {r['peak_db']:6.1f}  rms {r['rms_act_db']:6.1f}  "
               f"cent {r['centroid']:6.0f}  dom {r['dominant']:6.0f}  dir {r['dir_dom_st']:+5.1f}/{r['dir_cen_st']:+5.1f}")

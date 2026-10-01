@@ -3,8 +3,9 @@
 The phone's sensory layer: how Zeron for Android feels and sounds. It reuses the
 desktop's notification family (`done`, `request`, `attention`, see
 [README.md](README.md)) for session events, promotes five of the desktop
-auditions, and adds fifteen small interface cues in the same "rounded pressure
-pulse" language. Code: `apps/android/app/src/main/java/sh/zeron/android/feedback/`.
+auditions, and adds thirty-one small interface cues in the same "rounded pressure
+pulse" language (fifteen for the interface itself, five for thinking power and fast
+mode, eleven provider motifs). Code: `apps/android/app/src/main/java/sh/zeron/android/feedback/`.
 Asset QA: [android-audit.md](android-audit.md).
 
 ## Principles
@@ -44,9 +45,10 @@ Asset QA: [android-audit.md](android-audit.md).
 | --- | --- |
 | App active | Only while the app is in the foreground **and** the screen is on. Otherwise nothing plays in-app. Events that matter in the background arrive as notifications (below). |
 | Haptics | Needs the in-app **Haptics** switch, a vibrator, and the system's *Touch feedback* setting. The ringer mode does **not** matter (Android's own keyboard and touch haptics also keep working on silent). |
-| Sounds | Needs the **Sounds** master, the category switch, a normal ringer (silent and vibrate mute everything), no total-silence / alarms-only Do Not Disturb, and a non-zero system sound volume. Interface cues also follow the system's *Touch sounds* setting; session chimes do not (they are events, not touch feedback). Priority-only Do Not Disturb does not block them (they are sonification, like keyboard clicks). |
+| Sounds | Needs the **Sounds** master, the category switch, a normal ringer (silent and vibrate mute everything), no total-silence / alarms-only Do Not Disturb, and a non-zero system sound volume. Interface cues also follow the system's *Touch sounds* setting unless **Play sounds anyway** is on (see "If you hear nothing"); session chimes never do (they are events, not touch feedback). Priority-only Do Not Disturb does not block them (they are sonification, like keyboard clicks). |
 | No audio focus | Cues are `USAGE_ASSISTANCE_SONIFICATION` / `CONTENT_TYPE_SONIFICATION` and never take focus, so music keeps playing and nothing ducks. |
 | Rate limits | The same cue never stacks inside its own gap (60 to 400 ms by cue); any two cues of equal or lower priority keep 20 ms apart; at most 4 concurrent streams (a more important cue still gets in); the same haptic is coalesced (70 ms for ticks up to 400 ms for alerts); at most 12 light haptics per second; any alert cuts through light ticks. |
+| Order | Wherever a sound and a haptic belong to the same moment, the **sound is issued first**, then the haptic, from the same synchronous call (`Feedback.both`, `Feedback.play`, the default tap, previews). See Latency. |
 | Default tap | Plain controls answer `Select` + `Tap` *after* their action; if the action asked for feedback of its own (a toggle, a menu item, a navigation's Open cue) the default stays out of the way. Menus and popovers close silently after a chosen item. |
 
 ## Haptic mapping
@@ -73,6 +75,20 @@ constant has a fallback.
 | `Threshold` | swipe or pull crossed its commit point | `GESTURE_THRESHOLD_ACTIVATE` | CLICK 0.55 | `EFFECT_CLICK` |
 | `Heavy` | delete, uninstall, discard | designed | THUD 0.85, CLICK 0.5 @30 ms | `EFFECT_HEAVY_CLICK` |
 | `Pop` | pinned, starred | designed | TICK 0.8, LOW_TICK 0.35 @25 ms | `EFFECT_TICK` |
+| `EffortStep` (level 0..1) | a thinking-power detent | none (platform constants are too faint) | CLICK 0.70 to 1.00; from level 0.2 a THUD 0.25 to 1.00 @10 ms; from 0.75 a second CLICK 1.0 @22 ms. Without THUD: two CLICKs; without CLICK strength: two TICKs | `CLICK` below level 0.4, `HEAVY_CLICK` above; waveform 10 ms @150-255, gap, 10-38 ms @110-255 |
+| `Stretch` (level 0..1) | the effort thumb pulled past the end | none | TICK 0.25 to 0.70 (firmer the further it is pulled); from level 0.6 a LOW_TICK drag 0.35 to 0.80 @12 ms | `EFFECT_TICK`, 8 ms @40-150 |
+| `Rebound` | the thumb snaps back | designed | THUD 0.9, LOW_TICK 0.35 @30 ms (a firm thump that decays at once) | `HEAVY_CLICK`, 22 ms @230, 12 ms @100, 10 ms @40 |
+| `Surge` | the highest power chosen | designed | five rising TICKs (0.20, 0.30, 0.42, 0.56, 0.70, gaps 60, 50, 40, 32 ms), CLICK 0.9 @24, THUD 1.0 @8: about 250 ms, a crescendo with a hard crack | without THUD a CLICK 1.0 closes; clicks only: a CLICK crescendo; waveform 28 ms bursts at 40, 70, 110, 160, 210 then 40 ms @255 |
+| `Zip` | the lowest power chosen | designed | TICK 0.9, TICK 0.9 @28 ms (very short, sharp double tick) | CLICK 0.5 twice; waveform 6 ms @200, 18 ms gap, 6 ms @200 |
+| `Lightning` | fast mode on | designed | TICK 0.45, TICK 0.80 @31, LOW_TICK 0.35 @17, TICK 0.90 @44, CLICK 1.0 @52: uneven strength and spacing, about 180 ms, ends in a firm crack | five CLICKs of the same shape; waveform of irregular 5-8 ms bursts ending in 24 ms @255 |
+| `RailTick` | landing on a provider on the rail | `SEGMENT_FREQUENT_TICK` (`CLOCK_TICK`) | LOW_TICK 0.3 (lighter than `Tick`) | 6 ms @28 |
+
+`EffortStep` and `Stretch` take a level: `Feedback.haptic(h, level)` with `level`
+from 0 to 1 (position on the effort scale, distance pulled). `AndroidFeedback`
+passes it to `HapticTable.spec(h, level)`; every other haptic ignores it. At its
+lightest (level 0) `EffortStep` is already a CLICK 0.70 against the old `Select`
+TICK 0.70 and `Tick` LOW_TICK 0.5, and at the top it is a THUD 1.0 under a full
+double CLICK: clearly the strongest detent in the set, as asked.
 
 **Strength** (Settings): *Subtle* scales primitives and waveform amplitudes by 0.5,
 *Standard* by 1.0 (and prefers the platform constants), *Strong* by 1.5 (clamped
@@ -86,17 +102,21 @@ Confirm click is played at scale 0.97 / 0.32 (`dumpsys vibrator_manager`).
 
 Files are `res/raw/fx_<name>.wav`. Interface cues are generated
 (`scripts/generate-android-sounds.py`, deterministic, mono 16-bit 48 kHz) and
-committed; `done`, `request`, `attention` are copied byte-for-byte from
-`crates/ui/assets/sounds` by the Gradle `genSounds` task; the five promoted cues
-come from `docs/sound-design/auditions/` (stereo to mono, level untouched).
+committed. The three session chimes exist twice: `fx_done`, `fx_request`,
+`fx_attention` are still copied byte-for-byte from `crates/ui/assets/sounds` by the
+Gradle `genSounds` task and are what the notification channels play; the in-app
+cues use `fx_chime_done` / `_request` / `_attention`, the same sounds as mono,
+leading silence trimmed, plus the slider headroom (+6 dB, see Volume). The five
+promoted cues come from `docs/sound-design/auditions/` (stereo to mono, trimmed,
++6 dB). `silence_keepalive.wav` is not a cue (see Latency).
 Category = the in-app switch that governs it. "Trigger" lists every place the
 cue is wired.
 
 | Cue | Source | ms | Category | Paired haptic | Trigger(s) |
 | --- | --- | ---: | --- | --- | --- |
-| `Done` | desktop `done.wav` | 520 | Completion | `Success` | a session's turn finished while Zeron is open |
-| `Request` | desktop `request.wav` | 600 | Input required | `Attention` | a session is waiting for an answer or approval |
-| `Attention` | desktop `attention.wav` | 650 | Errors | `Error` / `Attention` | a session failed; connection lost while a turn runs |
+| `Done` | in-app copy of desktop `done.wav` | 513 | Completion | `Success` | a session's turn finished while Zeron is open |
+| `Request` | in-app copy of `request.wav` | 593 | Input required | `Attention` | a session is waiting for an answer or approval |
+| `Attention` | in-app copy of `attention.wav` | 644 | Errors | `Error` / `Attention` | a session failed; connection lost while a turn runs |
 | `Send` | desktop audition 01 | 300 | Interface | `Confirm` | composer send / steer, question answer, queued message "Send now" |
 | `Queued` | desktop audition 02 | 480 | Interface | `Confirm` | composer send while a turn is running (queue) |
 | `UploadReady` | desktop audition 03 | 740 | Interface | `Success` | Save to Downloads done; agent install / update done; project cloned or created |
@@ -115,6 +135,28 @@ cue is wired.
 | `Copy` | generated | 76 | Interface | `Confirm` | every copy action: paths, links, transcript, code blocks, terminal selection |
 | `Error` | generated | 176 | Interface | `Error` | a refusal or failure: save failed or conflicted, send failed, install / update / save-to-Downloads failed, terminal could not open, toasts |
 | `Refresh` | generated | 118 | Interface | `Select` / `Confirm` | pull to refresh, reload, retry, refresh files |
+| `Surge` | generated | 490 | Interface | `Surge` | the highest thinking power chosen. A rising swell G4 to C6 with a detuned second voice for shimmer, a pentatonic run of sparkles climbing with it (E5 G5 A5 C6 D6 E6) and a bright C-major bloom (C6 E6 G6 C7) at the top. Quiet start, loudest at about 350 ms |
+| `Zip` | generated | 85 | Interface | `Zip` | the lowest thinking power chosen. A fast airy streak of band-passed noise falling from 7.5 to 1.8 kHz with a thin pure zing riding it, G6 to C6. Falling = light |
+| `Rebound` | generated | 121 | Interface | `Rebound` | the effort thumb snapped back. A soft elastic boing: G4 whose pitch overshoots 55% and wobbles at 26 Hz while it decays, with a low pulse under the hit |
+| `FastOn` | generated | 195 | Interface (trim 0.7) | `Lightning` | fast mode on. Eight tiny signed pulses at uneven times (the crackle, centroid above 2 kHz), a bright G6 to G7 zap with a C6 to C7 shadow, and a small C7 + G6 bloom. Quiet by design |
+| `FastOff` | generated | 100 | Interface (trim 0.8) | `ToggleOff` | fast mode off. A soft tick, then the charge draining: G6 falling to C5 over 80 ms, fast decay |
+| `ProviderClaude` | generated | 115 | Interface | `RailTick` | warm two-note rising pair, E5 then A5, rounded harmonics, soft attack |
+| `ProviderCodex` | generated | 83 | Interface | `RailTick` | crisp bracket-like double tick: two identical hollow clicks (odd harmonics) on D6, 41 ms apart |
+| `ProviderCursor` | generated | 108 | Interface | `RailTick` | one glassy blip, G6 bending up to A6, inharmonic partials (2.76, 5.4) |
+| `ProviderDevin` | generated | 116 | Interface | `RailTick` | soft pad-like minor third, A4 + C5 over an A3 undertone, slow 22 ms bloom |
+| `ProviderGrok` | generated | 116 | Interface | `RailTick` | bright quick fifth, C5 then G5, rich upper harmonics, then three sparkles (A6, C7, E7) |
+| `ProviderHermes` | generated | 94 | Interface | `RailTick` | fast flutter up: seven steps of the scale C5 to D6, 9 ms apart, with a breath of air |
+| `ProviderPi` | generated | 110 | Interface | `RailTick` | three-note tiny arpeggio on the digits 3-1-4 of pi: E5, C5, G5 (third, root, fourth degree) |
+| `ProviderOpenCode` | generated | 117 | Interface | `RailTick` | open, hollow tone: an open fifth D5 + A5 in odd harmonics only, like a wooden pipe |
+| `ProviderAntigravity` | generated | 116 | Interface | `RailTick` | floaty upward glide C5 to C6 with a slow wobble, and a quieter echo (G5 to G6) 32 ms later |
+| `ProviderFavorites` | generated | 116 | Interface | `RailTick` | twinkle: four bell tones (C7, G6, C7, E7) falling in loudness, inharmonic overtones |
+| `ProviderOther` | generated | 59 | Interface | `RailTick` | neutral soft pop: a broad rounded pulse with a short low A4 body, no pitch story |
+
+The provider cues are told apart by structure, not just by pitch: the audit builds
+a fingerprint of each (12 spectral bands, a 24-slice loudness envelope, an 8-slice
+pitch contour) and asserts that no two are closer than a threshold
+(`android-audit.md`, "Provider cues are told apart"). `Cue.forProvider(harness)`
+maps a harness id to its motif; anything unknown plays `ProviderOther`.
 
 Detent gets `Haptic.Tick` (on the effort slider `Haptic.EffortStep` with `level = index / (n - 1)`);
 pull and swipe thresholds have haptic only (`Threshold`).
@@ -130,6 +172,81 @@ the finger onto the next provider (or scrolling the list across a section) with
 are skipped, not the feedback, when animations are off.
 Not every vocabulary entry is wired by this layer: `Star`, `Pop` for favorites and
 the model chip are used by the model picker, `Press` is reserved.
+
+## Volume
+
+The slider is 0 to 100% in ten steps and **starts at 50%**. 50% is exactly the
+loudness the app always had at its old maximum; 100% is twice as loud (+6 dB). The
+curve, `FeedbackSettings.gainFor(slider)`: `v = 2 * slider`; for `v <= 1` the gain is
+`v^2` (the curve the app always used, so 25% reads about -12 dB), above that it is
+`2^(v - 1)`, equal dB steps up to gain 2.0 at 100%. Both pieces meet at gain 1 with no
+jump.
+
+`SoundPool` volume cannot exceed 1.0, so the headroom is in the files: every `fx_*`
+asset is generated 6.02 dB hotter than before (`BOOST_DB` in the generator: active
+RMS -38 dBFS, peaks about -24 dBFS, always under -3 dBFS, no clipping, checked by the
+audit) and the app plays a cue at `gain * trim / ASSET_BOOST` (`CueTable.volume`).
+At the default that is half volume of a file twice as hot as before: the same sound
+pressure as yesterday. At 100% it is full volume: twice. The in-app session chimes
+carry the same boost; the notification channels still play the desktop originals, so
+background alerts did not change.
+
+**Migration.** Settings written by the old layout stored the volume on the old scale
+(100% = today's 50%). `FeedbackSettingsCodec.migrate` runs once, keyed on
+`feedback.prefs_version` (absent = 1), and halves a stored volume, so a user who had
+chosen v keeps the gain `v^2` they were hearing. A fresh install has no stored
+volume, is just stamped, and gets 50%. Unit tests cover the mapping, the migration
+for stored values 0 to 1, idempotence and malformed values.
+
+## Latency
+
+Reports: sounds are "slightly delayed". The path from finger to ear, and what each
+part costs, was traced through `AndroidFeedback`, `SoundBank` and `FeedbackGate`
+(the emulator has no audio output, so the costs below are from the platform's
+documented behaviour and the code, not a timed capture; the log and the unit tests
+prove the changes, only a phone proves the milliseconds).
+
+| Stage | Before | Now |
+| --- | --- | --- |
+| Default tap | `defaultTap` waits `ClaimTracker.DEFER_MS` = 40 ms after release (so an explicit cue can claim the moment), after the release interaction's own coroutine hop | unchanged on purpose (the wait is what keeps a Tap from stacking on an Open); it is the largest remaining software term, about 2.4 frames at 60 Hz. Explicit cues (`feedbackClickable`, `toggleAction`, `both`) already fire inside the click handler, synchronously |
+| Order | haptic first, then sound: the vibrator service is a binder call (about 1 to 3 ms, sometimes tens when the service is busy), and a late sound is the one a person hears as late | sound first everywhere (`both`, `play`, `defaultTap`, `preview`) |
+| Gate | per event: `PowerManager.isInteractive`, `AudioManager.getRingerMode` and `getStreamVolume`, `NotificationManager.currentInterruptionFilter`, two `Settings.System` reads, `hasVibrator`: five binder calls and two settings reads on the UI thread | one `SystemSnapshot` read per 2 s (`TtlValue`), dropped at once by the system's own broadcasts (ringer, volume, interruption filter, screen on/off) and content observers on the two touch settings, registered only while foregrounded. `hasVibrator` is read once |
+| Output standby | after a few seconds with no stream the audio output goes to standby, and waking it takes tens of ms on many phones (more over Bluetooth): the first sound after a pause came late | a silent looped stream (`silence_keepalive.wav`) keeps the mixer running; started on a finger-down anywhere (`MainActivity.dispatchTouchEvent` to `AndroidFeedback.onTouchDown`, so it is up before the click that sounds), stopped 12 s after the last touch or when the app leaves the foreground (`WarmPolicy`) |
+| First play per stream | `SoundPool` creates a stream's `AudioTrack` at its first `play`: a few ms the first four cues paid | after the last sample loads, four silent (-60 dB) plays of the shortest cue create all four tracks (`SoundBank.prime`). The pool has one stream more than the gate allows, for the keep-alive loop |
+| Sample rate | assets are 48 kHz; a mixer at another rate must resample every cue and loses the fast path | `AudioManager.PROPERTY_OUTPUT_SAMPLE_RATE` is read at start (logged: `outputRate=`); at 48 kHz (every current phone) nothing changes; otherwise each asset is resampled once to the output rate with a Catmull-Rom interpolator into `cacheDir/sounds-<rate>-<install time>` and loaded from there |
+| Attributes | `USAGE_ASSISTANCE_SONIFICATION` only | plus `FLAG_LOW_LATENCY` (deprecated since 29, still read by the audio policy, which then selects the fast output; `SoundPool` has no performance-mode API) |
+| Leading silence in the files | 1.1 to 8.2 ms before the sound reaches -40 dB re peak (Archive 8.2; the promoted desktop cues 7.3 to 7.5; Open 3.3), measured by the audit | every file is trimmed to a 0.25 ms lead-in with a click-free fade from exact zero; the audit and `LatencyTest` assert onset within 1 ms for every `fx_` file. The desktop `fx_done`, `fx_request`, `fx_attention` keep their 7 ms (notification sounds; the in-app copies are trimmed) |
+| Loading | `onLoadComplete` was tracked; a cue that was not ready yet was dropped (`NotLoaded`) | unchanged: dropping is right (a late sound is worse than none); loading is one background thread at start |
+
+What is **not** fixed, and cannot be in software: the Bluetooth link's own delay,
+phone-specific audio HAL buffering (a fast track is typically 10 to 20 ms), and the
+`Detent` ladder, which plays at a playback rate other than 1.0 (so the mixer
+resamples it; a pre-rendered set per step would avoid that at the cost of five
+more files).
+
+## If you hear nothing
+
+Zeron's sounds are played by the app itself as *interface sonification*, the same
+channel the keyboard clicks use. They follow your phone's **system sound volume**
+(the "Ring / System" slider, not Media), silent and vibrate mode, and Do Not Disturb
+set to total silence or alarms only. Check, in this order:
+
+1. Settings, Sounds & haptics: **Sounds** and **Interface sounds** are on.
+2. The phone is not on silent or vibrate, and the system sound volume is above zero.
+3. A banner at the top of Sounds & haptics explains what the phone is doing to
+   Zeron. If it says **Touch sounds are off in your phone's settings**, tap it:
+   - **Open sound settings** goes to the phone's sound settings. Turn on *Touch
+     sounds* (Pixel and most phones: Settings, Sound & vibration, Touch sounds;
+     Samsung: Settings, Sounds and vibration, System sound/vibration control, Touch
+     sounds). For vibration also check Vibration & haptics, Touch feedback.
+   - **Play sounds anyway** makes Zeron ignore that one phone setting for its
+     interface sounds. This is safe because the cues do not go through Android's
+     touch-sound path (`playSoundEffect`) at all: the setting does not technically
+     stop them, Zeron only honours it by default as a courtesy. Silent mode, Do Not
+     Disturb, volume zero and the in-app switches still apply. Session chimes
+     never depended on it.
+4. Haptics have their own line: *Touch vibration is turned off in system settings*
+   means the phone's Touch feedback is off, which Zeron honours for haptics.
 
 ## Where each event goes
 
@@ -163,7 +280,8 @@ this change).
 ## Settings
 
 Settings, then **Sounds & haptics**: master **Sounds**, **Interface sounds**, a
-ten-step **Volume** (perceptual curve: gain is volume squared), the **Session
+ten-step **Volume** (default 50%, 100% is twice as loud, see Volume; sits a small
+gap under the Interface sounds row), the **Session
 sounds** master with independent **Completion**, **Input required** and **Errors**
 (mirroring the desktop's Settings, Notifications), **Background alerts**
 (notification permission), **Haptics** with **Strength** (Subtle / Standard /
@@ -171,7 +289,11 @@ Strong) and a **Try them** list that plays the real cue and haptic together.
 Previews ignore rate limits and category switches (hearing a muted category is
 their point) but obey the master switches and the system state; a note at the top
 says when the phone is silent, in Do Not Disturb, has touch vibration off, or has
-no vibrator. Everything defaults on at the restrained levels above.
+no vibrator. The touch-sounds line is tappable and opens a sheet with how to turn the
+phone setting on, **Open sound settings** (`ACTION_SOUND_SETTINGS`, falling back to
+`ACTION_SETTINGS`) and **Play sounds anyway** (see "If you hear nothing"); the note is
+read again whenever the page resumes, so it clears itself after you fix the setting.
+Everything defaults on at the restrained levels above.
 
 ## Debugging
 
@@ -182,7 +304,10 @@ rate=1.33 step=5`) or why it did not (`cue Tap skip: another cue just played`,
 vibrations with the primitives played. Session events can be driven without an
 agent: `adb shell am broadcast -a sh.zeron.android.DEBUG_EVENT -p sh.zeron.android
 --es kind done|input|failed [--ez background true]` (`background` takes the
-notification branch).
+notification branch). Any vocabulary entry can be fired directly: `--es kind haptic
+--es name Surge [--ef level 0.75]` or `--es kind cue --es name ProviderClaude`. The
+`ready:` line at start reports `outputRate=`, `assetRate=` and whether assets had to
+be resampled.
 
 ## Regenerating
 
@@ -195,15 +320,20 @@ Both are standard-library only and deterministic (bit-identical output). The aud
 asserts durations (interface cues at most about 120 ms, event cues at most about
 600 ms plus the promoted tails), peaks and RMS bands, no clipping, zero first and
 last samples with zero-slope fades, DC offset, rising Open and falling Close,
-rising ToggleOn and falling ToggleOff, and that interface cues stay 2 to 4 dB
-under the desktop chimes. The full table is in [android-audit.md](android-audit.md).
+rising ToggleOn and falling ToggleOff, a rising Surge and falling Zip / FastOff,
+onset within 1 ms of the file start for every `fx_` file, that the in-app chimes are
+the desktop chimes plus the 6.02 dB headroom, that the provider cues are
+structurally distinct, and that interface cues stay 2 to 4 dB under the chimes. The full table is in [android-audit.md](android-audit.md).
 
 ## Verification and its limits
 
 JVM tests (`apps/android/app/src/test/java/sh/zeron/android/feedback`) cover the
-gate (switches, system state, silent, DND, throttling, stream cap), the haptic
-planner (a plan for every `Haptic` on several simulated devices, strength
-scaling), the cue table (every `Cue` has a file), the settings codec and the
+gate (switches, system state, silent, DND, throttling, stream cap, the "play anyway"
+override, reads per decision), the haptic planner (a plan for every `Haptic` at
+several levels on several simulated devices, strength scaling, the round-2 designs),
+the volume curve and its migration, the latency pieces (`LatencyTest`: the TTL cache,
+output-rate handling, the resampler, the keep-warm policy, every shipped file starting
+within 1 ms), the cue table (every `Cue` has its own file), the settings codec and the
 event policy with a recording fake (a finished session fires Done once; a
 background event becomes a notification and nothing in-app). On the emulator the
 log, `dumpsys vibrator_manager` and `dumpsys notification` prove what fires and

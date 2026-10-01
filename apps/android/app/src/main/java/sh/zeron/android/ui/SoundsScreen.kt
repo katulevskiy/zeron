@@ -6,6 +6,7 @@ import androidx.compose.foundation.layout.Column
 import androidx.compose.foundation.layout.Row
 import androidx.compose.foundation.layout.Spacer
 import androidx.compose.foundation.layout.fillMaxWidth
+import androidx.compose.foundation.layout.height
 import androidx.compose.foundation.layout.padding
 import androidx.compose.foundation.layout.size
 import androidx.compose.foundation.lazy.LazyListScope
@@ -25,6 +26,8 @@ import androidx.compose.runtime.LaunchedEffect
 import androidx.compose.runtime.collectAsState
 import androidx.compose.runtime.getValue
 import androidx.compose.runtime.mutableIntStateOf
+import androidx.compose.runtime.mutableStateOf
+import androidx.compose.ui.draw.clip
 import androidx.compose.runtime.remember
 import androidx.compose.runtime.setValue
 import androidx.compose.ui.Modifier
@@ -42,6 +45,8 @@ import sh.zeron.android.feedback.FeedbackSettings
 import sh.zeron.android.feedback.Haptic
 import sh.zeron.android.feedback.HapticStrength
 import sh.zeron.android.feedback.LocalFeedback
+import sh.zeron.android.feedback.SystemNote
+import sh.zeron.android.feedback.feedbackClickable
 import sh.zeron.android.feedback.toggleAction
 
 /**
@@ -58,9 +63,23 @@ fun SoundsScreen(model: AppModel, onBack: () -> Unit) {
     val s by engine.store.settings.collectAsState()
     val update = engine.store::update
     val fb = LocalFeedback.current
+    // The system state changes behind our back (the user goes to Settings and returns): read it again on every resume.
+    var resumes by remember { mutableIntStateOf(0) }
+    androidx.lifecycle.compose.LifecycleResumeEffect(Unit) {
+        resumes++
+        onPauseOrDispose {}
+    }
+    val notes = remember(resumes, s) { engine.systemNotes() }
+    var explainTouchSounds by remember { mutableStateOf(false) }
+    if (explainTouchSounds) {
+        TouchSoundsSheet(
+            playAnyway = s.ignoreSystemTouchSounds,
+            onPlayAnyway = { on -> update { copy(ignoreSystemTouchSounds = on) } },
+            onDismiss = { explainTouchSounds = false },
+        )
+    }
     SubPage("Sounds & haptics", "Chimes, taps and vibration", onBack) {
-        val notes = engine.systemNotes()
-        if (notes.isNotEmpty()) item("notes") { SystemNotes(notes) }
+        if (notes.isNotEmpty()) item("notes") { SystemNotes(notes) { explainTouchSounds = true } }
 
         sectionTitle("Sounds")
         item("sounds") {
@@ -69,7 +88,10 @@ fun SoundsScreen(model: AppModel, onBack: () -> Unit) {
                 SwitchRow(1, 2, ZIcons.Context, "Interface sounds", "Soft taps for toggles, menus, sheets and actions", s.interfaceSounds, enabled = s.sounds) { on -> update { copy(interfaceSounds = on) } }
             }
         }
-        item("volume") { VolumeRow(engine, s) }
+        item("volume") {
+            Spacer(Modifier.height(VolumeGap)) // the switch group above and the slider card are separate rows
+            VolumeRow(engine, s)
+        }
 
         sectionTitle("Session sounds")
         item("session") {
@@ -142,6 +164,9 @@ private fun SwitchRow(
 
 private val VolumeSteps = 10
 
+/** Space between the "Interface sounds" row and the volume card below it. */
+private val VolumeGap = 10.dp
+
 /** The master level: a ten-step slider whose detents climb the family's scale as you drag. */
 @Composable
 private fun VolumeRow(engine: AndroidFeedback, s: FeedbackSettings) {
@@ -154,7 +179,7 @@ private fun VolumeRow(engine: AndroidFeedback, s: FeedbackSettings) {
                     Spacer(Modifier.size(16.dp))
                     Column(Modifier.weight(1f)) {
                         Text("Volume", style = MaterialTheme.typography.titleMedium)
-                        Text("Relative to your phone's volume", style = MaterialTheme.typography.bodyMedium, color = MaterialTheme.colorScheme.onSurfaceVariant)
+                        Text("Relative to your phone's volume. 100% is twice as loud as 50%", style = MaterialTheme.typography.bodyMedium, color = MaterialTheme.colorScheme.onSurfaceVariant)
                     }
                     Spacer(Modifier.size(12.dp))
                     Text("${(s.volume * 100).toInt()}%", style = MaterialTheme.typography.labelLarge, color = MaterialTheme.colorScheme.onSurfaceVariant)
@@ -258,19 +283,23 @@ private fun PreviewRows(engine: AndroidFeedback, s: FeedbackSettings, fb: sh.zer
 }
 
 @Composable
-private fun SystemNotes(notes: List<String>) {
-    Surface(
-        shape = androidx.compose.foundation.shape.RoundedCornerShape(24.dp),
-        color = MaterialTheme.colorScheme.secondaryContainer,
-        contentColor = MaterialTheme.colorScheme.onSecondaryContainer,
-        modifier = Modifier.fillMaxWidth().padding(horizontal = 16.dp, vertical = 8.dp),
-    ) {
-        Column(Modifier.padding(16.dp), verticalArrangement = Arrangement.spacedBy(6.dp)) {
-            for (n in notes) {
-                Row(verticalAlignment = androidx.compose.ui.Alignment.Top) {
+private fun SystemNotes(notes: List<SystemNote>, onTouchSounds: () -> Unit) {
+    Column(Modifier.fillMaxWidth().padding(horizontal = 16.dp, vertical = 8.dp), verticalArrangement = Arrangement.spacedBy(8.dp)) {
+        for (n in notes) {
+            val tappable = n.kind == SystemNote.Kind.TouchSounds
+            Surface(
+                shape = androidx.compose.foundation.shape.RoundedCornerShape(24.dp),
+                color = MaterialTheme.colorScheme.secondaryContainer,
+                contentColor = MaterialTheme.colorScheme.onSecondaryContainer,
+                modifier = Modifier.fillMaxWidth().then(
+                    if (tappable) Modifier.clip(androidx.compose.foundation.shape.RoundedCornerShape(24.dp)).feedbackClickable(Haptic.Select, Cue.Open, role = Role.Button, onClick = onTouchSounds)
+                    else Modifier,
+                ),
+            ) {
+                Row(Modifier.padding(16.dp), verticalAlignment = androidx.compose.ui.Alignment.Top) {
                     ZIcon(ZIcons.Info, null, Modifier.size(18.dp))
                     Spacer(Modifier.size(10.dp))
-                    Text(n, style = MaterialTheme.typography.bodyMedium)
+                    Text(n.text, style = MaterialTheme.typography.bodyMedium, modifier = Modifier.weight(1f))
                 }
             }
         }
