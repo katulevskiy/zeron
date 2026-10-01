@@ -13558,6 +13558,7 @@ dependencies = [
  "notify",
  "nucleo-matcher",
  "portable-pty",
+ "regex",
  "reqwest",
  "rusqlite",
  "serde",
@@ -13579,6 +13580,7 @@ dependencies = [
  "zeron-rpc",
  "zeron-sync",
  "zeron-update",
+ "zeron-workflow",
  "zip",
 ]
 
