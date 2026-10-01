@@ -7640,6 +7640,14 @@ impl Composer {
         if !self.check_reference_delivery(&text, cx) {
             return;
         }
+        // A mode the agent can't honour is never sent to run looser; the
+        // draft stays put while the user picks another mode.
+        if let Some(reason) = self.pickers.read(cx).mode_refusal(cx) {
+            self.failure = Some(format!("{reason}. Your draft is preserved.").into());
+            self.failure_key = Some(self.current_key.clone());
+            cx.notify();
+            return;
+        }
         let Some(engine) = self.state.read(cx).engine().cloned() else {
             self.failure = Some("Engine not connected".into());
             self.failure_key = None; // global — meaningful on every chat
@@ -8242,7 +8250,7 @@ impl Composer {
                     .is_some();
                 let command = SessionCommandPayload::Run {
                     request: RunRequest {
-                        policy: Default::default(),
+                        policy: resolved.policy.clone(),
                         mcp: None,
                         prompt: content.clone(),
                         harness: resolved.harness,
@@ -8665,6 +8673,11 @@ impl Composer {
             // Selection reads on the row only while no typed override exists
             // (typed answers win — zeron question-panel.tsx `isSel`).
             let picked = wizard.is_picked(ix) && typed_empty;
+            // An approval prompt's options: Deny reads as the refusal it is,
+            // "Always allow" says it sticks.
+            let approval = crate::permission_mode::approval_option(&question.id, label);
+            let deny = approval == Some(crate::permission_mode::ApprovalOption::Deny);
+            let always = approval == Some(crate::permission_mode::ApprovalOption::AllowAlways);
             div()
                 .id(("wizard-option", ix))
                 .flex()
@@ -8675,14 +8688,24 @@ impl Composer {
                 .py(px(10.0))
                 .rounded(px(12.0))
                 .border_1()
-                .border_color(if picked {
+                .border_color(if picked && deny {
+                    theme.danger.opacity(0.45)
+                } else if picked {
                     crate::theme::ink(0.16)
                 } else {
                     gpui::transparent_black()
                 })
                 // zeron question-panel.tsx option rows: `transition-colors`.
-                .bg(if picked {
+                .bg(if picked && deny {
+                    theme.danger.opacity(0.12)
+                } else if picked {
                     crate::theme::ink(0.09)
+                } else if deny {
+                    motion::hover_blend(
+                        &format!("wizard-option-{ix}"),
+                        theme.danger.opacity(0.04),
+                        theme.danger.opacity(0.10),
+                    )
                 } else {
                     motion::hover_blend(
                         &format!("wizard-option-{ix}"),
@@ -8699,12 +8722,23 @@ impl Composer {
                         .min_w_0()
                         .text_size(crate::typography::ui_rems(13.5))
                         .font_weight(gpui::FontWeight::MEDIUM)
-                        .text_color(if picked {
+                        .text_color(if deny {
+                            theme.danger
+                        } else if picked {
                             theme.text
                         } else {
                             theme.text.opacity(0.9)
                         })
-                        .child(SharedString::from(label.clone())),
+                        .child(SharedString::from(label.clone()))
+                        .when(always, |el| {
+                            el.child(
+                                div()
+                                    .text_size(crate::typography::ui_rems(11.5))
+                                    .font_weight(gpui::FontWeight::NORMAL)
+                                    .text_color(theme.text_muted.opacity(0.75))
+                                    .child("Remembered for later runs on this chat's device"),
+                            )
+                        }),
                 )
                 .when(ix < 9, |el| {
                     el.child(
@@ -9236,6 +9270,19 @@ impl Render for Composer {
                 }
             }))
         });
+
+        // Shift+Tab cycles the permission mode. The input binds it to list
+        // outdent and lets it through when there's nothing to outdent; the
+        // completion popups and the question panel keep it.
+        let container = container.on_action(cx.listener(|this, _: &OutdentList, _, cx| {
+            if this.wizard.is_none()
+                && this.editing_queued.is_none()
+                && this.mention.token.is_none()
+                && this.slash.token.is_none()
+            {
+                this.pickers.update(cx, |pickers, cx| pickers.cycle_mode(cx));
+            }
+        }));
 
         // Route coordination must not force an established thread into the
         // two-row layout. Short drafts keep the original skinny composer.
