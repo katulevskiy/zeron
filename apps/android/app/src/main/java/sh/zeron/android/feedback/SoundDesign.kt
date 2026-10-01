@@ -55,6 +55,13 @@ object CueTable {
         Cue.Copy -> CueSpec(cue, "fx_copy", CueCategory.Interface, 1f, 1, 120, 120)
         Cue.Error -> CueSpec(cue, "fx_error", CueCategory.Interface, 1f, 3, 250, 180)
         Cue.Refresh -> CueSpec(cue, "fx_refresh", CueCategory.Interface, 1f, 1, 200, 120)
+
+        // Round 2 placeholders (real assets replace these): borrow a neighbour's file.
+        Cue.Surge, Cue.FastOn -> spec(Cue.Done).copy(cue = cue, category = CueCategory.Interface, priority = 1)
+        Cue.Zip, Cue.Rebound, Cue.FastOff -> spec(Cue.Select).copy(cue = cue)
+        Cue.ProviderClaude, Cue.ProviderCodex, Cue.ProviderCursor, Cue.ProviderDevin, Cue.ProviderGrok,
+        Cue.ProviderHermes, Cue.ProviderPi, Cue.ProviderOpenCode, Cue.ProviderAntigravity,
+        Cue.ProviderFavorites, Cue.ProviderOther -> spec(Cue.Select).copy(cue = cue)
     }
 
     val all: List<CueSpec> get() = Cue.entries.map(::spec)

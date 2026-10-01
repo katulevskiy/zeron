@@ -22,7 +22,7 @@ data class Segment(val ms: Long, val amplitude: Int)
  * 4. The designed [waveform] (amplitude control), then the predefined effect,
  *    then the waveform without amplitudes.
  */
-class HapticSpec(
+data class HapticSpec(
     val haptic: Haptic,
     val preferView: Boolean,
     /** SDK level -> `HapticFeedbackConstants` value, or null when this device has none for the moment. */
@@ -144,6 +144,12 @@ object HapticTable {
             ),
             VibrationEffect.EFFECT_TICK, listOf(Segment(12, 120), Segment(14, 0), Segment(8, 50)), priority = 1, minGapMs = 120,
         )
+
+        // Round 2 placeholders (real designs replace these): borrow a neighbour's effect.
+        Haptic.EffortStep, Haptic.Zip, Haptic.RailTick -> spec(Haptic.Select).copy(haptic = haptic)
+        Haptic.Stretch -> spec(Haptic.Tick).copy(haptic = haptic)
+        Haptic.Rebound -> spec(Haptic.Heavy).copy(haptic = haptic)
+        Haptic.Surge, Haptic.Lightning -> spec(Haptic.Success).copy(haptic = haptic)
     }
 
     val all: List<HapticSpec> get() = Haptic.entries.map(::spec)
