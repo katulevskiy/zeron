@@ -41,6 +41,7 @@ import sh.zeron.android.feedback.FeedbackSettings
 import sh.zeron.android.feedback.Haptic
 import sh.zeron.android.feedback.HapticStrength
 import sh.zeron.android.feedback.LocalFeedback
+import sh.zeron.android.feedback.toggleAction
 
 /**
  * Settings > Sounds & haptics. Mirrors the desktop's Notifications settings

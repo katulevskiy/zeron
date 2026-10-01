@@ -429,7 +429,7 @@ fun AgentsScreen(model: AppModel, onBack: () -> Unit) {
             confirmButton = {
                 TextButton(onClick = feedbackAction(Haptic.Heavy, Cue.Delete) {
                     signingOut = null
-                    val d = device ?: return@TextButton
+                    val d = device ?: return@feedbackAction
                     scope.launch {
                         runCatching {
                             accounts = Agents.accounts(model.hostCall(d.id, Agents.FORGET_ACCOUNT, JSONObject().put("harness", h.id).put("accountId", a.id)))
