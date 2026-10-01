@@ -95,7 +95,7 @@ fn main() -> anyhow::Result<()> {
             "Review the release notes",
             "claude-code",
             "claude-sonnet-4-6",
-            serde_json::json!({"mode": "ask"}),
+            serde_json::json!({"mode": "ask", "sandbox": "workspaceWrite"}),
         ),
     ]
     .into_iter()
@@ -204,7 +204,7 @@ fn main() -> anyhow::Result<()> {
                 close_menu(cx)?;
                 pause(cx, 600).await;
                 capture(window.into(), cx, &output, "chip-bypass")?;
-                // A chat already in Ask.
+                // A chat already in Ask with the workspace sandbox on.
                 close_menu(cx)?;
                 state.update(cx, |s, cx| {
                     s.selected_chat = Some("claude-ask".into());
@@ -212,10 +212,10 @@ fn main() -> anyhow::Result<()> {
                 });
                 pause(cx, 900).await;
                 pause(cx, 600).await;
-                capture(window.into(), cx, &output, "chip-ask")?;
+                capture(window.into(), cx, &output, "chip-ask-sandboxed")?;
                 open_menu(cx)?;
                 pause(cx, 900).await;
-                capture(window.into(), cx, &output, "mode-menu-ask")?;
+                capture(window.into(), cx, &output, "mode-menu-ask-sandboxed")?;
                 // A harness that never asks: the menu says so.
                 close_menu(cx)?;
                 state.update(cx, |s, cx| {
