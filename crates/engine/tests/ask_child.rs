@@ -580,3 +580,187 @@ async fn an_ask_child_is_not_revived_by_boot_recovery() {
         "the crashed turn is still stamped aborted"
     );
 }
+
+// ── persistent children: workflow actors ──────────────────────────────────
+
+fn actor_spec(title: &str) -> AskSpec {
+    let mut spec = AskSpec::new("agent", "Do part of the job.", schema());
+    spec.title = Some(title.into());
+    spec.persistent = true;
+    spec
+}
+
+#[tokio::test]
+async fn a_persistent_child_is_hidden_at_once_reused_by_later_asks_and_never_archived_by_them() {
+    let rig = rig(|_, request, out, _c, client| {
+        tokio::spawn(async move {
+            submit(&client, &request, json!({"passed": true, "reason": "ok"})).await;
+            text_turn(&out, "done", Some((10, 2)));
+        });
+    });
+    let mut first = actor_spec("Review · security");
+    first.workflow_actor = Some(zeron_proto::WorkflowActorTag {
+        run_id: "run-1".into(),
+        site_id: "3:5-3:20".into(),
+        ordinal: 0,
+        name: "security".into(),
+    });
+    let one = rig
+        .ask
+        .ask("parent", first, CancellationToken::new())
+        .await
+        .unwrap();
+    let child = child_of(&rig, &one.child_chat_id);
+    assert!(child.archived, "hidden from the sidebar from the start");
+    assert_eq!(child.title.as_deref(), Some("Review · security"));
+    assert_eq!(child.parent_chat_id.as_deref(), Some("parent"));
+    let handle = rig.env.core.doc_host.open(&one.child_chat_id).unwrap();
+    assert_eq!(handle.doc().workflow_actor().unwrap().run_id, "run-1");
+
+    // The next ask continues the same chat: same id, no second child, and
+    // only its own tokens are reported.
+    let mut second = actor_spec("ignored");
+    second.reuse_child = Some(one.child_chat_id.clone());
+    let two = rig
+        .ask
+        .ask("parent", second, CancellationToken::new())
+        .await
+        .unwrap();
+    assert_eq!(two.child_chat_id, one.child_chat_id);
+    assert_eq!(two.usage.total_tokens(), 12, "{:?}", two.usage);
+    assert_eq!(
+        child_of(&rig, &two.child_chat_id).title.as_deref(),
+        Some("Review · security"),
+        "a reused child is not renamed"
+    );
+    let chats = rig.env.core.workspace.read_chats().unwrap();
+    let children = chats.iter().filter(|c| c.parent_chat_id.is_some()).count();
+    assert_eq!(children, 1);
+    // Two prompts reached the one conversation, each with its own ask id.
+    let runs = rig.env.runs.lock().unwrap();
+    assert_eq!(runs.len(), 2);
+    let ask_ids: Vec<_> = runs
+        .iter()
+        .map(|r| r.mcp.as_ref().unwrap().env["ZERON_ASK_ID"].clone())
+        .collect();
+    assert_ne!(ask_ids[0], ask_ids[1]);
+}
+
+#[tokio::test]
+async fn an_escalation_parks_only_its_ask_and_the_answer_is_the_tool_result() {
+    let reply = Arc::new(Mutex::new(None));
+    let seen = reply.clone();
+    let rig = rig(move |_, request, out, _c, client| {
+        let seen = seen.clone();
+        tokio::spawn(async move {
+            let env = request.mcp.as_ref().unwrap().env.clone();
+            // The advertised spec says the child may escalate.
+            let info: zeron_proto::AskSpecInfo = client
+                .call_as(
+                    methods::GET_ASK_SPEC,
+                    json!({"chatId": env["ZERON_CHAT_ID"], "askId": env["ZERON_ASK_ID"]}),
+                )
+                .await
+                .unwrap();
+            assert!(info.escalation);
+            let raised: zeron_proto::EscalateReply = client
+                .call_as(
+                    methods::ASK_ESCALATE,
+                    json!({"chatId": env["ZERON_CHAT_ID"], "askId": env["ZERON_ASK_ID"],
+                           "question": "Which database?", "context": "two are configured",
+                           "maxWaitMs": 150}),
+                )
+                .await
+                .unwrap();
+            assert_eq!(raised.status, zeron_proto::EscalateStatus::Pending);
+            // Keep waiting with the question id: this is the answer.
+            let answered: zeron_proto::EscalateReply = client
+                .call_as(
+                    methods::ASK_ESCALATE,
+                    json!({"chatId": env["ZERON_CHAT_ID"], "askId": env["ZERON_ASK_ID"],
+                           "questionId": raised.question_id, "maxWaitMs": 10000}),
+                )
+                .await
+                .unwrap();
+            *seen.lock().unwrap() = Some(answered.clone());
+            submit(
+                &client,
+                &request,
+                json!({"passed": true, "reason": answered.answer.unwrap_or_default()}),
+            )
+            .await;
+            text_turn(&out, "done", None);
+        });
+    });
+    let raised = Arc::new(Mutex::new(Vec::new()));
+    let sink = raised.clone();
+    let mut spec = actor_spec("Asker");
+    spec.escalation = Some(zeron_engine::ask::EscalationHook(Arc::new(move |e| {
+        sink.lock().unwrap().push(e);
+    })));
+    // A short timeout proves the parked time is not charged to the ask.
+    spec.timeout = Duration::from_millis(1500);
+    let ask = rig.ask.clone();
+    let task = tokio::spawn(async move { ask.ask("parent", spec, CancellationToken::new()).await });
+    wait_for(|| !raised.lock().unwrap().is_empty(), "the escalation").await;
+    tokio::time::sleep(Duration::from_millis(2000)).await; // longer than the ask's timeout
+    let e = raised.lock().unwrap()[0].clone();
+    assert_eq!(e.question, "Which database?");
+    assert_eq!(e.context, "two are configured");
+    assert!(rig.ask.answer_escalation(&e.child_chat_id, &e.qid, "Postgres".into()).await);
+    let outcome = task.await.unwrap().expect("ask completes after the answer");
+    assert_eq!(outcome.result["reason"], "Postgres");
+    let answered = reply.lock().unwrap().clone().unwrap();
+    assert_eq!(answered.status, zeron_proto::EscalateStatus::Answered);
+    assert!(answered.message.contains("Postgres"));
+    assert_eq!(answered.left, 2);
+}
+
+#[tokio::test]
+async fn escalations_are_limited_per_ask_and_refused_where_not_offered() {
+    let statuses = Arc::new(Mutex::new(Vec::new()));
+    let log = statuses.clone();
+    let rig = rig(move |_, request, out, _c, client| {
+        let log = log.clone();
+        tokio::spawn(async move {
+            let env = request.mcp.as_ref().unwrap().env.clone();
+            for n in 0..3 {
+                let reply: zeron_proto::EscalateReply = client
+                    .call_as(
+                        methods::ASK_ESCALATE,
+                        json!({"chatId": env["ZERON_CHAT_ID"], "askId": env["ZERON_ASK_ID"],
+                               "question": format!("q{n}"), "maxWaitMs": 5000}),
+                    )
+                    .await
+                    .unwrap();
+                log.lock().unwrap().push((reply.status, reply.left));
+            }
+            submit(&client, &request, json!({"passed": true, "reason": "ok"})).await;
+            text_turn(&out, "done", None);
+        });
+    });
+    let mut spec = actor_spec("Asker");
+    spec.max_escalations = 2;
+    let ask_backend = rig.ask.clone();
+    spec.escalation = Some(zeron_engine::ask::EscalationHook(Arc::new({
+        let ask_backend = ask_backend.clone();
+        move |e| {
+            let ask_backend = ask_backend.clone();
+            tokio::spawn(async move {
+                ask_backend
+                    .answer_escalation(&e.child_chat_id, &e.qid, "yes".into())
+                    .await;
+            });
+        }
+    })));
+    rig.ask
+        .ask("parent", spec, CancellationToken::new())
+        .await
+        .unwrap();
+    use zeron_proto::EscalateStatus::*;
+    assert_eq!(
+        statuses.lock().unwrap().clone(),
+        vec![(Answered, 1), (Answered, 0), (Refused, 0)]
+    );
+
+}
