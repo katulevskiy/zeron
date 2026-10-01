@@ -195,7 +195,9 @@ class LatencyTest {
 
     @Test fun notificationChannelsPlayTheMasteredChimesAndTheChannelVersionWasBumped() {
         val sounds = sh.zeron.android.core.Notifier.Kind.entries.map { it.sound }
-        assertEquals(listOf("fx_chime_done", "fx_chime_request", "fx_chime_attention"), sounds)
+        // Session kinds first, then the file-transfer kinds that reuse the same three chimes.
+        assertEquals(listOf("fx_chime_done", "fx_chime_request", "fx_chime_attention"), sounds.take(3))
+        assertTrue(sounds.all { it in setOf("fx_chime_done", "fx_chime_request", "fx_chime_attention") })
         for (name in sounds) assertTrue(name, File(raw, "$name.wav").isFile)
         assertTrue(sh.zeron.android.core.Notifier.CHANNEL_VERSION >= 2) // channel sounds are immutable once created
     }
