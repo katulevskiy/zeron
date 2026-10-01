@@ -5,7 +5,7 @@
 ZCode; the difference is that the verifier here is a full hidden chat that can
 open files and run tests, not a tool-less model call over the transcript.
 
-Screenshots: [`docs/screenshots/goal-mode/`](screenshots/goal-mode/).
+Screenshots (live, mock harness with `ZERON_MOCK_GOAL=1`): [`docs/screenshots/goal-mode/`](screenshots/goal-mode/) — `collapsed-running` (tray header, round marker, goal-set marker), `collapsed-complete`, `expanded-rounds-working`, `expanded-paused` (reason line, verifier cost, per-round verdicts and todos), `expanded-complete`. The expanded shots use a build whose tray opens expanded by default (the tray itself defaults to collapsed); no interaction was automated.
 
 Two pieces, built to be separable:
 
