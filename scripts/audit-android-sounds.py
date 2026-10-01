@@ -20,14 +20,18 @@ Definitions
   onset           time of the first sample >= peak - 40 dB (the leading silence
                   a listener waits through; asserted <= 1 ms for every fx_ file)
   clean ends      first and last sample are 0 (within 1 LSB) and the three
-                  samples next to each end stay within 2 LSB, which with the
+                  samples next to each end stay within 2 LSB (or 0.2% of the peak, the louder the file the more LSBs a fade
+                  covers per sample), which with the
                   signal's own slope means the file starts and ends on a
                   zero crossing; "zc" additionally reports whether a sign
                   change (or a zero) occurs in the first/last 8 samples.
 Desktop references are stereo; they are analysed as the L/R average.
 """
+import io
 import math
+import re
 import struct
+import subprocess
 import sys
 import wave
 from pathlib import Path
@@ -74,13 +78,18 @@ NOTES = {
 }
 RMS_BAND_DB = 1.5
 DESKTOP_MARGIN_DB = 2.0
-BOOST_DB = 20 * math.log10(2.0)  # the slider headroom baked into every fx_ file
+BOOST_DB = 20 * math.log10(2.0)  # the slider headroom baked into every fx_ file (CueTable.ASSET_BOOST)
+LIFT_DB = 6.0                    # "twice as loud again": default slider position vs the previous build's 100%
+MIN_GAIN_DB = 5.5                # asserted for every cue (plain and A-weighted active RMS)
+PREVIOUS_COMMIT = 'f1d4eff1'     # the build whose slider 100% is the reference
+KOTLIN = ROOT / 'apps/android/app/src/main/java/sh/zeron/android/feedback'
 ONSET_DB = -40.0
 ONSET_MAX_MS = 1.0
 DISTINCT_MIN = 0.20  # minimum fingerprint distance between two provider cues
-PEAK_LIMIT_DB = -3.0
+PEAK_LIMIT_DB = -0.5
 SIZE_LIMIT_BYTES = 800 * 1024
 DIRECTION_MIN_ST = 0.5
+EDGE_REL = 0.002  # neighbours of the first / last sample: 2 LSB or 0.2% of the peak (-54 dB), whichever is larger
 
 
 def db(x):
@@ -243,15 +252,132 @@ def measure(path):
         'active_ms': (b - a) / rate * 1000,
         'crest_db': db(peak / r_all), 'first': int(x[0]), 'last': int(x[-1]),
         'edge_ok': (abs(x[0]) <= 1 and abs(x[-1]) <= 1
-                    and max(abs(v) for v in x[:3]) <= 2 and max(abs(v) for v in x[-3:]) <= 2),
+                    and max(abs(v) for v in x[:3]) <= max(2, EDGE_REL * peak)
+                    and max(abs(v) for v in x[-3:]) <= max(2, EDGE_REL * peak)),
         'zc_start': near_zero_crossing(x, False), 'zc_end': near_zero_crossing(x, True),
         'dc': sum(x) / len(x), 'centroid': centroid, 'dominant': dominant,
         'dir_dom_st': 12 * math.log2(d2 / d1), 'dir_cen_st': 12 * math.log2(c2 / c1),
         'dom1': d1, 'dom2': d2,
         'band_fraction': sum(power[lo:hi]) / sum(power[1:]),
         'onset_ms': onset / rate * 1000,
+        'arms_act_db': loudness(x)[1],
         'print': fingerprint(x, rate, df, mags),
     }
+
+
+# --------------------------------------------------------------- loudness
+
+def _bilinear(num, den, fs):
+    """Analog biquad (coefficients of s^2, s, 1; highest power first) to digital with s = 2 fs (1 - z^-1) / (1 + z^-1)."""
+    k = 2.0 * fs
+
+    def conv(c):
+        c2, c1, c0 = c
+        return (c2 * k * k + c1 * k + c0, -2 * c2 * k * k + 2 * c0, c2 * k * k - c1 * k + c0)
+
+    n, d = conv(num), conv(den)
+    return [v / d[0] for v in n], [v / d[0] for v in d]
+
+
+def _a_weighting_sections(fs):
+    w = [2 * math.pi * f for f in (20.598997, 107.65265, 737.86223, 12194.217)]
+    sections = [
+        ((1.0, 0.0, 0.0), (1.0, 2 * w[0], w[0] ** 2)),                           # s^2 / (s + w1)^2
+        ((1.0, 0.0, 0.0), (1.0, w[1] + w[2], w[1] * w[2])),                      # s^2 / ((s + w2)(s + w3))
+        ((0.0, 0.0, w[3] ** 2), (1.0, 2 * w[3], w[3] ** 2)),                     # w4^2 / (s + w4)^2
+    ]
+    digital = [_bilinear(n, d, fs) for n, d in sections]
+    # Normalise to 0 dB at 1 kHz.
+    z = complex(math.cos(2 * math.pi * 1000 / fs), math.sin(2 * math.pi * 1000 / fs))
+    zi = 1 / z
+    gain = 1.0
+    for (b, a) in digital:
+        gain *= abs((b[0] + b[1] * zi + b[2] * zi * zi) / (a[0] + a[1] * zi + a[2] * zi * zi))
+    return digital, 1.0 / gain
+
+
+def a_weight(x, fs=48000):
+    """The A-weighting curve (IEC 61672 poles, bilinear transform, 0 dB at 1 kHz) applied to x."""
+    sections, norm = _a_weighting_sections(fs)
+    y = list(x)
+    for b, a in sections:
+        x1 = x2 = y1 = y2 = 0.0
+        out = []
+        for v in y:
+            o = b[0] * v + b[1] * x1 + b[2] * x2 - a[1] * y1 - a[2] * y2
+            x2, x1, y2, y1 = x1, v, y1, o
+            out.append(o)
+        y = out
+    return [v * norm for v in y]
+
+
+def loudness(x):
+    """(plain, A-weighted) RMS in dBFS over the active region (the A-weighting runs over the whole file first)."""
+    a, b = active_span(x)
+    plain = db(rms(x[a:b]) / 32768)
+    weighted = db(rms(a_weight(x)[a:b]) / 32768)
+    return plain, weighted
+
+
+def previous_wav(name):
+    """A res/raw file of the previous build, straight from git (None when git or the commit is not available)."""
+    try:
+        data = subprocess.run(['git', 'show', f'{PREVIOUS_COMMIT}:apps/android/app/src/main/res/raw/{name}.wav'],
+                              cwd=ROOT, capture_output=True, check=True).stdout
+    except (OSError, subprocess.CalledProcessError):
+        return None
+    with wave.open(io.BytesIO(data), 'rb') as wav:
+        count, channels = wav.getnframes(), wav.getnchannels()
+        values = struct.unpack(f'<{count * channels}h', wav.readframes(count))
+    return [sum(values[i * channels:(i + 1) * channels]) / channels for i in range(count)]
+
+
+def previous_trims():
+    """Per-resource trims of the previous build's CueTable (only the non-1.0 ones matter)."""
+    try:
+        text = subprocess.run(['git', 'show', f'{PREVIOUS_COMMIT}:apps/android/app/src/main/java/sh/zeron/android/feedback/SoundDesign.kt'],
+                              cwd=ROOT, capture_output=True, check=True, text=True).stdout
+    except (OSError, subprocess.CalledProcessError):
+        return None
+    return parse_trims(text)
+
+
+def parse_trims(text):
+    trims = {m.group(1): float(m.group(2)) for m in re.finditer(r'CueSpec\(cue, "(fx_\w+)", CueCategory\.\w+, ([\d.]+)f', text)}
+    for m in re.finditer(r'provider\(cue, "(\w+)"', text):
+        trims[f'fx_provider_{m.group(1)}'] = 1.0
+    return trims
+
+
+def kotlin_const(file, pattern):
+    return float(re.search(pattern, (KOTLIN / file).read_text()).group(1))
+
+
+def sound_pool_volume(slider, trim, asset_boost, max_gain):
+    """CueTable.volume(spec, FeedbackSettings(volume = slider).gain): the curve of FeedbackSettings.gainFor."""
+    v = 2 * min(max(slider, 0.0), 1.0)
+    gain = v * v if v <= 1 else 2 ** (v - 1)
+    return min(max(gain * trim / asset_boost, 0.0), 1.0)
+
+
+# The previous build's files, measured once (plain, A-weighted active RMS in dBFS) so the audit also runs where the
+# git history is not available; when it is, the numbers are re-measured and must agree.
+PREVIOUS_RMS = {
+    'tap': (-37.99, -38.95), 'select': (-37.98, -39.79), 'toggle_on': (-37.98, -38.69),
+    'toggle_off': (-37.98, -39.18), 'open': (-37.98, -39.39), 'close': (-37.98, -40.08), 'detent': (-37.98, -38.43),
+    'star': (-37.98, -37.18), 'unstar': (-37.98, -38.05), 'pin': (-37.98, -42.80), 'archive': (-37.98, -44.66),
+    'delete': (-37.98, -47.48), 'copy': (-37.98, -37.80), 'error': (-37.98, -44.62), 'refresh': (-37.98, -40.00),
+    'surge': (-37.98, -37.67), 'zip': (-37.98, -37.47), 'rebound': (-37.98, -42.27), 'fast_on': (-37.98, -36.88),
+    'fast_off': (-37.98, -37.14), 'provider_claude': (-37.98, -38.66), 'provider_codex': (-37.98, -37.43),
+    'provider_cursor': (-37.98, -36.98), 'provider_devin': (-37.98, -41.49), 'provider_grok': (-37.98, -38.84),
+    'provider_hermes': (-37.98, -38.45), 'provider_pi': (-37.98, -39.60), 'provider_opencode': (-37.98, -39.35),
+    'provider_antigravity': (-38.00, -38.90), 'provider_favorites': (-37.98, -36.83),
+    'provider_other': (-37.98, -42.37), 'send': (-34.62, -38.18), 'queued': (-36.65, -40.77),
+    'upload_ready': (-35.72, -40.56), 'reconnected': (-36.34, -41.15), 'undo': (-36.75, -40.94),
+    'chime_done': (-34.26, -38.89), 'chime_request': (-35.69, -39.67), 'chime_attention': (-35.82, -41.44),
+}
+PREVIOUS_TRIMS = {'fx_send': 0.8, 'fx_queued': 0.8, 'fx_upload_ready': 0.8, 'fx_reconnected': 0.8, 'fx_undo': 0.8,
+                  'fx_fast_on': 0.7, 'fx_fast_off': 0.8}
 
 
 # ------------------------------------------------------------------- main
@@ -279,11 +405,11 @@ def main():
         check(f'{name}: mono 16-bit 48 kHz', (r['channels'], r['bits'], r['rate']) == (1, 16, 48000),
               f"{r['channels']} ch, {r['bits']} bit, {r['rate']} Hz")
         check(f'{name}: no clipping', not r['clipped'])
-        check(f'{name}: peak <= {PEAK_LIMIT_DB:.0f} dBFS', r['peak_db'] <= PEAK_LIMIT_DB,
+        check(f'{name}: peak <= {PEAK_LIMIT_DB:.1f} dBFS', r['peak_db'] <= PEAK_LIMIT_DB,
               f"{r['peak_db']:.1f}")
         check(f'{name}: onset within {ONSET_MAX_MS:g} ms (first sample >= {ONSET_DB:.0f} dB re peak)',
               r['onset_ms'] <= ONSET_MAX_MS, f"{r['onset_ms']:.2f} ms")
-        check(f'{name}: clean ends (0 within 1 LSB, near zero crossing)',
+        check(f'{name}: clean ends (0 within 1 LSB, neighbours within 0.2% of peak, near zero crossing)',
               r['edge_ok'] and r['zc_start'] and r['zc_end'], f"first {r['first']}, last {r['last']}")
     for name in INTERFACE:
         r = m[name]
@@ -347,10 +473,57 @@ def main():
         check(f'Every interface cue >= {DESKTOP_MARGIN_DB:g} dB quieter (active RMS) than in-app {chime}',
               margin >= DESKTOP_MARGIN_DB, f'smallest margin {margin:.1f} dB')
         gain = m[chime]['rms_act_db'] - m[ref]['rms_act_db']
-        check(f'{chime} is the desktop {ref} plus the {BOOST_DB:.2f} dB slider headroom (+-0.3 dB)',
-              abs(gain - BOOST_DB) <= 0.3, f'{gain:+.2f} dB')
+        expected = 2 * BOOST_DB + LIFT_DB
+        check(f'{chime} is the desktop {ref} plus {expected:.2f} dB: previous headroom {BOOST_DB:.2f} + slider headroom '
+              f'{BOOST_DB:.2f} + lift {LIFT_DB:g} (+-0.3 dB)', abs(gain - expected) <= 0.3, f'{gain:+.2f} dB')
     total = sum(m[n]['bytes'] for n in fx)
-    check('fx_*.wav total size < 400 KB', total < SIZE_LIMIT_BYTES, f'{total / 1024:.0f} KB')
+    check('fx_*.wav total size < 800 KB', total < SIZE_LIMIT_BYTES, f'{total / 1024:.0f} KB')
+
+    # ------------------------------------------- loudness against the previous build
+    sd = (KOTLIN / 'SoundDesign.kt').read_text()
+    asset_boost = kotlin_const('SoundDesign.kt', r'ASSET_BOOST = ([\d.]+)f')
+    max_gain = kotlin_const('FeedbackSettings.kt', r'MAX_GAIN = ([\d.]+)f')
+    default_volume = kotlin_const('FeedbackSettings.kt', r'DEFAULT_VOLUME = ([\d.]+)f')
+    trims = parse_trims(sd)
+    old_trims = previous_trims() or PREVIOUS_TRIMS
+    check('SoundPool volume stays <= 1.0 at every slider position for every cue',
+          all(sound_pool_volume(i / 100, trims[f'fx_{n}'], asset_boost, max_gain) <= 1.0
+              for n in fx for i in range(101)), f'ASSET_BOOST {asset_boost:g}, MAX_GAIN {max_gain:g}')
+    check('The default slider position is 50%', default_volume == 0.5, f'{default_volume:g}')
+    loud = {}
+    for n in fx:
+        old_plain, old_a = PREVIOUS_RMS[n]
+        wav = previous_wav(f'fx_{n}')
+        if wav is not None:
+            p, a = loudness(wav)
+            check(f'{n}: stored baseline of the previous build still matches {PREVIOUS_COMMIT}',
+                  abs(p - old_plain) < 0.05 and abs(a - old_a) < 0.05, f'{p:.2f}/{a:.2f} vs {old_plain:.2f}/{old_a:.2f}')
+        trim_old = old_trims.get(f'fx_{n}', 1.0)
+        old100 = 20 * math.log10(sound_pool_volume(1.0, trim_old, 2.0, 2.0))  # the previous build: ASSET_BOOST 2, MAX_GAIN 2
+        trim = trims[f'fx_{n}']
+        d = 20 * math.log10(sound_pool_volume(default_volume, trim, asset_boost, max_gain))
+        t = 20 * math.log10(sound_pool_volume(1.0, trim, asset_boost, max_gain))
+        r = m[n]
+        loud[n] = {
+            'old100': old_plain + old100, 'old100_a': old_a + old100,
+            'new50': r['rms_act_db'] + d, 'new50_a': r['arms_act_db'] + d,
+            'new100': r['rms_act_db'] + t, 'new100_a': r['arms_act_db'] + t,
+        }
+        l = loud[n]
+        l['gain'], l['gain_a'] = l['new50'] - l['old100'], l['new50_a'] - l['old100_a']
+        check(f'{n}: default slider (50%) is >= {MIN_GAIN_DB:g} dB louder than the previous build at 100% '
+              f'(plain and A-weighted active RMS, SoundPool volume included)',
+              l['gain'] >= MIN_GAIN_DB and l['gain_a'] >= MIN_GAIN_DB,
+              f"{l['gain']:+.2f} dB plain, {l['gain_a']:+.2f} dB A-weighted")
+        check(f'{n}: slider 100% is 6.02 dB above the default', abs(l['new100'] - l['new50'] - BOOST_DB) < 0.02,
+              f"{l['new100'] - l['new50']:+.2f} dB")
+    notify = {}
+    for ref, chime in zip(REFERENCES, CHIMES):
+        # Notification channels play fx_chime_* at file level (the system notification volume is the user's);
+        # they used to play the desktop original.
+        notify[ref] = (m[chime]['rms_act_db'] - m[ref]['rms_act_db'], m[chime]['arms_act_db'] - m[ref]['arms_act_db'])
+        check(f'notification {ref}: channel sound (fx_{chime}) >= {MIN_GAIN_DB:g} dB louder than the desktop original',
+              min(notify[ref]) >= MIN_GAIN_DB, f'{notify[ref][0]:+.1f} dB plain, {notify[ref][1]:+.1f} dB A-weighted')
 
     # ------------------------------------------------------------- report
     out = ['<!-- generated by scripts/audit-android-sounds.py, do not edit -->', '',
@@ -377,6 +550,34 @@ def main():
                        f"{r['crest_db']:.1f} | {r['first']} | {r['last']} | "
                        f"{'yes' if r['zc_start'] else 'NO'}/{'yes' if r['zc_end'] else 'NO'} | "
                        f"{r['dc']:+.2f} | {r['bytes']} |")
+    classes = [('interface (generated)', CORE + ROUND2), ('provider motifs', PROVIDERS),
+               ('promoted auditions', PROMOTED), ('session chimes (in-app)', CHIMES)]
+    out += ['', '## Loudness against the previous build', '',
+            f'Effective level = file active RMS + SoundPool volume (`CueTable.volume`, slider curve `gainFor`, trim, '
+            f'`ASSET_BOOST` {asset_boost:g}, volume capped at 1.0). Previous build = `{PREVIOUS_COMMIT}` at slider 100% '
+            f'(its loudest setting; the user still found it too quiet). Every cue must gain at least {MIN_GAIN_DB:g} dB '
+            'at the new default (50%), in plain active RMS and in A-weighted active RMS (IEC A-curve through bilinear '
+            'biquads, so about right to 10 kHz). The new 100% is another 6.02 dB above the new default. dBFS.', '',
+            '| class | previous 100% | new 50% (default) | new 100% | gain at default | gain at default, A-weighted | A-weighted new 100% |',
+            '|---|---:|---:|---:|---:|---:|---:|']
+    for label, names in classes:
+        avg = lambda key: sum(loud[n][key] for n in names) / len(names)
+        out.append(f"| {label} | {avg('old100'):.1f} | {avg('new50'):.1f} | {avg('new100'):.1f} | "
+                   f"{avg('gain'):+.1f} dB (min {min(loud[n]['gain'] for n in names):+.1f}) | "
+                   f"{avg('gain_a'):+.1f} dB (min {min(loud[n]['gain_a'] for n in names):+.1f}) | {avg('new100_a'):.1f} |")
+    out += ['', 'Notification channels (system notification volume applies on top; file level only):', '',
+            '| channel | desktop original (RMS / A-weighted) | new channel file (RMS / A-weighted) | gain |', '|---|---:|---:|---:|']
+    for ref, chime in zip(REFERENCES, CHIMES):
+        out.append(f"| {ref} | {m[ref]['rms_act_db']:.1f} / {m[ref]['arms_act_db']:.1f} | "
+                   f"{m[chime]['rms_act_db']:.1f} / {m[chime]['arms_act_db']:.1f} | "
+                   f"{notify[ref][0]:+.1f} / {notify[ref][1]:+.1f} dB |")
+    out += ['', '| cue | trim | previous 100% | new 50% | new 100% | gain at default | A-weighted | peak dBFS | crest dB |',
+            '|---|---:|---:|---:|---:|---:|---:|---:|---:|']
+    for label, names in classes:
+        for n in names:
+            l = loud[n]
+            out.append(f"| {n} | {trims['fx_' + n]:g} | {l['old100']:.1f} | {l['new50']:.1f} | {l['new100']:.1f} | "
+                       f"{l['gain']:+.1f} | {l['gain_a']:+.1f} | {m[n]['peak_db']:.1f} | {m[n]['crest_db']:.1f} |")
     out += ['', '## Round 2 cues', '',
             '| file | what it is | ms | onset ms | centroid Hz | dir (dominant) st |', '|---|---|---:|---:|---:|---:|']
     for n in ROUND2 + PROVIDERS:
@@ -403,11 +604,13 @@ def main():
     prov = sorted((print_distance(m[a]['print'], m[b]['print']), a, b)
                   for i, a in enumerate(PROVIDERS) for b in PROVIDERS[i + 1:])
     out += ['', f'Level model. Every `fx_` file carries {BOOST_DB:.2f} dB of slider headroom: SoundPool volume '
-            'cannot exceed 1.0, so "100% is twice as loud as the old maximum" has to live in the files. The app '
-            'plays them at half volume by default (`CueTable.ASSET_BOOST`), which is exactly the old level, and '
-            'the slider\'s upper half spends the headroom. The in-app chime copies (`fx_chime_*`) are the '
-            f'desktop chimes plus the same {BOOST_DB:.2f} dB (checked above); the desktop originals stay '
-            'untouched for the notification channels.', '',
+            'cannot exceed 1.0, so "100% is twice as loud as 50%" has to live in the files. The app '
+            'plays them at half volume by default (`CueTable.ASSET_BOOST`) and the slider\'s upper half spends the '
+            f'headroom. On top of that the files are mastered {LIFT_DB:g} dB hotter than the previous build\'s '
+            'loudest setting (pre-emphasis around 2.6 kHz, soft limiter at -0.5 dBFS, see '
+            '`scripts/generate-android-sounds.py`). The in-app chime copies (`fx_chime_*`, also the notification '
+            f'channel sounds) are the desktop chimes plus {2 * BOOST_DB + LIFT_DB:.2f} dB (checked above); the '
+            'desktop originals stay untouched.', '',
             f'Why only {DESKTOP_MARGIN_DB:g} dB under the chimes: the margin is an audibility floor, not a target. '
             'The interface cues are also far shorter than the chimes (tens of milliseconds against several '
             'hundred), so at equal RMS they are perceptually quieter still. Measured on active-region RMS.', '',
