@@ -40,7 +40,7 @@ export function composerHasContent(text: string, attachments: number, comments: 
   return text.trim() !== "" || attachments > 0 || comments > 0;
 }
 
-/** `send_blocked`'s four conditions (composer.rs:5944-5966). */
+/** Native `send_blocked` conditions plus selected-engine harness validation. */
 export interface SendBlockedConditions {
   /** Condition 1: a queued-row edit is finishing (its RPC is in flight). */
   readonly queueEditFinishing: boolean;
@@ -52,17 +52,17 @@ export interface SendBlockedConditions {
   /** Condition 3: review comments are flushing for this chat (ticket 23). */
   readonly reviewCommentFlushPending: boolean;
   /**
-   * Condition 4: the new-chat canvas with a LOADED catalog that reports no
-   * agents — offline/loading must not block.
+   * Condition 4: the new-chat canvas with a loaded catalog that reports no
+   * agents. Pending/error catalogs are gated by selectedHarnessUnavailable.
    */
   readonly newChatNoAgents: boolean;
-  /** The selected harness is no longer offered by its selected engine. */
+  /** The engine reports the harness unavailable, or a fresh chat has not confirmed it yet. */
   readonly selectedHarnessUnavailable: boolean;
 }
 
 /**
- * `send_blocked` (composer.rs:5944) — true when any of the four conditions
- * holds. Desktop's Stop is never blocked (the caller checks the mode first).
+ * `send_blocked` (composer.rs:5944) plus browser target validation — true when
+ * any condition holds. Stop is never blocked (the caller checks the mode first).
  */
 export function sendBlocked(conditions: SendBlockedConditions): boolean {
   return (

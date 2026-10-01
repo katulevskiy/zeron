@@ -535,12 +535,14 @@ export function Composer({
   // flip state, and a mode flip there never commits (7284-7300 — auto-grow
   // still morphs; only the compact↔expanded flip is suppressed).
   const newChat = chat.id === "";
-  // Loading preserves sticky intent; only a settled selected-engine catalog
-  // can declare the draft unavailable and block discovery/sends.
+  // Keep sticky intent while loading, but a fresh send must wait for this
+  // engine to confirm the harness is offered. Established chats keep their
+  // committed config and are blocked only by a settled unavailable result.
   const selectedHarnessUnavailable =
-    harnesses.loaded &&
-    harnesses.error === null &&
-    !offeredHarnesses(harnesses.rows).some((row) => row.id === draft.harness);
+    (newChat && (!harnesses.loaded || harnesses.error !== null)) ||
+    (harnesses.loaded &&
+      harnesses.error === null &&
+      !offeredHarnesses(harnesses.rows).some((row) => row.id === draft.harness));
   // Route coordination must not force an established thread into the
   // two-row layout: `dock_height`'s session side reads the composer's OWN
   // expanded state, never the forced one.
@@ -2387,9 +2389,8 @@ export function Composer({
         queueEditFinishing: busy,
         requestTargetDisconnected: session.client.state !== "connected",
         reviewCommentFlushPending: false,
-        // Condition 4 (composer.rs:5958-5962): the new-chat canvas with a
-        // LOADED catalog that reports no agents — offline/loading must not
-        // block.
+        // A settled empty catalog and an unconfirmed selected harness are
+        // separate gates; loading preserves the draft, not send permission.
         newChatNoAgents: newChat && harnesses.loaded && offeredHarnesses(harnesses.rows).length === 0,
         selectedHarnessUnavailable,
       })
