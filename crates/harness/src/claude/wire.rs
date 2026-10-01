@@ -49,6 +49,21 @@ pub(crate) struct SystemFrame {
     /// absent on subagent-owned background shell tasks.
     #[serde(default)]
     pub subagent_type: Option<String>,
+    #[serde(default)]
+    pub task_type: String,
+    #[serde(default)]
+    pub owned_by_subagent: Option<bool>,
+    /// Newer CLIs publish an authoritative set as well as task bookends.
+    #[serde(default)]
+    pub tasks: Option<Vec<BackgroundTask>>,
+}
+
+#[derive(Debug, Default, Deserialize)]
+pub(crate) struct BackgroundTask {
+    #[serde(default)]
+    pub task_id: String,
+    #[serde(default)]
+    pub ambient: bool,
 }
 
 #[derive(Debug, Default, Deserialize)]
@@ -80,6 +95,9 @@ pub(crate) struct Delta {
 /// An `assistant` or `user` frame (an Anthropic API message envelope).
 #[derive(Debug, Default, Deserialize)]
 pub(crate) struct MessageFrame {
+    /// Structured tool output (e.g. ScheduleWakeup's scheduledFor timestamp).
+    #[serde(default)]
+    pub tool_use_result: Option<Value>,
     #[serde(default)]
     pub uuid: Option<String>,
     #[serde(default)]

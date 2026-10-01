@@ -37,10 +37,13 @@ import androidx.compose.ui.Modifier
 import androidx.compose.ui.draw.clip
 import androidx.compose.ui.graphics.Shape
 import androidx.compose.ui.graphics.Color
+import androidx.compose.ui.semantics.contentDescription
+import androidx.compose.ui.semantics.semantics
 import androidx.compose.ui.text.font.FontWeight
 import androidx.compose.ui.unit.Dp
 import androidx.compose.ui.unit.dp
 import androidx.compose.ui.unit.sp
+import sh.zeron.android.core.SessionActivity
 import sh.zeron.android.design.LocalDarkTheme
 import sh.zeron.android.design.ProjectColors
 import uniffi.zeron_core.ChatIndicator
@@ -142,7 +145,8 @@ private object SpinnerQueue {
  */
 @OptIn(ExperimentalMaterial3ExpressiveApi::class)
 @Composable
-private fun WorkingSpinner() {
+private fun WorkingSpinner(shape: SessionActivity.Shape) {
+    val tone = sessionActivityColor(shape)
     val motion = LocalMotionActive.current
     var spinning by remember { mutableStateOf(false) }
     LaunchedEffect(motion) {
@@ -153,9 +157,9 @@ private fun WorkingSpinner() {
             spinning = false
         }
     }
-    Box(Modifier.size(26.dp), contentAlignment = Alignment.Center) {
-        if (spinning) LoadingIndicator(Modifier.fillMaxSize())
-        else Box(Modifier.size(8.dp).clip(CircleShape).background(MaterialTheme.colorScheme.primary))
+    Box(Modifier.size(26.dp).semantics(mergeDescendants = true) { contentDescription = shape.description }, contentAlignment = Alignment.Center) {
+        if (spinning) LoadingIndicator(Modifier.fillMaxSize(), color = tone)
+        else Box(Modifier.size(8.dp).clip(CircleShape).background(tone))
     }
 }
 
@@ -163,6 +167,11 @@ private fun WorkingSpinner() {
 @OptIn(ExperimentalMaterial3ExpressiveApi::class)
 @Composable
 fun StatusLabel(row: SessionRow) {
+    val activity = SessionActivity.shape(row.indicator, row.runningSubagents, row.pendingCallbacks)
+    if (activity != null) {
+        WorkingSpinner(activity)
+        return
+    }
     @Composable
     fun label(text: String, color: Color, dot: Boolean) {
         Row(verticalAlignment = Alignment.CenterVertically) {
@@ -176,7 +185,7 @@ fun StatusLabel(row: SessionRow) {
         }
     }
     when (row.indicator) {
-        ChatIndicator.WORKING -> WorkingSpinner()
+        ChatIndicator.WORKING -> WorkingSpinner(SessionActivity.Shape.MainRunning)
         ChatIndicator.AWAITING_INPUT -> label("Input", MaterialTheme.colorScheme.primary, dot = true)
         ChatIndicator.ERRORED -> label("Failed", MaterialTheme.colorScheme.error, dot = true)
         ChatIndicator.COMPLETED -> label("Done", successColor(), dot = false)

@@ -574,6 +574,12 @@ pub enum AgentEvent {
     AvailableCommands {
         commands: Vec<SlashCommand>,
     },
+    /// Explicitly reported background work whose completion can wake the main
+    /// agent. Engine metadata only: never a transcript part or a subagent.
+    #[serde(rename_all = "camelCase")]
+    PendingCallbacks {
+        count: u32,
+    },
     Error {
         message: String,
     },

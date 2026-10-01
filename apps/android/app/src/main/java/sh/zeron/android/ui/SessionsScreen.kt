@@ -7,7 +7,6 @@ import sh.zeron.android.feedback.OpenCloseFeedback
 import sh.zeron.android.feedback.LocalFeedback
 import sh.zeron.android.feedback.Haptic
 import sh.zeron.android.feedback.Cue
-import androidx.compose.foundation.background
 import androidx.compose.foundation.horizontalScroll
 import androidx.compose.foundation.layout.Arrangement
 import androidx.compose.foundation.layout.Box
@@ -59,7 +58,6 @@ import androidx.compose.runtime.saveable.rememberSaveable
 import androidx.compose.runtime.setValue
 import androidx.compose.ui.Alignment
 import androidx.compose.ui.Modifier
-import androidx.compose.ui.draw.clip
 import androidx.compose.ui.graphics.Shape
 import androidx.compose.runtime.LaunchedEffect
 import androidx.compose.runtime.snapshotFlow
@@ -68,7 +66,7 @@ import androidx.compose.ui.text.style.TextOverflow
 import androidx.compose.ui.unit.dp
 import kotlinx.coroutines.launch
 import sh.zeron.android.core.AppModel
-import sh.zeron.android.design.HarnessMark
+import sh.zeron.android.core.SessionActivity
 import sh.zeron.android.design.LocalDarkTheme
 import sh.zeron.android.design.ProjectColors
 import sh.zeron.android.design.ZIcon
@@ -96,9 +94,11 @@ private fun frontRows(ws: WorkspaceSnapshot): List<SessionRow> {
     return (ws.front.pinned + ws.front.sections.flatMap { it.sessions } + ws.front.recent).filter { seen.add(it.id) }
 }
 
-private fun liveCounts(ws: WorkspaceSnapshot): Pair<Int, Int> {
+internal fun workingRows(ws: WorkspaceSnapshot): List<SessionRow> = frontRows(ws).filter(SessionActivity::isWorking)
+
+internal fun liveCounts(ws: WorkspaceSnapshot): Pair<Int, Int> {
     val rows = frontRows(ws)
-    return rows.count { it.indicator == ChatIndicator.WORKING } to rows.count { it.indicator == ChatIndicator.AWAITING_INPUT }
+    return rows.count(SessionActivity::isWorking) to rows.count { it.indicator == ChatIndicator.AWAITING_INPUT }
 }
 
 @OptIn(ExperimentalMaterial3Api::class, ExperimentalMaterial3ExpressiveApi::class)
@@ -224,7 +224,7 @@ fun SessionsScreen(model: AppModel, onOpen: (String) -> Unit) {
                         if (front.recent.isNotEmpty()) group("recent", "Recent", front.recent, model, onOpen, archive)
                     }
                     Filter.NeedsYou -> group("f", null, frontRows(ws).filter { it.indicator == ChatIndicator.AWAITING_INPUT }, model, onOpen, archive)
-                    Filter.Working -> group("f", null, frontRows(ws).filter { it.indicator == ChatIndicator.WORKING }, model, onOpen, archive)
+                    Filter.Working -> group("f", null, workingRows(ws), model, onOpen, archive)
                     Filter.Pinned -> group("f", null, front.pinned, model, onOpen, archive)
                 }
                 val empty = when (filter) {
@@ -342,15 +342,7 @@ fun SessionItem(
             supportingContent = { Subline(row) },
             trailingContent = {
                 Column(horizontalAlignment = Alignment.End, verticalArrangement = Arrangement.spacedBy(6.dp)) {
-                    // Running subagents lead the row's own status (never
-                    // replace it) — also once the parent's turn is done.
-                    Row(verticalAlignment = Alignment.CenterVertically) {
-                        if (row.runningSubagents > 0u) {
-                            RunningPill(row.runningSubagents.toInt())
-                            Spacer(Modifier.width(8.dp))
-                        }
-                        StatusLabel(row)
-                    }
+                    StatusLabel(row)
                     row.pullRequest?.let { PrBadge(it.number, it.state) }
                 }
             },
@@ -374,10 +366,7 @@ fun SessionItem(
 @Composable
 private fun HarnessTile(row: SessionRow) {
     val tone = ProjectColors.color(row.colorIndex(), LocalDarkTheme.current)
-    Box(
-        Modifier.size(48.dp).clip(RoundedCornerShape(16.dp)).background(tone.copy(alpha = if (LocalDarkTheme.current) 0.18f else 0.12f)),
-        contentAlignment = Alignment.Center,
-    ) { HarnessMark(row.harness, 24.dp, tint = MaterialTheme.colorScheme.onSurface) }
+    HarnessActivityTile(row.harness, tone, row.runningSubagents)
 }
 
 /** Project monogram + name, then the branch — the desktop sidebar subline. */

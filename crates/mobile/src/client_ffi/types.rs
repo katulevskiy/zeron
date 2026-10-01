@@ -590,6 +590,7 @@ pub struct SessionRow {
     /// Subagents running right now, also after the chat's own turn settled
     /// (staleness-gated). Draw as "● N" (`running_count_label`).
     pub running_subagents: u32,
+    pub pending_callbacks: u32,
 }
 
 impl From<&zc::SessionRow> for SessionRow {
@@ -630,6 +631,7 @@ impl From<&zc::SessionRow> for SessionRow {
             parent_chat_id: r.parent_chat_id.clone(),
             room_gen: r.room_gen,
             running_subagents: r.running_subagents,
+            pending_callbacks: r.pending_callbacks,
         }
     }
 }

@@ -72,6 +72,13 @@ pub fn running_subagents(session: Option<&Session>, now: DateTime<Utc>) -> u32 {
         .map_or(0, |s| s.running_subagents)
 }
 
+/// Confirmed deferred work, never inferred merely from an idle warm process.
+pub fn pending_callbacks(session: Option<&Session>, now: DateTime<Utc>) -> u32 {
+    session
+        .filter(|s| now.signed_duration_since(s.updated_at).num_milliseconds() <= SESSION_STALE_MS)
+        .map_or(0, |s| s.pending_callbacks)
+}
+
 /// The full display status for a chat row / tab dot: live states win, then the
 /// synced seen marker decides completed-vs-idle. Staleness gating rides on
 /// [`effective_indicator`]; the derivation itself is [`crate::chat_indicator`].
@@ -207,6 +214,7 @@ mod gate_tests {
             started_at: None,
             updated_at,
             running_subagents: running,
+            pending_callbacks: 0,
         }
     }
 
@@ -221,6 +229,7 @@ mod gate_tests {
         }))
         .unwrap();
         assert_eq!(row.running_subagents, 0);
+        assert_eq!(row.pending_callbacks, 0);
         let wire = serde_json::to_value(running_session(3, Utc::now())).unwrap();
         assert_eq!(wire["runningSubagents"], 3);
     }
@@ -237,6 +246,18 @@ mod gate_tests {
         );
         assert_eq!(running_subagents(Some(&stale), now), 0);
         assert_eq!(running_subagents(None, now), 0);
+    }
+
+    #[test]
+    fn pending_callbacks_are_visible_while_idle_and_expire_with_the_host() {
+        let now = Utc::now();
+        let mut session = running_session(0, now);
+        session.status = SessionStatus::Idle;
+        session.pending_callbacks = 2;
+        assert_eq!(pending_callbacks(Some(&session), now), 2);
+        session.updated_at = now - chrono::Duration::milliseconds(SESSION_STALE_MS + 1);
+        assert_eq!(pending_callbacks(Some(&session), now), 0);
+        assert_eq!(pending_callbacks(None, now), 0);
     }
 
     #[test]

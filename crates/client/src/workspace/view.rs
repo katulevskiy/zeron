@@ -105,6 +105,8 @@ pub struct SessionRow {
     /// Subagents of this chat running right now — also after the parent's
     /// turn has settled (staleness-gated like `indicator`).
     pub running_subagents: u32,
+    /// Confirmed background callbacks on a live, freshness-gated host.
+    pub pending_callbacks: u32,
 }
 
 #[derive(Debug, Clone, PartialEq)]
@@ -408,6 +410,7 @@ fn hash_row(row: &SessionRow) -> u64 {
     row.parent_chat_id.hash(&mut h);
     row.room_gen.hash(&mut h);
     row.running_subagents.hash(&mut h);
+    row.pending_callbacks.hash(&mut h);
     h.finish()
 }
 
@@ -510,6 +513,7 @@ fn build_row(chat: &Chat, rc: &RowContext<'_>, cx: &DeriveContext<'_>) -> Arc<Se
         parent_chat_id: chat.parent_chat_id.clone(),
         room_gen: chat.room_gen.unwrap_or(1),
         running_subagents: zeron_proto::view::running_subagents(session, cx.now),
+        pending_callbacks: zeron_proto::view::pending_callbacks(session, cx.now),
     };
     row.revision = hash_row(&row);
     // Unchanged rows keep their Arc across snapshots (pointer-equal diffing).

@@ -3135,3 +3135,86 @@ async fn session_row_counts_running_subagents_until_the_run_ends() {
         "an ended run leaves no subagents counted"
     );
 }
+
+/// Background metadata survives a completed turn without fabricating another
+/// assistant entry, then clears on callback completion or runtime shutdown.
+#[tokio::test(flavor = "multi_thread")]
+async fn parked_background_callbacks_do_not_unpark_the_main_thread() {
+    let dir = tempfile::tempdir().unwrap();
+    let core = assemble(
+        dir.path(),
+        Arc::new(ScriptedHarness {
+            script: vec![
+                AgentEvent::TextDelta {
+                    text: "Waiting for a build".into(),
+                },
+                AgentEvent::PendingCallbacks { count: 1 },
+                done(DoneStatus::Completed),
+                AgentEvent::PendingCallbacks { count: 0 },
+                AgentEvent::TextDelta {
+                    text: "Build finished".into(),
+                },
+                done(DoneStatus::Completed),
+                AgentEvent::PendingCallbacks { count: 1 },
+            ],
+            step_delay: Duration::from_millis(400),
+            hang_until_interrupt: true,
+        }),
+    );
+    let handle = core.doc_host.open(CHAT).unwrap();
+    queue_as_viewer(
+        handle.doc(),
+        "callbacks-run",
+        SessionCommandPayload::Run {
+            request: run_request("start a background build"),
+            message_id: "callback-user".into(),
+        },
+    );
+    let idle_with = |count| {
+        core.sessions
+            .session_status(CHAT)
+            .is_some_and(|s| s.status == SessionStatus::Idle && s.pending_callbacks == count)
+    };
+    wait_for(|| idle_with(1), "settled main thread awaiting callback").await;
+    let first_completion = core
+        .sessions
+        .session_status(CHAT)
+        .unwrap()
+        .last_completed_turn;
+    let first_assistants = entries(&core)
+        .iter()
+        .filter(|entry| entry.role == MessageRole::Assistant)
+        .count();
+    wait_for(|| idle_with(0), "callback completion metadata").await;
+    assert_eq!(
+        core.sessions
+            .session_status(CHAT)
+            .unwrap()
+            .last_completed_turn,
+        first_completion,
+        "metadata cannot fabricate another completed main turn"
+    );
+    assert_eq!(
+        entries(&core)
+            .iter()
+            .filter(|entry| entry.role == MessageRole::Assistant)
+            .count(),
+        first_assistants,
+        "callback metadata cannot fabricate assistant output"
+    );
+    wait_for(|| idle_with(1), "new callback after an actual wake turn").await;
+    assert!(
+        entries(&core).iter().any(|entry| {
+            entry.role == MessageRole::Assistant
+                && entry.status == Some(MessageStatus::Complete)
+                && entry.parts.iter().any(|part| {
+                    matches!(part, MessagePart::Text { text, .. } if text == "Build finished")
+                })
+        }),
+        "main output still wakes and settles its own assistant entry"
+    );
+    // Cancel targets an in-flight user turn; an idle warm process is retired
+    // by engine shutdown, which must clear its deferred-work metadata too.
+    core.sessions.shutdown().await;
+    wait_for(|| idle_with(0), "runtime shutdown clears pending callbacks").await;
+}

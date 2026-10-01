@@ -209,6 +209,7 @@ impl DemoHost {
                             s.status,
                             SessionStatus::Working | SessionStatus::AwaitingInput
                         ) || s.running_subagents > 0
+                            || s.pending_callbacks > 0
                     })
                     .cloned()
                     .collect();
@@ -514,6 +515,7 @@ impl DemoHost {
             doc.upsert_session(&Session {
                 last_completed_turn: completed.map(str::to_owned),
                 running_subagents: 0,
+                pending_callbacks: 0,
                 chat_id: chat_id.to_owned(),
                 device_id: host,
                 status,

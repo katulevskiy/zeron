@@ -320,6 +320,10 @@ pub struct Session {
     /// has not opened; read it through `view::running_subagents`.
     #[serde(default)]
     pub running_subagents: u32,
+    /// Explicit background tasks whose completion may wake the parked agent.
+    /// Zero on older engines; freshness is gated just like running subagents.
+    #[serde(default)]
+    pub pending_callbacks: u32,
 }
 
 #[derive(Debug, Clone, PartialEq, Serialize, Deserialize)]

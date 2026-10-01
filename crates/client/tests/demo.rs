@@ -563,6 +563,17 @@ fn rows_count_running_subagents_even_when_the_parent_is_done() {
 }
 
 #[test]
+fn idle_rows_report_confirmed_background_callbacks() {
+    let (client, _dir) = demo(fast());
+    let ws = client.workspace();
+    let row = ws.session("chat-deploy").unwrap();
+    assert_ne!(row.indicator, ChatIndicator::Working);
+    assert_eq!(row.running_subagents, 0);
+    assert_eq!(row.pending_callbacks, 1);
+    assert_eq!(ws.session("chat-background").unwrap().pending_callbacks, 0);
+}
+
+#[test]
 fn subagents_group_like_the_desktop_and_open_read_only() {
     let (client, _dir) = demo(fast());
     let parent = client.open_session("chat-fanout").unwrap();

@@ -296,6 +296,7 @@ fn session(chat_id: &str, device_id: &str, status: SessionStatus) -> Session {
     Session {
         last_completed_turn: None,
         running_subagents: 0,
+        pending_callbacks: 0,
         chat_id: chat_id.into(),
         device_id: device_id.into(),
         status,
@@ -1249,6 +1250,23 @@ fn running_subagent_count_replicates_and_clears() {
     server_round(&mut server, &mut seq, &mut [&mut source, &mut viewer]);
     assert_eq!(viewer.read_sessions().unwrap(), vec![row.clone()]);
     row.running_subagents = 0;
+    source.upsert_session(&row).unwrap();
+    server_round(&mut server, &mut seq, &mut [&mut source, &mut viewer]);
+    assert_eq!(viewer.read_sessions().unwrap(), vec![row]);
+}
+
+#[test]
+fn idle_background_callback_count_replicates_and_clears() {
+    let mut source = RegistryDoc::new("dev-a");
+    let mut viewer = RegistryDoc::new("dev-b");
+    let mut server = HashMap::new();
+    let mut seq = 0;
+    let mut row = session("chat-1", "dev-a", SessionStatus::Idle);
+    row.pending_callbacks = 2;
+    source.upsert_session(&row).unwrap();
+    server_round(&mut server, &mut seq, &mut [&mut source, &mut viewer]);
+    assert_eq!(viewer.read_sessions().unwrap(), vec![row.clone()]);
+    row.pending_callbacks = 0;
     source.upsert_session(&row).unwrap();
     server_round(&mut server, &mut seq, &mut [&mut source, &mut viewer]);
     assert_eq!(viewer.read_sessions().unwrap(), vec![row]);

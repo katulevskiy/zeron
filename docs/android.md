@@ -473,9 +473,21 @@ The desktop's Subagents view (#638, #647), on the phone:
   and grouping are the desktop's and live in Rust so iOS can reuse them:
   running first, longest-running on top, then unstamped; finished ones split
   into Completed and Failed, newest first.
-- **Sessions list**: a "● N" pill (Geist Mono digits, capped "99+") leads the
-  row's own status — it never replaces it, so a finished parent reads
-  "● 2 ✓ Done".
+- **Sessions list**: a purple badge at the provider tile's top-right shows
+  the active subagent count, grows with the digits, and caps at "99+". It is
+  hidden at zero. The rotating Material shape is purple while the main thread
+  runs, yellow when the main thread is idle with running subagents, and blue
+  when an idle main thread has a confirmed background callback. Input and
+  Failed labels remain visible when the main thread needs attention.
+  Chats with active subagents or callbacks count toward **Working**, including
+  the filter, its count, and the bottom summary.
+- **Background callbacks**: the host engine reports Claude's main-thread
+  background shell tasks and monitors, and successful `ScheduleWakeup` timers.
+  Completion, cancellation, expiry, and runtime shutdown clear them; nested
+  subagent tasks do not count as main callbacks. Other providers and opaque
+  callback mechanisms remain idle until they expose a reliable signal. Older
+  host engines omit the field and show no blue state. Callback rows use the
+  same heartbeat staleness check as subagent counts.
 - **Session header**: a subagents button (the bot glyph) appears once the
   chat has any; while some run its face breathes in the activity colour and
   a badge shows the count. It opens the **Subagents** sheet: the running

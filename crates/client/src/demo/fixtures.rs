@@ -123,6 +123,7 @@ pub(crate) fn chats() -> Vec<DemoChat> {
         },
         DemoChat {
             last_ago_ms: DAY,
+            status: Some(SessionStatus::Idle),
             created_ago_ms: 2 * DAY,
             ..chat(
                 "chat-deploy",
@@ -445,6 +446,7 @@ pub(crate) fn seed(
                 last_completed_turn: (status == SessionStatus::Idle)
                     .then(|| format!("{}-a0", demo.id)),
                 running_subagents: super::transcripts::running_subagents(demo.id),
+                pending_callbacks: u32::from(demo.id == "chat-deploy"),
                 chat_id: demo.id.into(),
                 device_id: demo.device.into(),
                 status,
