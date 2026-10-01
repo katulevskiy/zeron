@@ -25,9 +25,9 @@ use sha2::{Digest, Sha256};
 use tokio::time::Instant;
 use tokio_util::sync::CancellationToken;
 use zeron_proto::{
-    ArtifactKind, ArtifactSummary, HarnessId, NodeKind, NodeOutcome, ReasoningLevel, WorkflowActorTag,
-    WorkflowConcurrency, WorkflowEvent, WorkflowEventKind, WorkflowQuestion, WorkflowStopReason,
-    WorkflowUsage,
+    ArtifactKind, ArtifactSummary, HarnessId, NodeKind, NodeOutcome, ReasoningLevel,
+    WorkflowActorTag, WorkflowConcurrency, WorkflowEvent, WorkflowEventKind, WorkflowQuestion,
+    WorkflowStopReason, WorkflowUsage,
 };
 use zeron_workflow::host::{
     ActorSpec, ArtifactContent, ArtifactRequest, AskReply, AskRequest, Completion, Host, ReadOp,
@@ -235,7 +235,9 @@ impl RunCore {
     }
 
     pub(super) fn result_record(&self, value: &Value) {
-        let _ = self.journal.append(&Record::Result { value: value.clone() });
+        let _ = self.journal.append(&Record::Result {
+            value: value.clone(),
+        });
     }
 
     // ── events ─────────────────────────────────────────────────────────────
@@ -260,7 +262,9 @@ impl RunCore {
     }
 
     fn emit_usage(&self) {
-        self.emit(WorkflowEventKind::UsageUpdated { usage: self.usage() });
+        self.emit(WorkflowEventKind::UsageUpdated {
+            usage: self.usage(),
+        });
     }
 
     fn concurrency_changed(&self) {
@@ -317,10 +321,11 @@ impl RunCore {
     /// Called periodically: raise the stall notice once, lift it on success.
     pub(super) fn check_stall(&self) {
         let quiet = lock(&self.last_success).elapsed();
-        if quiet >= STALL_AFTER && self.has_work_pending() {
-            if !self.stalled.swap(true, Ordering::SeqCst) {
-                self.emit(WorkflowEventKind::Stalled);
-            }
+        if quiet >= STALL_AFTER
+            && self.has_work_pending()
+            && !self.stalled.swap(true, Ordering::SeqCst)
+        {
+            self.emit(WorkflowEventKind::Stalled);
         }
     }
 
@@ -334,7 +339,11 @@ impl RunCore {
     // ── actors and lanes ───────────────────────────────────────────────────
 
     fn lane_for(&self, resolved: &Resolved) -> Arc<Lane> {
-        let key = format!("{:?}/{}", resolved.harness, resolved.model.as_deref().unwrap_or("-"));
+        let key = format!(
+            "{:?}/{}",
+            resolved.harness,
+            resolved.model.as_deref().unwrap_or("-")
+        );
         let ceiling = self.meta().options.max_concurrency.max(1);
         lock(&self.lanes)
             .entry(key)
@@ -362,7 +371,11 @@ impl RunCore {
 
     async fn resolve_uncached(&self, actor: &Actor) -> Result<Resolved, String> {
         let spec = &actor.spec;
-        let harness = match spec.harness.as_deref().or(self.meta().options.harness.as_deref()) {
+        let harness = match spec
+            .harness
+            .as_deref()
+            .or(self.meta().options.harness.as_deref())
+        {
             Some(name) => parse_harness(name)?,
             None => self.defaults.harness,
         };
@@ -370,10 +383,20 @@ impl RunCore {
             .model
             .clone()
             .or_else(|| self.meta().options.model.clone())
-            .or_else(|| (harness == self.defaults.harness).then(|| self.defaults.model.clone()).flatten());
-        let reasoning = match spec.reasoning.as_deref().or(self.meta().options.reasoning.as_deref()) {
+            .or_else(|| {
+                (harness == self.defaults.harness)
+                    .then(|| self.defaults.model.clone())
+                    .flatten()
+            });
+        let reasoning = match spec
+            .reasoning
+            .as_deref()
+            .or(self.meta().options.reasoning.as_deref())
+        {
             Some(r) => Some(parse_reasoning(r)?),
-            None => (harness == self.defaults.harness).then_some(self.defaults.reasoning).flatten(),
+            None => (harness == self.defaults.harness)
+                .then_some(self.defaults.reasoning)
+                .flatten(),
         };
         let catalog = lock(&self.shared.catalog).clone();
         catalog.check(harness, model.as_deref()).await?;
@@ -418,7 +441,15 @@ impl RunCore {
         Some((lane_permit, global_permit))
     }
 
-    fn settle_ask(&self, job: Job, reply: AskReply, outcome: NodeOutcome, journal: bool, child: Option<String>, tokens: (u64, u64)) {
+    fn settle_ask(
+        &self,
+        job: Job,
+        reply: AskReply,
+        outcome: NodeOutcome,
+        journal: bool,
+        child: Option<String>,
+        tokens: (u64, u64),
+    ) {
         let (site_id, ordinal) = (job.req.key.site.clone(), job.req.key.ordinal);
         if journal {
             let _ = self.journal.append(&Record::AskDone {
@@ -454,7 +485,10 @@ impl RunCore {
         if let Some(max) = self.meta().options.budgets.max_tokens
             && self.usage().total_tokens() >= max
         {
-            self.request_stop(WorkflowStopReason::Budget, format!("the token budget of {max} was reached"));
+            self.request_stop(
+                WorkflowStopReason::Budget,
+                format!("the token budget of {max} was reached"),
+            );
         }
     }
 
@@ -478,17 +512,35 @@ impl RunCore {
         let resolved = match self.resolve(actor).await {
             Ok(r) => r,
             Err(message) => {
-                self.settle_ask(job, AskReply::failed(message), NodeOutcome::Failed, true, None, (0, 0));
+                self.settle_ask(
+                    job,
+                    AskReply::failed(message),
+                    NodeOutcome::Failed,
+                    true,
+                    None,
+                    (0, 0),
+                );
                 return;
             }
         };
         let lane = self.lane_for(&resolved);
         let Some(backend) = self.shared.doc_host.ask_backend() else {
-            self.settle_ask(job, AskReply::failed("asks are not available in this engine"), NodeOutcome::Failed, true, None, (0, 0));
+            self.settle_ask(
+                job,
+                AskReply::failed("asks are not available in this engine"),
+                NodeOutcome::Failed,
+                true,
+                None,
+                (0, 0),
+            );
             return;
         };
         let (site, ordinal) = (job.req.key.site.clone(), job.req.key.ordinal);
-        let salt = u64::from_le_bytes(Sha256::digest(job.req.key.to_string().as_bytes())[..8].try_into().unwrap_or([0; 8]));
+        let salt = u64::from_le_bytes(
+            Sha256::digest(job.req.key.to_string().as_bytes())[..8]
+                .try_into()
+                .unwrap_or([0; 8]),
+        );
         let mut attempt = 0u32;
         let mut dispatched = false;
         loop {
@@ -538,7 +590,14 @@ impl RunCore {
                     let mut reply = AskReply::ok(value);
                     reply.tokens = outcome.usage.total_tokens();
                     let tokens = (outcome.usage.input_tokens, outcome.usage.output_tokens);
-                    self.settle_ask(job, reply, NodeOutcome::Ok, true, Some(outcome.child_chat_id), tokens);
+                    self.settle_ask(
+                        job,
+                        reply,
+                        NodeOutcome::Ok,
+                        true,
+                        Some(outcome.child_chat_id),
+                        tokens,
+                    );
                     return;
                 }
                 Err(failure) => {
@@ -566,7 +625,11 @@ impl RunCore {
                                 if attempt > MAX_REDRIVES {
                                     self.request_stop(
                                         WorkflowStopReason::Provider,
-                                        format!("the provider kept failing ({}): {}", fault.label(), one_line(message)),
+                                        format!(
+                                            "the provider kept failing ({}): {}",
+                                            fault.label(),
+                                            one_line(message)
+                                        ),
                                     );
                                     self.settle_cancelled(job);
                                     return;
@@ -645,7 +708,9 @@ impl RunCore {
         spec.read_only = req.read_only;
         spec.persistent = true;
         spec.reuse_child = lock(&actor.child).clone();
-        spec.timeout = req.timeout_s.map_or(DEFAULT_ASK_TIMEOUT, Duration::from_secs);
+        spec.timeout = req
+            .timeout_s
+            .map_or(DEFAULT_ASK_TIMEOUT, Duration::from_secs);
         spec.harness = Some(resolved.harness);
         spec.model = resolved.model.clone();
         spec.reasoning = resolved.reasoning;
@@ -698,7 +763,9 @@ impl RunCore {
             AskProgress::Executing | AskProgress::Resumed => {
                 self.emit(WorkflowEventKind::NodeExecuting { site_id, ordinal })
             }
-            AskProgress::Repairing { .. } => self.emit(WorkflowEventKind::NodeRepairing { site_id, ordinal }),
+            AskProgress::Repairing { .. } => {
+                self.emit(WorkflowEventKind::NodeRepairing { site_id, ordinal })
+            }
             AskProgress::Nudged => self.emit(WorkflowEventKind::NodeNudged { site_id, ordinal }),
             AskProgress::Waiting => self.emit(WorkflowEventKind::NodeWaiting { site_id, ordinal }),
             AskProgress::Turn {
@@ -727,7 +794,14 @@ impl RunCore {
             asked_at: crate::now_ms(),
         };
         self.emit(WorkflowEventKind::EscalationRaised { question });
-        let text = prompts::escalation_message(&self.name, &self.run_id, &actor.name, &e.qid, &e.question, &e.context);
+        let text = prompts::escalation_message(
+            &self.name,
+            &self.run_id,
+            &actor.name,
+            &e.qid,
+            &e.question,
+            &e.context,
+        );
         if let Err(err) = self.shared.doc_host.enqueue_machine_message(
             &self.chat_id,
             &format!("workflow-{}-q-{}", self.run_id, e.qid),
@@ -750,9 +824,14 @@ impl RunCore {
         let Some(backend) = self.shared.doc_host.ask_backend() else {
             return false;
         };
-        if backend.answer_escalation(&child, qid, answer.to_owned()).await {
+        if backend
+            .answer_escalation(&child, qid, answer.to_owned())
+            .await
+        {
             lock(&self.questions).remove(qid);
-            self.emit(WorkflowEventKind::EscalationResolved { qid: qid.to_owned() });
+            self.emit(WorkflowEventKind::EscalationResolved {
+                qid: qid.to_owned(),
+            });
             true
         } else {
             false
@@ -797,7 +876,11 @@ fn digest_of(parts: &[&str]) -> String {
         h.update((p.len() as u64).to_le_bytes());
         h.update(p.as_bytes());
     }
-    h.finalize().iter().take(12).map(|b| format!("{b:02x}")).collect()
+    h.finalize()
+        .iter()
+        .take(12)
+        .map(|b| format!("{b:02x}"))
+        .collect()
 }
 
 // ── the Host the script sees ──────────────────────────────────────────────
@@ -805,7 +888,9 @@ fn digest_of(parts: &[&str]) -> String {
 impl Host for RunCore {
     fn enter_phase(&self, name: &str) {
         *lock(&self.phase) = Some(name.to_owned());
-        self.emit(WorkflowEventKind::PhaseEntered { name: name.to_owned() });
+        self.emit(WorkflowEventKind::PhaseEntered {
+            name: name.to_owned(),
+        });
     }
 
     fn create_actor(&self, key: &SiteKey, spec: &ActorSpec) {
@@ -832,7 +917,10 @@ impl Host for RunCore {
         let key = req.key.clone();
         let digest = digest_of(&[
             &req.instructions,
-            &req.schema.as_ref().map(Value::to_string).unwrap_or_default(),
+            &req.schema
+                .as_ref()
+                .map(Value::to_string)
+                .unwrap_or_default(),
             if req.read_only { "ro" } else { "rw" },
         ]);
         self.emit(WorkflowEventKind::NodeQueued {
@@ -841,7 +929,11 @@ impl Host for RunCore {
             kind: NodeKind::Ask,
             actor_site_id: Some(req.actor.site.clone()),
             actor_ordinal: req.actor.ordinal,
-            instructions_head: req.instructions.chars().take(zeron_proto::WORKFLOW_HEAD_CHARS + 1).collect(),
+            instructions_head: req
+                .instructions
+                .chars()
+                .take(zeron_proto::WORKFLOW_HEAD_CHARS + 1)
+                .collect(),
             phase_name: lock(&self.phase).clone(),
         });
         // A resumed run answers from the journal: no child, no cost.
@@ -863,19 +955,30 @@ impl Host for RunCore {
                 digest,
                 completer,
             };
-            let mut reply = if *ok { AskReply::ok(value.clone()) } else { AskReply::failed(error.clone().unwrap_or_default()) };
+            let mut reply = if *ok {
+                AskReply::ok(value.clone())
+            } else {
+                AskReply::failed(error.clone().unwrap_or_default())
+            };
             reply.cached = true;
             reply.tokens = input_tokens + output_tokens;
             lock(&self.usage).nodes_cached += 1;
             let _ = child_chat_id;
-            let outcome = if *ok { NodeOutcome::Ok } else { NodeOutcome::Failed };
+            let outcome = if *ok {
+                NodeOutcome::Ok
+            } else {
+                NodeOutcome::Failed
+            };
             self.settle_ask_cached(job, reply, outcome);
             return completion;
         }
         if let Some(max) = self.meta().options.budgets.max_asks
             && self.asks_started.fetch_add(1, Ordering::SeqCst) + 1 > max
         {
-            self.request_stop(WorkflowStopReason::Budget, format!("the ask budget of {max} was reached"));
+            self.request_stop(
+                WorkflowStopReason::Budget,
+                format!("the ask budget of {max} was reached"),
+            );
             return completed(AskReply::failed("the run's ask budget was reached"));
         }
         let Some(actor) = lock(&self.actors).get(&req.actor.to_string()).cloned() else {
@@ -911,10 +1014,17 @@ impl Host for RunCore {
             kind: NodeKind::Run,
             actor_site_id: None,
             actor_ordinal: 0,
-            instructions_head: head.chars().take(zeron_proto::WORKFLOW_HEAD_CHARS + 1).collect(),
+            instructions_head: head
+                .chars()
+                .take(zeron_proto::WORKFLOW_HEAD_CHARS + 1)
+                .collect(),
             phase_name: lock(&self.phase).clone(),
         });
-        let digest = digest_of(&[&req.program, &req.args.join("\u{1f}"), req.cwd.as_deref().unwrap_or("")]);
+        let digest = digest_of(&[
+            &req.program,
+            &req.args.join("\u{1f}"),
+            req.cwd.as_deref().unwrap_or(""),
+        ]);
         let (completer, completion) = completion();
         if let Some(Record::RunDone {
             digest: recorded,
@@ -959,8 +1069,14 @@ impl Host for RunCore {
                 });
                 return; // dropping the completer abandons the script's wait
             }
-            me.emit(WorkflowEventKind::NodeDispatched { site_id: req.key.site.clone(), ordinal: req.key.ordinal });
-            me.emit(WorkflowEventKind::NodeExecuting { site_id: req.key.site.clone(), ordinal: req.key.ordinal });
+            me.emit(WorkflowEventKind::NodeDispatched {
+                site_id: req.key.site.clone(),
+                ordinal: req.key.ordinal,
+            });
+            me.emit(WorkflowEventKind::NodeExecuting {
+                site_id: req.key.site.clone(),
+                ordinal: req.key.ordinal,
+            });
             let world = me.world.clone();
             let flag = me.flag.clone();
             let request = req.clone();
@@ -992,7 +1108,11 @@ impl Host for RunCore {
 
     fn read(&self, key: &SiteKey, op: &ReadOp) -> Result<Value, String> {
         let digest = digest_of(&[op.name(), &format!("{op:?}")]);
-        if let Some(Record::ReadDone { digest: recorded, value, .. }) = self.replay.reads.get(&key.to_string())
+        if let Some(Record::ReadDone {
+            digest: recorded,
+            value,
+            ..
+        }) = self.replay.reads.get(&key.to_string())
             && *recorded == digest
         {
             let _ = self.journal.append(&Record::ReadDone {
@@ -1012,7 +1132,9 @@ impl Host for RunCore {
     }
 
     fn log(&self, line: &str) {
-        let _ = self.journal.append(&Record::Log { line: line.to_owned() });
+        let _ = self.journal.append(&Record::Log {
+            line: line.to_owned(),
+        });
     }
 
     fn report(&self, item: Value, artifact_id: Option<String>) -> Result<(), String> {
@@ -1036,50 +1158,68 @@ impl Host for RunCore {
     }
 
     fn artifact(&self, req: ArtifactRequest) -> Result<(), String> {
-        let (kind, content_type, extension, item_count, bytes): (_, _, String, _, _) = match &req.content {
-            ArtifactContent::Markdown(text) => (ArtifactKind::Markdown, "text/markdown", "md".to_owned(), 0, text.clone().into_bytes()),
-            ArtifactContent::Table { columns, rows } => (
-                ArtifactKind::Table,
-                "application/json",
-                "json".to_owned(),
-                rows.len() as u32,
-                serde_json::to_vec(&json!({"columns": columns, "rows": rows})).map_err(|e| e.to_string())?,
-            ),
-            ArtifactContent::Metrics(items) => (
-                ArtifactKind::Metrics,
-                "application/json",
-                "json".to_owned(),
-                items.len() as u32,
-                serde_json::to_vec(
-                    &items
-                        .iter()
-                        .map(|m| json!({"label": m.label, "value": m.value, "unit": m.unit}))
-                        .collect::<Vec<_>>(),
-                )
-                .map_err(|e| e.to_string())?,
-            ),
-            ArtifactContent::File(path) => {
-                let full = confine(self.world.root(), path)?;
-                if !full.is_file() {
-                    return Err(format!("{path:?} is not a file"));
+        let (kind, content_type, extension, item_count, bytes): (_, _, String, _, _) =
+            match &req.content {
+                ArtifactContent::Markdown(text) => (
+                    ArtifactKind::Markdown,
+                    "text/markdown",
+                    "md".to_owned(),
+                    0,
+                    text.clone().into_bytes(),
+                ),
+                ArtifactContent::Table { columns, rows } => (
+                    ArtifactKind::Table,
+                    "application/json",
+                    "json".to_owned(),
+                    rows.len() as u32,
+                    serde_json::to_vec(&json!({"columns": columns, "rows": rows}))
+                        .map_err(|e| e.to_string())?,
+                ),
+                ArtifactContent::Metrics(items) => (
+                    ArtifactKind::Metrics,
+                    "application/json",
+                    "json".to_owned(),
+                    items.len() as u32,
+                    serde_json::to_vec(
+                        &items
+                            .iter()
+                            .map(|m| json!({"label": m.label, "value": m.value, "unit": m.unit}))
+                            .collect::<Vec<_>>(),
+                    )
+                    .map_err(|e| e.to_string())?,
+                ),
+                ArtifactContent::File(path) => {
+                    let full = confine(self.world.root(), path)?;
+                    if !full.is_file() {
+                        return Err(format!("{path:?} is not a file"));
+                    }
+                    let meta = std::fs::metadata(&full).map_err(|e| e.to_string())?;
+                    if meta.len() as usize > MAX_ARTIFACT_BYTES {
+                        return Err(format!(
+                            "{path:?} is {} bytes; artifacts are limited to {MAX_ARTIFACT_BYTES}",
+                            meta.len()
+                        ));
+                    }
+                    let ext = full
+                        .extension()
+                        .and_then(|e| e.to_str())
+                        .filter(|e| e.len() <= 8 && e.chars().all(|c| c.is_ascii_alphanumeric()))
+                        .unwrap_or("bin")
+                        .to_owned();
+                    let bytes = std::fs::read(&full).map_err(|e| e.to_string())?;
+                    let ct = if std::str::from_utf8(&bytes).is_ok() {
+                        "text/plain"
+                    } else {
+                        "application/octet-stream"
+                    };
+                    (ArtifactKind::File, ct, ext, 0, bytes)
                 }
-                let meta = std::fs::metadata(&full).map_err(|e| e.to_string())?;
-                if meta.len() as usize > MAX_ARTIFACT_BYTES {
-                    return Err(format!("{path:?} is {} bytes; artifacts are limited to {MAX_ARTIFACT_BYTES}", meta.len()));
-                }
-                let ext = full
-                    .extension()
-                    .and_then(|e| e.to_str())
-                    .filter(|e| e.len() <= 8 && e.chars().all(|c| c.is_ascii_alphanumeric()))
-                    .unwrap_or("bin")
-                    .to_owned();
-                let bytes = std::fs::read(&full).map_err(|e| e.to_string())?;
-                let ct = if std::str::from_utf8(&bytes).is_ok() { "text/plain" } else { "application/octet-stream" };
-                (ArtifactKind::File, ct, ext, 0, bytes)
-            }
-        };
+            };
         if bytes.len() > MAX_ARTIFACT_BYTES {
-            return Err(format!("artifact content is {} bytes; the limit is {MAX_ARTIFACT_BYTES}", bytes.len()));
+            return Err(format!(
+                "artifact content is {} bytes; the limit is {MAX_ARTIFACT_BYTES}",
+                bytes.len()
+            ));
         }
         self.shared
             .store
@@ -1158,27 +1298,35 @@ impl RunCore {
         } else if reply.timed_out {
             Some("timed out".to_owned())
         } else {
-            Some(format!("exit {}", reply.exit_code.map_or("?".into(), |c| c.to_string())))
+            Some(format!(
+                "exit {}",
+                reply.exit_code.map_or("?".into(), |c| c.to_string())
+            ))
         };
         self.emit(WorkflowEventKind::NodeSettled {
             site_id: req.key.site.clone(),
             ordinal: req.key.ordinal,
-            outcome: if ok { NodeOutcome::Ok } else { NodeOutcome::Failed },
+            outcome: if ok {
+                NodeOutcome::Ok
+            } else {
+                NodeOutcome::Failed
+            },
             cached,
             tokens: 0,
             error,
             result_preview: Some(format!(
                 "exit {}{}",
                 reply.exit_code.map_or("none".into(), |c| c.to_string()),
-                if reply.stdout.is_empty() { String::new() } else { format!("\n{}", reply.stdout.chars().take(600).collect::<String>()) }
+                if reply.stdout.is_empty() {
+                    String::new()
+                } else {
+                    format!("\n{}", reply.stdout.chars().take(600).collect::<String>())
+                }
             )),
         });
         self.emit_usage();
     }
 
-    pub(super) fn counters(&self) -> (u32, u32) {
-        (self.asks_started.load(Ordering::SeqCst), self.reports.load(Ordering::SeqCst))
-    }
 
     pub(super) fn begin_budget_timer(&self) -> Option<tokio::task::JoinHandle<()>> {
         let secs = self.meta().options.budgets.max_runtime_seconds?;
@@ -1188,7 +1336,10 @@ impl RunCore {
             let spent = Duration::from_millis(me.base_elapsed_ms);
             let left = Duration::from_secs(secs).saturating_sub(spent);
             tokio::time::sleep(left).await;
-            me.request_stop(WorkflowStopReason::Budget, format!("the runtime budget of {secs}s was reached"));
+            me.request_stop(
+                WorkflowStopReason::Budget,
+                format!("the runtime budget of {secs}s was reached"),
+            );
         }))
     }
 }

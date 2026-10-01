@@ -17,7 +17,9 @@ use std::sync::atomic::{AtomicU64, Ordering};
 use std::sync::{Arc, Mutex, MutexGuard, PoisonError};
 use std::time::Duration;
 
-use zeron_proto::{WorkflowEvent, WorkflowEventKind, WorkflowRun, WorkflowRunsDelta, WorkflowRunsState};
+use zeron_proto::{
+    WorkflowEvent, WorkflowEventKind, WorkflowRun, WorkflowRunsDelta, WorkflowRunsState,
+};
 use zeron_workflow::reduce;
 
 use crate::DocHost;
@@ -95,15 +97,17 @@ impl Projection {
         chats: &'a mut HashMap<String, ChatProjection>,
         chat_id: &str,
     ) -> &'a mut ChatProjection {
-        chats.entry(chat_id.to_owned()).or_insert_with(|| ChatProjection {
-            state: self
-                .inner
-                .doc_host
-                .open(chat_id)
-                .map(|h| h.doc().workflow_runs())
-                .unwrap_or_default(),
-            ..ChatProjection::default()
-        })
+        chats
+            .entry(chat_id.to_owned())
+            .or_insert_with(|| ChatProjection {
+                state: self
+                    .inner
+                    .doc_host
+                    .open(chat_id)
+                    .map(|h| h.doc().workflow_runs())
+                    .unwrap_or_default(),
+                ..ChatProjection::default()
+            })
     }
 
     /// Fold one event; schedule (or perform) the doc write.
@@ -159,7 +163,9 @@ impl Projection {
         }
         match self.inner.doc_host.open(chat_id) {
             Ok(handle) => {
-                let bytes = serde_json::to_vec(&delta).map(|b| b.len() as u64).unwrap_or(0);
+                let bytes = serde_json::to_vec(&delta)
+                    .map(|b| b.len() as u64)
+                    .unwrap_or(0);
                 if let Err(err) = handle.doc().apply_workflow_delta(&delta) {
                     tracing::warn!(chat = %chat_id, error = %err, "workflow state write failed");
                     return;
@@ -167,7 +173,9 @@ impl Projection {
                 self.inner.writes.fetch_add(1, Ordering::Relaxed);
                 self.inner.bytes.fetch_add(bytes, Ordering::Relaxed);
             }
-            Err(err) => tracing::warn!(chat = %chat_id, error = %err, "workflow state: chat unavailable"),
+            Err(err) => {
+                tracing::warn!(chat = %chat_id, error = %err, "workflow state: chat unavailable")
+            }
         }
     }
 
@@ -188,7 +196,9 @@ impl Projection {
         {
             let mut chats = lock(&self.inner.chats);
             let chat = self.entry(&mut chats, chat_id);
-            chat.state.runs.retain(|r| r.header.run_id != run.header.run_id);
+            chat.state
+                .runs
+                .retain(|r| r.header.run_id != run.header.run_id);
             chat.state.runs.push(run.clone());
             chat.state.runs.sort_by_key(|r| r.header.created_at);
             chat.state.revision += 1;

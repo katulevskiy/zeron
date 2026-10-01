@@ -133,9 +133,16 @@ impl Catalog for EngineCatalog {
         }
         let descriptors = self.sessions.harness_descriptors();
         match descriptors.iter().find(|d| d.id == harness) {
-            None => return Err(format!("harness {harness:?} is not available on this device")),
+            None => {
+                return Err(format!(
+                    "harness {harness:?} is not available on this device"
+                ));
+            }
             Some(d) if !d.installed => {
-                return Err(format!("harness {} is not installed on this device", d.name));
+                return Err(format!(
+                    "harness {} is not installed on this device",
+                    d.name
+                ));
             }
             Some(d) if d.enabled == Some(false) => {
                 return Err(format!(
@@ -409,13 +416,15 @@ impl WorkflowService {
             v @ Value::Object(_) => v,
             _ => return Err(StartError::Invalid("`args` must be an object".into())),
         };
-        let name = sanitize_name(req.name.as_deref().unwrap_or(match &req.path {
-            Some(p) => Path::new(p)
-                .file_stem()
-                .and_then(|s| s.to_str())
-                .unwrap_or("workflow"),
-            None => "workflow",
-        }));
+        let name = sanitize_name(
+            req.name.as_deref().unwrap_or(match &req.path {
+                Some(p) => Path::new(p)
+                    .file_stem()
+                    .and_then(|s| s.to_str())
+                    .unwrap_or("workflow"),
+                None => "workflow",
+            }),
+        );
         let defaults = defaults_for(&self.shared.workspace, chat_id);
         // Validate what the caller picked up front, with a clear error.
         if let Some(h) = &req.harness {
@@ -463,8 +472,16 @@ impl WorkflowService {
             max_concurrency,
             draft_path,
         };
-        self.begin(meta, script, analysis, defaults, store::Replay::default(), 0, false)
-            .await?;
+        self.begin(
+            meta,
+            script,
+            analysis,
+            defaults,
+            store::Replay::default(),
+            0,
+            false,
+        )
+        .await?;
         Ok(outcome)
     }
 
@@ -781,7 +798,10 @@ impl WorkflowService {
             .store
             .read_meta(run_id)
             .map_err(|_| WorkflowError::NoRun(run_id.to_owned()))?;
-        if matches!(meta.status, WorkflowStatus::Pending | WorkflowStatus::Running) {
+        if matches!(
+            meta.status,
+            WorkflowStatus::Pending | WorkflowStatus::Running
+        ) {
             // An orphan: nothing is executing it.
             self.reconcile_run(&meta);
             return Ok(true);
@@ -937,7 +957,11 @@ impl WorkflowService {
         Ok(RunView {
             run,
             result: replay.result,
-            reports: replay.reports.into_iter().map(|(_, item, _)| item).collect(),
+            reports: replay
+                .reports
+                .into_iter()
+                .map(|(_, item, _)| item)
+                .collect(),
         })
     }
 
@@ -1059,7 +1083,11 @@ fn approval_question(
             .ok()
             .and_then(|v| v.as_str().map(str::to_owned))
     });
-    let model = meta.options.model.clone().or_else(|| defaults.model.clone());
+    let model = meta
+        .options
+        .model
+        .clone()
+        .or_else(|| defaults.model.clone());
     let text = prompts::approval_text(&prompts::ApprovalFacts {
         name: &meta.name,
         graph,

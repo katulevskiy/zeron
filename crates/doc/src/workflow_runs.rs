@@ -8,7 +8,9 @@
 //! a shape this one does not know), never fatal.
 
 use loro::{LoroMap, ToJson};
-use zeron_proto::{WorkflowEntry, WorkflowRun, WorkflowRunHeader, WorkflowRunsDelta, WorkflowRunsState};
+use zeron_proto::{
+    WorkflowEntry, WorkflowRun, WorkflowRunHeader, WorkflowRunsDelta, WorkflowRunsState,
+};
 
 use crate::{DocError, SessionDoc};
 
@@ -78,8 +80,9 @@ impl SessionDoc {
             run.pending_questions.sort_by_key(|q| q.asked_at);
             out.runs.push(run);
         }
-        out.runs
-            .sort_by(|a, b| (a.header.created_at, &a.header.run_id).cmp(&(b.header.created_at, &b.header.run_id)));
+        out.runs.sort_by(|a, b| {
+            (a.header.created_at, &a.header.run_id).cmp(&(b.header.created_at, &b.header.run_id))
+        });
         out
     }
 
@@ -89,14 +92,14 @@ impl SessionDoc {
             return Ok(());
         }
         let meta = self.doc().get_map("meta");
-        let runs: LoroMap = meta.get_or_create_container(RUNS_KEY, LoroMap::new())?;
+        let runs: LoroMap = meta.ensure_mergeable_map(RUNS_KEY)?;
         for id in &delta.runs_removed {
             if runs.get(id).is_some() {
                 runs.delete(id)?;
             }
         }
         for change in &delta.runs {
-            let run: LoroMap = runs.get_or_create_container(&change.run_id, LoroMap::new())?;
+            let run: LoroMap = runs.ensure_mergeable_map(&change.run_id)?;
             if let Some(header) = &change.header {
                 run.insert(HEADER_KEY, serde_json::to_string(header)?)?;
             }
@@ -119,12 +122,11 @@ impl SessionDoc {
     /// Replace one run wholesale (startup reconciliation).
     pub fn replace_workflow_run(&self, run: &WorkflowRun) -> Result<(), DocError> {
         let meta = self.doc().get_map("meta");
-        let runs: LoroMap = meta.get_or_create_container(RUNS_KEY, LoroMap::new())?;
-        let id = &run.header.run_id;
-        if runs.get(id).is_some() {
-            runs.delete(id)?;
-        }
-        let map: LoroMap = runs.get_or_create_container(id, LoroMap::new())?;
+        let runs: LoroMap = meta.ensure_mergeable_map(RUNS_KEY)?;
+        // A mergeable child keeps its content when its key is deleted, so a
+        // wholesale replace clears the entries instead.
+        let map: LoroMap = runs.ensure_mergeable_map(&run.header.run_id)?;
+        map.clear()?;
         map.insert(HEADER_KEY, serde_json::to_string(&run.header)?)?;
         for entry in run.entries() {
             map.insert(&entry.key(), serde_json::to_string(&entry)?)?;
@@ -180,8 +182,12 @@ mod tests {
         assert!(host.workflow_runs().runs.is_empty());
         let mut delta = WorkflowRunDelta::for_run("r1");
         delta.header = Some(header("r1"));
-        delta.upserts.push(WorkflowEntry::Node(node("b", 1, NodePhase::Queued)));
-        delta.upserts.push(WorkflowEntry::Node(node("a", 0, NodePhase::Executing)));
+        delta
+            .upserts
+            .push(WorkflowEntry::Node(node("b", 1, NodePhase::Queued)));
+        delta
+            .upserts
+            .push(WorkflowEntry::Node(node("a", 0, NodePhase::Executing)));
         let d = WorkflowRunsDelta {
             revision: 3,
             runs: vec![delta],
@@ -191,7 +197,13 @@ mod tests {
         let state = host.workflow_runs();
         assert_eq!(state.revision, 3);
         let run = state.run("r1").unwrap();
-        assert_eq!(run.nodes.iter().map(|n| n.site_id.as_str()).collect::<Vec<_>>(), ["a", "b"]);
+        assert_eq!(
+            run.nodes
+                .iter()
+                .map(|n| n.site_id.as_str())
+                .collect::<Vec<_>>(),
+            ["a", "b"]
+        );
 
         // One node changes: only its value is rewritten.
         let mut change = WorkflowRunDelta::for_run("r1");
@@ -248,9 +260,9 @@ mod tests {
         let runs = doc
             .doc()
             .get_map("meta")
-            .get_or_create_container(RUNS_KEY, LoroMap::new())
+            .ensure_mergeable_map(RUNS_KEY)
             .unwrap();
-        let r: LoroMap = runs.get_or_create_container("r1", LoroMap::new()).unwrap();
+        let r: LoroMap = runs.ensure_mergeable_map("r1").unwrap();
         r.insert("n:future#0", "{\"kind\":\"hologram\"}").unwrap();
         doc.doc().commit();
         assert_eq!(doc.workflow_runs().run("r1").unwrap().nodes.len(), 1);
@@ -276,7 +288,9 @@ mod tests {
 
     #[test]
     fn workflow_commands_round_trip_through_the_ledger() {
-        use crate::{SessionCommandEntry, SessionCommandKind, SessionCommandPayload, SessionCommandStatus};
+        use crate::{
+            SessionCommandEntry, SessionCommandKind, SessionCommandPayload, SessionCommandStatus,
+        };
         let doc = SessionDoc::init("chat").unwrap();
         let entry = SessionCommandEntry {
             id: "c1".into(),

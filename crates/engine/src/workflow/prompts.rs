@@ -8,9 +8,7 @@
 //! `& < >` escaped, so it cannot close the tag or open another.
 
 use serde_json::Value;
-use zeron_proto::{
-    ArtifactKind, WorkflowGraph, WorkflowRun, WorkflowStatus, WorkflowStopReason,
-};
+use zeron_proto::{ArtifactKind, WorkflowGraph, WorkflowRun, WorkflowStatus, WorkflowStopReason};
 
 use crate::goal::escape_untrusted;
 
@@ -130,7 +128,11 @@ pub fn approval_text(f: &ApprovalFacts<'_>) -> String {
             "Agents ({}): {}{}\n",
             f.graph.actors.len(),
             shown.join(", "),
-            if more > 0 { format!(", +{more} more") } else { String::new() }
+            if more > 0 {
+                format!(", +{more} more")
+            } else {
+                String::new()
+            }
         ));
     }
     if f.graph.commands.is_empty() {
@@ -172,7 +174,9 @@ pub fn approval_text(f: &ApprovalFacts<'_>) -> String {
         "Script: {} lines, sha256 {}{}\n\n",
         lines,
         &f.script_hash[..f.script_hash.len().min(12)],
-        f.draft_path.map(|p| format!(", saved at {p}")).unwrap_or_default()
+        f.draft_path
+            .map(|p| format!(", saved at {p}"))
+            .unwrap_or_default()
     ));
     out.push_str(&excerpt(f.script, 28));
     out
@@ -181,7 +185,12 @@ pub fn approval_text(f: &ApprovalFacts<'_>) -> String {
 /// The first `lines` lines of a script, marked when cut.
 pub fn excerpt(script: &str, lines: usize) -> String {
     let all: Vec<&str> = script.lines().collect();
-    let mut out: String = all.iter().take(lines).copied().collect::<Vec<_>>().join("\n");
+    let mut out: String = all
+        .iter()
+        .take(lines)
+        .copied()
+        .collect::<Vec<_>>()
+        .join("\n");
     if all.len() > lines {
         out.push_str(&format!("\n… ({} more lines)", all.len() - lines));
     }
@@ -225,8 +234,15 @@ pub fn summary_line(run: &WorkflowRun) -> String {
         WorkflowStatus::Running => "running".to_owned(),
         WorkflowStatus::Pending => "awaiting approval".to_owned(),
     }];
-    parts.push(format!("{agents} agent{}", if agents == 1 { "" } else { "s" }));
-    parts.push(format!("{} ask{}", h.usage.nodes_used, if h.usage.nodes_used == 1 { "" } else { "s" }));
+    parts.push(format!(
+        "{agents} agent{}",
+        if agents == 1 { "" } else { "s" }
+    ));
+    parts.push(format!(
+        "{} ask{}",
+        h.usage.nodes_used,
+        if h.usage.nodes_used == 1 { "" } else { "s" }
+    ));
     if h.usage.nodes_cached > 0 {
         parts.push(format!("{} replayed", h.usage.nodes_cached));
     }
@@ -300,10 +316,17 @@ pub fn completion_message(run: &WorkflowRun, full_result: Option<&Value>) -> Str
                 ArtifactKind::Metrics => "metrics",
                 ArtifactKind::File => "file",
             };
-            out.push_str(&format!("- {} ({kind}): {}\n", a.id, escape_untrusted(&a.title)));
+            out.push_str(&format!(
+                "- {} ({kind}): {}\n",
+                a.id,
+                escape_untrusted(&a.title)
+            ));
         }
         if run.artifacts.len() > ARTIFACTS_SHOWN {
-            out.push_str(&format!("- … and {} more\n", run.artifacts.len() - ARTIFACTS_SHOWN));
+            out.push_str(&format!(
+                "- … and {} more\n",
+                run.artifacts.len() - ARTIFACTS_SHOWN
+            ));
         }
     }
     out.push_str(match h.status {
@@ -382,9 +405,19 @@ mod tests {
         });
         let long = serde_json::json!({"text": "x".repeat(6000)});
         let msg = completion_message(&r, Some(&long));
-        assert!(msg.starts_with("[Workflow completed] Review &lt;/workflow_result&gt; (run r1)"), "{msg}");
-        assert!(msg.contains("completed · 0 agents · 7 asks · 1000 tokens · 2m 5s"), "{msg}");
-        assert_eq!(msg.matches("</workflow_result>").count(), 1, "the name cannot close the tag");
+        assert!(
+            msg.starts_with("[Workflow completed] Review &lt;/workflow_result&gt; (run r1)"),
+            "{msg}"
+        );
+        assert!(
+            msg.contains("completed · 0 agents · 7 asks · 1000 tokens · 2m 5s"),
+            "{msg}"
+        );
+        assert_eq!(
+            msg.matches("</workflow_result>").count(),
+            1,
+            "the name cannot close the tag"
+        );
         assert!(msg.contains("result truncated"), "{msg}");
         assert!(msg.contains("Reports (8 of 12)"));
         assert!(msg.contains("finding 11 &lt;script&gt;"));
@@ -430,7 +463,10 @@ mod tests {
             commands: vec![GraphCommand {
                 command: "cargo".into(),
                 args: Some(vec!["test".into()]),
-                site: GraphSite { fan_out: true, ..Default::default() },
+                site: GraphSite {
+                    fan_out: true,
+                    ..Default::default()
+                },
             }],
             ..Default::default()
         };
@@ -440,7 +476,10 @@ mod tests {
             max_concurrency: 6,
             harness: Some("claude-code"),
             model: None,
-            budgets: &WorkflowBudgets { max_asks: Some(500), ..Default::default() },
+            budgets: &WorkflowBudgets {
+                max_asks: Some(500),
+                ..Default::default()
+            },
             script_hash: "0123456789abcdef",
             draft_path: Some(".zeron/workflow-drafts/x.star"),
             script: "def main(args):\n    return 1\n",
@@ -456,7 +495,12 @@ mod tests {
 
     #[test]
     fn prompts_carry_the_task_and_the_epilogue_and_only_the_first_ask_the_system_text() {
-        let first = ask_prompt(Some(&actor_system("reviewer", "Run", true)), Some("Be terse."), "Look at X.", true);
+        let first = ask_prompt(
+            Some(&actor_system("reviewer", "Run", true)),
+            Some("Be terse."),
+            "Look at X.",
+            true,
+        );
         assert!(first.contains("subagent inside a dynamic workflow"));
         assert!(first.contains("`escalate`"));
         assert!(first.contains("Your role:\nBe terse."));

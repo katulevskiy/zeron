@@ -147,7 +147,9 @@ impl Tools {
     /// refusal the model reads.
     pub(crate) async fn escalate(&self, args: Value) -> Result<Value, String> {
         if !self.ask_tool().await.escalation {
-            return Err("escalate is not available in this request: decide, then submit_result".into());
+            return Err(
+                "escalate is not available in this request: decide, then submit_result".into(),
+            );
         }
         let reply = self
             .zeron

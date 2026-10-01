@@ -15,7 +15,10 @@ use zeron_workflow::testing::{FakeHost, Recorded};
 const GUIDE: &str = include_str!("../../../docs/workflow-guide.md");
 
 fn example() -> String {
-    let start = GUIDE.find("```python example\n").expect("the guide has a worked example") + "```python example\n".len();
+    let start = GUIDE
+        .find("```python example\n")
+        .expect("the guide has a worked example")
+        + "```python example\n".len();
     let end = GUIDE[start..].find("\n```").expect("the example is fenced") + start;
     GUIDE[start..end].to_owned()
 }
@@ -32,11 +35,17 @@ fn finding(angle: &str, n: u32) -> Value {
 #[test]
 fn the_guide_example_passes_analysis_with_the_graph_the_guide_describes() {
     let analysis = analyze("example.star", &example()).unwrap_or_else(|d| panic!("{d:?}"));
-    assert_eq!(analysis.graph.phase_names(), ["review", "confirm", "fix", "summarize"]);
+    assert_eq!(
+        analysis.graph.phase_names(),
+        ["review", "confirm", "fix", "summarize"]
+    );
     assert_eq!(analysis.graph.commands.len(), 1);
     assert_eq!(analysis.graph.commands[0].command, "cargo");
     assert!(analysis.graph.phases[0].asks[0].site.fan_out);
-    assert!(analysis.graph.phases[1].asks[0].site.fan_out, "confirm runs once per finding");
+    assert!(
+        analysis.graph.phases[1].asks[0].site.fan_out,
+        "confirm runs once per finding"
+    );
     assert!(analysis.warnings.is_empty(), "{:?}", analysis.warnings);
 }
 
@@ -44,7 +53,11 @@ fn the_guide_example_passes_analysis_with_the_graph_the_guide_describes() {
 fn the_guide_example_runs_end_to_end_against_a_fake_host() {
     let host = FakeHost::new();
     host.on_ask(|req| {
-        let props = req.schema.as_ref().and_then(|s| s["properties"].as_object().cloned()).unwrap_or_default();
+        let props = req
+            .schema
+            .as_ref()
+            .and_then(|s| s["properties"].as_object().cloned())
+            .unwrap_or_default();
         if props.contains_key("findings") {
             let angle = ["security", "correctness", "performance"]
                 .into_iter()
@@ -58,7 +71,9 @@ fn the_guide_example_runs_end_to_end_against_a_fake_host() {
         } else if props.contains_key("changed") {
             AskReply::ok(json!({"changed": ["src/lib.rs"], "notes": "fixed"}))
         } else {
-            AskReply::ok(json!({"conclusion": "Four problems are real; two could not be reproduced."}))
+            AskReply::ok(
+                json!({"conclusion": "Four problems are real; two could not be reproduced."}),
+            )
         }
     });
     let gates = Arc::new(AtomicUsize::new(0));
@@ -77,10 +92,16 @@ fn the_guide_example_runs_end_to_end_against_a_fake_host() {
     });
     let out = run(&example(), json!({"strong_model": "opus"}), &host).unwrap();
 
-    assert_eq!(out["conclusion"], "Four problems are real; two could not be reproduced.");
+    assert_eq!(
+        out["conclusion"],
+        "Four problems are real; two could not be reproduced."
+    );
     let findings = out["findings"].as_array().unwrap();
     assert_eq!(findings.len(), 6);
-    let statuses: Vec<&str> = findings.iter().map(|f| f["status"].as_str().unwrap()).collect();
+    let statuses: Vec<&str> = findings
+        .iter()
+        .map(|f| f["status"].as_str().unwrap())
+        .collect();
     assert_eq!(statuses.iter().filter(|s| **s == "verified").count(), 4);
     assert_eq!(statuses.iter().filter(|s| **s == "unconfirmed").count(), 2);
     for f in findings {
@@ -94,7 +115,11 @@ fn the_guide_example_runs_end_to_end_against_a_fake_host() {
     // Two gate runs (red, fix, green), exactly one fixer ask, one judge ask.
     assert_eq!(gates.load(Ordering::SeqCst), 2);
     let asks = host.asks();
-    assert_eq!(asks.len(), 3 + 6 + 1 + 1, "3 reviewers, 6 checkers, 1 fixer, 1 judge");
+    assert_eq!(
+        asks.len(),
+        3 + 6 + 1 + 1,
+        "3 reviewers, 6 checkers, 1 fixer, 1 judge"
+    );
     // The confirmers are fresh actors, one per finding; reviewers are read-only.
     let actors: std::collections::HashSet<_> = asks.iter().map(|a| a.actor.to_string()).collect();
     assert_eq!(actors.len(), 3 + 6 + 1 + 1);
@@ -118,7 +143,13 @@ fn the_guide_example_runs_end_to_end_against_a_fake_host() {
             _ => None,
         })
         .collect();
-    assert_eq!(reports, [json!({"reviewed": 6}), json!({"confirmed": 4, "unconfirmed": 2})]);
+    assert_eq!(
+        reports,
+        [
+            json!({"reviewed": 6}),
+            json!({"confirmed": 4, "unconfirmed": 2})
+        ]
+    );
     let phases: Vec<_> = host
         .recorded()
         .into_iter()
@@ -134,7 +165,11 @@ fn the_guide_example_runs_end_to_end_against_a_fake_host() {
 fn the_example_survives_failing_agents_and_a_gate_that_never_passes() {
     let host = FakeHost::new();
     host.on_ask(|req| {
-        let props = req.schema.as_ref().and_then(|s| s["properties"].as_object().cloned()).unwrap_or_default();
+        let props = req
+            .schema
+            .as_ref()
+            .and_then(|s| s["properties"].as_object().cloned())
+            .unwrap_or_default();
         if props.contains_key("findings") {
             AskReply::ok(json!({"findings": [finding("security", 1)]}))
         } else if props.contains_key("confirmed") {
@@ -145,11 +180,26 @@ fn the_example_survives_failing_agents_and_a_gate_that_never_passes() {
             AskReply::failed("no conclusion")
         }
     });
-    host.on_run(|_| RunReply { exit_code: Some(1), ..RunReply::default() });
+    host.on_run(|_| RunReply {
+        exit_code: Some(1),
+        ..RunReply::default()
+    });
     let out = run(&example(), json!({}), &host).unwrap();
-    assert!(out["conclusion"].as_str().unwrap().starts_with("No conclusion was produced"));
-    assert_eq!(out["verified"], json!(["cargo test --workspace still failing"]));
+    assert!(
+        out["conclusion"]
+            .as_str()
+            .unwrap()
+            .starts_with("No conclusion was produced")
+    );
+    assert_eq!(
+        out["verified"],
+        json!(["cargo test --workspace still failing"])
+    );
     // Three bounded gate rounds, two fixer attempts between them.
-    let gates = host.recorded().into_iter().filter(|e| matches!(e, Recorded::Run(_))).count();
+    let gates = host
+        .recorded()
+        .into_iter()
+        .filter(|e| matches!(e, Recorded::Run(_)))
+        .count();
     assert_eq!(gates, 3);
 }

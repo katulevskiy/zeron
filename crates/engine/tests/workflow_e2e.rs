@@ -77,7 +77,11 @@ fn rig() -> Rig {
         let client = handler_slot.get().expect("client wired").clone();
         let result_slot = result_slot.clone();
         tokio::spawn(async move {
-            if request.mcp.as_ref().is_some_and(|m| m.env.contains_key("ZERON_ASK_ID")) {
+            if request
+                .mcp
+                .as_ref()
+                .is_some_and(|m| m.env.contains_key("ZERON_ASK_ID"))
+            {
                 answer_ask(&client, &request, &out).await;
             } else if request.prompt == "start the workflow" {
                 // The parent agent calling the `start_workflow` MCP tool.
@@ -101,7 +105,13 @@ fn rig() -> Rig {
     let space = "space-main".to_string();
     env.core
         .workspace
-        .create_space(&space, &env.core.device_id, &project.to_string_lossy(), None, false)
+        .create_space(
+            &space,
+            &env.core.device_id,
+            &project.to_string_lossy(),
+            None,
+            false,
+        )
         .unwrap();
     env.core
         .workspace
@@ -159,9 +169,10 @@ async fn run_parent_turn(rig: &Rig) {
 fn pending_question(rig: &Rig) -> Option<(String, zeron_proto::UserInputQuestion)> {
     let (replay, _rx) = rig.env.core.sessions.subscribe(CHAT, 0).ok()?;
     replay.iter().rev().find_map(|e| match &e.event {
-        AgentEvent::InputRequested { request_id, questions } => {
-            Some((request_id.clone(), questions[0].clone()))
-        }
+        AgentEvent::InputRequested {
+            request_id,
+            questions,
+        } => Some((request_id.clone(), questions[0].clone())),
         _ => None,
     })
 }
@@ -174,66 +185,156 @@ async fn an_approved_workflow_runs_real_child_chats_and_reports_back_to_the_pare
     // The approval question is a normal input request on the live turn.
     wait_for(|| pending_question(&rig).is_some(), "the approval question").await;
     let (request_id, question) = pending_question(&rig).unwrap();
-    assert!(question.question.contains("Run workflow \"Demo\"?"), "{}", question.question);
-    assert!(question.question.contains("Phases: review (1) → gate (1)"), "{}", question.question);
+    assert!(
+        question.question.contains("Run workflow \"Demo\"?"),
+        "{}",
+        question.question
+    );
+    assert!(
+        question.question.contains("Phases: review (1) → gate (1)"),
+        "{}",
+        question.question
+    );
     assert!(question.question.contains("$ sh -c echo gate-ok"));
     assert_eq!(question.meta.as_ref().unwrap()["kind"], "workflowApproval");
     wait_for(
-        || rig.env.core.sessions.session_status(CHAT).is_some_and(|s| s.status == SessionStatus::AwaitingInput),
+        || {
+            rig.env
+                .core
+                .sessions
+                .session_status(CHAT)
+                .is_some_and(|s| s.status == SessionStatus::AwaitingInput)
+        },
         "the chat to show it awaits input",
     )
     .await;
-    assert!(rig
-        .env
-        .core
-        .sessions
-        .respond_input(
-            CHAT,
-            &request_id,
-            vec![UserInputAnswer { question_id: question.id.clone(), labels: vec!["Run workflow".into()] }],
-        )
-        .unwrap());
+    assert!(
+        rig.env
+            .core
+            .sessions
+            .respond_input(
+                CHAT,
+                &request_id,
+                vec![UserInputAnswer {
+                    question_id: question.id.clone(),
+                    labels: vec!["Run workflow".into()]
+                }],
+            )
+            .unwrap()
+    );
 
     // start_workflow returns once approved, with the run id.
-    wait_for(|| rig.start_result.lock().unwrap().is_some(), "start_workflow to return").await;
-    let started = rig.start_result.lock().unwrap().clone().unwrap().expect("approved");
+    wait_for(
+        || rig.start_result.lock().unwrap().is_some(),
+        "start_workflow to return",
+    )
+    .await;
+    let started = rig
+        .start_result
+        .lock()
+        .unwrap()
+        .clone()
+        .unwrap()
+        .expect("approved");
     let run_id = started["runId"].as_str().unwrap().to_owned();
     assert_eq!(started["graph"]["phases"][0]["name"], "review");
 
     let svc = rig.env.core.doc_host.workflows().unwrap();
     wait_for_within(
-        || svc.get(&run_id).map(|v| v.run.header.status.is_settled()).unwrap_or(false),
+        || {
+            svc.get(&run_id)
+                .map(|v| v.run.header.status.is_settled())
+                .unwrap_or(false)
+        },
         "the run to settle",
         Duration::from_secs(30),
     )
     .await;
     let view = svc.get(&run_id).unwrap();
-    assert_eq!(view.run.header.status, WorkflowStatus::Completed, "{:?}", view.run.header);
+    assert_eq!(
+        view.run.header.status,
+        WorkflowStatus::Completed,
+        "{:?}",
+        view.run.header
+    );
     let result = view.result.clone().unwrap();
     assert_eq!(result["gate"], "gate-ok");
     assert_eq!(result["notes"].as_array().unwrap().len(), 3);
-    assert!(result["notes"][0].as_str().unwrap().starts_with("looked at it: REVIEW"));
+    assert!(
+        result["notes"][0]
+            .as_str()
+            .unwrap()
+            .starts_with("looked at it: REVIEW")
+    );
 
     // Three real child chats: hidden (archived), one level under the parent,
     // titled by run and actor, tagged, and still readable by id.
     let chats = rig.env.core.workspace.read_chats().unwrap();
-    let children: Vec<_> = chats.iter().filter(|c| c.parent_chat_id.as_deref() == Some(CHAT)).collect();
-    assert_eq!(children.len(), 3, "{:?}", chats.iter().map(|c| (c.id.clone(), c.parent_chat_id.clone(), c.archived)).collect::<Vec<_>>());
+    let children: Vec<_> = chats
+        .iter()
+        .filter(|c| c.parent_chat_id.as_deref() == Some(CHAT))
+        .collect();
+    assert_eq!(
+        children.len(),
+        3,
+        "{:?}",
+        chats
+            .iter()
+            .map(|c| (c.id.clone(), c.parent_chat_id.clone(), c.archived))
+            .collect::<Vec<_>>()
+    );
     for child in &children {
         assert!(child.archived);
-        assert!(child.title.as_deref().unwrap().starts_with("Demo · reviewer-"), "{:?}", child.title);
+        assert!(
+            child
+                .title
+                .as_deref()
+                .unwrap()
+                .starts_with("Demo · reviewer-"),
+            "{:?}",
+            child.title
+        );
         let handle = rig.env.core.doc_host.open(&child.id).unwrap();
-        let tag = handle.doc().workflow_actor().expect("tagged as a workflow actor");
+        let tag = handle
+            .doc()
+            .workflow_actor()
+            .expect("tagged as a workflow actor");
         assert_eq!(tag.run_id, run_id);
-        assert!(!handle.doc().read_entries().unwrap().is_empty(), "its transcript is readable");
+        assert!(
+            !handle.doc().read_entries().unwrap().is_empty(),
+            "its transcript is readable"
+        );
     }
-    let actor_children: Vec<_> = view.run.actors.iter().filter_map(|a| a.child_chat_id.clone()).collect();
-    assert_eq!(actor_children.len(), 3, "the state links each actor to its chat");
-    assert!(view.run.header.usage.total_tokens() >= 75, "{:?}", view.run.header.usage);
+    let actor_children: Vec<_> = view
+        .run
+        .actors
+        .iter()
+        .filter_map(|a| a.child_chat_id.clone())
+        .collect();
+    assert_eq!(
+        actor_children.len(),
+        3,
+        "the state links each actor to its chat"
+    );
+    assert!(
+        view.run.header.usage.total_tokens() >= 75,
+        "{:?}",
+        view.run.header.usage
+    );
 
     // The completion message reached the parent chat, as a machine-origin turn.
     wait_for(
-        || rig.env.user_text(CHAT).iter().any(|(_, o)| matches!(o, Some(MessageOrigin::Workflow { status: WorkflowStatus::Completed, .. }))),
+        || {
+            rig.env.user_text(CHAT).iter().any(|(_, o)| {
+                matches!(
+                    o,
+                    Some(MessageOrigin::Workflow {
+                        status: WorkflowStatus::Completed,
+                        ..
+                    })
+                )
+            })
+        },
         "the completion message in the parent chat",
     )
     .await;
@@ -244,9 +345,21 @@ async fn an_approved_workflow_runs_real_child_chats_and_reports_back_to_the_pare
         .find(|(_, o)| matches!(o, Some(MessageOrigin::Workflow { .. })))
         .unwrap();
     assert!(body.starts_with("[Workflow completed] Demo"), "{body}");
-    assert!(body.contains("gate-ok") && body.contains("summary (markdown): Summary"), "{body}");
+    assert!(
+        body.contains("gate-ok") && body.contains("summary (markdown): Summary"),
+        "{body}"
+    );
     // …and it woke the idle parent: one more agent turn replied to it.
-    wait_for(|| rig.env.prompts().iter().any(|p| p.starts_with("[Workflow completed]")), "the parent to be woken").await;
+    wait_for(
+        || {
+            rig.env
+                .prompts()
+                .iter()
+                .any(|p| p.starts_with("[Workflow completed]"))
+        },
+        "the parent to be woken",
+    )
+    .await;
 }
 
 #[cfg(unix)]
@@ -262,14 +375,30 @@ async fn a_denied_workflow_returns_an_error_and_runs_nothing() {
         .respond_input(
             CHAT,
             &request_id,
-            vec![UserInputAnswer { question_id: question.id, labels: vec!["Deny".into()] }],
+            vec![UserInputAnswer {
+                question_id: question.id,
+                labels: vec!["Deny".into()],
+            }],
         )
         .unwrap();
-    wait_for(|| rig.start_result.lock().unwrap().is_some(), "start_workflow to return").await;
-    let err = rig.start_result.lock().unwrap().clone().unwrap().unwrap_err();
+    wait_for(
+        || rig.start_result.lock().unwrap().is_some(),
+        "start_workflow to return",
+    )
+    .await;
+    let err = rig
+        .start_result
+        .lock()
+        .unwrap()
+        .clone()
+        .unwrap()
+        .unwrap_err();
     assert!(err.contains("denied"), "{err}");
     let chats = rig.env.core.workspace.read_chats().unwrap();
-    assert!(chats.iter().all(|c| c.parent_chat_id.is_none()), "no child chat was created");
+    assert!(
+        chats.iter().all(|c| c.parent_chat_id.is_none()),
+        "no child chat was created"
+    );
     let runs = rig.env.core.doc_host.workflows().unwrap().list(Some(CHAT));
     assert_eq!(runs[0].status, WorkflowStatus::Stopped);
 }

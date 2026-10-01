@@ -1249,9 +1249,13 @@ mod tests {
                         methods::WORKFLOW_GET => json!({
                             "run": { "runId": "run-1", "chatId": *self.workflow_owner.lock().unwrap(), "status": "running" }
                         }),
-                        methods::WORKFLOW_LIST => json!([{ "runId": "run-1", "status": "running" }]),
+                        methods::WORKFLOW_LIST => {
+                            json!([{ "runId": "run-1", "status": "running" }])
+                        }
                         methods::WORKFLOW_STOP => json!({ "stopped": true }),
-                        methods::WORKFLOW_RESUME => json!({ "runId": "run-2", "resumedFrom": "run-1" }),
+                        methods::WORKFLOW_RESUME => {
+                            json!({ "runId": "run-2", "resumedFrom": "run-1" })
+                        }
                         _ => json!({ "answered": true }),
                     })
                 }
@@ -1260,10 +1264,16 @@ mod tests {
                         .lock()
                         .unwrap()
                         .push((method.to_owned(), params));
-                    RpcReply::Value(self.escalate_reply.lock().unwrap().clone().unwrap_or(json!({
-                        "status": "answered", "questionId": "q1", "answer": "Postgres",
-                        "message": "Answer from the parent agent:\nPostgres", "left": 2
-                    })))
+                    RpcReply::Value(
+                        self.escalate_reply
+                            .lock()
+                            .unwrap()
+                            .clone()
+                            .unwrap_or(json!({
+                                "status": "answered", "questionId": "q1", "answer": "Postgres",
+                                "message": "Answer from the parent agent:\nPostgres", "left": 2
+                            })),
+                    )
                 }
                 methods::GET_ASK_SPEC => RpcReply::Value(json!({
                     "escalation": *self.ask_escalation.lock().unwrap(),
@@ -1891,7 +1901,13 @@ mod tests {
     }
 
     fn last_write(world: &World) -> (String, Value) {
-        world.writes.lock().unwrap().last().cloned().expect("a write")
+        world
+            .writes
+            .lock()
+            .unwrap()
+            .last()
+            .cloned()
+            .expect("a write")
     }
 
     #[tokio::test]
@@ -1945,7 +1961,10 @@ mod tests {
         // No chat to deliver the result to: refused before reaching the engine.
         let before = world.writes.lock().unwrap().len();
         let anon = tools(world.clone(), Origin::default());
-        let err = anon.call("start_workflow", json!({"script": "x"})).await.unwrap_err();
+        let err = anon
+            .call("start_workflow", json!({"script": "x"}))
+            .await
+            .unwrap_err();
         assert!(err.contains("inside a Zeron chat"), "{err}");
         assert_eq!(world.writes.lock().unwrap().len(), before);
     }
@@ -1956,7 +1975,10 @@ mod tests {
         *world.workflow_error.lock().unwrap() =
             Some("workflow.star:2:5 phase \"x\" contains no ask() or run()".into());
         let t = tools(world, chat_origin("chat-beta-2"));
-        let err = t.call("start_workflow", json!({"script": "x"})).await.unwrap_err();
+        let err = t
+            .call("start_workflow", json!({"script": "x"}))
+            .await
+            .unwrap_err();
         assert!(err.starts_with("workflow.star:2:5"), "{err}");
         assert!(!err.contains("WorkflowStart"), "{err}");
     }
@@ -1966,20 +1988,31 @@ mod tests {
         let world = Arc::new(World::default());
         *world.workflow_owner.lock().unwrap() = "chat-beta-2".into();
         let t = tools(world.clone(), chat_origin("chat-beta-2"));
-        t.call("get_workflow_run", json!({"run_id": "run-1", "include": ["nodes", "result"]}))
-            .await
-            .unwrap();
+        t.call(
+            "get_workflow_run",
+            json!({"run_id": "run-1", "include": ["nodes", "result"]}),
+        )
+        .await
+        .unwrap();
         let (_, params) = last_write(&world);
         assert_eq!(params["include"], json!(["nodes", "result"]));
-        assert!(t
-            .call("get_workflow_run", json!({"run_id": "run-1", "include": ["everything"]}))
+        assert!(
+            t.call(
+                "get_workflow_run",
+                json!({"run_id": "run-1", "include": ["everything"]})
+            )
             .await
-            .is_err());
+            .is_err()
+        );
         t.call("list_workflow_runs", json!({})).await.unwrap();
         assert_eq!(last_write(&world).1["chatId"], "chat-beta-2");
-        t.call("list_workflow_runs", json!({"chat": "all"})).await.unwrap();
+        t.call("list_workflow_runs", json!({"chat": "all"}))
+            .await
+            .unwrap();
         assert!(last_write(&world).1["chatId"].is_null());
-        t.call("list_workflow_runs", json!({"chat": "alpha"})).await.unwrap();
+        t.call("list_workflow_runs", json!({"chat": "alpha"}))
+            .await
+            .unwrap();
         assert_eq!(last_write(&world).1["chatId"], "chat-alpha-1");
     }
 
@@ -1992,34 +2025,59 @@ mod tests {
         for (tool, args) in [
             ("stop_workflow_run", json!({"run_id": "run-1"})),
             ("resume_workflow_run", json!({"run_id": "run-1"})),
-            ("resolve_workflow_question", json!({"run_id": "run-1", "qid": "q", "answer": "a"})),
+            (
+                "resolve_workflow_question",
+                json!({"run_id": "run-1", "qid": "q", "answer": "a"}),
+            ),
         ] {
             let err = t.call(tool, args).await.unwrap_err();
             assert!(err.contains("your own chat"), "{tool}: {err}");
         }
         assert!(
-            world.writes.lock().unwrap().iter().all(|(m, _)| m == methods::WORKFLOW_GET),
+            world
+                .writes
+                .lock()
+                .unwrap()
+                .iter()
+                .all(|(m, _)| m == methods::WORKFLOW_GET),
             "only the ownership lookup reached the engine"
         );
         // Its own run: allowed.
         *world.workflow_owner.lock().unwrap() = "chat-beta-2".into();
-        let stopped = t.call("stop_workflow_run", json!({"run_id": "run-1", "reason": "enough"})).await.unwrap();
+        let stopped = t
+            .call(
+                "stop_workflow_run",
+                json!({"run_id": "run-1", "reason": "enough"}),
+            )
+            .await
+            .unwrap();
         assert_eq!(stopped["stopped"], true);
         let (method, params) = last_write(&world);
         assert_eq!(method, methods::WORKFLOW_STOP);
         assert_eq!(params["reason"], "enough");
-        let resumed = t.call("resume_workflow_run", json!({"run_id": "run-1"})).await.unwrap();
-        assert_eq!(resumed["runId"], "run-2");
-        t.call("resolve_workflow_question", json!({"run_id": "run-1", "qid": "q9", "answer": "Postgres"}))
+        let resumed = t
+            .call("resume_workflow_run", json!({"run_id": "run-1"}))
             .await
             .unwrap();
+        assert_eq!(resumed["runId"], "run-2");
+        t.call(
+            "resolve_workflow_question",
+            json!({"run_id": "run-1", "qid": "q9", "answer": "Postgres"}),
+        )
+        .await
+        .unwrap();
         let (method, params) = last_write(&world);
         assert_eq!(method, methods::WORKFLOW_ANSWER);
-        assert_eq!((params["qid"].as_str(), params["answer"].as_str()), (Some("q9"), Some("Postgres")));
+        assert_eq!(
+            (params["qid"].as_str(), params["answer"].as_str()),
+            (Some("q9"), Some("Postgres"))
+        );
         // A user's own MCP client (no chat origin) may act on any run.
         *world.workflow_owner.lock().unwrap() = "chat-alpha-1".into();
         let user = tools(world.clone(), Origin::default());
-        user.call("stop_workflow_run", json!({"run_id": "run-1"})).await.unwrap();
+        user.call("stop_workflow_run", json!({"run_id": "run-1"}))
+            .await
+            .unwrap();
     }
 
     #[tokio::test]
@@ -2027,20 +2085,39 @@ mod tests {
         let world = Arc::new(World::default());
         let plain = tools(world.clone(), ask_origin());
         let names: Vec<_> = plain.list().await.iter().map(|d| d.name).collect();
-        assert!(names.iter().all(|n| !n.contains("workflow") && *n != "escalate"), "{names:?}");
-        assert!(plain.call("start_workflow", json!({"script": "x"})).await.is_err());
+        assert!(
+            names
+                .iter()
+                .all(|n| !n.contains("workflow") && *n != "escalate"),
+            "{names:?}"
+        );
+        assert!(
+            plain
+                .call("start_workflow", json!({"script": "x"}))
+                .await
+                .is_err()
+        );
         // Not offered: calling it is refused without reaching the engine.
-        let err = plain.call("escalate", json!({"question": "?"})).await.unwrap_err();
+        let err = plain
+            .call("escalate", json!({"question": "?"}))
+            .await
+            .unwrap_err();
         assert!(err.contains("not available"), "{err}");
 
         *world.ask_escalation.lock().unwrap() = true;
         let actor = tools(world.clone(), ask_origin());
         let listed = actor.list().await;
-        let escalate = listed.iter().find(|d| d.name == "escalate").expect("offered");
+        let escalate = listed
+            .iter()
+            .find(|d| d.name == "escalate")
+            .expect("offered");
         assert!(escalate.description.contains("Last resort"));
         assert!(listed.iter().any(|d| d.name == "submit_result"));
         let out = actor
-            .call("escalate", json!({"question": "Which database?", "context": "two configured"}))
+            .call(
+                "escalate",
+                json!({"question": "Which database?", "context": "two configured"}),
+            )
             .await
             .unwrap();
         assert_eq!(out["status"], "answered");
@@ -2053,13 +2130,19 @@ mod tests {
         *world.escalate_reply.lock().unwrap() = Some(json!({
             "status": "pending", "questionId": "q1", "message": "No answer yet. Your question is still pending", "left": 2
         }));
-        let pending = actor.call("escalate", json!({"question": "?"})).await.unwrap();
+        let pending = actor
+            .call("escalate", json!({"question": "?"}))
+            .await
+            .unwrap();
         assert_eq!(pending["status"], "pending");
         assert_eq!(pending["question_id"], "q1");
         *world.escalate_reply.lock().unwrap() = Some(json!({
             "status": "refused", "questionId": "", "message": "You have no escalations left", "left": 0
         }));
-        let err = actor.call("escalate", json!({"question": "?"})).await.unwrap_err();
+        let err = actor
+            .call("escalate", json!({"question": "?"}))
+            .await
+            .unwrap_err();
         assert!(err.contains("no escalations left"), "{err}");
     }
 }

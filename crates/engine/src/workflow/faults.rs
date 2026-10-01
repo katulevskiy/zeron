@@ -140,7 +140,10 @@ fn parse_retry_after(lower: &str) -> Option<Duration> {
             continue;
         };
         let rest = lower[at + marker.len()..].trim_start_matches([':', ' ', '=']);
-        let digits: String = rest.chars().take_while(|c| c.is_ascii_digit() || *c == '.').collect();
+        let digits: String = rest
+            .chars()
+            .take_while(|c| c.is_ascii_digit() || *c == '.')
+            .collect();
         let Ok(n) = digits.parse::<f64>() else {
             continue;
         };
@@ -185,21 +188,38 @@ mod tests {
     #[test]
     fn faults_are_classified_by_message() {
         use Fault::*;
-        assert_eq!(classify("Error: 429 Too Many Requests"), RateLimited { retry_after: None });
+        assert_eq!(
+            classify("Error: 429 Too Many Requests"),
+            RateLimited { retry_after: None }
+        );
         assert_eq!(
             classify("rate limit reached; retry-after: 12"),
-            RateLimited { retry_after: Some(Duration::from_secs(12)) }
+            RateLimited {
+                retry_after: Some(Duration::from_secs(12))
+            }
         );
         assert_eq!(
             classify("Overloaded. Please try again in 2 minutes"),
-            RateLimited { retry_after: Some(Duration::from_secs(120)) }
+            RateLimited {
+                retry_after: Some(Duration::from_secs(120))
+            }
         );
         assert_eq!(classify("connection reset by peer"), Transient);
         assert_eq!(classify("503 Service Unavailable"), Transient);
-        assert_eq!(classify("You exceeded your current quota, check billing"), Quota);
-        assert_eq!(classify("429: insufficient_quota"), Quota, "money beats rate limit");
+        assert_eq!(
+            classify("You exceeded your current quota, check billing"),
+            Quota
+        );
+        assert_eq!(
+            classify("429: insufficient_quota"),
+            Quota,
+            "money beats rate limit"
+        );
         assert_eq!(classify("401 Unauthorized: invalid API key"), Auth);
-        assert_eq!(classify("The model `gpt-9` does not exist"), ModelUnavailable);
+        assert_eq!(
+            classify("The model `gpt-9` does not exist"),
+            ModelUnavailable
+        );
         assert_eq!(classify("the schema was wrong"), Other);
         assert_eq!(classify("the child's turn was interrupted"), Other);
         assert!(Quota.is_deterministic() && !Quota.is_retryable());
@@ -209,17 +229,34 @@ mod tests {
     #[test]
     fn backoff_doubles_to_a_minute_with_bounded_jitter() {
         let at = |a| backoff(a, 7, None).as_millis() as f64;
-        for (attempt, base) in [(0, 2000.0), (1, 4000.0), (2, 8000.0), (3, 16000.0), (4, 32000.0), (5, 60000.0), (9, 60000.0)] {
+        for (attempt, base) in [
+            (0, 2000.0),
+            (1, 4000.0),
+            (2, 8000.0),
+            (3, 16000.0),
+            (4, 32000.0),
+            (5, 60000.0),
+            (9, 60000.0),
+        ] {
             let d = at(attempt);
-            assert!(d >= base * 0.75 && d <= base * 1.25, "attempt {attempt}: {d}");
+            assert!(
+                d >= base * 0.75 && d <= base * 1.25,
+                "attempt {attempt}: {d}"
+            );
         }
         // Deterministic per salt, different across salts.
         assert_eq!(backoff(2, 7, None), backoff(2, 7, None));
         assert_ne!(backoff(2, 7, None), backoff(2, 8, None));
         // A longer Retry-After wins; a shorter one does not shorten the backoff.
-        assert_eq!(backoff(0, 1, Some(Duration::from_secs(90))), Duration::from_secs(90));
+        assert_eq!(
+            backoff(0, 1, Some(Duration::from_secs(90))),
+            Duration::from_secs(90)
+        );
         assert!(backoff(5, 1, Some(Duration::from_secs(1))) >= Duration::from_secs(45));
         // …but a hostile Retry-After is capped.
-        assert_eq!(backoff(0, 1, Some(Duration::from_secs(99_999))), Duration::from_secs(600));
+        assert_eq!(
+            backoff(0, 1, Some(Duration::from_secs(99_999))),
+            Duration::from_secs(600)
+        );
     }
 }

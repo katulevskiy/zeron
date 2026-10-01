@@ -19,7 +19,8 @@ use crate::tools::{ToolDef, Tools};
 pub(crate) const GUIDE: &str = include_str!("../../../docs/workflow-guide.md");
 
 pub(crate) fn catalog() -> Vec<ToolDef> {
-    let run_id = json!({ "type": "string", "description": "The run id returned by start_workflow." });
+    let run_id =
+        json!({ "type": "string", "description": "The run id returned by start_workflow." });
     vec![
         ToolDef {
             name: "workflow_guide",
@@ -198,7 +199,12 @@ impl Tools {
     }
 
     pub(crate) async fn list_workflow_runs(&self, args: ListArgs) -> anyhow::Result<Value> {
-        let chat_id = match args.chat.as_deref().map(str::trim).filter(|c| !c.is_empty()) {
+        let chat_id = match args
+            .chat
+            .as_deref()
+            .map(str::trim)
+            .filter(|c| !c.is_empty())
+        {
             Some("all") => None,
             Some(key) => Some(self.zeron.resolve_chat(key).await?.id),
             None => self.zeron.origin().chat_id.clone(),
@@ -215,7 +221,10 @@ impl Tools {
     async fn own_run(&self, run_id: &str, verb: &str) -> anyhow::Result<()> {
         let got = self
             .zeron
-            .call(methods::WORKFLOW_GET, json!({ "runId": run_id, "include": [] }))
+            .call(
+                methods::WORKFLOW_GET,
+                json!({ "runId": run_id, "include": [] }),
+            )
             .await
             .map_err(strip_method)?;
         let owner = got["run"]["chatId"].as_str().unwrap_or_default();
@@ -261,7 +270,10 @@ impl Tools {
         }))
     }
 
-    pub(crate) async fn resolve_workflow_question(&self, args: AnswerArgs) -> anyhow::Result<Value> {
+    pub(crate) async fn resolve_workflow_question(
+        &self,
+        args: AnswerArgs,
+    ) -> anyhow::Result<Value> {
         self.own_run(&args.run_id, "answer questions of").await?;
         self.zeron
             .call(
@@ -292,7 +304,15 @@ mod tests {
     #[test]
     fn the_guide_is_embedded_and_names_the_api() {
         assert!(GUIDE.contains("def main(args)"));
-        for needle in ["phase(", "agent(", ".ask(", "pmap(", "run(", "artifact.markdown", "schema.obj"] {
+        for needle in [
+            "phase(",
+            "agent(",
+            ".ask(",
+            "pmap(",
+            "run(",
+            "artifact.markdown",
+            "schema.obj",
+        ] {
             assert!(GUIDE.contains(needle), "{needle}");
         }
     }
@@ -314,7 +334,11 @@ mod tests {
             ]
         );
         let start = defs.iter().find(|d| d.name == "start_workflow").unwrap();
-        assert!(start.description.contains("ONLY when the user explicitly asks"));
+        assert!(
+            start
+                .description
+                .contains("ONLY when the user explicitly asks")
+        );
         assert!(start.description.contains("workflow_guide"));
         assert!(start.description.contains("Do NOT poll"));
         for d in &defs {
@@ -325,7 +349,9 @@ mod tests {
 
     #[test]
     fn method_prefixes_are_stripped_from_errors() {
-        let e = strip_method(anyhow::anyhow!("WorkflowStart: wf.star:2:5 phase \"x\" contains no ask"));
+        let e = strip_method(anyhow::anyhow!(
+            "WorkflowStart: wf.star:2:5 phase \"x\" contains no ask"
+        ));
         assert!(e.to_string().starts_with("wf.star:2:5"), "{e}");
         let e = strip_method(anyhow::anyhow!("something: else"));
         assert_eq!(e.to_string(), "something: else");

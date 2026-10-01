@@ -72,8 +72,8 @@ impl World {
             Ok(c) => c,
             Err(e) => return start_error(format!("could not start {:?}: {e}", req.program)),
         };
-        let out = child.stdout.take().map(|s| capped_reader(s));
-        let err = child.stderr.take().map(|s| capped_reader(s));
+        let out = child.stdout.take().map(capped_reader);
+        let err = child.stderr.take().map(capped_reader);
         let deadline = Instant::now() + Duration::from_secs(req.timeout_s);
         let mut timed_out = false;
         let status = loop {
@@ -89,10 +89,18 @@ impl World {
             }
             std::thread::sleep(Duration::from_millis(15));
         };
-        let (stdout, out_truncated) = out.map(|h| h.join().unwrap_or_default()).unwrap_or_default();
-        let (stderr, err_truncated) = err.map(|h| h.join().unwrap_or_default()).unwrap_or_default();
+        let (stdout, out_truncated) = out
+            .map(|h| h.join().unwrap_or_default())
+            .unwrap_or_default();
+        let (stderr, err_truncated) = err
+            .map(|h| h.join().unwrap_or_default())
+            .unwrap_or_default();
         RunReply {
-            exit_code: if timed_out { None } else { status.and_then(|s| s.code()) },
+            exit_code: if timed_out {
+                None
+            } else {
+                status.and_then(|s| s.code())
+            },
             stdout: String::from_utf8_lossy(&stdout).into_owned(),
             stderr: String::from_utf8_lossy(&stderr).into_owned(),
             timed_out,
@@ -117,11 +125,15 @@ impl World {
 
     fn walker(&self, glob: Option<&str>) -> Result<ignore::Walk, String> {
         let mut builder = ignore::WalkBuilder::new(&self.root);
-        builder.standard_filters(true).hidden(false).follow_links(false);
+        builder
+            .standard_filters(true)
+            .hidden(false)
+            .follow_links(false);
         builder.filter_entry(|e| e.file_name() != ".git");
         if let Some(glob) = glob {
             let mut ov = ignore::overrides::OverrideBuilder::new(&self.root);
-            ov.add(glob).map_err(|e| format!("bad glob {glob:?}: {e}"))?;
+            ov.add(glob)
+                .map_err(|e| format!("bad glob {glob:?}: {e}"))?;
             builder.overrides(ov.build().map_err(|e| format!("bad glob {glob:?}: {e}"))?);
         }
         Ok(builder.build())
@@ -193,11 +205,15 @@ impl World {
         }
         paths.sort();
         for path in paths {
-            let Ok(meta) = std::fs::metadata(&path) else { continue };
+            let Ok(meta) = std::fs::metadata(&path) else {
+                continue;
+            };
             if meta.len() > GREP_MAX_FILE_BYTES {
                 continue;
             }
-            let Ok(bytes) = std::fs::read(&path) else { continue };
+            let Ok(bytes) = std::fs::read(&path) else {
+                continue;
+            };
             if bytes[..bytes.len().min(8192)].contains(&0) {
                 continue; // binary
             }
@@ -269,7 +285,13 @@ impl World {
     }
 
     fn git_diff(&self, base: Option<&str>, path: Option<&str>) -> Result<Value, String> {
-        let mut args = vec!["diff", "--no-color", "--no-ext-diff", base.unwrap_or("HEAD"), "--"];
+        let mut args = vec![
+            "diff",
+            "--no-color",
+            "--no-ext-diff",
+            base.unwrap_or("HEAD"),
+            "--",
+        ];
         if let Some(p) = path {
             args.push(p);
         }
@@ -319,7 +341,9 @@ fn start_error(message: String) -> RunReply {
 }
 
 /// Read a stream on its own thread, keeping at most the output cap.
-fn capped_reader<R: Read + Send + 'static>(mut reader: R) -> std::thread::JoinHandle<(Vec<u8>, bool)> {
+fn capped_reader<R: Read + Send + 'static>(
+    mut reader: R,
+) -> std::thread::JoinHandle<(Vec<u8>, bool)> {
     std::thread::spawn(move || {
         let mut kept = Vec::new();
         let mut truncated = false;
@@ -372,7 +396,10 @@ mod tests {
 
     fn req(program: &str, args: &[&str], timeout_s: u64) -> RunRequest {
         RunRequest {
-            key: zeron_workflow::site::SiteKey { site: "s".into(), ordinal: 0 },
+            key: zeron_workflow::site::SiteKey {
+                site: "s".into(),
+                ordinal: 0,
+            },
             program: program.into(),
             args: args.iter().map(ToString::to_string).collect(),
             cwd: None,
@@ -383,18 +410,56 @@ mod tests {
     #[test]
     fn globs_greps_and_reads_stay_inside_the_project() {
         let (_dir, world) = project();
-        assert_eq!(world.read(&ReadOp::Glob { pattern: "src/**/*.rs".into() }).unwrap(), json!(["src/a.rs", "src/b.rs"]));
+        assert_eq!(
+            world
+                .read(&ReadOp::Glob {
+                    pattern: "src/**/*.rs".into()
+                })
+                .unwrap(),
+            json!(["src/a.rs", "src/b.rs"])
+        );
         let hits = world
-            .read(&ReadOp::Grep { pattern: "TODO".into(), glob: Some("*.rs".into()) })
+            .read(&ReadOp::Grep {
+                pattern: "TODO".into(),
+                glob: Some("*.rs".into()),
+            })
             .unwrap();
         assert_eq!(hits[0]["path"], "src/a.rs");
         assert_eq!(hits[0]["line"], 2);
-        assert_eq!(world.read(&ReadOp::Read { path: "README.md".into() }).unwrap(), json!("hello\n"));
-        assert_eq!(world.read(&ReadOp::Read { path: "nope.txt".into() }).unwrap(), Value::Null);
+        assert_eq!(
+            world
+                .read(&ReadOp::Read {
+                    path: "README.md".into()
+                })
+                .unwrap(),
+            json!("hello\n")
+        );
+        assert_eq!(
+            world
+                .read(&ReadOp::Read {
+                    path: "nope.txt".into()
+                })
+                .unwrap(),
+            Value::Null
+        );
         for escape in ["../secret.txt", "/etc/passwd", "src/../../secret.txt"] {
-            assert!(world.read(&ReadOp::Read { path: escape.into() }).is_err(), "{escape}");
+            assert!(
+                world
+                    .read(&ReadOp::Read {
+                        path: escape.into()
+                    })
+                    .is_err(),
+                "{escape}"
+            );
         }
-        assert!(world.read(&ReadOp::Grep { pattern: "(".into(), glob: None }).is_err());
+        assert!(
+            world
+                .read(&ReadOp::Grep {
+                    pattern: "(".into(),
+                    glob: None
+                })
+                .is_err()
+        );
     }
 
     #[test]
@@ -402,12 +467,20 @@ mod tests {
         let (_dir, world) = project();
         let big = "x".repeat(MAX_READ_BYTES + 1);
         std::fs::write(world.root().join("big.txt"), big).unwrap();
-        let err = world.read(&ReadOp::Read { path: "big.txt".into() }).unwrap_err();
+        let err = world
+            .read(&ReadOp::Read {
+                path: "big.txt".into(),
+            })
+            .unwrap_err();
         assert!(err.contains("at most"), "{err}");
         for i in 0..(MAX_READ_ENTRIES + 5) {
             std::fs::write(world.root().join("src").join(format!("f{i}.txt")), "").unwrap();
         }
-        let err = world.read(&ReadOp::Glob { pattern: "src/*.txt".into() }).unwrap_err();
+        let err = world
+            .read(&ReadOp::Glob {
+                pattern: "src/*.txt".into(),
+            })
+            .unwrap_err();
         assert!(err.contains("narrow the pattern"), "{err}");
     }
 
@@ -416,7 +489,10 @@ mod tests {
     fn commands_return_values_and_are_confined_and_bounded() {
         let (_dir, world) = project();
         let cancel = Arc::new(AtomicBool::new(false));
-        let ok = world.run(&req("sh", &["-c", "echo out; echo err >&2; exit 3"], 10), &cancel);
+        let ok = world.run(
+            &req("sh", &["-c", "echo out; echo err >&2; exit 3"], 10),
+            &cancel,
+        );
         assert_eq!(ok.exit_code, Some(3));
         assert_eq!(ok.stdout.trim(), "out");
         assert_eq!(ok.stderr.trim(), "err");
@@ -428,7 +504,12 @@ mod tests {
         r.cwd = Some("../".into());
         assert!(world.run(&r, &cancel).start_error.is_some());
         // Missing program: a value, not a panic.
-        assert!(world.run(&req("definitely-not-a-program", &[], 5), &cancel).start_error.is_some());
+        assert!(
+            world
+                .run(&req("definitely-not-a-program", &[], 5), &cancel)
+                .start_error
+                .is_some()
+        );
         // Timeout kills the whole group.
         let started = Instant::now();
         let slow = world.run(&req("sh", &["-c", "sleep 30 & sleep 30"], 1), &cancel);
@@ -455,7 +536,7 @@ mod tests {
     fn git_reads_in_a_repository() {
         let (_dir, world) = project();
         let git = |args: &[&str]| {
-            let ok = Command::new("git")
+            Command::new("git")
                 .args(args)
                 .current_dir(world.root())
                 .env("GIT_AUTHOR_NAME", "t")
@@ -464,8 +545,7 @@ mod tests {
                 .env("GIT_COMMITTER_EMAIL", "t@t")
                 .output()
                 .map(|o| o.status.success())
-                .unwrap_or(false);
-            ok
+                .unwrap_or(false)
         };
         if !git(&["init", "-q"]) {
             return; // no git on this machine
@@ -475,11 +555,21 @@ mod tests {
         std::fs::write(world.root().join("new.txt"), "n").unwrap();
         let changed = world.read(&ReadOp::GitChangedFiles { base: None }).unwrap();
         assert_eq!(changed, json!(["new.txt", "src/a.rs"]));
-        let diff = world.read(&ReadOp::GitDiff { base: None, path: Some("src/a.rs".into()) }).unwrap();
+        let diff = world
+            .read(&ReadOp::GitDiff {
+                base: None,
+                path: Some("src/a.rs".into()),
+            })
+            .unwrap();
         assert!(diff.as_str().unwrap().contains("+// changed"));
         let status = world.read(&ReadOp::GitStatus).unwrap();
         assert!(status.as_array().unwrap().len() >= 2);
-        let log = world.read(&ReadOp::GitLog { limit: 5, path: None }).unwrap();
+        let log = world
+            .read(&ReadOp::GitLog {
+                limit: 5,
+                path: None,
+            })
+            .unwrap();
         assert_eq!(log[0]["subject"], "first");
     }
 }

@@ -699,10 +699,7 @@ impl AskService {
             .or_else(|| parent.cwd.clone())
             .unwrap_or_else(|| "~".into());
 
-        let child_id = spec
-            .reuse_child
-            .clone()
-            .unwrap_or_else(new_id);
+        let child_id = spec.reuse_child.clone().unwrap_or_else(new_id);
         let ask_id = new_id();
         let mcp = self
             .sessions
@@ -826,8 +823,7 @@ impl AskService {
                     )
                 };
                 // Escalation waits are the parent agent's time, not the child's.
-                let deadline =
-                    tokio::time::Instant::from_std(started + spec.timeout + parked);
+                let deadline = tokio::time::Instant::from_std(started + spec.timeout + parked);
                 if let Some(result) = accepted.clone() {
                     // Let the child's closing remark land; never wait on it
                     // beyond the grace period.
@@ -912,7 +908,8 @@ impl AskService {
         turns: u32,
         tracker: &mut ProgressTracker,
     ) {
-        if lock(state).progress.is_none() || tracker.at.is_some_and(|t| t.elapsed() < PROGRESS_EVERY)
+        if lock(state).progress.is_none()
+            || tracker.at.is_some_and(|t| t.elapsed() < PROGRESS_EVERY)
         {
             return;
         }
@@ -1136,7 +1133,9 @@ pub fn tool_label(call: &zeron_proto::ToolCall) -> String {
         T::ReadFile { path } => format!("Read {}", clip(path)),
         T::WriteFile { path, .. } => format!("Write {}", clip(path)),
         T::EditFile { path, .. } => format!("Edit {}", clip(path)),
-        T::ApplyPatch { path } => format!("Patch {}", path.as_deref().map_or_else(String::new, clip)),
+        T::ApplyPatch { path } => {
+            format!("Patch {}", path.as_deref().map_or_else(String::new, clip))
+        }
         T::Search { pattern, .. } => format!("Search {}", clip(pattern)),
         T::Glob { pattern } => format!("Glob {}", clip(pattern)),
         T::WebFetch { url, .. } => format!("Fetch {}", clip(url)),
@@ -1774,9 +1773,13 @@ mod tests {
         let fake = demo_workflow_agents();
         let ask = |label: &str| {
             let fake = fake.clone();
-            let spec = AskSpec::new(label, "p", json!({
-                "type": "object", "properties": {"text": {"type": "string"}}, "required": ["text"]
-            }));
+            let spec = AskSpec::new(
+                label,
+                "p",
+                json!({
+                    "type": "object", "properties": {"text": {"type": "string"}}, "required": ["text"]
+                }),
+            );
             async move { fake.ask("c", spec, CancellationToken::new()).await }
         };
         let ok = ask("reviewer").await.unwrap();

@@ -707,7 +707,11 @@ async fn an_escalation_parks_only_its_ask_and_the_answer_is_the_tool_result() {
     let e = raised.lock().unwrap()[0].clone();
     assert_eq!(e.question, "Which database?");
     assert_eq!(e.context, "two are configured");
-    assert!(rig.ask.answer_escalation(&e.child_chat_id, &e.qid, "Postgres".into()).await);
+    assert!(
+        rig.ask
+            .answer_escalation(&e.child_chat_id, &e.qid, "Postgres".into())
+            .await
+    );
     let outcome = task.await.unwrap().expect("ask completes after the answer");
     assert_eq!(outcome.result["reason"], "Postgres");
     let answered = reply.lock().unwrap().clone().unwrap();
@@ -762,5 +766,4 @@ async fn escalations_are_limited_per_ask_and_refused_where_not_offered() {
         statuses.lock().unwrap().clone(),
         vec![(Answered, 1), (Answered, 0), (Refused, 0)]
     );
-
 }

@@ -248,7 +248,10 @@ mod tests {
         tokio::time::sleep(Duration::from_millis(20)).await;
         assert!(!more.is_finished());
         gate.set_cap(3);
-        let d = tokio::time::timeout(Duration::from_secs(1), more).await.unwrap().unwrap();
+        let d = tokio::time::timeout(Duration::from_secs(1), more)
+            .await
+            .unwrap()
+            .unwrap();
         gate.set_cap(1);
         assert_eq!(gate.in_flight(), 3, "running asks are never cut");
         drop((c, d));

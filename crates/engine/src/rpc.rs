@@ -1562,26 +1562,26 @@ fn doc_messages_stream(
                 // doc's workflow revision moved).
                 let is_reset = matches!(frame, TranscriptFrame::Reset { .. });
                 let revision = doc.workflow_revision();
-                let workflows = if !is_reset
-                    && sent_workflows.as_ref().is_some_and(|(r, _)| *r == revision)
-                {
-                    None
-                } else {
-                    let now = doc.workflow_runs();
-                    match (&sent_workflows, is_reset) {
-                        (Some((_, before)), false) => {
-                            let delta = before.diff(&now);
-                            sent_workflows = Some((revision, now));
-                            delta.map(zeron_proto::WorkflowsUpdate::Delta)
+                let workflows =
+                    if !is_reset && sent_workflows.as_ref().is_some_and(|(r, _)| *r == revision) {
+                        None
+                    } else {
+                        let now = doc.workflow_runs();
+                        match (&sent_workflows, is_reset) {
+                            (Some((_, before)), false) => {
+                                let delta = before.diff(&now);
+                                sent_workflows = Some((revision, now));
+                                delta.map(zeron_proto::WorkflowsUpdate::Delta)
+                            }
+                            _ => {
+                                let nothing = now.runs.is_empty() && revision == 0;
+                                let update = (!nothing)
+                                    .then(|| zeron_proto::WorkflowsUpdate::Full(now.clone()));
+                                sent_workflows = Some((revision, now));
+                                update
+                            }
                         }
-                        _ => {
-                            let nothing = now.runs.is_empty() && revision == 0;
-                            let update = (!nothing).then(|| zeron_proto::WorkflowsUpdate::Full(now.clone()));
-                            sent_workflows = Some((revision, now));
-                            update
-                        }
-                    }
-                };
+                    };
                 if frame.is_empty_delta()
                     && usage == previous_usage
                     && replay_baseline.is_none()
@@ -1642,7 +1642,8 @@ async fn opening_doc_messages_stream(
             context_usage: handle.doc().context_usage(),
             replay_baseline: Some(zeron_doc::TranscriptBaseline::capture(&entries)),
             goal: handle.doc().goal(),
-            goal_cleared: false, workflows: None,
+            goal_cleared: false,
+            workflows: None,
         })
         .map_err(|e| crate::EngineError::Other(e.to_string()))?;
         preview["historyPending"] = serde_json::Value::Bool(true);
@@ -2037,7 +2038,10 @@ impl RpcService for EngineRpc {
                 let mut run = serde_json::to_value(&view.run).unwrap_or_default();
                 if let Some(o) = run.as_object_mut() {
                     // Counts instead of lists unless asked for.
-                    let nodes = o.get("nodes").and_then(|n| n.as_array()).map_or(0, Vec::len);
+                    let nodes = o
+                        .get("nodes")
+                        .and_then(|n| n.as_array())
+                        .map_or(0, Vec::len);
                     o.insert("nodeCount".into(), nodes.into());
                     if !has("nodes") {
                         o.remove("nodes");

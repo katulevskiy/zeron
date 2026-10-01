@@ -108,7 +108,10 @@ impl DocHost {
     ) -> Result<(SessionCommandStatus, Option<String>), EngineError> {
         use zeron_proto::WorkflowCommand as C;
         let Some(workflows) = self.workflows() else {
-            return Ok((SessionCommandStatus::Rejected, Some("workflows are not available".into())));
+            return Ok((
+                SessionCommandStatus::Rejected,
+                Some("workflows are not available".into()),
+            ));
         };
         let owned = |run_id: &str| {
             workflows
@@ -120,7 +123,10 @@ impl DocHost {
             C::Stop { run_id, .. } | C::Resume { run_id } | C::Answer { run_id, .. } => run_id,
         };
         if !owned(run_id) {
-            return Ok((SessionCommandStatus::Rejected, Some(format!("no such workflow run in this chat: {run_id}"))));
+            return Ok((
+                SessionCommandStatus::Rejected,
+                Some(format!("no such workflow run in this chat: {run_id}")),
+            ));
         }
         let outcome = match command {
             C::Stop { run_id, reason } => workflows
@@ -138,7 +144,11 @@ impl DocHost {
                 });
                 Ok(())
             }
-            C::Answer { run_id, qid, answer } => workflows
+            C::Answer {
+                run_id,
+                qid,
+                answer,
+            } => workflows
                 .resolve_question(run_id, qid, answer)
                 .await
                 .map_err(|e| e.to_string()),

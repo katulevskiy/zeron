@@ -21,9 +21,8 @@ use gpui::{
 
 use zeron_doc::{MessagePart, MessageRole, SessionMessageEntry};
 use zeron_proto::{
-    GOAL_OBJECTIVE_MAX_CHARS, Goal, GoalCommand, GoalEventKind, GoalLimits,
-    GoalStatus, MessageOrigin, TodoStatus, ToolCall, VerdictOutcome, WorkflowEventMarker,
-    WorkflowStatus,
+    GOAL_OBJECTIVE_MAX_CHARS, Goal, GoalCommand, GoalEventKind, GoalLimits, GoalStatus,
+    MessageOrigin, TodoStatus, ToolCall, VerdictOutcome, WorkflowEventMarker, WorkflowStatus,
 };
 
 use crate::composer::{Composer, QUEUE_COMPOSER_OVERLAP};
@@ -421,7 +420,9 @@ impl GoalMarker {
             MarkerKind::Event(VerifierFailed) => {
                 format!("Verifier · round {} failed", self.round)
             }
-            MarkerKind::Workflow(marker) => zeron_proto::workflow_marker_text(marker, &self.title, ""),
+            MarkerKind::Workflow(marker) => {
+                zeron_proto::workflow_marker_text(marker, &self.title, "")
+            }
             MarkerKind::WorkflowMessage(WorkflowStatus::Running) => {
                 format!("Workflow agent asks a question · {}", one_line(&self.title))
             }
@@ -431,7 +432,10 @@ impl GoalMarker {
                     WorkflowStatus::Errored => "failed",
                     _ => "stopped",
                 };
-                format!("Workflow {word} · {} — result sent to the agent", one_line(&self.title))
+                format!(
+                    "Workflow {word} · {} — result sent to the agent",
+                    one_line(&self.title)
+                )
             }
         }
     }
@@ -1216,9 +1220,7 @@ pub(crate) fn marker_element(marker: &GoalMarker, theme: &Theme) -> AnyElement {
     let glyph = match marker.kind {
         MarkerKind::Workflow(WorkflowEventMarker::Completed)
         | MarkerKind::WorkflowMessage(WorkflowStatus::Completed) => icons::CHECK,
-        MarkerKind::Workflow(
-            WorkflowEventMarker::Errored | WorkflowEventMarker::Denied,
-        )
+        MarkerKind::Workflow(WorkflowEventMarker::Errored | WorkflowEventMarker::Denied)
         | MarkerKind::WorkflowMessage(WorkflowStatus::Errored) => icons::DANGER_TRIANGLE,
         MarkerKind::Workflow(WorkflowEventMarker::Stopped)
         | MarkerKind::WorkflowMessage(WorkflowStatus::Stopped) => icons::PAUSE,
@@ -1534,7 +1536,10 @@ mod tests {
         ))
         .unwrap();
         assert_eq!(stopped.tone(), Tone::Warning);
-        assert_eq!(stopped.detail_line().as_deref(), Some("stopped by a provider error · 4 agents"));
+        assert_eq!(
+            stopped.detail_line().as_deref(),
+            Some("stopped by a provider error · 4 agents")
+        );
 
         // The agent-facing result message is hidden behind a one-line row.
         let result = goal_marker(&workflow_entry(
@@ -1547,9 +1552,15 @@ mod tests {
             "[Workflow completed] PR review (run r)\ncompleted · 4 agents · 12 asks · 2m 5s\n\nResult: ...",
         ))
         .unwrap();
-        assert_eq!(result.label(), "Workflow completed · PR review — result sent to the agent");
+        assert_eq!(
+            result.label(),
+            "Workflow completed · PR review — result sent to the agent"
+        );
         assert_eq!(result.tone(), Tone::Success);
-        assert_eq!(result.detail_line().as_deref(), Some("completed · 4 agents · 12 asks · 2m 5s"));
+        assert_eq!(
+            result.detail_line().as_deref(),
+            Some("completed · 4 agents · 12 asks · 2m 5s")
+        );
         // An escalation notice shows the question.
         let question = goal_marker(&workflow_entry(
             MessageRole::User,
@@ -1562,7 +1573,11 @@ mod tests {
         ))
         .unwrap();
         assert_eq!(question.detail_line().as_deref(), Some("Which database?"));
-        assert!(question.label().starts_with("Workflow agent asks a question"));
+        assert!(
+            question
+                .label()
+                .starts_with("Workflow agent asks a question")
+        );
     }
 
     #[test]

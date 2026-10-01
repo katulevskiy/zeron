@@ -12,7 +12,7 @@ use std::sync::{Arc, Mutex};
 use std::time::Duration;
 
 use async_trait::async_trait;
-use serde_json::{Value, json};
+use serde_json::json;
 use support::*;
 use zeron_engine::ask::{AskError, AskUsage, FakeAsk, FakeReply};
 use zeron_engine::workflow::{
@@ -58,14 +58,20 @@ impl Catalog for Catalogue {
         if self.0.contains(&harness) {
             Ok(())
         } else {
-            Err(format!("harness {harness:?} is not installed on this device"))
+            Err(format!(
+                "harness {harness:?} is not installed on this device"
+            ))
         }
     }
 }
 
 fn quick_agent() -> Handler {
     Arc::new(|_, request, out, _controls| {
-        text_turn(&out, &format!("read: {}", request.prompt.len()), Some((10, 5)));
+        text_turn(
+            &out,
+            &format!("read: {}", request.prompt.len()),
+            Some((10, 5)),
+        );
     })
 }
 
@@ -81,7 +87,13 @@ fn rig_with(handler: Handler) -> Rig {
     let space = "space-main".to_string();
     env.core
         .workspace
-        .create_space(&space, &env.core.device_id, &project.to_string_lossy(), None, false)
+        .create_space(
+            &space,
+            &env.core.device_id,
+            &project.to_string_lossy(),
+            None,
+            false,
+        )
         .unwrap();
     env.core
         .workspace
@@ -108,7 +120,10 @@ fn rig_with(handler: Handler) -> Rig {
         asked: Mutex::new(Vec::new()),
     });
     svc.set_approver(approver.clone());
-    svc.set_catalog(Arc::new(Catalogue(vec![HarnessId::Mock, HarnessId::ClaudeCode])));
+    svc.set_catalog(Arc::new(Catalogue(vec![
+        HarnessId::Mock,
+        HarnessId::ClaudeCode,
+    ])));
     Rig {
         env,
         ask,
@@ -138,7 +153,10 @@ fn start(script: &str) -> StartRequest {
 async fn wait_real<F: FnMut() -> bool>(paused: bool, mut done: F, what: &str) {
     let deadline = std::time::Instant::now() + Duration::from_secs(40);
     while !done() {
-        assert!(std::time::Instant::now() < deadline, "timed out waiting for {what}");
+        assert!(
+            std::time::Instant::now() < deadline,
+            "timed out waiting for {what}"
+        );
         if paused {
             // Let the blocking thread run, then let virtual time pass.
             std::thread::sleep(Duration::from_millis(2));
@@ -169,7 +187,12 @@ async fn wait_delivered(rig: &Rig, run_id: &str) {
     let store = rig.svc.store().clone();
     wait_real(
         rig.paused,
-        || store.read_meta(run_id).map(|m| m.delivered).unwrap_or(false),
+        || {
+            store
+                .read_meta(run_id)
+                .map(|m| m.delivered)
+                .unwrap_or(false)
+        },
         "the completion message to be delivered",
     )
     .await;
@@ -224,27 +247,67 @@ async fn a_workflow_runs_end_to_end_and_its_result_reaches_the_parent_once() {
     review_handler(&rig);
     let out = rig.svc.start(CHAT, start(REVIEW)).await.expect("starts");
     assert_eq!(out.graph.phase_names(), ["review", "confirm", "gate"]);
-    assert!(out.draft_path.as_deref().unwrap().starts_with(".zeron/workflow-drafts/demo-"));
-    assert!(rig.project.join(out.draft_path.as_deref().unwrap()).exists());
+    assert!(
+        out.draft_path
+            .as_deref()
+            .unwrap()
+            .starts_with(".zeron/workflow-drafts/demo-")
+    );
+    assert!(
+        rig.project
+            .join(out.draft_path.as_deref().unwrap())
+            .exists()
+    );
 
     let run = wait_settled(&rig, &out.run_id).await;
-    assert_eq!(run.header.status, WorkflowStatus::Completed, "{:?}", run.header);
+    assert_eq!(
+        run.header.status,
+        WorkflowStatus::Completed,
+        "{:?}",
+        run.header
+    );
     assert_eq!(run.actors.len(), 6, "3 reviewers + 3 verifiers");
     assert_eq!(run.nodes.len(), 7, "6 asks + 1 command");
     assert!(run.nodes.iter().all(|n| n.outcome == Some(NodeOutcome::Ok)));
     assert_eq!(run.reports.len(), 1);
     assert_eq!(run.artifacts.len(), 1);
     assert_eq!(run.artifacts[0].id, "summary");
-    assert_eq!(run.header.phases.iter().map(|p| p.name.as_str()).collect::<Vec<_>>(), ["review", "confirm", "gate"]);
-    assert!(run.header.result_preview.as_deref().unwrap().contains("gate-ok"));
+    assert_eq!(
+        run.header
+            .phases
+            .iter()
+            .map(|p| p.name.as_str())
+            .collect::<Vec<_>>(),
+        ["review", "confirm", "gate"]
+    );
+    assert!(
+        run.header
+            .result_preview
+            .as_deref()
+            .unwrap()
+            .contains("gate-ok")
+    );
 
     // The completion message: queued once, with the origin, delivered as a turn.
     wait_delivered(&rig, &out.run_id).await;
-    wait_for(|| workflow_messages(&rig).len() == 1, "the completion message in the transcript").await;
+    wait_for(
+        || workflow_messages(&rig).len() == 1,
+        "the completion message in the transcript",
+    )
+    .await;
     let (body, origin) = workflow_messages(&rig).remove(0);
     assert!(body.starts_with("[Workflow completed] Demo"), "{body}");
-    assert!(body.contains("gate-ok") && body.contains("summary (markdown)"), "{body}");
-    assert!(matches!(origin, MessageOrigin::Workflow { status: WorkflowStatus::Completed, .. }));
+    assert!(
+        body.contains("gate-ok") && body.contains("summary (markdown)"),
+        "{body}"
+    );
+    assert!(matches!(
+        origin,
+        MessageOrigin::Workflow {
+            status: WorkflowStatus::Completed,
+            ..
+        }
+    ));
     // Markers: started and completed.
     let markers: Vec<_> = rig
         .env
@@ -255,16 +318,25 @@ async fn a_workflow_runs_end_to_end_and_its_result_reaches_the_parent_once() {
             _ => None,
         })
         .collect();
-    assert_eq!(markers, [WorkflowEventMarker::Started, WorkflowEventMarker::Completed]);
+    assert_eq!(
+        markers,
+        [WorkflowEventMarker::Started, WorkflowEventMarker::Completed]
+    );
     // The synced projection carries the same run (children hidden, one level down).
     rig.svc.flush();
     let doc = rig.env.core.doc_host.open(CHAT).unwrap();
     let synced = doc.doc().workflow_runs();
     assert_eq!(synced.run(&out.run_id).unwrap().nodes.len(), 7);
-    assert_eq!(synced.run(&out.run_id).unwrap().header.status, WorkflowStatus::Completed);
+    assert_eq!(
+        synced.run(&out.run_id).unwrap().header.status,
+        WorkflowStatus::Completed
+    );
     // Full results live in the journal only.
     let view = rig.svc.get(&out.run_id).unwrap();
-    assert_eq!(view.result.unwrap()["findings"].as_array().unwrap().len(), 3);
+    assert_eq!(
+        view.result.unwrap()["findings"].as_array().unwrap().len(),
+        3
+    );
     assert_eq!(view.reports, vec![json!({"found": 3})]);
 
     // A restart (or a second reconcile) never delivers it again.
@@ -280,13 +352,25 @@ async fn approval_shows_the_graph_and_a_denial_creates_a_settled_run_and_no_work
     let rig = rig();
     *rig.approver.answer.lock().unwrap() = Approval::Denied("not now".into());
     let err = rig.svc.start(CHAT, start(REVIEW)).await.unwrap_err();
-    assert!(matches!(&err, StartError::Denied(m) if m == "not now"), "{err:?}");
+    assert!(
+        matches!(&err, StartError::Denied(m) if m == "not now"),
+        "{err:?}"
+    );
     assert!(rig.ask.calls().is_empty(), "nothing ran");
     let asked = rig.approver.asked.lock().unwrap().clone();
     assert_eq!(asked.len(), 1);
     let q = &asked[0];
-    assert!(q.question.contains("Phases: review (1) → confirm (1) → gate (1)"), "{}", q.question);
-    assert!(q.question.contains("$ sh -c echo gate-ok"), "{}", q.question);
+    assert!(
+        q.question
+            .contains("Phases: review (1) → confirm (1) → gate (1)"),
+        "{}",
+        q.question
+    );
+    assert!(
+        q.question.contains("$ sh -c echo gate-ok"),
+        "{}",
+        q.question
+    );
     assert_eq!(q.options, ["Run workflow", "Deny"]);
     let meta = q.meta.as_ref().unwrap();
     assert_eq!(meta["kind"], "workflowApproval");
@@ -298,7 +382,10 @@ async fn approval_shows_the_graph_and_a_denial_creates_a_settled_run_and_no_work
     assert_eq!(runs[0].stop_reason, Some(WorkflowStopReason::Denied));
     assert!(!runs[0].resumable);
     assert!(workflow_messages(&rig).is_empty());
-    assert!(rig.svc.resume(&runs[0].run_id, None, false).await.is_err(), "a denied run cannot be resumed");
+    assert!(
+        rig.svc.resume(&runs[0].run_id, None, false).await.is_err(),
+        "a denied run cannot be resumed"
+    );
 }
 
 #[tokio::test(flavor = "multi_thread", worker_threads = 4)]
@@ -306,32 +393,67 @@ async fn a_script_with_problems_returns_diagnostics_and_creates_nothing() {
     let rig = rig();
     let err = rig
         .svc
-        .start(CHAT, start("def main(args):\n    phase(\"empty\")\n    return 1\n"))
+        .start(
+            CHAT,
+            start("def main(args):\n    phase(\"empty\")\n    return 1\n"),
+        )
         .await
         .unwrap_err();
-    let StartError::Diagnostics(d) = err else { panic!("{err:?}") };
-    assert!(d[0].to_string().starts_with("workflow.star:2:5"), "{}", d[0]);
+    let StartError::Diagnostics(d) = err else {
+        panic!("{err:?}")
+    };
+    assert!(
+        d[0].to_string().starts_with("workflow.star:2:5"),
+        "{}",
+        d[0]
+    );
     assert!(rig.svc.list(None).is_empty());
-    assert!(rig.approver.asked.lock().unwrap().is_empty(), "no approval dialog for a broken script");
+    assert!(
+        rig.approver.asked.lock().unwrap().is_empty(),
+        "no approval dialog for a broken script"
+    );
     // `path` scripts are read inside the project only.
     std::fs::create_dir_all(rig.project.join("wf")).unwrap();
-    std::fs::write(rig.project.join("wf/a.star"), "def main(args):\n    return 7\n").unwrap();
+    std::fs::write(
+        rig.project.join("wf/a.star"),
+        "def main(args):\n    return 7\n",
+    )
+    .unwrap();
     let ok = rig
         .svc
-        .start(CHAT, StartRequest { path: Some("wf/a.star".into()), ..StartRequest::default() })
+        .start(
+            CHAT,
+            StartRequest {
+                path: Some("wf/a.star".into()),
+                ..StartRequest::default()
+            },
+        )
         .await
         .unwrap();
     assert_eq!(ok.name, "a");
     wait_settled(&rig, &ok.run_id).await;
     let escape = rig
         .svc
-        .start(CHAT, StartRequest { path: Some("../secret.star".into()), ..StartRequest::default() })
+        .start(
+            CHAT,
+            StartRequest {
+                path: Some("../secret.star".into()),
+                ..StartRequest::default()
+            },
+        )
         .await
         .unwrap_err();
     assert!(matches!(escape, StartError::Invalid(_)));
     let both = rig
         .svc
-        .start(CHAT, StartRequest { path: Some("wf/a.star".into()), script: Some("x".into()), ..StartRequest::default() })
+        .start(
+            CHAT,
+            StartRequest {
+                path: Some("wf/a.star".into()),
+                script: Some("x".into()),
+                ..StartRequest::default()
+            },
+        )
         .await
         .unwrap_err();
     assert!(matches!(both, StartError::Invalid(_)));
@@ -350,7 +472,10 @@ async fn the_concurrency_cap_bounds_asks_in_flight() {
         p.fetch_max(now, Ordering::SeqCst);
         // `After` keeps the ask in flight; the decrement rides the next call's
         // clock: simpler to track via the reply delay below.
-        Some(FakeReply::After(Duration::from_millis(80), Box::new(text("ok"))))
+        Some(FakeReply::After(
+            Duration::from_millis(80),
+            Box::new(text("ok")),
+        ))
     });
     let l2 = live.clone();
     let mut events = rig.svc.subscribe();
@@ -378,7 +503,11 @@ def main(args):
     assert_eq!(run.header.status, WorkflowStatus::Completed);
     let _ = counter.await;
     assert_eq!(rig.ask.calls().len(), 10);
-    assert!(peak.load(Ordering::SeqCst) <= 3, "peak {}", peak.load(Ordering::SeqCst));
+    assert!(
+        peak.load(Ordering::SeqCst) <= 3,
+        "peak {}",
+        peak.load(Ordering::SeqCst)
+    );
     assert!(peak.load(Ordering::SeqCst) >= 2, "it did overlap");
     assert_eq!(run.header.concurrency.ceiling, 3);
 }
@@ -386,7 +515,12 @@ def main(args):
 #[tokio::test(flavor = "multi_thread", worker_threads = 4)]
 async fn an_actor_is_fifo_and_keeps_one_child_across_asks() {
     let rig = rig();
-    rig.ask.on_call(|_| Some(FakeReply::After(Duration::from_millis(30), Box::new(text("ok")))));
+    rig.ask.on_call(|_| {
+        Some(FakeReply::After(
+            Duration::from_millis(30),
+            Box::new(text("ok")),
+        ))
+    });
     let script = r#"
 def main(args):
     phase("p")
@@ -405,19 +539,46 @@ def main(args):
     assert_eq!(worker.len(), 4);
     let order: Vec<_> = worker
         .iter()
-        .map(|c| c.spec.prompt.split("STEP ").nth(1).unwrap().chars().next().unwrap())
+        .map(|c| {
+            c.spec
+                .prompt
+                .split("STEP ")
+                .nth(1)
+                .unwrap()
+                .chars()
+                .next()
+                .unwrap()
+        })
         .collect();
     assert_eq!(order, ['0', '1', '2', '3'], "script order is run order");
     // The first ask creates the child; every later ask continues it.
     assert!(worker[0].spec.reuse_child.is_none());
-    let reused: BTreeSet<_> = worker.iter().skip(1).map(|c| c.spec.reuse_child.clone()).collect();
+    let reused: BTreeSet<_> = worker
+        .iter()
+        .skip(1)
+        .map(|c| c.spec.reuse_child.clone())
+        .collect();
     assert_eq!(reused.len(), 1, "one child for every later ask: {reused:?}");
     assert!(reused.iter().next().unwrap().is_some());
     // Standing instructions and the persona go with the first ask only.
-    assert!(worker[0].spec.prompt.contains("subagent inside a dynamic workflow"));
+    assert!(
+        worker[0]
+            .spec
+            .prompt
+            .contains("subagent inside a dynamic workflow")
+    );
     assert!(worker[0].spec.prompt.contains("Be terse."));
-    assert!(!worker[1].spec.prompt.contains("subagent inside a dynamic workflow"));
-    assert!(worker.iter().all(|c| c.spec.persistent && c.spec.escalation.is_some()));
+    assert!(
+        !worker[1]
+            .spec
+            .prompt
+            .contains("subagent inside a dynamic workflow")
+    );
+    assert!(
+        worker
+            .iter()
+            .all(|c| c.spec.persistent && c.spec.escalation.is_some())
+    );
     assert_eq!(worker[0].spec.title.as_deref(), Some("Demo · worker"));
     // The other actor got its own child.
     let other = calls.iter().find(|c| c.spec.label == "other").unwrap();
@@ -450,9 +611,20 @@ def main(args):
     let result = view.result.unwrap();
     assert_eq!(result[0], true);
     assert_eq!(result[1], false);
-    assert!(result[2].as_str().unwrap().contains("without submitting a result"));
+    assert!(
+        result[2]
+            .as_str()
+            .unwrap()
+            .contains("without submitting a result")
+    );
     assert_eq!(result[3], true);
-    assert_eq!(run.nodes.iter().filter(|n| n.outcome == Some(NodeOutcome::Failed)).count(), 1);
+    assert_eq!(
+        run.nodes
+            .iter()
+            .filter(|n| n.outcome == Some(NodeOutcome::Failed))
+            .count(),
+        1
+    );
 }
 
 #[tokio::test(flavor = "multi_thread", worker_threads = 4)]
@@ -476,11 +648,18 @@ def main(args):
     assert!(r[2].as_str().unwrap().contains("not installed"), "{r}");
     assert_eq!(r[3], false);
     assert!(r[4].as_str().unwrap().contains("unknown harness"), "{r}");
-    assert_eq!(rig.ask.calls().len(), 1, "only the valid ask reached a child");
+    assert_eq!(
+        rig.ask.calls().len(),
+        1,
+        "only the valid ask reached a child"
+    );
     // …and the same check at start for run-level defaults.
     let mut req = start("def main(args):\n    return 1\n");
     req.harness = Some("codex".into());
-    assert!(matches!(rig.svc.start(CHAT, req).await.unwrap_err(), StartError::Invalid(_)));
+    assert!(matches!(
+        rig.svc.start(CHAT, req).await.unwrap_err(),
+        StartError::Invalid(_)
+    ));
 }
 
 // ── provider faults ───────────────────────────────────────────────────────
@@ -506,7 +685,10 @@ async fn transient_errors_are_redriven_with_backoff_and_never_reach_the_script()
     let out = rig.svc.start(CHAT, start(script)).await.unwrap();
     let run = wait_settled(&rig, &out.run_id).await;
     assert_eq!(run.header.status, WorkflowStatus::Completed);
-    assert_eq!(rig.svc.get(&out.run_id).unwrap().result.unwrap(), json!([true, "finally"]));
+    assert_eq!(
+        rig.svc.get(&out.run_id).unwrap().result.unwrap(),
+        json!([true, "finally"])
+    );
     assert_eq!(n.load(Ordering::SeqCst), 4, "3 failures + 1 success");
     // Backoff 2s, 4s, 8s (±25 %) of virtual time between the redrives (the
     // test advances the clock in coarse steps, so gaps are at least that).
@@ -527,19 +709,25 @@ async fn rate_limits_throttle_the_model_and_show_it() {
     let c = n.clone();
     rig.ask.on_call(move |_| {
         Some(if c.fetch_add(1, Ordering::SeqCst) == 0 {
-            FakeReply::Fail(AskError::TurnFailed("429 Too Many Requests; retry-after: 7".into()))
+            FakeReply::Fail(AskError::TurnFailed(
+                "429 Too Many Requests; retry-after: 7".into(),
+            ))
         } else {
             text("ok")
         })
     });
     let mut events = rig.svc.subscribe();
-    let script = "def main(args):\n    phase(\"p\")\n    return agent(\"a\").ask(\"x\").result().ok\n";
+    let script =
+        "def main(args):\n    phase(\"p\")\n    return agent(\"a\").ask(\"x\").result().ok\n";
     let mut req = start(script);
     req.max_concurrency = Some(4);
     let started = tokio::time::Instant::now();
     let out = rig.svc.start(CHAT, req).await.unwrap();
     wait_settled(&rig, &out.run_id).await;
-    assert!(started.elapsed() >= Duration::from_secs(7), "the Retry-After was honoured");
+    assert!(
+        started.elapsed() >= Duration::from_secs(7),
+        "the Retry-After was honoured"
+    );
     let mut throttled = false;
     while let Ok(e) = events.try_recv() {
         if let WorkflowEventKind::ConcurrencyChanged { concurrency } = e.kind {
@@ -558,11 +746,19 @@ async fn a_deterministic_provider_error_stops_the_run_and_resume_continues_witho
     let b = broken.clone();
     rig.ask.on_call(move |call| {
         c.fetch_add(1, Ordering::SeqCst);
-        Some(if call.spec.prompt.contains("SECOND") && b.load(Ordering::SeqCst) {
-            FakeReply::Fail(AskError::TurnFailed("401 Unauthorized: invalid API key".into()))
-        } else {
-            text(if call.spec.prompt.contains("FIRST") { "one" } else { "two" })
-        })
+        Some(
+            if call.spec.prompt.contains("SECOND") && b.load(Ordering::SeqCst) {
+                FakeReply::Fail(AskError::TurnFailed(
+                    "401 Unauthorized: invalid API key".into(),
+                ))
+            } else {
+                text(if call.spec.prompt.contains("FIRST") {
+                    "one"
+                } else {
+                    "two"
+                })
+            },
+        )
     });
     let script = r#"
 def main(args):
@@ -577,7 +773,15 @@ def main(args):
     let run = wait_settled(&rig, &out.run_id).await;
     assert_eq!(run.header.status, WorkflowStatus::Stopped);
     assert_eq!(run.header.stop_reason, Some(WorkflowStopReason::Provider));
-    assert!(run.header.stop_detail.as_deref().unwrap().contains("authentication failed"), "{:?}", run.header.stop_detail);
+    assert!(
+        run.header
+            .stop_detail
+            .as_deref()
+            .unwrap()
+            .contains("authentication failed"),
+        "{:?}",
+        run.header.stop_detail
+    );
     assert!(run.header.resumable);
     assert_eq!(calls.load(Ordering::SeqCst), 2);
     wait_delivered(&rig, &out.run_id).await;
@@ -586,17 +790,37 @@ def main(args):
 
     // The user fixes the key; resume replays FIRST from the journal.
     broken.store(false, Ordering::SeqCst);
-    let resumed = rig.svc.resume(&out.run_id, Some(json!({})), false).await.unwrap();
+    let resumed = rig
+        .svc
+        .resume(&out.run_id, Some(json!({})), false)
+        .await
+        .unwrap();
     let run2 = wait_settled(&rig, &resumed.run_id).await;
-    assert_eq!(run2.header.status, WorkflowStatus::Completed, "{:?}", run2.header);
-    assert_eq!(run2.header.resumed_from.as_deref(), Some(out.run_id.as_str()));
+    assert_eq!(
+        run2.header.status,
+        WorkflowStatus::Completed,
+        "{:?}",
+        run2.header
+    );
+    assert_eq!(
+        run2.header.resumed_from.as_deref(),
+        Some(out.run_id.as_str())
+    );
     assert_eq!(calls.load(Ordering::SeqCst), 3, "FIRST was not asked again");
     assert_eq!(run2.header.usage.nodes_cached, 1);
     assert!(run2.nodes.iter().any(|n| n.cached));
-    assert_eq!(rig.svc.get(&resumed.run_id).unwrap().result.unwrap(), json!(["one", "two"]));
+    assert_eq!(
+        rig.svc.get(&resumed.run_id).unwrap().result.unwrap(),
+        json!(["one", "two"])
+    );
     // Different inputs are refused; the old run cannot be resumed twice at once
     // and a finished one not at all.
-    assert!(rig.svc.resume(&out.run_id, Some(json!({"x": 1})), false).await.is_err());
+    assert!(
+        rig.svc
+            .resume(&out.run_id, Some(json!({"x": 1})), false)
+            .await
+            .is_err()
+    );
     assert!(rig.svc.resume(&resumed.run_id, None, false).await.is_err());
 }
 
@@ -616,8 +840,15 @@ async fn stop_cancels_in_flight_asks_and_the_run_is_resumable() {
     assert_eq!(run.header.stop_detail.as_deref(), Some("changed my mind"));
     assert!(run.header.resumable);
     assert_eq!(rig.ask.cancelled(), 3);
-    assert!(run.nodes.iter().all(|n| n.outcome == Some(NodeOutcome::Cancelled)));
-    assert!(!rig.svc.stop(&out.run_id, None).unwrap(), "already finished");
+    assert!(
+        run.nodes
+            .iter()
+            .all(|n| n.outcome == Some(NodeOutcome::Cancelled))
+    );
+    assert!(
+        !rig.svc.stop(&out.run_id, None).unwrap(),
+        "already finished"
+    );
 }
 
 #[tokio::test(flavor = "multi_thread", worker_threads = 4)]
@@ -626,7 +857,12 @@ async fn budgets_stop_a_run_with_a_reason() {
     rig.ask.on_call(|_| {
         Some(FakeReply::ResultWithUsage(
             json!({"text": "x"}),
-            AskUsage { input_tokens: 600, output_tokens: 400, elapsed_ms: 1, turns: 1 },
+            AskUsage {
+                input_tokens: 600,
+                output_tokens: 400,
+                elapsed_ms: 1,
+                turns: 1,
+            },
         ))
     });
     let looping = "def main(args):\n    phase(\"p\")\n    a = agent(\"a\")\n    for i in range(10):\n        a.ask(\"n\" + str(i)).result()\n    return 1\n";
@@ -636,7 +872,13 @@ async fn budgets_stop_a_run_with_a_reason() {
     let run = wait_settled(&rig, &out.run_id).await;
     assert_eq!(run.header.status, WorkflowStatus::Stopped);
     assert_eq!(run.header.stop_reason, Some(WorkflowStopReason::Budget));
-    assert!(run.header.stop_detail.as_deref().unwrap().contains("ask budget of 3"));
+    assert!(
+        run.header
+            .stop_detail
+            .as_deref()
+            .unwrap()
+            .contains("ask budget of 3")
+    );
     assert_eq!(rig.ask.calls().len(), 3);
 
     let mut req = start(looping);
@@ -644,7 +886,13 @@ async fn budgets_stop_a_run_with_a_reason() {
     let out = rig.svc.start(CHAT, req).await.unwrap();
     let run = wait_settled(&rig, &out.run_id).await;
     assert_eq!(run.header.stop_reason, Some(WorkflowStopReason::Budget));
-    assert!(run.header.stop_detail.as_deref().unwrap().contains("token budget"));
+    assert!(
+        run.header
+            .stop_detail
+            .as_deref()
+            .unwrap()
+            .contains("token budget")
+    );
     assert!(run.header.usage.total_tokens() >= 2500);
 }
 
@@ -652,17 +900,27 @@ async fn budgets_stop_a_run_with_a_reason() {
 async fn a_long_silence_raises_the_stall_notice_and_a_success_lifts_it() {
     let mut rig = rig();
     rig.paused = true;
-    rig.svc.set_tuning(Tuning { stall_check: Duration::from_secs(60), ..Tuning::default() });
+    rig.svc.set_tuning(Tuning {
+        stall_check: Duration::from_secs(60),
+        ..Tuning::default()
+    });
     rig.ask.on_call(|_| {
-        Some(FakeReply::After(Duration::from_secs(25 * 60), Box::new(text("late"))))
+        Some(FakeReply::After(
+            Duration::from_secs(25 * 60),
+            Box::new(text("late")),
+        ))
     });
     let mut events = rig.svc.subscribe();
-    let script = "def main(args):\n    phase(\"p\")\n    return agent(\"a\").ask(\"x\").result().ok\n";
+    let script =
+        "def main(args):\n    phase(\"p\")\n    return agent(\"a\").ask(\"x\").result().ok\n";
     let out = rig.svc.start(CHAT, start(script)).await.unwrap();
     wait_settled(&rig, &out.run_id).await;
     let mut kinds = Vec::new();
     while let Ok(e) = events.try_recv() {
-        if matches!(e.kind, WorkflowEventKind::Stalled | WorkflowEventKind::Unstalled) {
+        if matches!(
+            e.kind,
+            WorkflowEventKind::Stalled | WorkflowEventKind::Unstalled
+        ) {
             kinds.push(matches!(e.kind, WorkflowEventKind::Stalled));
         }
     }
@@ -719,21 +977,51 @@ def main(args):
     .await;
     // The parent agent is told, with the exact tool to answer with.
     wait_for(
-        || workflow_messages(&rig).iter().any(|(t, _)| t.contains("[Workflow question]")),
+        || {
+            workflow_messages(&rig)
+                .iter()
+                .any(|(t, _)| t.contains("[Workflow question]"))
+        },
         "the question in the parent chat",
     )
     .await;
-    let note = workflow_messages(&rig).into_iter().find(|(t, _)| t.contains("[Workflow question]")).unwrap().0;
-    assert!(note.contains(&format!("resolve_workflow_question {{run_id: \"{}\", qid: \"{}\"", out.run_id, q.qid)), "{note}");
+    let note = workflow_messages(&rig)
+        .into_iter()
+        .find(|(t, _)| t.contains("[Workflow question]"))
+        .unwrap()
+        .0;
+    assert!(
+        note.contains(&format!(
+            "resolve_workflow_question {{run_id: \"{}\", qid: \"{}\"",
+            out.run_id, q.qid
+        )),
+        "{note}"
+    );
     // Wrong qid / empty answers are refused; the real answer resumes it.
-    assert!(rig.svc.resolve_question(&out.run_id, "nope", "x").await.is_err());
-    assert!(rig.svc.resolve_question(&out.run_id, &q.qid, "  ").await.is_err());
-    rig.svc.resolve_question(&out.run_id, &q.qid, "Postgres").await.unwrap();
+    assert!(
+        rig.svc
+            .resolve_question(&out.run_id, "nope", "x")
+            .await
+            .is_err()
+    );
+    assert!(
+        rig.svc
+            .resolve_question(&out.run_id, &q.qid, "  ")
+            .await
+            .is_err()
+    );
+    rig.svc
+        .resolve_question(&out.run_id, &q.qid, "Postgres")
+        .await
+        .unwrap();
     let run = wait_settled(&rig, &out.run_id).await;
     assert_eq!(run.header.status, WorkflowStatus::Completed);
     assert_eq!(rig.ask.escalation_answers(), ["Postgres"]);
     assert!(run.pending_questions.is_empty());
-    assert_eq!(rig.svc.get(&out.run_id).unwrap().result.unwrap(), json!(["independent", "went with the answer"]));
+    assert_eq!(
+        rig.svc.get(&out.run_id).unwrap().result.unwrap(),
+        json!(["independent", "went with the answer"])
+    );
 }
 
 // ── restart ───────────────────────────────────────────────────────────────
@@ -742,7 +1030,8 @@ def main(args):
 async fn a_run_left_running_by_a_dead_engine_becomes_interrupted_and_resumable() {
     let rig = rig();
     rig.ask.on_call(|_| Some(FakeReply::Hang));
-    let script = "def main(args):\n    phase(\"p\")\n    return agent(\"a\").ask(\"x\").result().ok\n";
+    let script =
+        "def main(args):\n    phase(\"p\")\n    return agent(\"a\").ask(\"x\").result().ok\n";
     let out = rig.svc.start(CHAT, start(script)).await.unwrap();
     wait_for(|| rig.ask.calls().len() == 1, "the ask in flight").await;
     // Simulate a crash: a second service over the same data dir never saw the
@@ -760,7 +1049,11 @@ async fn a_run_left_running_by_a_dead_engine_becomes_interrupted_and_resumable()
     let view = restarted.get(&out.run_id).unwrap();
     assert_eq!(view.run.header.status, WorkflowStatus::Stopped);
     assert!(view.run.header.resumable);
-    wait_for(|| workflow_messages(&rig).len() == 1, "the interruption notice").await;
+    wait_for(
+        || workflow_messages(&rig).len() == 1,
+        "the interruption notice",
+    )
+    .await;
     // Idempotent: another restart changes nothing and sends nothing more.
     restarted.reconcile();
     tokio::time::sleep(Duration::from_millis(300)).await;
@@ -820,7 +1113,15 @@ def main(args):
     assert!(stats.doc_writes < 120, "writes are batched: {stats:?}");
     assert!(stats.delta_bytes < 2_500_000, "{stats:?}");
     let doc = rig.env.core.doc_host.open(CHAT).unwrap();
-    assert_eq!(doc.doc().workflow_runs().run(&out.run_id).unwrap().nodes.len(), 200);
+    assert_eq!(
+        doc.doc()
+            .workflow_runs()
+            .run(&out.run_id)
+            .unwrap()
+            .nodes
+            .len(),
+        200
+    );
 }
 
 #[cfg(unix)]
@@ -841,7 +1142,15 @@ def main(args):
     let run = wait_settled(&rig, &out.run_id).await;
     // `../outside` is an error: the script fails with the confinement message.
     assert_eq!(run.header.status, WorkflowStatus::Errored);
-    assert!(run.header.error.as_deref().unwrap().contains("inside the project"), "{:?}", run.header.error);
+    assert!(
+        run.header
+            .error
+            .as_deref()
+            .unwrap()
+            .contains("inside the project"),
+        "{:?}",
+        run.header.error
+    );
     let replay = rig.svc.store().load_replay(&out.run_id).unwrap();
     assert_eq!(replay.reads.len(), 1, "the successful read was journaled");
 }
@@ -867,16 +1176,34 @@ def main(args):
     let by_id: BTreeSet<_> = run.artifacts.iter().map(|a| a.id.as_str()).collect();
     assert_eq!(by_id, BTreeSet::from(["m", "notes", "report", "tbl"]));
     let tbl = run.artifacts.iter().find(|a| a.id == "tbl").unwrap();
-    assert_eq!((tbl.item_count, tbl.content_type.as_str()), (2, "application/json"));
-    let page = rig.svc.artifact_read(&out.run_id, "report", None, 6, 5).unwrap();
+    assert_eq!(
+        (tbl.item_count, tbl.content_type.as_str()),
+        (2, "application/json")
+    );
+    let page = rig
+        .svc
+        .artifact_read(&out.run_id, "report", None, 6, 5)
+        .unwrap();
     assert_eq!(String::from_utf8(page.bytes).unwrap(), "world");
     assert_eq!(page.total, 11);
-    let file = rig.svc.artifact_read(&out.run_id, "notes", None, 0, 100).unwrap();
+    let file = rig
+        .svc
+        .artifact_read(&out.run_id, "notes", None, 0, 100)
+        .unwrap();
     assert_eq!(String::from_utf8(file.bytes).unwrap(), "file artifact body");
     for bad in ["../meta", "..", "a/b", ""] {
-        assert!(rig.svc.artifact_read(&out.run_id, bad, None, 0, 10).is_err(), "{bad:?}");
+        assert!(
+            rig.svc
+                .artifact_read(&out.run_id, bad, None, 0, 10)
+                .is_err(),
+            "{bad:?}"
+        );
     }
-    assert!(rig.svc.artifact_read("../../etc", "report", None, 0, 10).is_err());
+    assert!(
+        rig.svc
+            .artifact_read("../../etc", "report", None, 0, 10)
+            .is_err()
+    );
     // A script cannot publish a file from outside the project.
     let evil = "def main(args):\n    phase(\"p\")\n    agent(\"a\").ask(\"x\").result()\n    artifact.file(\"x\", \"X\", \"../../etc/passwd\")\n    return 1\n";
     let out = rig.svc.start(CHAT, start(evil)).await.unwrap();
@@ -894,25 +1221,43 @@ async fn a_running_workflow_defers_goal_verification() {
     rig.ask.on_call(move |call| {
         if call.spec.label == "Verifier" {
             vc.fetch_add(1, Ordering::SeqCst);
-            return Some(FakeReply::Result(json!({"passed": true, "reason": "all done"})));
+            return Some(FakeReply::Result(
+                json!({"passed": true, "reason": "all done"}),
+            ));
         }
-        Some(FakeReply::After(Duration::from_millis(1500), Box::new(text("slow work"))))
+        Some(FakeReply::After(
+            Duration::from_millis(1500),
+            Box::new(text("slow work")),
+        ))
     });
-    let script = "def main(args):\n    phase(\"p\")\n    return agent(\"slow\").ask(\"x\").result().value\n";
+    let script =
+        "def main(args):\n    phase(\"p\")\n    return agent(\"slow\").ask(\"x\").result().value\n";
     let out = rig.svc.start(CHAT, start(script)).await.unwrap();
     assert!(rig.svc.has_running_run(CHAT));
     rig.env.set_goal(CHAT, "Finish the job");
     // The goal's first round runs and ends within milliseconds, but the
     // controller must not judge it while the workflow's agents still work.
-    wait_for(|| rig.env.complete_turns(CHAT) >= 1, "the goal's first round").await;
+    wait_for(
+        || rig.env.complete_turns(CHAT) >= 1,
+        "the goal's first round",
+    )
+    .await;
     tokio::time::sleep(Duration::from_millis(600)).await;
-    assert_eq!(verifier_calls.load(Ordering::SeqCst), 0, "verification waits for the workflow");
+    assert_eq!(
+        verifier_calls.load(Ordering::SeqCst),
+        0,
+        "verification waits for the workflow"
+    );
     assert!(rig.env.goal(CHAT).unwrap().status.is_running());
     // Once the workflow settles (and its result message has been delivered)
     // verification proceeds and the goal completes.
     wait_settled(&rig, &out.run_id).await;
     wait_for(
-        || rig.env.goal(CHAT).is_some_and(|g| g.status == zeron_proto::GoalStatus::Complete),
+        || {
+            rig.env
+                .goal(CHAT)
+                .is_some_and(|g| g.status == zeron_proto::GoalStatus::Complete)
+        },
         "the goal to complete after the workflow",
     )
     .await;

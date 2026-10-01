@@ -263,7 +263,10 @@ impl WorkflowStore {
 
     /// The store root this store was opened on (its parent of `workflows/`).
     pub fn base(&self) -> PathBuf {
-        self.root.parent().map(Path::to_path_buf).unwrap_or_default()
+        self.root
+            .parent()
+            .map(Path::to_path_buf)
+            .unwrap_or_default()
     }
 
     fn run_dir(&self, run_id: &str) -> Result<PathBuf, StoreError> {
@@ -297,7 +300,9 @@ impl WorkflowStore {
 
     pub fn read_meta(&self, run_id: &str) -> Result<RunMeta, StoreError> {
         let dir = self.existing_run_dir(run_id)?;
-        Ok(serde_json::from_slice(&std::fs::read(dir.join("meta.json"))?)?)
+        Ok(serde_json::from_slice(&std::fs::read(
+            dir.join("meta.json"),
+        )?)?)
     }
 
     pub fn read_script(&self, run_id: &str) -> Result<String, StoreError> {
@@ -347,7 +352,9 @@ impl WorkflowStore {
             }
             match serde_json::from_str::<Record>(&line) {
                 Ok(record) => replay.absorb(record),
-                Err(err) => tracing::warn!(run = %run_id, error = %err, "skipping an unreadable journal line"),
+                Err(err) => {
+                    tracing::warn!(run = %run_id, error = %err, "skipping an unreadable journal line")
+                }
             }
         }
         Ok(replay)
@@ -479,9 +486,12 @@ impl WorkflowStore {
 pub fn confine(root: &Path, relative: &str) -> Result<PathBuf, String> {
     let rel = Path::new(relative);
     if rel.is_absolute()
-        || rel
-            .components()
-            .any(|c| matches!(c, Component::ParentDir | Component::Prefix(_) | Component::RootDir))
+        || rel.components().any(|c| {
+            matches!(
+                c,
+                Component::ParentDir | Component::Prefix(_) | Component::RootDir
+            )
+        })
     {
         return Err(format!("{relative:?} is outside the project"));
     }
@@ -519,7 +529,9 @@ mod tests {
     fn a_run_round_trips_meta_script_and_journal() {
         let dir = tempfile::tempdir().unwrap();
         let store = WorkflowStore::open(dir.path());
-        store.create_run(&meta("r1"), "def main(args): return 1").unwrap();
+        store
+            .create_run(&meta("r1"), "def main(args): return 1")
+            .unwrap();
         assert_eq!(store.read_meta("r1").unwrap().name, "demo");
         assert!(store.read_script("r1").unwrap().contains("main"));
         let journal = store.open_journal("r1").unwrap();
@@ -536,9 +548,17 @@ mod tests {
             })
             .unwrap();
         journal
-            .append(&Record::Report { index: 0, item: serde_json::json!("x"), artifact_id: None })
+            .append(&Record::Report {
+                index: 0,
+                item: serde_json::json!("x"),
+                artifact_id: None,
+            })
             .unwrap();
-        journal.append(&Record::Result { value: serde_json::json!(7) }).unwrap();
+        journal
+            .append(&Record::Result {
+                value: serde_json::json!(7),
+            })
+            .unwrap();
         let replay = store.load_replay("r1").unwrap();
         assert!(replay.asks.contains_key("s#0"));
         assert_eq!(replay.reports.len(), 1);
@@ -570,7 +590,11 @@ mod tests {
             assert!(safe_component("x", bad).is_err(), "{bad:?}");
         }
         store.create_run(&meta("r1"), "").unwrap();
-        assert!(store.read_artifact("r1", "../../meta.json", None, 0, 10).is_err());
+        assert!(
+            store
+                .read_artifact("r1", "../../meta.json", None, 0, 10)
+                .is_err()
+        );
         assert!(store.read_artifact("r1", "nope", None, 0, 10).is_err());
         assert!(store.read_artifact("../r1", "x", None, 0, 10).is_err());
     }
@@ -582,7 +606,18 @@ mod tests {
         store.create_run(&meta("r1"), "").unwrap();
         for v in 1..=2u32 {
             store
-                .put_artifact("r1", "summary", v, ArtifactKind::Markdown, "Summary", "text/markdown", "md", 0, format!("version {v} body").as_bytes(), 9)
+                .put_artifact(
+                    "r1",
+                    "summary",
+                    v,
+                    ArtifactKind::Markdown,
+                    "Summary",
+                    "text/markdown",
+                    "md",
+                    0,
+                    format!("version {v} body").as_bytes(),
+                    9,
+                )
                 .unwrap();
         }
         assert_eq!(store.artifact_ids("r1").unwrap(), ["summary"]);
@@ -595,7 +630,8 @@ mod tests {
         assert!(store.read_artifact("r1", "summary", Some(9), 0, 4).is_err());
         // A tampered index cannot point outside the artifact directory.
         let idx = dir.path().join("workflows/r1/artifacts/summary/index.json");
-        let mut index: ArtifactIndex = serde_json::from_slice(&std::fs::read(&idx).unwrap()).unwrap();
+        let mut index: ArtifactIndex =
+            serde_json::from_slice(&std::fs::read(&idx).unwrap()).unwrap();
         index.versions[1].file = "../../meta.json".into();
         std::fs::write(&idx, serde_json::to_vec(&index).unwrap()).unwrap();
         assert!(store.read_artifact("r1", "summary", None, 0, 10).is_err());

@@ -525,7 +525,8 @@ mod context_update_tests {
         assert!(update.replay_baseline.is_none());
         let value = serde_json::to_value(TranscriptUpdate {
             goal: None,
-            goal_cleared: false, workflows: None,
+            goal_cleared: false,
+            workflows: None,
             frame: TranscriptFrame::reset(&[]),
             replay_baseline: Some(TranscriptBaseline::default()),
             context_usage: Some(zeron_proto::ContextUsage {
