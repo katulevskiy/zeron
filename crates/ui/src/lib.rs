@@ -46,6 +46,7 @@ mod new_thread_background_mask;
 mod notice;
 pub mod notify;
 pub mod permission_mode;
+pub mod plan_card;
 pub mod pickers;
 pub mod popover;
 pub mod project_actions;

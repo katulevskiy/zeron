@@ -8680,6 +8680,8 @@ impl Composer {
             let approval = crate::permission_mode::approval_option(&question.id, label);
             let deny = approval == Some(crate::permission_mode::ApprovalOption::Deny);
             let always = approval == Some(crate::permission_mode::ApprovalOption::AllowAlways);
+            // A plan's options say what they lead to.
+            let plan_hint = crate::plan_card::option_hint(&question.id, label);
             div()
                 .id(("wizard-option", ix))
                 .flex()
@@ -8739,6 +8741,15 @@ impl Composer {
                                     .font_weight(gpui::FontWeight::NORMAL)
                                     .text_color(theme.text_muted.opacity(0.75))
                                     .child("Remembered for later runs on this chat's device"),
+                            )
+                        })
+                        .when_some(plan_hint, |el, hint| {
+                            el.child(
+                                div()
+                                    .text_size(crate::typography::ui_rems(11.5))
+                                    .font_weight(gpui::FontWeight::NORMAL)
+                                    .text_color(theme.text_muted.opacity(0.75))
+                                    .child(SharedString::from(hint)),
                             )
                         }),
                 )
@@ -8823,15 +8834,19 @@ impl Composer {
                                 )
                             }),
                     )
-                    .child(
+                    .child(if zeron_proto::policy::is_plan_question(&question.id) {
+                        // A plan is a document, not a one-line question.
+                        crate::plan_card::render(&theme, &question.question)
+                    } else {
                         div()
                             .mt(px(6.0))
                             .text_size(crate::typography::ui_rems(15.0))
                             .line_height(px(20.0))
                             .font_weight(gpui::FontWeight::MEDIUM)
                             .text_color(theme.text)
-                            .child(SharedString::from(question.question.clone())),
-                    )
+                            .child(SharedString::from(question.question.clone()))
+                            .into_any_element()
+                    })
                     .when(question.multi_select, |el| {
                         el.child(
                             div()
