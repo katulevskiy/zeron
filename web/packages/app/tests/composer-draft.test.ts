@@ -12,6 +12,7 @@ import {
   isHarnessLocked,
   reconcileDraftModel,
   reconcileFreshDraftHarness,
+  reconcileFreshDraftModel,
   rememberNoProject,
 } from "../src/lib/composer-draft";
 import type { StorageLike } from "../src/lib/storage";
@@ -414,6 +415,47 @@ describe("applyDraftUpdate", () => {
     expect(next.modelOptions).toEqual({});
     // haiku's empty list falls back to the descriptor: low stays.
     expect(next.reasoning).toBe("low");
+  });
+});
+
+describe("reconcileFreshDraftModel", () => {
+  const model: Model = {
+    id: "shared-model",
+    label: "Selected engine model",
+    reasoningLevels: ["medium"],
+    options: [{
+      id: "contextWindow",
+      label: "Context window",
+      choices: [{ id: "standard", label: "Standard" }],
+      defaultChoice: "standard",
+    }],
+  };
+  const current: DraftConfig = {
+    harness: "claude-code",
+    model: model.id,
+    reasoning: "low",
+    sandbox: "workspace-write",
+    modelOptions: { contextWindow: "extended", obsolete: "old-engine" },
+  };
+
+  it("revalidates reasoning and options even when both engines use the same model id", () => {
+    const next = reconcileFreshDraftModel(current, [model], HARNESSES[0]!, null);
+    expect(next).toMatchObject({ model: model.id, reasoning: "medium", modelOptions: {} });
+    expect(reconcileFreshDraftModel(next, [model], HARNESSES[0]!, null)).toBe(next);
+  });
+
+  it("preserves valid options and draft identity without a reconciliation loop", () => {
+    const valid = { ...current, reasoning: "medium" as const, modelOptions: { contextWindow: "standard" } };
+    expect(reconcileFreshDraftModel(valid, [model], HARNESSES[0]!, null)).toBe(valid);
+  });
+
+  it("drops another engine's options when seeding a replacement model", () => {
+    const next = reconcileFreshDraftModel({ ...current, model: "removed-model" }, [model], HARNESSES[0]!, null);
+    expect(next).toMatchObject({ model: model.id, reasoning: "medium", modelOptions: {} });
+  });
+
+  it("keeps preference intent unchanged until a model catalog exists", () => {
+    expect(reconcileFreshDraftModel(current, [], HARNESSES[0]!, null)).toBe(current);
   });
 });
 

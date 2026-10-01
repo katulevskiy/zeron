@@ -34,6 +34,7 @@ import {
   defaultDraftHarness,
   draftFromChat,
   reconcileFreshDraftHarness,
+  reconcileFreshDraftModel,
   rememberedModelFor,
 } from "../lib/composer-draft";
 import { useDraftModelReconciliation } from "../lib/composer-reconciliation";
@@ -546,6 +547,19 @@ export function Composer({
     (harnesses.loaded &&
       harnesses.error === null &&
       !offeredHarnesses(harnesses.rows).some((row) => row.id === draft.harness));
+  // A ready harness alone cannot validate a model carried from another engine.
+  // Wait for the selected catalog and for its reasoning/options reconciliation.
+  const selectedModelUnavailable =
+    newChat &&
+    (!models.loaded ||
+      models.error !== null ||
+      !models.rows.some((row) => row.id === draft.model) ||
+      reconcileFreshDraftModel(
+        draft,
+        models.rows,
+        harnesses.rows.find((row) => row.id === draft.harness) ?? null,
+        rememberedModelFor(draft.harness),
+      ) !== draft);
   // Route coordination must not force an established thread into the
   // two-row layout: `dock_height`'s session side reads the composer's OWN
   // expanded state, never the forced one.
@@ -685,7 +699,7 @@ export function Composer({
   // that lands after the models re-resolves the selection instead of leaving
   // a stale model-only clamp behind. The extracted owner carries the logic;
   // it returns the prior draft when nothing changed (no setState loop).
-  useDraftModelReconciliation(models.rows, harnesses.rows, setDraft);
+  useDraftModelReconciliation(models.rows, harnesses.rows, setDraft, newChat);
 
   // ── The width-driven flip + height morph ───────────────────────────────
   //
@@ -2392,10 +2406,9 @@ export function Composer({
         queueEditFinishing: busy,
         requestTargetDisconnected: targetUnavailable || session.client.state !== "connected",
         reviewCommentFlushPending: false,
-        // A settled empty catalog and an unconfirmed selected harness are
-        // separate gates; loading preserves the draft, not send permission.
-        newChatNoAgents: newChat && harnesses.loaded && offeredHarnesses(harnesses.rows).length === 0,
+        // Catalog loading preserves preference intent, not send permission.
         selectedHarnessUnavailable,
+        selectedModelUnavailable,
       })
     ) {
       // A blocked send is a no-op — no failure, no wire call
@@ -2403,7 +2416,7 @@ export function Composer({
       return;
     }
     await send(text, mode === "queue");
-  }, [busy, text, staged, runLive, commentCount, editingMessage, onEditFinish, session.client, interrupt, send, commitQueueEdit, newChat, harnesses.loaded, harnesses.rows, selectedHarnessUnavailable, targetUnavailable]);
+  }, [busy, text, staged, runLive, commentCount, editingMessage, onEditFinish, session.client, interrupt, send, commitQueueEdit, selectedHarnessUnavailable, selectedModelUnavailable, targetUnavailable]);
 
   // ── Key policy: completions → phone newline → wizard → Enter (§2.7) ────
   // `resolveEnterAction` (lib/composer-send.ts) is the Enter branch's single
@@ -2744,8 +2757,8 @@ export function Composer({
       queueEditFinishing: busy,
       requestTargetDisconnected: targetUnavailable || session.client.state !== "connected",
       reviewCommentFlushPending: false,
-      newChatNoAgents: newChat && harnesses.loaded && offeredHarnesses(harnesses.rows).length === 0,
       selectedHarnessUnavailable,
+      selectedModelUnavailable,
     });
 
   // ── The queue-degraded caption (§2.3) ───────────────────────────────────

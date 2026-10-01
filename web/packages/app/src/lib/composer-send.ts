@@ -40,7 +40,7 @@ export function composerHasContent(text: string, attachments: number, comments: 
   return text.trim() !== "" || attachments > 0 || comments > 0;
 }
 
-/** Native `send_blocked` conditions plus selected-engine harness validation. */
+/** Native `send_blocked` conditions plus selected-engine catalog validation. */
 export interface SendBlockedConditions {
   /** Condition 1: a queued-row edit is finishing (its RPC is in flight). */
   readonly queueEditFinishing: boolean;
@@ -51,11 +51,8 @@ export interface SendBlockedConditions {
   readonly requestTargetDisconnected: boolean;
   /** Condition 3: review comments are flushing for this chat (ticket 23). */
   readonly reviewCommentFlushPending: boolean;
-  /**
-   * Condition 4: the new-chat canvas with a loaded catalog that reports no
-   * agents. Pending/error catalogs are gated by selectedHarnessUnavailable.
-   */
-  readonly newChatNoAgents: boolean;
+  /** A fresh chat's selected model or metadata is not confirmed by its engine. */
+  readonly selectedModelUnavailable: boolean;
   /** The engine reports the harness unavailable, or a fresh chat has not confirmed it yet. */
   readonly selectedHarnessUnavailable: boolean;
 }
@@ -69,7 +66,7 @@ export function sendBlocked(conditions: SendBlockedConditions): boolean {
     conditions.queueEditFinishing ||
     conditions.requestTargetDisconnected ||
     conditions.reviewCommentFlushPending ||
-    conditions.newChatNoAgents ||
+    conditions.selectedModelUnavailable ||
     conditions.selectedHarnessUnavailable
   );
 }

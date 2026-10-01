@@ -77,19 +77,19 @@ describe("a_comment_only_stage_queues_during_a_live_run", () => {
 });
 
 describe("sendBlocked", () => {
-  it("blocks on any of the four conditions", () => {
+  it("blocks on native or selected-engine validation", () => {
     const open = {
       queueEditFinishing: false,
       requestTargetDisconnected: false,
       reviewCommentFlushPending: false,
-      newChatNoAgents: false,
+      selectedModelUnavailable: false,
       selectedHarnessUnavailable: false,
     };
     expect(sendBlocked(open)).toBe(false);
     expect(sendBlocked({ ...open, queueEditFinishing: true })).toBe(true);
     expect(sendBlocked({ ...open, requestTargetDisconnected: true })).toBe(true);
     expect(sendBlocked({ ...open, reviewCommentFlushPending: true })).toBe(true);
-    expect(sendBlocked({ ...open, newChatNoAgents: true })).toBe(true);
+    expect(sendBlocked({ ...open, selectedModelUnavailable: true })).toBe(true);
     expect(sendBlocked({ ...open, selectedHarnessUnavailable: true })).toBe(true);
   });
 });

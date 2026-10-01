@@ -1072,12 +1072,12 @@ describe("useDraftModelReconciliation (the composer's reconciliation owner)", ()
     expect(probe.renders.count).toBe(settledRenders + 1);
   });
 
-  it("composer.tsx wires this owner with both live inputs", () => {
+  it("composer.tsx wires both live inputs and fresh-chat option validation", () => {
     // The wiring pin (the dock-glide suite's idiom): the reconciliation
     // logic above is the code the composer actually runs — a reverted
     // model-only effect cannot pass this suite unnoticed.
     // (cwd is the app package root under vitest; jsdom rewrites import.meta.url)
     const source = readFileSync(join(process.cwd(), "src/components/composer.tsx"), "utf8");
-    expect(source).toContain("useDraftModelReconciliation(models.rows, harnesses.rows, setDraft)");
+    expect(source).toContain("useDraftModelReconciliation(models.rows, harnesses.rows, setDraft, newChat)");
   });
 });

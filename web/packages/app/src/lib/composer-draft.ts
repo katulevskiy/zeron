@@ -609,3 +609,21 @@ export function reconcileDraftModel(
   // so this branch is always a real update.
   return { ...current, model: seeded, reasoning };
 }
+
+/** Fresh chats must revalidate option picks as well as model/reasoning on engine changes. */
+export function reconcileFreshDraftModel(
+  current: DraftConfig,
+  models: readonly Model[],
+  descriptor: HarnessDescriptor | null,
+  rememberedModel: RememberedModel | null,
+): DraftConfig {
+  const next = reconcileDraftModel(current, models, descriptor, rememberedModel);
+  const model = models.find((row) => row.id === next.model);
+  if (model === undefined) {
+    return next;
+  }
+  const modelOptions = offeredOptions(model, next.modelOptions);
+  return JSON.stringify(modelOptions) === JSON.stringify(next.modelOptions)
+    ? next
+    : { ...next, modelOptions };
+}
