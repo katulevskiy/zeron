@@ -6,17 +6,20 @@
  * glyph the desktop does not have, and a changed asset changes both clients.
  *
  *   node scripts/generate.mjs            # write
- *   node scripts/generate.mjs --check    # fail when stale (no CI gate runs
- *                                         # this — regeneration is manual)
+ *   node scripts/generate.mjs --check    # fail when stale
+ *   --repo-root <path>                   # isolated generation fixture
  */
 import { readdirSync, readFileSync, writeFileSync, mkdirSync, existsSync } from "node:fs";
 import { dirname, join, resolve } from "node:path";
 import { fileURLToPath } from "node:url";
+import { parseArgs } from "node:util";
+
+const { values } = parseArgs({ options: { check: { type: "boolean" }, "repo-root": { type: "string" } } });
 
 const here = dirname(fileURLToPath(import.meta.url));
-const repoRoot = resolve(here, "../../../..");
+const repoRoot = values["repo-root"] ? resolve(values["repo-root"]) : resolve(here, "../../../..");
 const assetDir = join(repoRoot, "crates/ui/assets/icons");
-const outDir = join(here, "../src/generated");
+const outDir = join(repoRoot, "web/packages/icons/src/generated");
 const outFile = join(outDir, "index.ts");
 
 /** `alt-arrow-down.svg` -> `altArrowDown`. */
@@ -33,6 +36,10 @@ const SHAPE_TAGS = ["path", "circle", "ellipse", "rect", "line", "polyline", "po
 
 /** Pull the root `<svg …>` attributes and its inner markup. */
 function parse(source) {
+  // GPUI tints these monochrome glyphs at the call site. Literal black
+  // from upstream must likewise inherit CSS color on the browser path.
+  // Preserve `none` and the authored --icon-bg cutout paint.
+  source = source.replace(/\b(fill|stroke)="(?:black|#000(?:000)?)"/gi, '$1="currentColor"');
   const open = source.match(/<svg\b([^>]*)>/);
   if (!open) {
     throw new Error("no <svg> root");
@@ -84,9 +91,9 @@ const lines = [
   "export interface IconAsset {",
   "  /** Root `viewBox`, verbatim from the asset. */",
   "  readonly viewBox: string;",
-  "  /** Root `fill`, verbatim — `none` for stroked Solar glyphs. */",
+  "  /** Root fill with monochrome black normalized to currentColor. */",
   "  readonly fill: string;",
-  "  /** Inner markup; every paint is `currentColor`, so the glyph tints with `color`. */",
+  "  /** Inner markup; monochrome foreground paints inherit `currentColor`. */",
   "  readonly body: string;",
   "}",
   "",

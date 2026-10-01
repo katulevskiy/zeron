@@ -2,11 +2,9 @@
  * `@zeron/theme` — the Zeron design tokens for the web client.
  *
  * The data under `./generated/` is produced by `zeron-theme-export`
- * (`cargo run -p zeron-theme --bin zeron-theme-export`) from the same Rust
- * sources the desktop compiles: the builtin theme registry, the accent preset
- * derivations, the layout constants (`zeron_proto::layout`), and the motion
- * catalog (`zeron_proto::motion`). A CI gate (`theme-artifact.yml`) fails
- * when the artifact is stale.
+ * (`cargo run -p zeron-theme --bin zeron-theme-export`) from upstream Rust
+ * builtin themes and accent math plus explicitly browser-owned tokens in
+ * `browser-tokens.json`. See ../README.md for provenance and freshness checks.
  */
 
 import { themeArtifact } from "./generated/index";
@@ -228,7 +226,6 @@ const COLOR_VARS: Record<keyof ThemeColors, string> = {
   background: "bg",
   shell: "shell",
   raised: "raised",
-  raisedHover: "raised-hover",
   card: "card",
   dialog: "dialog",
   overlay: "overlay",
@@ -239,11 +236,9 @@ const COLOR_VARS: Record<keyof ThemeColors, string> = {
   text: "text",
   textMuted: "text-muted",
   textFaint: "text-faint",
-  textDim: "text-dim",
   solid: "solid",
   onSolid: "on-solid",
   danger: "danger",
-  dangerStrong: "danger-strong",
   dangerMuted: "danger-muted",
   warning: "warning",
   warningMuted: "warning-muted",
@@ -275,6 +270,12 @@ export function variantCssVars(
   for (const [key, suffix] of Object.entries(COLOR_VARS) as [keyof ThemeColors, string][]) {
     vars[`--rb-${suffix}`] = variant.colors[key];
   }
+  // These three roles belong to the browser, not upstream ThemeColors.
+  // Custom/new variants use existing upstream roles until explicitly authored.
+  const browser = themeArtifact.browserColors[variant.id];
+  vars["--rb-raised-hover"] = browser?.raisedHover ?? variant.colors.raised;
+  vars["--rb-text-dim"] = browser?.textDim ?? variant.colors.textMuted;
+  vars["--rb-danger-strong"] = browser?.dangerStrong ?? variant.colors.danger;
   // Ticket 79 — the opaque input plate: the web port of the desktop's
   // `input_glass_bg()` (`flatten(input, bg)`, theme.rs:968-980). Dark
   // variants author `input` with alpha (`#343438b8`); flattened over the

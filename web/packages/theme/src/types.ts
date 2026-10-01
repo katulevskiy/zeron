@@ -12,13 +12,11 @@ export type Appearance = "dark" | "light";
 /** The theme author's recommended surface treatment for a variant. */
 export type SurfaceTreatment = "opaque" | "frosted";
 
-/** UI roles + status + diff — the post-hardening color role set. */
+/** Upstream ThemeColors, with no browser-only roles. */
 export interface ThemeColors {
   background: HexColor;
   shell: HexColor;
   raised: HexColor;
-  /** Hover tone for an OPAQUE raised pill — never the translucent `hover`. */
-  raisedHover: HexColor;
   card: HexColor;
   dialog: HexColor;
   overlay: HexColor;
@@ -29,13 +27,9 @@ export interface ThemeColors {
   text: HexColor;
   textMuted: HexColor;
   textFaint: HexColor;
-  /** One notch below `textMuted`: the diff/file-path tone. */
-  textDim: HexColor;
   solid: HexColor;
   onSolid: HexColor;
   danger: HexColor;
-  /** The destructive-action button plate; carries `onAccent`, not `danger`. */
-  dangerStrong: HexColor;
   dangerMuted: HexColor;
   warning: HexColor;
   warningMuted: HexColor;
@@ -46,6 +40,13 @@ export interface ThemeColors {
   diffAdd: HexColor;
   diffDelete: HexColor;
   diffHunk: HexColor;
+}
+
+/** Browser-only roles authored in browser-tokens.json, not ThemeVariant. */
+export interface BrowserColorRoles {
+  raisedHover: HexColor;
+  textDim: HexColor;
+  dangerStrong: HexColor;
 }
 
 /** Interaction roles — the only colors an accent preset override touches. */
@@ -238,6 +239,9 @@ export interface ThemeArtifact {
   /** `variantId -> presetId -> derived roles`, precomputed for every
    * variant × preset so the web needs zero color math. */
   accents: Record<string, Partial<Record<AccentPresetId, AccentRoles>>>;
+  /** Provenance of the browser-owned tokens below, not upstream Rust data. */
+  browserProvenance: string;
+  browserColors: Record<string, BrowserColorRoles>;
   layout: LayoutTokens;
   motion: MotionTokens;
   fonts: FontFace[];

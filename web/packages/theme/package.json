@@ -2,7 +2,7 @@
   "name": "@zeron/theme",
   "version": "0.0.0",
   "private": true,
-  "description": "Zeron design tokens for the web client — resolved builtin theme variants, accent derivations, layout constants, the motion catalog, and Geist fonts. Data is generated from the Rust sources of truth by zeron-theme-export.",
+  "description": "Zeron web design tokens and Geist fonts. Builtin theme variants and accent derivations are exported from upstream Rust by zeron-theme-export; layout and motion tokens are explicitly browser-owned.",
   "type": "module",
   "exports": {
     ".": "./src/index.ts",
@@ -10,8 +10,10 @@
     "./artifact.json": "./src/generated/artifact.json"
   },
   "scripts": {
+    "build": "tsc --noEmit",
     "typecheck": "tsc --noEmit",
-    "regenerate": "cargo run -p zeron-theme --bin zeron-theme-export"
+    "regenerate": "cargo run --locked -p zeron-theme --bin zeron-theme-export",
+    "regenerate:check": "cargo run --locked -p zeron-theme --bin zeron-theme-export -- --check"
   },
   "packageManager": "pnpm@11.17.0",
   "devDependencies": {

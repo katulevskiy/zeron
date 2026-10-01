@@ -6,7 +6,7 @@ import {
   type ThemeVariant,
 } from "@zeron/theme";
 import type { IconName } from "@zeron/icons";
-import type { StorageLike } from "./engine-store";
+import type { StorageLike } from "./storage";
 import { UiSettingsStore, uiSettings, type UiSettings } from "../state/ui-settings";
 import { findVariantAnywhere, variantsForAppearanceAll } from "./theme-library";
 

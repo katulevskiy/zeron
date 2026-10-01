@@ -11,7 +11,7 @@ import {
   variantsForAppearanceAll,
   type ThemeCompilation,
 } from "../src/lib/theme-library";
-import type { StorageLike } from "../src/lib/engine-store";
+import type { StorageLike } from "../src/lib/storage";
 
 /**
  * The web custom-theme library — each describe named after the

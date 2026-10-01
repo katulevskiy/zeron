@@ -3,7 +3,7 @@
  *
  * The glyphs under `./generated/` are produced by `scripts/generate.mjs` from
  * `crates/ui/assets/icons/*.svg`, the same assets `crates/ui/src/icons.rs`
- * embeds. Every paint in them is `currentColor`, so an icon tints with the
+ * embeds. Monochrome foreground paints use `currentColor`, tinting with the
  * `color` of whatever it sits in — the web equivalent of gpui's
  * `icon(path).text_color(…)`.
  *

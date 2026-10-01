@@ -7,7 +7,7 @@ import {
   type ThemeFamily,
   type ThemeVariant,
 } from "@zeron/theme";
-import type { StorageLike } from "./engine-store";
+import type { StorageLike } from "./storage";
 
 /**
  * The web custom-theme library — the peer of the desktop's

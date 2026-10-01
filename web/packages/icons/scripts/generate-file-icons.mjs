@@ -23,13 +23,16 @@
 import { readdirSync, readFileSync, writeFileSync, mkdirSync, existsSync, rmSync } from "node:fs";
 import { dirname, join, relative, resolve } from "node:path";
 import { fileURLToPath } from "node:url";
+import { parseArgs } from "node:util";
+
+const { values } = parseArgs({ options: { check: { type: "boolean" }, "repo-root": { type: "string" } } });
 
 const here = dirname(fileURLToPath(import.meta.url));
-const repoRoot = resolve(here, "../../../..");
+const repoRoot = values["repo-root"] ? resolve(values["repo-root"]) : resolve(here, "../../../..");
 const assetDir = join(repoRoot, "crates/ui/assets/file-icons");
 const manifestSource = join(repoRoot, "crates/ui/src/file-icons.json");
 const publicDir = join(repoRoot, "web/packages/app/public/file-icons");
-const outManifest = join(here, "../src/generated/file-icons-manifest.ts");
+const outManifest = join(repoRoot, "web/packages/icons/src/generated/file-icons-manifest.ts");
 
 /** The desktop's bundle floor (`complete_theme_bundle_is_registered`). */
 const MIN_ICON_COUNT = 350;

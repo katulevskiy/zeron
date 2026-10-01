@@ -4,6 +4,7 @@
 //! as VS Code are deliberately isolated in [`vscode`], so a component never
 //! needs to understand a workbench color id or TextMate scope.
 
+pub mod artifact;
 mod builtins;
 mod library;
 pub mod vscode;

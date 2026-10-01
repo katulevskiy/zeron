@@ -46,7 +46,7 @@ import {
 } from "../src/lib/new-thread-background";
 import { memoryBackgroundBlobStore } from "../src/lib/background-blob-store";
 import { UiSettingsStore } from "../src/state/ui-settings";
-import type { StorageLike } from "../src/lib/engine-store";
+import type { StorageLike } from "../src/lib/storage";
 
 function memoryStorage(): StorageLike & { dump(): Map<string, string> } {
   const map = new Map<string, string>();
