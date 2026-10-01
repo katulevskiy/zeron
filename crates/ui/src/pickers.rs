@@ -1456,7 +1456,7 @@ impl Pickers {
                     .pb(px(2.0))
                     .text_size(crate::typography::ui_rems(11.0))
                     .text_color(theme.text_muted)
-                    .child("Manage presets in Settings → Agent presets"),
+                    .child("Manage presets in Settings → General"),
             )
             .into_any_element()
     }

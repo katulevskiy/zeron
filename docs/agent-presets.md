@@ -32,7 +32,7 @@ cloud, since nothing else could use it.
 ## Where presets live
 
 - **User presets** are `{data_dir}/presets.json` on the device, edited in
-  Settings → Agent presets. They are **per device for now**. The plan was a
+  Settings → General → Agent presets. They are **per device for now**. The plan was a
   synced registry row, which needs a new row kind on the edge as well as in
   the engine; that is the follow-up.
 - **Project presets** are `.zeron/agents/<id>.md` files, checked in with the
@@ -91,7 +91,7 @@ cloud, since nothing else could use it.
 - **Desktop:**
   - an **Agent** chip on the new-session canvas, beside the device and project
     chips: picking a preset sets the harness, model, reasoning and mode;
-  - Settings → **Agent presets** to create, edit, duplicate and delete user
+  - Settings → General → **Agent presets** to create, edit, duplicate and delete user
     presets, and to see the project's and imported ones read-only.
 - **MCP:**
   - `list_agents` returns id, name, description, source, harness, model and mode;
