@@ -17,6 +17,8 @@ const MAX_MSG: usize = 8 * 1024 * 1024;
 const BLOCK_HEADER: usize = 4 + 8 + 32;
 /// Manifest entries per `Manifest` frame.
 pub const MANIFEST_CHUNK: usize = 2048;
+/// Rough JSON bytes per `Manifest` frame (sync entries carry block hashes).
+const MANIFEST_CHUNK_BYTES: usize = 4 * 1024 * 1024;
 
 #[derive(Debug, Clone, Copy, PartialEq, Eq, Serialize, Deserialize)]
 #[serde(rename_all = "camelCase")]
@@ -36,6 +38,17 @@ pub struct FileHave {
     /// Verified, digest-checked and renamed into place.
     #[serde(default)]
     pub done: bool,
+    /// Sync mode, with `done`: the receiver's basis already has this
+    /// content; nothing is sent and nothing lands.
+    #[serde(default, skip_serializing_if = "is_false")]
+    pub unchanged: bool,
+    /// Sync mode, with `done`: the sender skipped it (it kept changing).
+    #[serde(default, skip_serializing_if = "is_false")]
+    pub skipped: bool,
+}
+
+fn is_false(value: &bool) -> bool {
+    !*value
 }
 
 #[derive(Debug, Clone, PartialEq, Serialize, Deserialize)]
@@ -62,6 +75,10 @@ pub enum Msg {
         destination: Option<String>,
         #[serde(default)]
         skipped: u64,
+        /// Sync mode: a ticket the receiver's engine granted for this
+        /// transfer. It replaces confirmation and decides where files land.
+        #[serde(default, skip_serializing_if = "Option::is_none")]
+        ticket: Option<String>,
     },
     Manifest {
         entries: Vec<Entry>,
@@ -72,6 +89,10 @@ pub enum Msg {
     /// Receiver: go ahead; skip what `have` lists.
     Accept {
         have: Vec<FileHave>,
+        /// The receiver honoured the offer's ticket (a receiver that
+        /// predates sync mode would have taken it as an inbox delivery).
+        #[serde(default, skip_serializing_if = "is_false")]
+        sync: bool,
     },
     Decline {
         reason: String,
@@ -86,6 +107,12 @@ pub enum Msg {
         file: u64,
         #[serde(default, skip_serializing_if = "Option::is_none")]
         blocks: Option<Vec<u64>>,
+    },
+    /// Sender, tolerant sync: entry `file` changed or vanished while it was
+    /// sent; the transfer completes without it.
+    Skip {
+        file: u64,
+        reason: String,
     },
     #[serde(rename_all = "camelCase")]
     Progress {
@@ -124,6 +151,30 @@ impl Block {
     pub fn verify(&self) -> bool {
         <[u8; 32]>::from(Sha256::digest(&self.data)) == self.sha256
     }
+}
+
+/// Split manifest entries into frames: at most [`MANIFEST_CHUNK`] entries
+/// and roughly [`MANIFEST_CHUNK_BYTES`] of JSON each.
+pub fn manifest_chunks(entries: &[Entry]) -> Vec<&[Entry]> {
+    let mut chunks = Vec::new();
+    let (mut start, mut bytes) = (0, 0);
+    for (index, entry) in entries.iter().enumerate() {
+        let size = 160
+            + entry.path.len()
+            + entry.target.as_ref().map_or(0, String::len)
+            + entry.blocks.as_ref().map_or(0, |b| b.len() * 67);
+        if index > start && (index - start >= MANIFEST_CHUNK || bytes + size > MANIFEST_CHUNK_BYTES)
+        {
+            chunks.push(&entries[start..index]);
+            start = index;
+            bytes = 0;
+        }
+        bytes += size;
+    }
+    if start < entries.len() {
+        chunks.push(&entries[start..]);
+    }
+    chunks
 }
 
 pub enum Frame {
@@ -232,6 +283,81 @@ mod tests {
             _ => panic!("expected a block"),
         }
         assert!(read_frame(&mut b).await.unwrap().is_none());
+    }
+
+    #[test]
+    fn sync_fields_stay_off_the_wire_for_inbox_transfers() {
+        let offer = Msg::Offer {
+            entry_count: 1,
+            file_count: 1,
+            total_bytes: 4,
+            digest: "d".into(),
+            destination: None,
+            skipped: 0,
+            ticket: None,
+        };
+        let json = serde_json::to_string(&offer).unwrap();
+        assert!(!json.contains("ticket"), "{json}");
+        let accept = Msg::Accept {
+            have: vec![FileHave {
+                file: 0,
+                blocks: RangeSet::full(1),
+                done: true,
+                unchanged: false,
+                skipped: false,
+            }],
+            sync: false,
+        };
+        let json = serde_json::to_string(&accept).unwrap();
+        assert_eq!(
+            json,
+            r#"{"type":"accept","have":[{"file":0,"blocks":[[0,1]],"done":true}]}"#
+        );
+        // What an older peer sends still parses.
+        let old: Msg = serde_json::from_str(
+            r#"{"type":"offer","entryCount":1,"fileCount":1,"totalBytes":4,"digest":"d","skipped":0}"#,
+        )
+        .unwrap();
+        assert_eq!(old, offer);
+        let entry: Entry =
+            serde_json::from_str(r#"{"path":"a","kind":"file","size":1,"mode":420}"#).unwrap();
+        assert!(entry.sha256.is_none() && entry.blocks.is_none() && entry.mtime_ms.is_none());
+        assert_eq!(
+            serde_json::to_string(&entry).unwrap(),
+            r#"{"path":"a","kind":"file","size":1,"mode":420}"#
+        );
+    }
+
+    #[test]
+    fn manifest_chunks_bound_entries_and_bytes() {
+        let entry = |blocks: usize| Entry {
+            path: "f".into(),
+            kind: crate::manifest::EntryKind::File,
+            size: 0,
+            mode: 0,
+            target: None,
+            sha256: None,
+            blocks: (blocks > 0).then(|| vec!["0".repeat(64); blocks]),
+            mtime_ms: None,
+        };
+        let small: Vec<Entry> = (0..5000).map(|_| entry(0)).collect();
+        let chunks = manifest_chunks(&small);
+        assert_eq!(chunks.len(), 3);
+        assert_eq!(chunks.iter().map(|c| c.len()).sum::<usize>(), 5000);
+        let large: Vec<Entry> = (0..4).map(|_| entry(40_000)).collect();
+        let chunks = manifest_chunks(&large);
+        assert_eq!(
+            chunks.len(),
+            4,
+            "each ~2.7 MB entry gets a frame of its own"
+        );
+        for chunk in chunks {
+            let msg = Msg::Manifest {
+                entries: chunk.to_vec(),
+            };
+            assert!(serde_json::to_vec(&msg).unwrap().len() < MAX_MSG);
+        }
+        assert!(manifest_chunks(&[]).is_empty());
     }
 
     #[tokio::test]

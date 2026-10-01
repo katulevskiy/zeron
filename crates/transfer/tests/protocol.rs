@@ -2,388 +2,17 @@
 //! resume after a severed tunnel, confirmation, cancellation, and a sender
 //! that lies in its manifest or its blocks.
 
-use std::future::Future;
-use std::path::{Path, PathBuf};
-use std::pin::Pin;
-use std::sync::atomic::{AtomicI64, AtomicUsize, Ordering};
-use std::sync::{Arc, Mutex, OnceLock};
-use std::task::{Context, Poll};
+mod common;
+
+use std::path::PathBuf;
+use std::sync::atomic::Ordering;
 use std::time::Duration;
 
-use tokio::io::{AsyncRead, AsyncWrite, ReadBuf};
-use zeron_proto::{FileTransfer, FileTransferState, FileTransferTransport};
+use common::*;
+use zeron_proto::{FileTransferState, FileTransferTransport};
 use zeron_transfer::manifest::{Entry, EntryKind, Manifest};
 use zeron_transfer::wire::{self, Block, Lane, Msg};
-use zeron_transfer::{
-    BoxIo, Network, SendRequest, Transfers, TransfersConfig, TransportPolicy, Tunnel,
-};
-
-/// Lanes to one peer's service. `budget` (bytes, shared by every lane of
-/// the first `severed` connections) cuts the tunnel mid-transfer.
-struct Net {
-    me: String,
-    peer: OnceLock<Transfers>,
-    budget: Arc<AtomicI64>,
-    connects: AtomicUsize,
-    severed: usize,
-    cancels: Mutex<Vec<String>>,
-    /// Throttle lanes (so a test can act mid-transfer).
-    slow: std::sync::atomic::AtomicBool,
-    /// Bytes written on connections that were not severed (the resume).
-    resumed_bytes: Arc<AtomicI64>,
-}
-
-struct MemTunnel {
-    me: String,
-    peer: Transfers,
-    budget: Option<Arc<AtomicI64>>,
-    slow: bool,
-    resumed_bytes: Arc<AtomicI64>,
-}
-
-#[async_trait::async_trait]
-impl Tunnel for MemTunnel {
-    fn transport(&self) -> FileTransferTransport {
-        FileTransferTransport::P2p
-    }
-    fn max_lanes(&self) -> usize {
-        4
-    }
-    async fn open_lane(&self) -> anyhow::Result<BoxIo> {
-        let (a, b) = tokio::io::duplex(256 * 1024);
-        self.peer
-            .accept_lane(self.me.clone(), FileTransferTransport::P2p, Box::new(b));
-        Ok(match &self.budget {
-            Some(budget) => Box::new(Fuse {
-                inner: a,
-                budget: budget.clone(),
-            }),
-            None if self.slow => Box::new(Slow {
-                inner: a,
-                delay: None,
-            }),
-            None => Box::new(Counted {
-                inner: a,
-                written: self.resumed_bytes.clone(),
-            }),
-        })
-    }
-    async fn close(&self) {}
-}
-
-#[async_trait::async_trait]
-impl Network for Net {
-    async fn connect(
-        &self,
-        _device: &str,
-        _policy: TransportPolicy,
-    ) -> anyhow::Result<Box<dyn Tunnel>> {
-        let n = self.connects.fetch_add(1, Ordering::SeqCst);
-        Ok(Box::new(MemTunnel {
-            me: self.me.clone(),
-            peer: self.peer.get().expect("wired").clone(),
-            budget: (n < self.severed).then(|| self.budget.clone()),
-            slow: self.slow.load(Ordering::SeqCst),
-            resumed_bytes: self.resumed_bytes.clone(),
-        }))
-    }
-    async fn notify_cancel(&self, _device: &str, transfer_id: &str) {
-        self.cancels.lock().unwrap().push(transfer_id.to_owned());
-        if let Some(peer) = self.peer.get() {
-            let _ = peer.cancel(transfer_id, false);
-        }
-    }
-    fn device_name(&self, device: &str) -> Option<String> {
-        Some(format!("{device} name"))
-    }
-    fn destination_roots(&self) -> Vec<PathBuf> {
-        Vec::new()
-    }
-}
-
-/// Fails every read and write once the shared byte budget is spent — a
-/// tunnel dying mid-block.
-struct Fuse<T> {
-    inner: T,
-    budget: Arc<AtomicI64>,
-}
-
-impl<T: AsyncRead + Unpin> AsyncRead for Fuse<T> {
-    fn poll_read(
-        mut self: Pin<&mut Self>,
-        cx: &mut Context<'_>,
-        buf: &mut ReadBuf<'_>,
-    ) -> Poll<std::io::Result<()>> {
-        if self.budget.load(Ordering::SeqCst) <= 0 {
-            return Poll::Ready(Err(std::io::ErrorKind::ConnectionReset.into()));
-        }
-        Pin::new(&mut self.inner).poll_read(cx, buf)
-    }
-}
-
-impl<T: AsyncWrite + Unpin> AsyncWrite for Fuse<T> {
-    fn poll_write(
-        mut self: Pin<&mut Self>,
-        cx: &mut Context<'_>,
-        data: &[u8],
-    ) -> Poll<std::io::Result<usize>> {
-        if self.budget.fetch_sub(data.len() as i64, Ordering::SeqCst) <= 0 {
-            return Poll::Ready(Err(std::io::ErrorKind::ConnectionReset.into()));
-        }
-        Pin::new(&mut self.inner).poll_write(cx, data)
-    }
-    fn poll_flush(mut self: Pin<&mut Self>, cx: &mut Context<'_>) -> Poll<std::io::Result<()>> {
-        Pin::new(&mut self.inner).poll_flush(cx)
-    }
-    fn poll_shutdown(mut self: Pin<&mut Self>, cx: &mut Context<'_>) -> Poll<std::io::Result<()>> {
-        Pin::new(&mut self.inner).poll_shutdown(cx)
-    }
-}
-
-/// Counts the bytes written through it.
-struct Counted<T> {
-    inner: T,
-    written: Arc<AtomicI64>,
-}
-
-impl<T: AsyncRead + Unpin> AsyncRead for Counted<T> {
-    fn poll_read(
-        mut self: Pin<&mut Self>,
-        cx: &mut Context<'_>,
-        buf: &mut ReadBuf<'_>,
-    ) -> Poll<std::io::Result<()>> {
-        Pin::new(&mut self.inner).poll_read(cx, buf)
-    }
-}
-
-impl<T: AsyncWrite + Unpin> AsyncWrite for Counted<T> {
-    fn poll_write(
-        mut self: Pin<&mut Self>,
-        cx: &mut Context<'_>,
-        data: &[u8],
-    ) -> Poll<std::io::Result<usize>> {
-        let result = std::task::ready!(Pin::new(&mut self.inner).poll_write(cx, data));
-        if let Ok(n) = &result {
-            self.written.fetch_add(*n as i64, Ordering::SeqCst);
-        }
-        Poll::Ready(result)
-    }
-    fn poll_flush(mut self: Pin<&mut Self>, cx: &mut Context<'_>) -> Poll<std::io::Result<()>> {
-        Pin::new(&mut self.inner).poll_flush(cx)
-    }
-    fn poll_shutdown(mut self: Pin<&mut Self>, cx: &mut Context<'_>) -> Poll<std::io::Result<()>> {
-        Pin::new(&mut self.inner).poll_shutdown(cx)
-    }
-}
-
-/// ~12 MB/s per lane: 64 KiB writes 5 ms apart.
-struct Slow<T> {
-    inner: T,
-    delay: Option<Pin<Box<tokio::time::Sleep>>>,
-}
-
-impl<T: AsyncRead + Unpin> AsyncRead for Slow<T> {
-    fn poll_read(
-        mut self: Pin<&mut Self>,
-        cx: &mut Context<'_>,
-        buf: &mut ReadBuf<'_>,
-    ) -> Poll<std::io::Result<()>> {
-        Pin::new(&mut self.inner).poll_read(cx, buf)
-    }
-}
-
-impl<T: AsyncWrite + Unpin> AsyncWrite for Slow<T> {
-    fn poll_write(
-        mut self: Pin<&mut Self>,
-        cx: &mut Context<'_>,
-        data: &[u8],
-    ) -> Poll<std::io::Result<usize>> {
-        if let Some(delay) = self.delay.as_mut() {
-            std::task::ready!(delay.as_mut().poll(cx));
-            self.delay = None;
-        }
-        let n = data.len().min(64 * 1024);
-        let result = std::task::ready!(Pin::new(&mut self.inner).poll_write(cx, &data[..n]));
-        self.delay = Some(Box::pin(tokio::time::sleep(Duration::from_millis(5))));
-        Poll::Ready(result)
-    }
-    fn poll_flush(mut self: Pin<&mut Self>, cx: &mut Context<'_>) -> Poll<std::io::Result<()>> {
-        Pin::new(&mut self.inner).poll_flush(cx)
-    }
-    fn poll_shutdown(mut self: Pin<&mut Self>, cx: &mut Context<'_>) -> Poll<std::io::Result<()>> {
-        Pin::new(&mut self.inner).poll_shutdown(cx)
-    }
-}
-
-struct Pair {
-    sender: Transfers,
-    receiver: Transfers,
-    sender_net: Arc<Net>,
-    home: PathBuf,
-    _dir: tempfile::TempDir,
-}
-
-fn net(me: &str, severed: usize, budget: i64) -> Arc<Net> {
-    Arc::new(Net {
-        me: me.into(),
-        peer: OnceLock::new(),
-        budget: Arc::new(AtomicI64::new(budget)),
-        connects: AtomicUsize::new(0),
-        severed,
-        cancels: Mutex::new(Vec::new()),
-        slow: Default::default(),
-        resumed_bytes: Arc::new(AtomicI64::new(0)),
-    })
-}
-
-fn service(dir: &Path, id: &str, home: Option<PathBuf>, net: Arc<Net>) -> Transfers {
-    Transfers::new(
-        TransfersConfig {
-            device_id: id.into(),
-            device_name: format!("{id} name"),
-            state_dir: dir.join(id).join("state"),
-            settings_file: dir.join(id).join("settings.json"),
-            home_dir: home,
-        },
-        net,
-    )
-}
-
-fn pair(severed: usize, budget: i64) -> Pair {
-    let dir = tempfile::tempdir_in(env!("CARGO_TARGET_TMPDIR")).unwrap();
-    let home = dir.path().join("home");
-    std::fs::create_dir_all(&home).unwrap();
-    let sender_net = net("laptop", severed, budget);
-    let receiver_net = net("phone", 0, 0);
-    let sender = service(dir.path(), "laptop", None, sender_net.clone());
-    let receiver = service(
-        dir.path(),
-        "phone",
-        Some(home.clone()),
-        receiver_net.clone(),
-    );
-    let _ = sender_net.peer.set(receiver.clone());
-    let _ = receiver_net.peer.set(sender.clone());
-    Pair {
-        sender,
-        receiver,
-        sender_net,
-        home,
-        _dir: dir,
-    }
-}
-
-async fn wait_for(
-    transfers: &Transfers,
-    id: &str,
-    what: impl Fn(&FileTransfer) -> bool,
-) -> FileTransfer {
-    let mut watch = transfers.watch();
-    let found = tokio::time::timeout(Duration::from_secs(120), async {
-        loop {
-            if let Some(row) = watch.borrow_and_update().iter().find(|r| r.id == id)
-                && what(row)
-            {
-                return row.clone();
-            }
-            watch.changed().await.unwrap();
-        }
-    })
-    .await;
-    found.unwrap_or_else(|_| panic!("timed out; rows: {:#?}", transfers.list()))
-}
-
-fn state_is(state: FileTransferState) -> impl Fn(&FileTransfer) -> bool {
-    move |row| row.state == state
-}
-
-/// Deterministic, position-dependent bytes: a misplaced block shows.
-fn pattern(size: usize, seed: u64) -> Vec<u8> {
-    let mut x = seed | 1;
-    (0..size)
-        .map(|_| {
-            x ^= x << 13;
-            x ^= x >> 7;
-            x ^= x << 17;
-            x as u8
-        })
-        .collect()
-}
-
-fn project(root: &Path) -> PathBuf {
-    let project = root.join("src-project");
-    std::fs::create_dir_all(project.join("app/src")).unwrap();
-    std::fs::create_dir_all(project.join("empty-dir")).unwrap();
-    std::fs::write(project.join("README.md"), b"# hello\n").unwrap();
-    std::fs::write(
-        project.join("app/src/main.rs"),
-        pattern(3 * 1024 * 1024 + 17, 1),
-    )
-    .unwrap();
-    std::fs::write(project.join("app/empty.txt"), b"").unwrap();
-    #[cfg(unix)]
-    {
-        use std::os::unix::fs::PermissionsExt;
-        std::fs::write(project.join("run.sh"), b"#!/bin/sh\necho hi\n").unwrap();
-        std::fs::set_permissions(
-            project.join("run.sh"),
-            std::fs::Permissions::from_mode(0o755),
-        )
-        .unwrap();
-        std::os::unix::fs::symlink("app/src/main.rs", project.join("main-link")).unwrap();
-    }
-    project
-}
-
-fn assert_same_tree(a: &Path, b: &Path) {
-    for entry in std::fs::read_dir(a).unwrap() {
-        let entry = entry.unwrap();
-        let other = b.join(entry.file_name());
-        let meta = std::fs::symlink_metadata(entry.path()).unwrap();
-        let other_meta = std::fs::symlink_metadata(&other)
-            .unwrap_or_else(|_| panic!("{} missing", other.display()));
-        if meta.file_type().is_symlink() {
-            assert!(
-                other_meta.file_type().is_symlink(),
-                "{} must stay a symlink",
-                other.display()
-            );
-            assert_eq!(
-                std::fs::read_link(entry.path()).unwrap(),
-                std::fs::read_link(&other).unwrap()
-            );
-        } else if meta.is_dir() {
-            assert!(other_meta.is_dir());
-            assert_same_tree(&entry.path(), &other);
-        } else {
-            assert_eq!(
-                std::fs::read(entry.path()).unwrap(),
-                std::fs::read(&other).unwrap(),
-                "{}",
-                other.display()
-            );
-            #[cfg(unix)]
-            {
-                use std::os::unix::fs::PermissionsExt;
-                assert_eq!(
-                    meta.permissions().mode() & 0o777,
-                    other_meta.permissions().mode() & 0o777
-                );
-            }
-        }
-    }
-}
-
-fn no_parts(dir: &Path) {
-    for entry in std::fs::read_dir(dir).unwrap() {
-        let entry = entry.unwrap();
-        let name = entry.file_name().to_string_lossy().into_owned();
-        assert!(!name.ends_with(".part"), "leftover {name}");
-        if entry.file_type().unwrap().is_dir() {
-            no_parts(&entry.path());
-        }
-    }
-}
+use zeron_transfer::{BoxIo, SendRequest, Transfers, TransportPolicy};
 
 #[tokio::test(flavor = "multi_thread", worker_threads = 4)]
 async fn a_folder_and_a_file_arrive_intact_in_the_inbox() {
@@ -647,6 +276,9 @@ async fn a_cancel_racing_the_confirmation_prompt_is_not_lost() {
                 size: 4,
                 mode: 0o644,
                 target: None,
+                sha256: None,
+                blocks: None,
+                mtime_ms: None,
             }],
         };
         let transfer_id = uuid::Uuid::new_v4().to_string();
@@ -665,6 +297,7 @@ async fn a_cancel_racing_the_confirmation_prompt_is_not_lost() {
                 digest: manifest.digest(),
                 destination: None,
                 skipped: 0,
+                ticket: None,
             },
             Msg::Manifest {
                 entries: manifest.entries.clone(),
@@ -709,6 +342,7 @@ async fn raw_offer(receiver: &Transfers, entries: Vec<Entry>) -> (BoxIo, Msg) {
             digest: manifest.digest(),
             destination: None,
             skipped: 0,
+            ticket: None,
         },
         Msg::Manifest {
             entries: manifest.entries.clone(),
@@ -733,6 +367,9 @@ async fn traversal_in_a_manifest_is_refused_and_nothing_is_written() {
         size: 4,
         mode: 0,
         target: (kind == EntryKind::Symlink).then(|| "/".into()),
+        sha256: None,
+        blocks: None,
+        mtime_ms: None,
     };
     for entries in [
         vec![evil("../../escape.txt", EntryKind::File)],
@@ -774,11 +411,14 @@ async fn corrupt_blocks_are_rejected_and_requested_again() {
             size: 4,
             mode: 0o644,
             target: None,
+            sha256: None,
+            blocks: None,
+            mtime_ms: None,
         }],
     )
     .await;
     assert!(
-        matches!(reply, Msg::Accept { ref have } if have.is_empty()),
+        matches!(reply, Msg::Accept { ref have, sync: false } if have.is_empty()),
         "{reply:?}"
     );
     let id = pair.receiver.list()[0].id.clone();

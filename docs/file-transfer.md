@@ -245,6 +245,44 @@ message, kind 2 a data block `u32 file ‖ u64 offset ‖ sha256[32] ‖ bytes`.
 - **Free space.** A receiver refuses a transfer larger than its free space
   (minus a 64 MiB margin).
 
+### Sync mode
+
+Session moves (docs/plans/2026-09-30-agent-mobility-and-policy.md) use the
+same protocol with a few additive fields; inbox transfers never set them and
+older peers ignore them.
+
+- **Tickets.** `Transfers::send_sync` lists files by explicit relative paths
+  whose first component is a logical root (`ws`, `x0`, `hs`, …); parent
+  folders are implied. The `Offer` carries a `ticket` the receiving engine
+  granted (`Network::sync_grant`). The grant names a private staging folder
+  (files land at `staging/<rel>` exactly, nothing renamed) and, per root, an
+  ordered list of basis folders. No prompt, no inbox. An ungranted ticket is
+  refused. The receiver answers `Accept {sync: true}`; a sender whose ticketed
+  offer is accepted without it cancels (an older receiver would have taken it
+  for an inbox delivery). A resumed transfer keeps its first grant (persisted
+  with the incoming state); a new transfer id asks again.
+- **Content up front.** File entries carry `sha256`, `mtimeMs`, and for files
+  of 4 MiB or more `blocks` (each 1 MiB block's SHA-256). Hashes come from a
+  persistent cache (`{profile}/file-transfers/hash-cache.bin`) keyed by path,
+  size, mtime, ctime and inode, so unchanged files aren't re-read.
+- **Unchanged files and block deltas.** For each file the receiver opens
+  `<first basis folder with an entry at that path>/<rest>` without following
+  symlinks. Same size and hash: reported `done`/`unchanged` in `Accept.have`;
+  nothing is sent or written. Otherwise basis blocks matching the entry's
+  block hashes are copied into the `.part`, fsynced, and reported as verified,
+  so only differing blocks travel.
+- **Tolerance.** Sync blocks are checked against the manifest's block hashes
+  as they are read, and a source must still be the version that was hashed. A
+  file that changed, vanished or fails its whole-file check is fatal unless the
+  send is `tolerant`; then the sender sends `Skip {file, reason}`, and the
+  receiver drops the part and completes without it.
+- **Result.** On completion the receiver restores mtimes and writes
+  `staging/.zeron-sync.json` (fsynced, atomic): `{transferId, ticket, files:
+  [{rel, outcome: landed|unchanged|skipped, sha256, size, mode, mtimeMs,
+  reason?, basisIndex?}], dirs: [{rel, mode}], symlinks: [{rel, target}]}`.
+  `Transfers::sync_result` parses it. An empty round is valid and leaves an
+  empty record.
+
 ## RPC surface
 
 All are forwardable with `targetDeviceId` naming the engine that sends or

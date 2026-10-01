@@ -43,6 +43,16 @@ pub struct Entry {
     pub mode: u32,
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub target: Option<String>,
+    /// Sync mode: the file's whole SHA-256 (hex), known before sending.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub sha256: Option<String>,
+    /// Sync mode, files of [`crate::hashcache::BLOCK_LIST_MIN`] or more:
+    /// the SHA-256 (hex) of each [`crate::blocks::BLOCK_SIZE`] block.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub blocks: Option<Vec<String>>,
+    /// Sync mode: modification time (epoch millis) restored on arrival.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub mtime_ms: Option<i64>,
 }
 
 impl Entry {
@@ -119,11 +129,20 @@ impl Manifest {
 
     /// Refuse anything that could escape the destination or confuse it.
     pub fn validate(&self) -> anyhow::Result<()> {
-        self.validate_for(CASE_INSENSITIVE_FS)
+        self.validate_for(CASE_INSENSITIVE_FS, false)
     }
 
-    fn validate_for(&self, case_insensitive: bool) -> anyhow::Result<()> {
-        anyhow::ensure!(!self.entries.is_empty(), "the transfer lists no files");
+    /// [`Self::validate`] for sync manifests, which may be empty (a round
+    /// with nothing to carry still leaves its result record).
+    pub fn validate_sync(&self) -> anyhow::Result<()> {
+        self.validate_for(CASE_INSENSITIVE_FS, true)
+    }
+
+    fn validate_for(&self, case_insensitive: bool, allow_empty: bool) -> anyhow::Result<()> {
+        anyhow::ensure!(
+            allow_empty || !self.entries.is_empty(),
+            "the transfer lists no files"
+        );
         anyhow::ensure!(
             self.entries.len() <= MAX_ENTRIES,
             "the transfer lists more than {MAX_ENTRIES} entries"
@@ -181,6 +200,22 @@ impl Manifest {
                 entry.kind == EntryKind::Symlink || entry.target.is_none(),
                 "only symlinks carry a target"
             );
+            anyhow::ensure!(
+                entry.kind == EntryKind::File || (entry.sha256.is_none() && entry.blocks.is_none()),
+                "only files carry hashes"
+            );
+            if let Some(sha256) = &entry.sha256 {
+                anyhow::ensure!(is_sha256_hex(sha256), "invalid hash for {}", entry.path);
+            }
+            if let Some(blocks) = &entry.blocks {
+                anyhow::ensure!(
+                    entry.sha256.is_some()
+                        && blocks.len() as u64 == crate::blocks::block_count(entry.size)
+                        && blocks.iter().all(|b| is_sha256_hex(b)),
+                    "invalid block hashes for {}",
+                    entry.path
+                );
+            }
         }
         Ok(())
     }
@@ -199,7 +234,7 @@ pub fn validate_relative(path: &str) -> anyhow::Result<()> {
     Ok(())
 }
 
-fn validate_name(name: &str) -> anyhow::Result<()> {
+pub(crate) fn validate_name(name: &str) -> anyhow::Result<()> {
     anyhow::ensure!(!name.is_empty(), "empty path component");
     anyhow::ensure!(name != "." && name != "..", "relative traversal");
     anyhow::ensure!(name.len() <= MAX_NAME_BYTES, "name too long");
@@ -357,18 +392,21 @@ fn push(
         },
         mode: mode_of(meta),
         target,
+        sha256: None,
+        blocks: None,
+        mtime_ms: None,
     });
     built.sources.push(source.to_path_buf());
 }
 
 #[cfg(unix)]
-fn mode_of(meta: &std::fs::Metadata) -> u32 {
+pub(crate) fn mode_of(meta: &std::fs::Metadata) -> u32 {
     use std::os::unix::fs::PermissionsExt;
     meta.permissions().mode() & 0o777
 }
 
 #[cfg(not(unix))]
-fn mode_of(_meta: &std::fs::Metadata) -> u32 {
+pub(crate) fn mode_of(_meta: &std::fs::Metadata) -> u32 {
     0
 }
 
@@ -390,6 +428,11 @@ pub fn numbered(name: &str, n: u32) -> String {
     }
 }
 
+/// 64 lowercase hex digits.
+pub fn is_sha256_hex(text: &str) -> bool {
+    text.len() == 64 && text.bytes().all(|b| matches!(b, b'0'..=b'9' | b'a'..=b'f'))
+}
+
 pub fn hex(bytes: &[u8]) -> String {
     bytes.iter().map(|b| format!("{b:02x}")).collect()
 }
@@ -405,6 +448,9 @@ mod tests {
             size: 0,
             mode: 0,
             target: (kind == EntryKind::Symlink).then(|| "elsewhere".into()),
+            sha256: None,
+            blocks: None,
+            mtime_ms: None,
         }
     }
 
@@ -439,8 +485,8 @@ mod tests {
             entry("app/Makefile", EntryKind::File),
             entry("app/makefile", EntryKind::File),
         ]);
-        clash.validate_for(false).unwrap();
-        let error = clash.validate_for(true).unwrap_err().to_string();
+        clash.validate_for(false, false).unwrap();
+        let error = clash.validate_for(true, false).unwrap_err().to_string();
         assert!(error.contains("letter case"), "{error}");
     }
 
@@ -487,8 +533,9 @@ mod tests {
                 .validate()
                 .is_err()
         );
-        // An empty manifest is refused.
+        // An empty manifest is refused (unless it is a sync round's).
         assert!(manifest(vec![]).validate().is_err());
+        manifest(vec![]).validate_sync().unwrap();
     }
 
     #[test]
@@ -550,6 +597,28 @@ mod tests {
             assert_eq!(readme.mode, 0o750);
         }
         assert!(build(&[PathBuf::from("relative/path")]).is_err());
+    }
+
+    #[test]
+    fn hashes_must_be_well_formed_and_only_on_files() {
+        let hash = "ab".repeat(32);
+        let mut file = entry("f", EntryKind::File);
+        file.size = 4 * crate::blocks::BLOCK_SIZE + 1;
+        file.sha256 = Some(hash.clone());
+        file.blocks = Some(vec![hash.clone(); 5]);
+        manifest(vec![file.clone()]).validate().unwrap();
+        let mut short = file.clone();
+        short.blocks = Some(vec![hash.clone(); 4]);
+        assert!(manifest(vec![short]).validate().is_err());
+        let mut upper = file.clone();
+        upper.sha256 = Some("AB".repeat(32));
+        assert!(manifest(vec![upper]).validate().is_err());
+        let mut blocks_alone = file.clone();
+        blocks_alone.sha256 = None;
+        assert!(manifest(vec![blocks_alone]).validate().is_err());
+        let mut dir = entry("d", EntryKind::Dir);
+        dir.sha256 = Some(hash);
+        assert!(manifest(vec![dir]).validate().is_err());
     }
 
     #[test]

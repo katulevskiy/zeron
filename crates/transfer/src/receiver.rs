@@ -4,8 +4,14 @@
 //! they describe) so a dropped tunnel — or a restart of this engine —
 //! resumes where it stopped. Each file lands as a hidden `*.part`, is
 //! checked against the sender's whole-file SHA-256, and only then renamed.
+//!
+//! A sync offer ([`crate::sync`]) carries a ticket instead: the engine's
+//! grant names the staging folder and the basis folders. Before accepting,
+//! the receiver compares every file with its basis — unchanged files are
+//! reported done, matching blocks are copied into the `.part` — and when
+//! the transfer completes it writes the result record at the staging root.
 
-use std::collections::HashMap;
+use std::collections::{HashMap, HashSet};
 use std::path::{Path, PathBuf};
 use std::sync::{Arc, Mutex};
 use std::time::Duration;
@@ -20,6 +26,7 @@ use zeron_proto::{FileTransfer, FileTransferDirection, FileTransferState, FileTr
 use crate::blocks::{BLOCK_SIZE, RangeSet, block_count, block_len};
 use crate::manifest::{self, Entry, EntryKind, MAX_ENTRIES, Manifest, hex};
 use crate::service::{INCOMING_RETENTION_MS, write_atomic};
+use crate::sync::{self, Basis, SyncGrant};
 use crate::wire::{self, FileHave, Frame, Msg};
 use crate::{BoxIo, Transfers, now_ms};
 
@@ -44,11 +51,22 @@ struct Meta {
     tops: HashMap<String, String>,
     created_at: i64,
     entries: Vec<Entry>,
+    /// Sync mode: the ticket the transfer was granted under. A resumed
+    /// session needs no new grant.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    ticket: Option<String>,
+    /// Sync mode: root id → basis folders, as granted.
+    #[serde(default, skip_serializing_if = "HashMap::is_empty")]
+    basis: HashMap<String, Vec<PathBuf>>,
 }
 
 #[derive(Serialize, Deserialize, Default)]
+#[serde(rename_all = "camelCase")]
 struct Progress {
     files: Vec<FileHave>,
+    /// Sync: unchanged file → the basis folder (its position) holding it.
+    #[serde(default, skip_serializing_if = "HashMap::is_empty")]
+    basis_index: HashMap<u64, u32>,
 }
 
 #[derive(Default)]
@@ -62,6 +80,13 @@ struct FileState {
     touched: bool,
     /// Final name (top-level files may be renamed around a conflict).
     landed: Option<PathBuf>,
+    /// Sync, with `done`: the basis already had it…
+    unchanged: bool,
+    /// …in this folder of the root's basis list.
+    basis_index: Option<u32>,
+    /// Sync, with `done`: the sender skipped it.
+    skipped: bool,
+    skip_reason: Option<String>,
 }
 
 #[derive(Default)]
@@ -90,6 +115,8 @@ pub(crate) struct Incoming {
     manifest: Manifest,
     dest_root: PathBuf,
     tops: HashMap<String, String>,
+    /// Sync mode (see [`crate::sync`]).
+    ticket: Option<String>,
     state: Mutex<RecvState>,
     session: Mutex<Option<Live>>,
     /// This device's user cancelled.
@@ -126,17 +153,7 @@ impl Incoming {
     }
 
     fn have(&self) -> Vec<FileHave> {
-        let state = self.state.lock().unwrap();
-        let mut have: Vec<FileHave> = state
-            .files
-            .iter()
-            .filter(|(_, f)| f.done || !f.blocks.is_empty())
-            .map(|(file, f)| FileHave {
-                file: *file,
-                blocks: f.blocks.clone(),
-                done: f.done,
-            })
-            .collect();
+        let mut have = have_of(&self.state.lock().unwrap());
         have.sort_by_key(|h| h.file);
         have
     }
@@ -148,6 +165,10 @@ impl Incoming {
             .enumerate()
             .filter(|(_, e)| e.kind == EntryKind::File)
             .map(|(i, e)| (i as u64, e))
+    }
+
+    fn is_sync(&self) -> bool {
+        self.ticket.is_some()
     }
 
     fn all_done(&self) -> bool {
@@ -252,6 +273,7 @@ impl Transfers {
             digest,
             destination,
             skipped,
+            ticket,
         } = wire::read_msg(&mut read).await?
         else {
             anyhow::bail!("expected a transfer offer");
@@ -276,7 +298,12 @@ impl Transfers {
         }
         let manifest = Manifest { entries };
         let invalid = |message: String| Msg::Error { message };
-        if let Err(error) = manifest.validate() {
+        let valid = if ticket.is_some() {
+            manifest.validate_sync()
+        } else {
+            manifest.validate()
+        };
+        if let Err(error) = valid {
             wire::write_msg(&mut write, &invalid(format!("Refused: {error}"))).await?;
             return Err(error);
         }
@@ -305,7 +332,7 @@ impl Transfers {
         let existing = self.0.incoming.lock().unwrap().get(&id).cloned();
         let incoming = match existing {
             Some(incoming) => {
-                if incoming.peer != peer || incoming.digest != digest {
+                if incoming.peer != peer || incoming.digest != digest || incoming.ticket != ticket {
                     wire::write_msg(&mut write, &invalid("Conflicting transfer id".into())).await?;
                     anyhow::bail!("conflicting transfer id {id}");
                 }
@@ -329,6 +356,19 @@ impl Transfers {
                     };
                     wire::write_msg(&mut write, &answer).await?;
                     return Ok(());
+                }
+                if let Some(ticket) = ticket {
+                    let offer = SyncOffer {
+                        peer,
+                        peer_name,
+                        id,
+                        digest,
+                        ticket,
+                        skipped,
+                    };
+                    return self
+                        .accept_sync(offer, manifest, session_id, transport, write, rx)
+                        .await;
                 }
                 let dest_root = match self.resolve_destination(&peer_name, destination.as_deref()) {
                     Ok(root) => root,
@@ -498,6 +538,8 @@ impl Transfers {
                 tops,
                 created_at: now_ms(),
                 entries: manifest.entries,
+                ticket: None,
+                basis: HashMap::new(),
             };
             let bytes = serde_json::to_vec(&meta)?;
             let incoming = incoming_from(meta, Progress::default());
@@ -510,6 +552,188 @@ impl Transfers {
                 ensure_dir(&incoming.final_path(entry))?;
             }
             write_atomic(&meta_dir.join("meta.json"), &bytes)?;
+            anyhow::Ok(Arc::new(incoming))
+        })
+        .await?
+    }
+
+    /// A ticketed offer: ask the engine for its grant, compare the manifest
+    /// with the basis (telling the sender to wait meanwhile), then receive
+    /// into the granted staging folder. Nothing asks this device's user —
+    /// the move itself was the user's decision.
+    async fn accept_sync<W: tokio::io::AsyncWrite + Unpin>(
+        &self,
+        offer: SyncOffer,
+        manifest: Manifest,
+        session_id: String,
+        transport: FileTransferTransport,
+        mut write: W,
+        rx: mpsc::Receiver<anyhow::Result<Msg>>,
+    ) -> anyhow::Result<()> {
+        let refuse = |message: String| Msg::Error { message };
+        // A sender that redials while the basis is still being compared
+        // gets a closed lane and retries.
+        if !self.0.preparing.lock().unwrap().insert(offer.id.clone()) {
+            anyhow::bail!("transfer {} is still being prepared", offer.id);
+        }
+        let _preparing = Preparing(self, offer.id.clone());
+        let grant = sync::valid_ticket(&offer.ticket)
+            .then(|| self.0.network.sync_grant(&offer.peer, &offer.ticket))
+            .flatten()
+            .filter(|grant| grant.dest_root.is_absolute());
+        let Some(grant) = grant else {
+            let message = "Refused: this device is not expecting a transfer with that ticket";
+            wire::write_msg(&mut write, &refuse(message.into())).await?;
+            anyhow::bail!(message);
+        };
+        let mut row = new_row(
+            &offer.id,
+            &offer.peer,
+            &offer.peer_name,
+            &manifest,
+            offer.skipped,
+        );
+        row.destination = Some(grant.dest_root.to_string_lossy().into_owned());
+        self.insert(row);
+
+        let id = offer.id.clone();
+        let prepare = self.lay_out_sync(offer, grant, manifest);
+        tokio::pin!(prepare);
+        let mut ping = tokio::time::interval(PENDING_PING);
+        let mut lane_up = true;
+        let prepared = loop {
+            tokio::select! {
+                prepared = &mut prepare => break prepared,
+                _ = ping.tick(), if lane_up => {
+                    // A lost lane doesn't stop the work: the sender resumes.
+                    lane_up = wire::write_msg(&mut write, &Msg::Pending).await.is_ok();
+                }
+            }
+        };
+        let incoming = match prepared {
+            Ok(incoming) => incoming,
+            Err(error) => {
+                let message = format!("Could not save the files: {error}");
+                self.finish(&id, FileTransferState::Failed, Some(message.clone()));
+                let _ = wire::write_msg(&mut write, &refuse(message)).await;
+                return Err(error);
+            }
+        };
+        self.0
+            .incoming
+            .lock()
+            .unwrap()
+            .insert(id.clone(), incoming.clone());
+        drop(_preparing);
+        self.run_receive_session(incoming, session_id, transport, write, rx)
+            .await
+    }
+
+    /// Compare the manifest with the grant's basis, seed `.part` files from
+    /// matching blocks, and persist the result before accepting.
+    async fn lay_out_sync(
+        &self,
+        offer: SyncOffer,
+        grant: SyncGrant,
+        manifest: Manifest,
+    ) -> anyhow::Result<Arc<Incoming>> {
+        let meta_dir = self.incoming_dir(&offer.id);
+        let cache = self.hash_cache();
+        tokio::task::spawn_blocking(move || {
+            let SyncGrant { dest_root, basis } = grant;
+            // The engine's own choice, but a root id is still one plain name.
+            let basis: HashMap<String, Vec<PathBuf>> = basis
+                .into_iter()
+                .filter(|(root, dirs)| {
+                    manifest::validate_name(root).is_ok() && dirs.iter().all(|d| d.is_absolute())
+                })
+                .collect();
+            std::fs::create_dir_all(&dest_root)?;
+            let total = manifest.total_bytes();
+            let meta = Meta {
+                id: offer.id,
+                peer: offer.peer,
+                peer_name: offer.peer_name,
+                digest: offer.digest,
+                dest_root: dest_root.clone(),
+                tops: HashMap::new(),
+                created_at: now_ms(),
+                entries: manifest.entries,
+                ticket: Some(offer.ticket),
+                basis: basis.clone(),
+            };
+            let meta_bytes = serde_json::to_vec(&meta)?;
+            let incoming = incoming_from(meta, Progress::default());
+
+            let files: Vec<(u64, &Entry)> = incoming
+                .file_entries()
+                .filter(|(_, e)| e.sha256.is_some())
+                .collect();
+            let found = sync::parallel(&files, |(_, entry)| {
+                sync::examine_basis(entry, &basis, &cache)
+            });
+            if let Err(error) = cache.lock().unwrap().save() {
+                tracing::warn!(%error, "could not save the file hash cache");
+            }
+            let mut seeds = Vec::new();
+            let mut unchanged_bytes = 0;
+            {
+                let mut state = incoming.state.lock().unwrap();
+                for (&(index, entry), basis) in files.iter().zip(found) {
+                    match basis {
+                        Basis::Unchanged { index: folder } => {
+                            state.files.insert(
+                                index,
+                                FileState {
+                                    blocks: RangeSet::full(block_count(entry.size)),
+                                    done: true,
+                                    unchanged: true,
+                                    basis_index: Some(folder),
+                                    ..Default::default()
+                                },
+                            );
+                            state.done_bytes += entry.size;
+                            unchanged_bytes += entry.size;
+                        }
+                        Basis::Seed { blocks, .. } => seeds.push((index, blocks)),
+                        Basis::None => {}
+                    }
+                }
+            }
+            if let Some(message) = space_problem(&dest_root, total - unchanged_bytes) {
+                anyhow::bail!(message);
+            }
+            for entry in incoming
+                .manifest
+                .entries
+                .iter()
+                .filter(|e| e.kind == EntryKind::Dir)
+            {
+                ensure_dir(&incoming.final_path(entry))?;
+            }
+            let seeded = sync::parallel(&seeds, |(index, blocks)| {
+                let entry = &incoming.manifest.entries[*index as usize];
+                sync::seed_part(&incoming.part_path(entry), entry, &basis, blocks.as_deref())
+            });
+            {
+                let mut state = incoming.state.lock().unwrap();
+                for ((index, ..), blocks) in seeds.iter().zip(seeded) {
+                    let blocks = blocks?;
+                    if blocks.is_empty() {
+                        continue;
+                    }
+                    let size = incoming.manifest.entries[*index as usize].size;
+                    state.done_bytes += blocks.bytes(size);
+                    state.files.entry(*index).or_default().blocks = blocks;
+                }
+            }
+            // Seeded blocks are already durable; record them, then accept.
+            let progress = progress_of(&incoming.state.lock().unwrap());
+            write_atomic(
+                &meta_dir.join("progress.json"),
+                &serde_json::to_vec(&progress)?,
+            )?;
+            write_atomic(&meta_dir.join("meta.json"), &meta_bytes)?;
             anyhow::Ok(Arc::new(incoming))
         })
         .await?
@@ -538,6 +762,7 @@ impl Transfers {
                 &mut write,
                 &Msg::Accept {
                     have: incoming.have(),
+                    sync: incoming.is_sync(),
                 },
             )
             .await?;
@@ -545,6 +770,11 @@ impl Transfers {
             self.progress(&id, incoming.state.lock().unwrap().done_bytes);
             if incoming.all_done() {
                 self.spawn_complete(incoming.clone());
+            } else if incoming.is_sync() {
+                // Fully seeded (or restored) files need no data, only checking.
+                for (file, _) in incoming.file_entries() {
+                    self.maybe_finalize(&incoming, file);
+                }
             }
             let mut progress = tokio::time::interval(PROGRESS_INTERVAL);
             let mut flush = tokio::time::interval(FLUSH_INTERVAL);
@@ -558,6 +788,7 @@ impl Transfers {
                     }
                     msg = rx.recv() => match msg {
                         Some(Ok(Msg::Digest { file, sha256 })) => self.on_digest(&incoming, file, sha256),
+                        Some(Ok(Msg::Skip { file, reason })) => self.on_skip(&incoming, file, reason).await,
                         Some(Ok(Msg::Cancel { .. })) => {
                             self.abandon(&incoming, FileTransferState::Cancelled, None).await;
                             return Ok(());
@@ -635,18 +866,29 @@ impl Transfers {
             live.stop.clone()
         };
         let mut files: HashMap<u32, Arc<std::fs::File>> = HashMap::new();
-        loop {
-            let frame = tokio::select! {
-                _ = stop.cancelled() => return Ok(()),
-                _ = incoming.cancel.cancelled() => return Ok(()),
-                frame = wire::read_frame(&mut io) => frame?,
-            };
-            match frame {
-                None => return Ok(()),
-                Some(Frame::Msg(_)) => anyhow::bail!("unexpected message on a data lane"),
-                Some(Frame::Block(block)) => self.on_block(&incoming, &mut files, block).await?,
+        let result = async {
+            loop {
+                let frame = tokio::select! {
+                    _ = stop.cancelled() => return Ok(()),
+                    _ = incoming.cancel.cancelled() => return Ok(()),
+                    frame = wire::read_frame(&mut io) => frame?,
+                };
+                match frame {
+                    None => return Ok(()),
+                    Some(Frame::Msg(_)) => anyhow::bail!("unexpected message on a data lane"),
+                    Some(Frame::Block(block)) => {
+                        self.on_block(&incoming, &mut files, block).await?
+                    }
+                }
             }
         }
+        .await;
+        // Blocks that drained after the control lane dropped are recorded
+        // too: a restart before the sender resumes keeps them.
+        if !incoming.cancel.is_cancelled() {
+            self.flush(&incoming).await;
+        }
+        result
     }
 
     async fn on_block(
@@ -711,15 +953,23 @@ impl Transfers {
                 .await;
             return Ok(());
         }
-        let done_bytes = {
+        let (done_bytes, skipped) = {
             let mut state = incoming.state.lock().unwrap();
             let entry_state = state.files.entry(file).or_default();
-            if entry_state.blocks.insert(index) {
+            let skipped = entry_state.skipped;
+            if !entry_state.done && entry_state.blocks.insert(index) {
                 entry_state.touched = true;
                 state.done_bytes += length;
             }
-            state.done_bytes
+            (state.done_bytes, skipped)
         };
+        if skipped {
+            // The sender gave up on this file while the block was in flight.
+            files.remove(&(file as u32));
+            let part = incoming.part_path(entry);
+            let _ = tokio::task::spawn_blocking(move || std::fs::remove_file(part)).await;
+            return Ok(());
+        }
         // Blocks still draining after the control lane dropped count too.
         self.progress(&incoming.id, done_bytes);
         self.maybe_finalize(incoming, file);
@@ -727,11 +977,12 @@ impl Transfers {
     }
 
     fn on_digest(&self, incoming: &Arc<Incoming>, file: u64, sha256: String) {
+        // Sync entries carry their digest in the manifest.
         let valid = incoming
             .manifest
             .entries
             .get(file as usize)
-            .is_some_and(|e| e.kind == EntryKind::File)
+            .is_some_and(|e| e.kind == EntryKind::File && e.sha256.is_none())
             && sha256.len() == 64;
         if !valid {
             return;
@@ -747,30 +998,64 @@ impl Transfers {
         self.maybe_finalize(incoming, file);
     }
 
+    /// Tolerant sync: the sender gave up on `file`; complete without it.
+    async fn on_skip(&self, incoming: &Arc<Incoming>, file: u64, reason: String) {
+        let Some(entry) = incoming
+            .manifest
+            .entries
+            .get(file as usize)
+            .filter(|e| e.kind == EntryKind::File && incoming.is_sync())
+        else {
+            return;
+        };
+        {
+            let mut state = incoming.state.lock().unwrap();
+            let f = state.files.entry(file).or_default();
+            // A file already verifying landed with the promised content.
+            if f.done || f.finalizing {
+                return;
+            }
+            let had = f.blocks.bytes(entry.size);
+            f.done = true;
+            f.skipped = true;
+            f.skip_reason = Some(reason.chars().take(500).collect());
+            f.blocks = RangeSet::full(block_count(entry.size));
+            f.touched = false;
+            state.done_bytes += entry.size - had;
+        }
+        let part = incoming.part_path(entry);
+        let _ = tokio::task::spawn_blocking(move || std::fs::remove_file(part)).await;
+        self.update_row(&incoming.id, |row| row.skipped += 1);
+        if incoming.all_done() {
+            self.spawn_complete(incoming.clone());
+        }
+    }
+
     fn maybe_finalize(&self, incoming: &Arc<Incoming>, file: u64) {
-        let entry = incoming.manifest.entries[file as usize].clone();
+        let entry = &incoming.manifest.entries[file as usize];
         let digest = {
             let mut state = incoming.state.lock().unwrap();
             let f = state.files.entry(file).or_default();
             if f.done || f.finalizing || f.blocks.len() < block_count(entry.size) {
                 return;
             }
-            let Some(digest) = f.digest.clone() else {
+            let Some(digest) = f.digest.clone().or_else(|| entry.sha256.clone()) else {
                 return;
             };
             f.finalizing = true;
             digest
         };
+        let entry = entry.clone();
         let transfers = self.clone();
         let incoming = incoming.clone();
         tokio::spawn(async move {
             let part = incoming.part_path(&entry);
             let target = incoming.final_path(&entry);
-            let top_level = entry.is_top_level();
-            let size = entry.size;
-            let mode = entry.mode;
+            // Sync layouts are exact: nothing is renamed around a conflict.
+            let top_level = entry.is_top_level() && !incoming.is_sync();
+            let (size, mode, mtime_ms) = (entry.size, entry.mode, entry.mtime_ms);
             let result = tokio::task::spawn_blocking(move || {
-                finalize_file(&part, &target, size, mode, &digest, top_level)
+                finalize_file(&part, &target, size, mode, mtime_ms, &digest, top_level)
             })
             .await
             .map_err(anyhow::Error::from)
@@ -853,9 +1138,30 @@ impl Transfers {
         let transfers = self.clone();
         tokio::spawn(async move {
             let links = incoming.clone();
-            let result = tokio::task::spawn_blocking(move || finish_tree(&links)).await;
-            if let Ok(Err(error)) | Err(error) = result.map_err(anyhow::Error::from) {
-                tracing::warn!(%error, "file transfer: could not finish folders");
+            let result = tokio::task::spawn_blocking(move || {
+                if let Err(error) = finish_tree(&links) {
+                    tracing::warn!(%error, "file transfer: could not finish folders");
+                }
+                if links.is_sync() {
+                    remove_skipped_parts(&links);
+                    write_sync_result(&links)?;
+                }
+                anyhow::Ok(())
+            })
+            .await
+            .map_err(anyhow::Error::from)
+            .and_then(|r| r);
+            if let Err(error) = result {
+                let message = format!("Could not save the files: {error}");
+                incoming
+                    .send_control(Msg::Error {
+                        message: message.clone(),
+                    })
+                    .await;
+                transfers
+                    .abandon(&incoming, FileTransferState::Failed, Some(message))
+                    .await;
+                return;
             }
             let _ = std::fs::remove_dir_all(transfers.incoming_dir(&incoming.id));
             transfers.finish(&incoming.id, FileTransferState::Completed, None);
@@ -886,17 +1192,7 @@ impl Transfers {
                 .iter_mut()
                 .filter_map(|(i, f)| (std::mem::take(&mut f.touched) && !f.done).then_some(*i))
                 .collect();
-            let files = state
-                .files
-                .iter()
-                .filter(|(_, f)| f.done || !f.blocks.is_empty())
-                .map(|(i, f)| FileHave {
-                    file: *i,
-                    blocks: f.blocks.clone(),
-                    done: f.done,
-                })
-                .collect();
-            (touched, Progress { files })
+            (touched, progress_of(&state))
         };
         if incoming.cancel.is_cancelled() {
             return;
@@ -920,6 +1216,118 @@ impl Transfers {
         })
         .await;
     }
+}
+
+/// Resume state: every file with verified blocks or done.
+fn have_of(state: &RecvState) -> Vec<FileHave> {
+    state
+        .files
+        .iter()
+        .filter(|(_, f)| f.done || !f.blocks.is_empty())
+        .map(|(file, f)| FileHave {
+            file: *file,
+            blocks: f.blocks.clone(),
+            done: f.done,
+            unchanged: f.unchanged,
+            skipped: f.skipped,
+        })
+        .collect()
+}
+
+fn progress_of(state: &RecvState) -> Progress {
+    Progress {
+        files: have_of(state),
+        basis_index: state
+            .files
+            .iter()
+            .filter_map(|(file, f)| Some((*file, f.basis_index?)))
+            .collect(),
+    }
+}
+
+/// A ticketed offer, before it was granted.
+struct SyncOffer {
+    peer: String,
+    peer_name: String,
+    id: String,
+    digest: String,
+    ticket: String,
+    skipped: u64,
+}
+
+/// Marks a sync transfer as being prepared until dropped.
+struct Preparing<'a>(&'a Transfers, String);
+
+impl Drop for Preparing<'_> {
+    fn drop(&mut self) {
+        self.0.0.preparing.lock().unwrap().remove(&self.1);
+    }
+}
+
+/// The record the receiving move engine applies staging from.
+fn write_sync_result(incoming: &Incoming) -> anyhow::Result<()> {
+    let result = {
+        let state = incoming.state.lock().unwrap();
+        let mut result = sync::SyncResult {
+            transfer_id: incoming.id.clone(),
+            ticket: incoming.ticket.clone().unwrap_or_default(),
+            files: Vec::new(),
+            dirs: Vec::new(),
+            symlinks: Vec::new(),
+        };
+        for (index, entry) in incoming.manifest.entries.iter().enumerate() {
+            match entry.kind {
+                EntryKind::Dir => result.dirs.push(sync::SyncDir {
+                    rel: entry.path.clone(),
+                    mode: entry.mode,
+                }),
+                EntryKind::Symlink => result.symlinks.push(sync::SyncSymlink {
+                    rel: entry.path.clone(),
+                    target: entry.target.clone().unwrap_or_default(),
+                }),
+                EntryKind::File => {
+                    let f = state.files.get(&(index as u64));
+                    let outcome = match f {
+                        Some(f) if f.skipped => sync::SyncOutcome::Skipped,
+                        Some(f) if f.unchanged => sync::SyncOutcome::Unchanged,
+                        Some(f) if f.done => sync::SyncOutcome::Landed,
+                        _ => anyhow::bail!("{} never arrived", entry.path),
+                    };
+                    result.files.push(sync::SyncFile {
+                        rel: entry.path.clone(),
+                        outcome,
+                        sha256: entry
+                            .sha256
+                            .clone()
+                            .or_else(|| f.and_then(|f| f.digest.clone()))
+                            .unwrap_or_default(),
+                        size: entry.size,
+                        mode: entry.mode,
+                        mtime_ms: entry.mtime_ms,
+                        reason: f.and_then(|f| f.skip_reason.clone()),
+                        basis_index: f.and_then(|f| f.basis_index).map(|i| i as usize),
+                    });
+                }
+            }
+        }
+        result
+    };
+    let path = incoming.dest_root.join(sync::SYNC_RESULT_FILE);
+    let tmp = incoming
+        .dest_root
+        .join(format!(".zeron-sync.{}.tmp", std::process::id()));
+    let mut options = std::fs::OpenOptions::new();
+    options.write(true).create(true).truncate(true);
+    #[cfg(unix)]
+    {
+        use std::os::unix::fs::OpenOptionsExt;
+        options.custom_flags(libc::O_NOFOLLOW).mode(0o600);
+    }
+    let mut file = options.open(&tmp)?;
+    std::io::Write::write_all(&mut file, &serde_json::to_vec(&result)?)?;
+    file.sync_all()?;
+    std::fs::rename(&tmp, &path)?;
+    Ok(())
 }
 
 fn incoming_from(meta: Meta, progress: Progress) -> Incoming {
@@ -953,6 +1361,9 @@ fn incoming_from(meta: Meta, progress: Progress) -> Incoming {
                     have.blocks
                 },
                 done: have.done,
+                unchanged: have.done && have.unchanged,
+                basis_index: progress.basis_index.get(&have.file).copied(),
+                skipped: have.done && have.skipped,
                 ..Default::default()
             },
         );
@@ -964,6 +1375,7 @@ fn incoming_from(meta: Meta, progress: Progress) -> Incoming {
         manifest,
         dest_root: meta.dest_root,
         tops: meta.tops,
+        ticket: meta.ticket,
         state: Mutex::new(state),
         session: Mutex::new(None),
         cancel: CancellationToken::new(),
@@ -1040,7 +1452,7 @@ fn ensure_dir(path: &Path) -> anyhow::Result<()> {
     }
 }
 
-fn open_part(path: &Path) -> anyhow::Result<std::fs::File> {
+pub(crate) fn open_part(path: &Path) -> anyhow::Result<std::fs::File> {
     let mut options = std::fs::OpenOptions::new();
     options.create(true).write(true).read(true);
     #[cfg(unix)]
@@ -1051,7 +1463,7 @@ fn open_part(path: &Path) -> anyhow::Result<std::fs::File> {
     Ok(options.open(path)?)
 }
 
-fn write_at(file: &std::fs::File, data: &[u8], offset: u64) -> std::io::Result<()> {
+pub(crate) fn write_at(file: &std::fs::File, data: &[u8], offset: u64) -> std::io::Result<()> {
     #[cfg(unix)]
     {
         use std::os::unix::fs::FileExt;
@@ -1075,6 +1487,7 @@ fn finalize_file(
     target: &Path,
     size: u64,
     mode: u32,
+    mtime_ms: Option<i64>,
     expected: &str,
     top_level: bool,
 ) -> anyhow::Result<Option<PathBuf>> {
@@ -1098,10 +1511,17 @@ fn finalize_file(
     #[cfg(unix)]
     if mode != 0 {
         use std::os::unix::fs::PermissionsExt;
-        std::fs::set_permissions(part, std::fs::Permissions::from_mode(mode & 0o777))?;
+        file.set_permissions(std::fs::Permissions::from_mode(mode & 0o777))?;
     }
     #[cfg(not(unix))]
     let _ = mode;
+    if let Some(time) = mtime_ms
+        .and_then(|ms| u64::try_from(ms).ok())
+        .and_then(|ms| std::time::UNIX_EPOCH.checked_add(Duration::from_millis(ms)))
+        && let Err(error) = file.set_modified(time)
+    {
+        tracing::debug!(%error, part = %part.display(), "could not restore a modification time");
+    }
     let mut landed = target.to_path_buf();
     if top_level {
         // Something appeared under the reserved name meanwhile: keep both.
@@ -1159,17 +1579,18 @@ fn finish_tree(incoming: &Incoming) -> anyhow::Result<()> {
 
 /// Remove unfinished `*.part` files and the folders left empty by them.
 fn remove_parts(incoming: &Incoming) {
-    let done: Vec<u64> = {
+    // Landed files have no part left; unchanged ones never had one.
+    let settled: HashSet<u64> = {
         let state = incoming.state.lock().unwrap();
         state
             .files
             .iter()
-            .filter(|(_, f)| f.done)
+            .filter(|(_, f)| f.done && !f.skipped)
             .map(|(i, _)| *i)
             .collect()
     };
     for (index, entry) in incoming.file_entries() {
-        if !done.contains(&index) {
+        if !settled.contains(&index) {
             let _ = std::fs::remove_file(incoming.part_path(entry));
         }
     }
@@ -1181,6 +1602,23 @@ fn remove_parts(incoming: &Incoming) {
         .filter(|e| e.kind == EntryKind::Dir)
     {
         let _ = std::fs::remove_dir(incoming.final_path(entry));
+    }
+}
+
+/// Parts of skipped files that a block still in flight may have recreated.
+fn remove_skipped_parts(incoming: &Incoming) {
+    let skipped: Vec<u64> = {
+        let state = incoming.state.lock().unwrap();
+        state
+            .files
+            .iter()
+            .filter(|(_, f)| f.skipped)
+            .map(|(i, _)| *i)
+            .collect()
+    };
+    for index in skipped {
+        let _ =
+            std::fs::remove_file(incoming.part_path(&incoming.manifest.entries[index as usize]));
     }
 }
 

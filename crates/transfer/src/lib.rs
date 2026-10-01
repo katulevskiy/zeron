@@ -9,13 +9,20 @@
 //! `*.part` file, records verified blocks durably, checks each file's
 //! whole-file SHA-256, and renames it into place. A dropped tunnel resumes
 //! from those verified blocks.
+//!
+//! Besides inbox delivery there is a [`sync`] mode for session moves: an
+//! explicit layout into a staging folder the receiving engine granted,
+//! content hashes up front so unchanged files and matching blocks never
+//! travel, and optional tolerance for files that change while sent.
 
 pub mod blocks;
+pub mod hashcache;
 pub mod manifest;
 mod receiver;
 pub mod relay;
 mod sender;
 mod service;
+pub mod sync;
 pub mod wire;
 
 use tokio::io::{AsyncRead, AsyncWrite};
@@ -24,6 +31,10 @@ use zeron_proto::FileTransferTransport;
 pub use relay::{RelayPipes, RelayTunnel};
 pub use service::{
     SendRequest, Transfers, TransfersConfig, TransportPolicy, WeakTransfers, expand_home,
+};
+pub use sync::{
+    SYNC_RESULT_FILE, SyncDir, SyncFile, SyncGrant, SyncOutcome, SyncResult, SyncSend, SyncSource,
+    SyncSymlink,
 };
 
 /// Mux service id of the P2P lanes.
@@ -61,6 +72,14 @@ pub trait Network: Send + Sync + 'static {
     fn device_name(&self, device: &str) -> Option<String>;
     /// Folders (besides the home folder) a sender may name as destination.
     fn destination_roots(&self) -> Vec<std::path::PathBuf>;
+    /// Sync mode: what this engine granted `peer` under `ticket` (where the
+    /// files land, which folders hold the current copies). `None` refuses
+    /// the transfer. Asked once per new transfer id; a resumed transfer
+    /// keeps what its first session was granted.
+    fn sync_grant(&self, peer: &str, ticket: &str) -> Option<SyncGrant> {
+        let _ = (peer, ticket);
+        None
+    }
 }
 
 pub(crate) fn now_ms() -> i64 {

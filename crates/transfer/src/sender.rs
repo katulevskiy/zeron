@@ -4,8 +4,13 @@
 //! alongside. A dropped tunnel is redialed with backoff; each new session
 //! resumes from whatever the receiver reports. Nothing is ever buffered
 //! beyond one block per lane.
+//!
+//! Sync sends ([`crate::sync`]) carry a ticket and content hashes in the
+//! manifest: no digests are computed while sending, and every block read is
+//! checked against the hash the manifest promised. A source that changed
+//! since is skipped (tolerant) or fails the transfer.
 
-use std::collections::{HashMap, VecDeque};
+use std::collections::{HashMap, HashSet, VecDeque};
 use std::path::PathBuf;
 use std::sync::{Arc, Mutex};
 use std::time::{Duration, Instant};
@@ -17,9 +22,10 @@ use tokio_util::sync::CancellationToken;
 use zeron_proto::FileTransferState;
 
 use crate::blocks::{BLOCK_SIZE, RangeSet, block_count, block_len};
+use crate::hashcache::FileStat;
 use crate::manifest::{Built, EntryKind, Manifest, hex};
-use crate::service::{SendRequest, TransportPolicy};
-use crate::wire::{self, Block, Lane, MANIFEST_CHUNK, Msg, PROTOCOL_VERSION};
+use crate::service::TransportPolicy;
+use crate::wire::{self, Block, Lane, Msg, PROTOCOL_VERSION};
 use crate::{Transfers, Tunnel};
 
 /// Data lanes at most, whatever the tunnel allows.
@@ -34,6 +40,14 @@ const RESUME_WINDOW: Duration = Duration::from_secs(15 * 60);
 /// Per-file digest mismatches the sender will resend for.
 const MAX_RESENDS: u32 = 3;
 
+/// What a sync send adds to an outgoing transfer.
+pub(crate) struct SyncOut {
+    pub ticket: String,
+    pub tolerant: bool,
+    /// Parallel to the manifest: each file's version when it was hashed.
+    pub stats: Vec<Option<FileStat>>,
+}
+
 pub(crate) struct Outgoing {
     id: String,
     to: String,
@@ -44,12 +58,15 @@ pub(crate) struct Outgoing {
     destination: Option<String>,
     policy: TransportPolicy,
     skipped: u64,
+    sync: Option<SyncOut>,
     cancel: CancellationToken,
     /// Whether the peer should be told when the cancel lands between sessions.
     notify_peer: std::sync::atomic::AtomicBool,
     /// Whole-file digests, kept across sessions.
     digests: Mutex<HashMap<u64, String>>,
     resends: Mutex<HashMap<u64, u32>>,
+    /// Tolerant sync: files given up on (the receiver was sent `Skip`).
+    dropped: Mutex<HashSet<u64>>,
 }
 
 enum Outcome {
@@ -72,23 +89,37 @@ impl std::fmt::Display for Fatal {
 impl std::error::Error for Fatal {}
 
 impl Outgoing {
-    pub(crate) fn new(id: String, to_name: String, request: SendRequest, built: Built) -> Self {
+    pub(crate) fn new(
+        id: String,
+        to: String,
+        to_name: String,
+        destination: Option<String>,
+        policy: TransportPolicy,
+        built: Built,
+        sync: Option<SyncOut>,
+    ) -> Self {
         let digest = built.manifest.digest();
         Self {
             id,
-            to: request.to,
+            to,
             to_name,
             manifest: built.manifest,
             sources: built.sources,
             digest,
-            destination: request.destination,
-            policy: request.policy,
+            destination,
+            policy,
             skipped: built.skipped,
+            sync,
             cancel: CancellationToken::new(),
             notify_peer: std::sync::atomic::AtomicBool::new(true),
             digests: Mutex::new(HashMap::new()),
             resends: Mutex::new(HashMap::new()),
+            dropped: Mutex::new(HashSet::new()),
         }
+    }
+
+    fn tolerant(&self) -> bool {
+        self.sync.as_ref().is_some_and(|s| s.tolerant)
     }
 
     pub(crate) fn cancel(&self, notify_peer: bool) {
@@ -122,6 +153,8 @@ impl Work {
 
 enum Event {
     Digest(u64, String),
+    /// Tolerant sync: give up on a file that changed.
+    Skip(u64, String),
     Fatal(String),
     LaneFailed(anyhow::Error),
 }
@@ -211,10 +244,11 @@ impl Transfers {
                 digest: out.digest.clone(),
                 destination: out.destination.clone(),
                 skipped: out.skipped,
+                ticket: out.sync.as_ref().map(|s| s.ticket.clone()),
             },
         )
         .await?;
-        for chunk in out.manifest.entries.chunks(MANIFEST_CHUNK) {
+        for chunk in wire::manifest_chunks(&out.manifest.entries) {
             wire::write_msg(
                 &mut write,
                 &Msg::Manifest {
@@ -252,10 +286,26 @@ impl Transfers {
                 msg = rx.recv() => msg.ok_or_else(|| anyhow::anyhow!("the other device closed the transfer"))??,
             };
             match msg {
+                // A sync receiver pings while it compares its basis; there
+                // is no one to accept.
+                Msg::Pending if out.sync.is_some() => {}
                 Msg::Pending => {
                     self.set_state(&out.id, FileTransferState::AwaitingAcceptance, None)
                 }
-                Msg::Accept { have } => break have,
+                Msg::Accept { have, sync } => {
+                    if out.sync.is_some() && !sync {
+                        // An older receiver took the ticket for an inbox
+                        // delivery: call it off before anything lands.
+                        let _ = wire::write_msg(&mut write, &Msg::Cancel { reason: None }).await;
+                        out.notify_peer
+                            .store(false, std::sync::atomic::Ordering::Relaxed);
+                        return Ok(Outcome::Failed(format!(
+                            "{} can't receive session moves yet; update Zeron there",
+                            out.to_name
+                        )));
+                    }
+                    break have;
+                }
                 Msg::Decline { reason } => return Ok(Outcome::Declined(reason)),
                 Msg::Cancel { .. } => {
                     out.notify_peer
@@ -282,6 +332,9 @@ impl Transfers {
             };
             if file_have.done {
                 finished[file_have.file as usize] = true;
+                if file_have.skipped {
+                    out.dropped.lock().unwrap().insert(file_have.file);
+                }
             } else if file_have.blocks.within(block_count(entry.size)) {
                 verified.insert(file_have.file, file_have.blocks);
             }
@@ -295,7 +348,22 @@ impl Transfers {
             if entry.kind != EntryKind::File || finished[index] {
                 continue;
             }
-            pending_files.push(index as u64);
+            if out.dropped.lock().unwrap().contains(&(index as u64)) {
+                // Skipped earlier, but the receiver never heard: say it again.
+                wire::write_msg(
+                    &mut write,
+                    &Msg::Skip {
+                        file: index as u64,
+                        reason: format!("{} changed while sending", entry.path),
+                    },
+                )
+                .await?;
+                continue;
+            }
+            if entry.sha256.is_none() {
+                // Sync entries carry their digest in the manifest.
+                pending_files.push(index as u64);
+            }
             let have = verified.remove(&(index as u64)).unwrap_or_default();
             work.push(
                 have.missing(block_count(entry.size))
@@ -328,7 +396,7 @@ impl Transfers {
                 lane_tasks.spawn(async move {
                     tokio::select! {
                         _ = stop.cancelled() => {}
-                        result = data_lane(lane, hello, &out, &work) => {
+                        result = data_lane(lane, hello, &out, &work, &events) => {
                             if let Err(error) = result {
                                 let event = match error.downcast::<Fatal>() {
                                     Ok(fatal) => Event::Fatal(fatal.0),
@@ -353,6 +421,12 @@ impl Transfers {
                     Event::Digest(file, sha256) => {
                         wire::write_msg(&mut write, &Msg::Digest { file, sha256 }).await?;
                     }
+                    Event::Skip(file, reason) => {
+                        if out.dropped.lock().unwrap().insert(file) {
+                            tracing::debug!(transfer = %out.id, %reason, "sync: skipping a changed file");
+                            wire::write_msg(&mut write, &Msg::Skip { file, reason }).await?;
+                        }
+                    }
                     Event::Fatal(message) => {
                         let _ = wire::write_msg(&mut write, &Msg::Error { message: message.clone() }).await;
                         return Ok(Outcome::Failed(message));
@@ -368,6 +442,19 @@ impl Transfers {
                         let count = block_count(entry.size);
                         match blocks {
                             Some(blocks) => work.push(blocks.into_iter().filter(|b| *b < count).map(|b| (file as u32, b))),
+                            // Sync: the receiver assembled exactly what was
+                            // read, so a whole-file mismatch means the source
+                            // no longer has the content the manifest promised.
+                            None if out.sync.is_some() => {
+                                let reason = format!("{} changed while sending", entry.path);
+                                if !out.tolerant() {
+                                    let _ = wire::write_msg(&mut write, &Msg::Error { message: reason.clone() }).await;
+                                    return Ok(Outcome::Failed(reason));
+                                }
+                                out.dropped.lock().unwrap().insert(file);
+                                wire::write_msg(&mut write, &Msg::Skip { file, reason }).await?;
+                                continue;
+                            }
                             None => {
                                 let resends = {
                                     let mut resends = out.resends.lock().unwrap();
@@ -394,7 +481,7 @@ impl Transfers {
                             lane_tasks.spawn(async move {
                                 tokio::select! {
                                     _ = stop.cancelled() => {}
-                                    result = data_lane(lane, hello, &out, &work) => {
+                                    result = data_lane(lane, hello, &out, &work, &events) => {
                                         if let Err(error) = result {
                                             let _ = events.send(Event::LaneFailed(error)).await;
                                         }
@@ -490,16 +577,29 @@ async fn data_lane(
     hello: Msg,
     out: &Arc<Outgoing>,
     work: &Arc<Work>,
+    events: &mpsc::Sender<Event>,
 ) -> anyhow::Result<()> {
     wire::write_msg(&mut lane, &hello).await?;
-    let (blocks, mut next) = mpsc::channel::<Result<Block, Fatal>>(1);
+    let (blocks, mut next) = mpsc::channel::<Result<Read, Fatal>>(1);
     let reader = {
         let (out, work) = (out.clone(), work.clone());
         tokio::spawn(async move {
             let mut open: Option<(u32, Arc<std::fs::File>)> = None;
             loop {
                 let (file, block) = work.pop().await;
-                let read = read_block(&out, &mut open, file, block).await;
+                if out.dropped.lock().unwrap().contains(&(file as u64)) {
+                    continue;
+                }
+                let read = match read_block(&out, &mut open, file, block).await {
+                    Ok(block) => Ok(Read::Block(block)),
+                    Err(ReadError::Changed(reason)) if out.tolerant() => {
+                        open = None;
+                        Ok(Read::Skip(file as u64, reason))
+                    }
+                    Err(ReadError::Changed(reason) | ReadError::Fatal(reason)) => {
+                        Err(Fatal(reason))
+                    }
+                };
                 let failed = read.is_err();
                 if blocks.send(read).await.is_err() || failed {
                     return;
@@ -508,9 +608,13 @@ async fn data_lane(
         })
     };
     let _reader = AbortOnDrop(reader);
-    while let Some(block) = next.recv().await {
-        let block = block?;
-        wire::write_block(&mut lane, &block).await?;
+    while let Some(read) = next.recv().await {
+        match read? {
+            Read::Block(block) => wire::write_block(&mut lane, &block).await?,
+            Read::Skip(file, reason) => {
+                let _ = events.send(Event::Skip(file, reason)).await;
+            }
+        }
         if next.is_empty() && work.queue.lock().unwrap().is_empty() {
             lane.flush().await?;
         }
@@ -518,23 +622,54 @@ async fn data_lane(
     anyhow::bail!("data lane reader stopped")
 }
 
+enum Read {
+    Block(Block),
+    Skip(u64, String),
+}
+
+enum ReadError {
+    Fatal(String),
+    /// Sync: the source no longer matches what the manifest promised.
+    Changed(String),
+}
+
 async fn read_block(
     out: &Outgoing,
     open: &mut Option<(u32, Arc<std::fs::File>)>,
     file: u32,
     block: u64,
-) -> Result<Block, Fatal> {
+) -> Result<Block, ReadError> {
     let entry = &out.manifest.entries[file as usize];
+    let promised = out
+        .sync
+        .as_ref()
+        .and_then(|s| s.stats.get(file as usize).copied().flatten());
     let handle = match open {
         Some((index, handle)) if *index == file => handle.clone(),
         _ => {
             let source = out.sources[file as usize].clone();
-            let handle = Arc::new(
-                tokio::task::spawn_blocking(move || std::fs::File::open(source))
-                    .await
-                    .map_err(|e| Fatal(e.to_string()))?
-                    .map_err(|e| Fatal(format!("Could not read {}: {e}", entry.path)))?,
-            );
+            let path = entry.path.clone();
+            let opened =
+                tokio::task::spawn_blocking(move || -> Result<std::fs::File, ReadError> {
+                    let Some(promised) = promised else {
+                        return std::fs::File::open(source)
+                            .map_err(|e| ReadError::Fatal(format!("Could not read {path}: {e}")));
+                    };
+                    // Sync: the very version that was hashed, never a link.
+                    let changed = |what: String| ReadError::Changed(format!("{path} {what}"));
+                    let handle = crate::sync::open_nofollow(&source)
+                        .map_err(|e| changed(format!("could not be read ({e})")))?;
+                    let meta = handle
+                        .metadata()
+                        .map_err(|e| changed(format!("could not be read ({e})")))?;
+                    if !meta.is_file() || !FileStat::of(&meta).same_content(&promised) {
+                        return Err(changed("changed while sending".into()));
+                    }
+                    Ok(handle)
+                })
+                .await
+                .map_err(|e| ReadError::Fatal(e.to_string()))??;
+            let handle = Arc::new(opened);
             *open = Some((file, handle.clone()));
             handle
         }
@@ -542,17 +677,33 @@ async fn read_block(
     let offset = block * BLOCK_SIZE;
     let length = block_len(entry.size, block) as usize;
     let path = entry.path.clone();
-    tokio::task::spawn_blocking(move || -> Result<Block, Fatal> {
+    let expected = entry
+        .blocks
+        .as_ref()
+        .and_then(|b| b.get(block as usize))
+        .and_then(|h| crate::sync::unhex32(h));
+    let sync = out.sync.is_some();
+    tokio::task::spawn_blocking(move || -> Result<Block, ReadError> {
         let mut data = vec![0u8; length];
-        read_at(&handle, &mut data, offset)
-            .map_err(|e| Fatal(format!("{path} changed while sending ({e})")))?;
-        Ok(Block::new(file, offset, data))
+        if let Err(error) = read_at(&handle, &mut data, offset) {
+            let message = format!("{path} changed while sending ({error})");
+            return Err(if sync {
+                ReadError::Changed(message)
+            } else {
+                ReadError::Fatal(message)
+            });
+        }
+        let block = Block::new(file, offset, data);
+        if expected.is_some_and(|hash| hash != block.sha256) {
+            return Err(ReadError::Changed(format!("{path} changed while sending")));
+        }
+        Ok(block)
     })
     .await
-    .map_err(|e| Fatal(e.to_string()))?
+    .map_err(|e| ReadError::Fatal(e.to_string()))?
 }
 
-fn read_at(file: &std::fs::File, buffer: &mut [u8], offset: u64) -> std::io::Result<()> {
+pub(crate) fn read_at(file: &std::fs::File, buffer: &mut [u8], offset: u64) -> std::io::Result<()> {
     #[cfg(unix)]
     {
         use std::os::unix::fs::FileExt;

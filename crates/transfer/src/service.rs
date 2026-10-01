@@ -2,9 +2,9 @@
 //! feed), receive settings, history, and the entry points for lanes that
 //! peers open. Sending lives in `sender.rs`, receiving in `receiver.rs`.
 
-use std::collections::{HashMap, VecDeque};
+use std::collections::{HashMap, HashSet, VecDeque};
 use std::path::{Path, PathBuf};
-use std::sync::{Arc, Mutex};
+use std::sync::{Arc, Mutex, OnceLock};
 use std::time::{Duration, Instant};
 
 use serde::Deserialize;
@@ -15,9 +15,12 @@ use zeron_proto::{
     FileTransferTransport, SendFilesReply,
 };
 
+use crate::hashcache::HashCache;
+use crate::manifest::Built;
 use crate::receiver::Incoming;
 use crate::relay::RelayPipes;
-use crate::sender::Outgoing;
+use crate::sender::{Outgoing, SyncOut};
+use crate::sync::{self, SyncSend};
 use crate::wire::{self, Lane, Msg, PROTOCOL_VERSION};
 use crate::{BoxIo, Network, now_ms};
 
@@ -84,6 +87,10 @@ pub(crate) struct Inner {
     /// Incoming transfers waiting for this device's user: the decision.
     pub(crate) pending: Mutex<HashMap<String, watch::Sender<Option<bool>>>>,
     pub(crate) outgoing: Mutex<HashMap<String, Arc<Outgoing>>>,
+    /// Sync transfers whose receive side is still comparing its basis.
+    pub(crate) preparing: Mutex<HashSet<String>>,
+    /// Loaded on first use (sync mode only).
+    hashes: OnceLock<Arc<Mutex<HashCache>>>,
     pub(crate) pipes: RelayPipes,
     pub(crate) stop: CancellationToken,
 }
@@ -136,6 +143,8 @@ impl Transfers {
             incoming: Mutex::new(HashMap::new()),
             pending: Mutex::new(HashMap::new()),
             outgoing: Mutex::new(HashMap::new()),
+            preparing: Mutex::new(HashSet::new()),
+            hashes: OnceLock::new(),
             pipes: RelayPipes::default(),
             stop: CancellationToken::new(),
         }));
@@ -203,11 +212,56 @@ impl Transfers {
             .map(|path| expand_home(path, home.as_deref()))
             .collect::<anyhow::Result<_>>()?;
         let built = tokio::task::spawn_blocking(move || crate::manifest::build(&paths)).await??;
+        Ok(self.start_outgoing(request.to, built, request.destination, request.policy, None))
+    }
+
+    /// Sync mode (session moves): send `request.files` under the layout
+    /// they name into the staging folder the receiving engine granted
+    /// `request.ticket`. Files the receiver already has — whole or in
+    /// blocks — don't travel. See [`crate::sync`].
+    pub async fn send_sync(&self, request: SyncSend) -> anyhow::Result<SendFilesReply> {
+        let SyncSend {
+            to,
+            ticket,
+            files,
+            tolerant,
+            policy,
+        } = request;
+        anyhow::ensure!(
+            to != self.0.config.device_id,
+            "Pick another device — this one already has these files."
+        );
+        anyhow::ensure!(!to.is_empty(), "No device to send to");
+        anyhow::ensure!(sync::valid_ticket(&ticket), "Invalid transfer ticket");
+        let cache = self.hash_cache();
+        let built =
+            tokio::task::spawn_blocking(move || sync::build(&files, tolerant, &cache)).await??;
+        Ok(self.start_outgoing(
+            to,
+            built.built,
+            None,
+            policy,
+            Some(SyncOut {
+                ticket,
+                tolerant,
+                stats: built.stats,
+            }),
+        ))
+    }
+
+    fn start_outgoing(
+        &self,
+        to: String,
+        built: Built,
+        destination: Option<String>,
+        policy: TransportPolicy,
+        sync: Option<SyncOut>,
+    ) -> SendFilesReply {
         let to_name = self
             .0
             .network
-            .device_name(&request.to)
-            .unwrap_or_else(|| request.to.clone());
+            .device_name(&to)
+            .unwrap_or_else(|| to.clone());
         let id = uuid::Uuid::new_v4().to_string();
         let now = now_ms();
         let mut items = built.manifest.items();
@@ -220,12 +274,14 @@ impl Transfers {
                 .filter(|(e, _)| e.is_top_level())
                 .map(|(_, s)| s),
         ) {
-            item.path = Some(source.to_string_lossy().into_owned());
+            if !source.as_os_str().is_empty() {
+                item.path = Some(source.to_string_lossy().into_owned());
+            }
         }
         self.insert(FileTransfer {
             id: id.clone(),
             direction: FileTransferDirection::Outgoing,
-            peer_device_id: request.to.clone(),
+            peer_device_id: to.clone(),
             peer_device_name: to_name.clone(),
             state: FileTransferState::Connecting,
             transport: None,
@@ -234,15 +290,22 @@ impl Transfers {
             total_bytes: built.manifest.total_bytes(),
             done_bytes: 0,
             bytes_per_sec: 0,
-            destination: request.destination.clone(),
+            destination: destination.clone(),
             skipped: built.skipped,
             error: None,
             created_at: now,
             updated_at: now,
             finished_at: None,
         });
-        let to = request.to.clone();
-        let outgoing = Arc::new(Outgoing::new(id.clone(), to_name.clone(), request, built));
+        let outgoing = Arc::new(Outgoing::new(
+            id.clone(),
+            to.clone(),
+            to_name.clone(),
+            destination,
+            policy,
+            built,
+            sync,
+        ));
         self.0
             .outgoing
             .lock()
@@ -250,11 +313,23 @@ impl Transfers {
             .insert(id.clone(), outgoing.clone());
         let transfers = self.clone();
         tokio::spawn(async move { transfers.run_outgoing(outgoing).await });
-        Ok(SendFilesReply {
+        SendFilesReply {
             transfer_id: id,
             to_device_id: to,
             to_device_name: to_name,
-        })
+        }
+    }
+
+    /// The content hash cache (sync mode), loaded on first use.
+    pub(crate) fn hash_cache(&self) -> Arc<Mutex<HashCache>> {
+        self.0
+            .hashes
+            .get_or_init(|| {
+                Arc::new(Mutex::new(HashCache::load(
+                    self.0.config.state_dir.join("hash-cache.bin"),
+                )))
+            })
+            .clone()
     }
 
     pub fn watch(&self) -> watch::Receiver<Vec<FileTransfer>> {
