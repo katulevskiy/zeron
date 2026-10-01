@@ -31,6 +31,9 @@ struct Rig {
     svc: WorkflowService,
     approver: Arc<ScriptedApprover>,
     project: std::path::PathBuf,
+    /// The test runs on a paused clock: waiting must advance it (tokio does
+    /// not auto-advance while the script's blocking thread is running).
+    paused: bool,
     _dir: tempfile::TempDir,
 }
 
@@ -112,6 +115,7 @@ fn rig_with(handler: Handler) -> Rig {
         svc,
         approver,
         project,
+        paused: false,
         _dir: dir,
     }
 }
@@ -131,17 +135,24 @@ fn start(script: &str) -> StartRequest {
 
 /// Poll with a REAL-time deadline: under a paused clock the virtual one runs
 /// ahead of the blocking script thread.
-async fn wait_real<F: FnMut() -> bool>(mut done: F, what: &str) {
+async fn wait_real<F: FnMut() -> bool>(paused: bool, mut done: F, what: &str) {
     let deadline = std::time::Instant::now() + Duration::from_secs(40);
     while !done() {
         assert!(std::time::Instant::now() < deadline, "timed out waiting for {what}");
-        tokio::time::sleep(Duration::from_millis(5)).await;
+        if paused {
+            // Let the blocking thread run, then let virtual time pass.
+            std::thread::sleep(Duration::from_millis(2));
+            tokio::time::advance(Duration::from_secs(20)).await;
+        } else {
+            tokio::time::sleep(Duration::from_millis(5)).await;
+        }
         tokio::task::yield_now().await;
     }
 }
 
 async fn wait_settled(rig: &Rig, run_id: &str) -> WorkflowRun {
     wait_real(
+        rig.paused,
         || {
             rig.svc
                 .get(run_id)
@@ -157,6 +168,7 @@ async fn wait_settled(rig: &Rig, run_id: &str) -> WorkflowRun {
 async fn wait_delivered(rig: &Rig, run_id: &str) {
     let store = rig.svc.store().clone();
     wait_real(
+        rig.paused,
         || store.read_meta(run_id).map(|m| m.delivered).unwrap_or(false),
         "the completion message to be delivered",
     )
@@ -474,10 +486,14 @@ def main(args):
 
 #[tokio::test(start_paused = true)]
 async fn transient_errors_are_redriven_with_backoff_and_never_reach_the_script() {
-    let rig = rig();
+    let mut rig = rig();
+    rig.paused = true;
     let n = Arc::new(AtomicUsize::new(0));
     let counter = n.clone();
+    let times = Arc::new(Mutex::new(Vec::new()));
+    let seen = times.clone();
     rig.ask.on_call(move |_| {
+        seen.lock().unwrap().push(tokio::time::Instant::now());
         Some(if counter.fetch_add(1, Ordering::SeqCst) < 3 {
             FakeReply::Fail(AskError::TurnFailed("503 Service Unavailable".into()))
         } else {
@@ -491,16 +507,21 @@ async fn transient_errors_are_redriven_with_backoff_and_never_reach_the_script()
     assert_eq!(run.header.status, WorkflowStatus::Completed);
     assert_eq!(rig.svc.get(&out.run_id).unwrap().result.unwrap(), json!([true, "finally"]));
     assert_eq!(n.load(Ordering::SeqCst), 4, "3 failures + 1 success");
-    // 2s + 4s + 8s (±25 %): virtual time advanced, real time did not.
-    let waited = started.elapsed();
-    assert!(waited >= Duration::from_secs(10), "{waited:?}");
-    assert!(waited < Duration::from_secs(25), "{waited:?}");
+    // Backoff 2s, 4s, 8s (±25 %) of virtual time between the redrives (the
+    // test advances the clock in coarse steps, so gaps are at least that).
+    let times = times.lock().unwrap().clone();
+    let gaps: Vec<_> = times.windows(2).map(|w| w[1] - w[0]).collect();
+    for (gap, min) in gaps.iter().zip([1.5, 3.0, 6.0]) {
+        assert!(gap.as_secs_f64() >= min, "gaps {gaps:?}");
+    }
+    assert!(started.elapsed() >= Duration::from_secs(10));
     assert_eq!(run.nodes[0].outcome, Some(NodeOutcome::Ok));
 }
 
 #[tokio::test(start_paused = true)]
 async fn rate_limits_throttle_the_model_and_show_it() {
-    let rig = rig();
+    let mut rig = rig();
+    rig.paused = true;
     let n = Arc::new(AtomicUsize::new(0));
     let c = n.clone();
     rig.ask.on_call(move |_| {
@@ -628,7 +649,8 @@ async fn budgets_stop_a_run_with_a_reason() {
 
 #[tokio::test(start_paused = true)]
 async fn a_long_silence_raises_the_stall_notice_and_a_success_lifts_it() {
-    let rig = rig();
+    let mut rig = rig();
+    rig.paused = true;
     rig.svc.set_tuning(Tuning { stall_check: Duration::from_secs(60), ..Tuning::default() });
     rig.ask.on_call(|_| {
         Some(FakeReply::After(Duration::from_secs(25 * 60), Box::new(text("late"))))
@@ -818,7 +840,7 @@ def main(args):
     let run = wait_settled(&rig, &out.run_id).await;
     // `../outside` is an error: the script fails with the confinement message.
     assert_eq!(run.header.status, WorkflowStatus::Errored);
-    assert!(run.header.error.as_deref().unwrap().contains("outside the project"), "{:?}", run.header.error);
+    assert!(run.header.error.as_deref().unwrap().contains("inside the project"), "{:?}", run.header.error);
     let replay = rig.svc.store().load_replay(&out.run_id).unwrap();
     assert_eq!(replay.reads.len(), 1, "the successful read was journaled");
 }

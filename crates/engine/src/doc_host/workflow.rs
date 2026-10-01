@@ -105,7 +105,7 @@ impl DocHost {
         &self,
         handle: &Arc<ChatDocHandle>,
         command: &zeron_proto::WorkflowCommand,
-    ) -> CommandOutcome {
+    ) -> Result<(SessionCommandStatus, Option<String>), EngineError> {
         use zeron_proto::WorkflowCommand as C;
         let Some(workflows) = self.workflows() else {
             return Ok((SessionCommandStatus::Rejected, Some("workflows are not available".into())));

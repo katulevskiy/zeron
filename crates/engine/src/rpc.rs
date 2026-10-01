@@ -1770,7 +1770,6 @@ impl RpcService for AuthRpc {
     }
 }
 
-#[async_trait]
 impl EngineRpc {
     fn workflows(&self) -> Result<crate::workflow::WorkflowService, RpcError> {
         self.doc_host
@@ -1779,6 +1778,7 @@ impl EngineRpc {
     }
 }
 
+#[async_trait]
 impl RpcService for EngineRpc {
     async fn handle(&self, method: &str, params: serde_json::Value) -> Result<RpcReply, RpcError> {
         // Device-addressed routing: forward calls that target another device over its
