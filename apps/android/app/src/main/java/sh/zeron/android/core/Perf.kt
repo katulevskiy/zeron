@@ -67,6 +67,15 @@ object Perf {
         Log.d(TAG, "%s: first frame = %s".format(what, run.first().parts))
     }
 
+    /** Ends the current timing after [n] frames (screens that open through navigation have no composable to ask). */
+    fun finishAfterFrames(n: Int) {
+        val choreographer = android.view.Choreographer.getInstance()
+        fun wait(left: Int) {
+            choreographer.postFrameCallback { if (left <= 1) finish("$n frames after the request") else wait(left - 1) }
+        }
+        wait(n)
+    }
+
     fun begin(what: String) {
         label = what
         tMono = System.nanoTime()

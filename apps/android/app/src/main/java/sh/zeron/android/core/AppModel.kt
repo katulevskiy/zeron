@@ -312,6 +312,16 @@ class AppModel(private val app: Application) {
                         main.postDelayed({ Perf.finish("window") }, intent.getIntExtra("ms", 3000).toLong())
                         return
                     }
+                    // `--es kind route --es route engine|agents|transfers|sounds|search|new|chat:<id>`: time a screen opening.
+                    "route" -> {
+                        val route = intent.getStringExtra("route").orEmpty()
+                        Perf.sampling = intent.getBooleanExtra("sample", false)
+                        Perf.tailMs = intent.getIntExtra("tail", 250).toLong()
+                        Perf.begin("route->$route")
+                        Perf.finishAfterFrames(12)
+                        pendingRoute.value = route
+                        return
+                    }
                     "tab" -> {
                         val tab = intent.getStringExtra("tab").orEmpty()
                         Perf.sampling = intent.getBooleanExtra("sample", false)

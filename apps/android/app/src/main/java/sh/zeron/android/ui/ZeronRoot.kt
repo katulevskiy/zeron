@@ -5,6 +5,7 @@ import sh.zeron.android.feedback.tapAction
 import androidx.compose.animation.AnimatedContent
 import androidx.compose.animation.fadeIn
 import androidx.compose.animation.fadeOut
+import androidx.compose.animation.core.tween
 import androidx.compose.animation.togetherWith
 import androidx.compose.foundation.layout.Box
 import androidx.compose.foundation.layout.fillMaxSize
@@ -92,6 +93,9 @@ fun ZeronRoot(model: AppModel) {
 
 private enum class Gate { Main, FirstRun }
 
+private const val NAV_FADE_IN_MS = 180
+private const val NAV_FADE_OUT_MS = 120
+
 object Routes {
     const val HOME = "home"
     const val CHAT = "chat/{id}?subagents={subagents}"
@@ -174,7 +178,7 @@ private fun MainNav(model: AppModel) {
     val nav = rememberNavController()
     val focus = LocalFocusManager.current
     val keyboard = LocalSoftwareKeyboardController.current
-    // A screen stays composed through NavHost's exit fade (700 ms), and so
+    // A screen stays composed through NavHost's exit fade, and so
     // does its focused text field — the IME only went away once the field was
     // disposed, a second after leaving the chat. Drop focus and the keyboard
     // the moment the destination changes instead.
@@ -199,7 +203,16 @@ private fun MainNav(model: AppModel) {
         pending?.let { nav.openRoute(it) }
         model.pendingRoute.value = null
     }
-    NavHost(nav, startDestination = Routes.HOME) {
+    // NavHost's default is a 700 ms fade in and out: a page that starts transparent and takes most of a second to
+    // arrive does not feel instant, however fast it composed. Short fades keep the cross-dissolve and lose the wait.
+    NavHost(
+        nav,
+        startDestination = Routes.HOME,
+        enterTransition = { fadeIn(tween(NAV_FADE_IN_MS)) },
+        exitTransition = { fadeOut(tween(NAV_FADE_OUT_MS)) },
+        popEnterTransition = { fadeIn(tween(NAV_FADE_IN_MS)) },
+        popExitTransition = { fadeOut(tween(NAV_FADE_OUT_MS)) },
+    ) {
         composable(Routes.HOME) { Home(model, nav) }
         composable(Routes.CHAT, arguments = listOf(navArgument("subagents") { defaultValue = "false" })) { entry ->
             val id = entry.arguments?.getString("id") ?: return@composable
