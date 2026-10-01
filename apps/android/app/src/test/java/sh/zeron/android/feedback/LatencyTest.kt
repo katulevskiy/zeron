@@ -173,10 +173,10 @@ class LatencyTest {
         return 20 * log10(Math.sqrt(sum / (b - a + 1)) / 32768.0)
     }
 
-    @Test fun theDefaultSliderIsLouderThanThePreviousBuildsLoudestSetting() {
+    @Test fun theDefaultSliderPlaysAtThePreviousBuildsLoudestSetting() {
         // The previous build played these files (active RMS below, interface cues -38) at SoundPool volume `trim`
         // at its slider 100%. The default slider now plays the new files at `trim / ASSET_BOOST`; the audit asserts
-        // 5.5 dB of gain with an A-weighted measure as well, this is the independent JVM guard (plain RMS).
+        // the default is no quieter than that (twice the amplitude of the previous default) with an A-weighted measure as well, this is the independent JVM guard (plain RMS).
         val previousRms = mapOf(
             "fx_send" to -34.6, "fx_queued" to -36.7, "fx_upload_ready" to -35.7, "fx_reconnected" to -36.3, "fx_undo" to -36.8,
             "fx_chime_done" to -34.3, "fx_chime_request" to -35.7, "fx_chime_attention" to -35.8,
@@ -186,7 +186,7 @@ class LatencyTest {
             val old = (previousRms[spec.resource] ?: -38.0) + 20 * log10(previousTrim[spec.resource] ?: 1.0)
             val volume = CueTable.volume(spec, FeedbackSettings().gain)
             val new = activeRmsDb(File(raw, spec.resource + ".wav")) + 20 * log10(volume.toDouble())
-            assertTrue("${spec.cue}: ${"%.1f".format(new - old)} dB over the previous 100%", new - old >= 5.5)
+            assertTrue("${spec.cue}: ${"%.1f".format(new - old)} dB against the previous 100%", new - old >= -0.5)
             // And the top of the slider is another 2x (6 dB) above the default, unclipped by SoundPool's 1.0 cap.
             val top = CueTable.volume(spec, FeedbackSettings(volume = 1f).gain)
             assertEquals(spec.cue.name, 6.02, 20 * log10((top / volume).toDouble()), 0.01)

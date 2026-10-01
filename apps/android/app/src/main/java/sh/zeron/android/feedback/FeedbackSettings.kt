@@ -128,7 +128,7 @@ object FeedbackSettingsCodec {
 
     /**
      * Layout of the stored values. 1 (absent): volume on the first scale. 2: the half-scale slider. 3: the slider is
-     * the same but the files are 12 dB hotter and the user asked for a louder default, so the stored volume is reset
+     * the same but the files are 6 dB hotter (twice the default's amplitude) and the user asked for a louder default, so the stored volume is reset
      * to 50% once, and the removed "play sounds anyway" override is dropped.
      */
     const val VERSION = 3

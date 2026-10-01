@@ -13,7 +13,7 @@ Asset QA: [android-audit.md](android-audit.md).
 - **Restraint.** Feedback answers a person or announces a one-shot event. There
   is none on scrolling, none per recomposition, none on typing, none for a state
   that merely redraws. Interface cues sit 2 to 4 dB under the session chimes
-  (active RMS -26.0 dBFS against -22.2 to -23.8 at full slider) and last 34 to 176 ms
+  (active RMS, at any slider position; see the audit) and last 34 to 176 ms
   against 520 to 650, so they read as far quieter; the shortest are under 40 ms.
 - **Consistency.** One vocabulary (`Feedback.kt`: `Haptic`, `Cue`) names the
   *moment*, never the vibration. A tap is always `Select` + `Tap`, a choice
@@ -198,15 +198,15 @@ file is now mastered by `scripts/generate-android-sounds.py`:
    rather than clipped, and only the chimes and promoted cues (crest factor 22 to 25 dB)
    reach it;
 3. the gain is solved with the limiter in the loop until the active RMS hits the target:
-   interface cues -25.98 dBFS (previous -38 + 6.0 lift + 6.02 slider headroom), the
-   promoted cues and chimes their desktop level + 18.04 dB.
+   interface cues -31.98 dBFS (previous -38 + 0 lift + 6.02 slider headroom), the
+   promoted cues and chimes their desktop level + 12.02 dB.
 
 Result (`android-audit.md`, "Loudness against the previous build"; all numbers include
 the SoundPool volume factor, trims and the cap at 1.0): at the **default 50% every cue
-is +6.0 dB (min, plain and A-weighted active RMS) above the previous build's 100%**,
-and the new 100% is another +6.02 dB, +12 dB above the previous build's loudest. Seen
-from the previous *default* (what the user had been hearing) that is +12 dB at 50%
-(4x the amplitude) and +18 dB at 100%. The audit asserts at least +5.5 dB for every
+plays as loud as the previous build's 100%** (plain and A-weighted active RMS, within
+the audit's 0.5 dB), and the new 100% is another +6.02 dB. Seen from the previous
+*default* (what the user had been hearing) that is +6 dB at 50% (twice the amplitude)
+and +12 dB at 100%. The audit asserts that no cue is quieter than that for every
 cue, volume at most 1.0 at every slider position, no clipping, and a stored baseline of
 the previous build that it re-checks against git (`f1d4eff1`) when the history is there.
 The mastering changes nothing about timing: onset is still within 1 ms in every file
@@ -214,7 +214,7 @@ The mastering changes nothing about timing: onset is still within 1 ms in every 
 
 Notification channels play the same mastered files (`fx_chime_done`, `_request`,
 `_attention`, formerly the untouched desktop WAVs through a Gradle copy, which is gone),
-+18 dB at file level; `Notifier.CHANNEL_VERSION` is 2 so existing channels, whose
++12 dB at file level; `Notifier.CHANNEL_VERSION` is 2 so existing channels, whose
 sounds are immutable, are recreated. The system's notification volume still applies.
 
 **What is not possible.** Digital full scale is the limit: the interface cues still
