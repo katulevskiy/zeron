@@ -51,6 +51,7 @@ struct CachedTranscript {
     entries: Vec<SessionMessageEntry>,
     context_usage: Option<zeron_proto::ContextUsage>,
     goal: Option<zeron_proto::Goal>,
+    workflows: zeron_proto::WorkflowRunsState,
     bytes: usize,
 }
 
@@ -745,6 +746,18 @@ pub struct AppState {
     /// The selected chat's goal (`/goal`): replicated with its doc, shown in
     /// the composer dock's goal tray.
     pub goal: Option<zeron_proto::Goal>,
+    /// The selected chat's workflow runs (`meta.workflowRuns`, over the
+    /// transcript watch): the transcript cards and the run pane read this.
+    pub workflows: zeron_proto::WorkflowRunsState,
+    /// Bumped whenever [`Self::workflows`] changes, so the transcript can
+    /// refresh its cards without a transcript change.
+    pub(crate) workflows_revision: u64,
+    /// A Stop / Resume / Answer the host refused or that never arrived:
+    /// `(run id, message)`, shown on that run's card until its state moves.
+    pub workflow_failure: Option<(String, String)>,
+    /// Every locally hosted chat's runs as briefs (`WatchWorkflowActivity`):
+    /// the sidebar's run lines.
+    pub workflow_activity: zeron_proto::WorkflowActivity,
     /// The selected chat has a transcript from a `WatchDocMessages` reset
     /// (including a retained reset from an earlier visit). An
     /// empty transcript is otherwise indistinguishable from the pre-replay
@@ -851,6 +864,10 @@ impl AppState {
             queue: Vec::new(),
             context_usage: None,
             goal: None,
+            workflows: Default::default(),
+            workflows_revision: 0,
+            workflow_failure: None,
+            workflow_activity: Default::default(),
             transcript_replayed: false,
             transcript_baselines: HashMap::new(),
             transcript_cache: Default::default(),
@@ -1078,6 +1095,7 @@ impl AppState {
             self.transcript.clear();
             self.context_usage = None;
             self.goal = None;
+            self.clear_workflows();
             self.transcript_revision = self.transcript_revision.wrapping_add(1);
             self.transcript_replayed = false;
             self.transcript_task = None;
@@ -1511,7 +1529,112 @@ impl AppState {
         } else if update.goal_cleared && self.goal.take().is_some() {
             cx.notify();
         }
+        if self.apply_workflows(update.workflows, is_reset) {
+            cx.notify();
+        }
         Ok(())
+    }
+
+    /// Fold a transcript frame's workflow state in: the whole state replaces
+    /// ours (a reset frame without one means the chat has no runs), a delta
+    /// applies. `true` when something changed.
+    pub(crate) fn apply_workflows(
+        &mut self,
+        update: Option<zeron_proto::WorkflowsUpdate>,
+        is_reset: bool,
+    ) -> bool {
+        use zeron_proto::WorkflowsUpdate;
+        let changed = match update {
+            Some(WorkflowsUpdate::Full(state)) => {
+                let changed = self.workflows != state;
+                self.workflows = state;
+                changed
+            }
+            Some(WorkflowsUpdate::Delta(delta)) => {
+                // A delta older than what we hold is ignored by `apply`; the
+                // revision moves exactly when something was applied.
+                let before = self.workflows.revision;
+                self.workflows.apply(&delta);
+                self.workflows.revision != before
+            }
+            None if is_reset => {
+                let changed = self.workflows != Default::default();
+                self.workflows = Default::default();
+                changed
+            }
+            None => false,
+        };
+        if changed {
+            self.workflows_revision = self.workflows_revision.wrapping_add(1);
+            self.workflow_failure = None;
+        }
+        changed
+    }
+
+    /// Send a workflow command (Stop / Resume / Answer) to the chat's host
+    /// over the command plane. A failure lands in [`Self::workflow_failure`].
+    pub fn send_workflow_command(
+        &mut self,
+        chat_id: &str,
+        command: zeron_proto::WorkflowCommand,
+        cx: &mut Context<Self>,
+    ) {
+        let run_id = match &command {
+            zeron_proto::WorkflowCommand::Stop { run_id, .. }
+            | zeron_proto::WorkflowCommand::Resume { run_id }
+            | zeron_proto::WorkflowCommand::Answer { run_id, .. } => run_id.clone(),
+        };
+        let Some(engine) = self.engine.clone() else {
+            self.fail_workflow_command(run_id, "Engine not connected".into(), cx);
+            return;
+        };
+        if !self.chat_host_supports(chat_id, zeron_proto::capabilities::WORKFLOWS_V1) {
+            self.fail_workflow_command(
+                run_id,
+                "Update Zeron on the chat's device to control workflows.".into(),
+                cx,
+            );
+            return;
+        }
+        let params = serde_json::json!({
+            "chatId": chat_id,
+            "command": { "kind": "workflow", "command": command },
+        });
+        cx.spawn(async move |this, cx| {
+            if let Err(err) = engine
+                .client()
+                .call(methods::QUEUE_COMMAND, params)
+                .await
+            {
+                this.update(cx, |state, cx| {
+                    state.fail_workflow_command(run_id, format!("Workflow command failed: {err}"), cx)
+                })
+                .ok();
+            }
+        })
+        .detach();
+    }
+
+    fn fail_workflow_command(&mut self, run_id: String, message: String, cx: &mut Context<Self>) {
+        self.workflow_failure = Some((run_id, message));
+        self.workflows_revision = self.workflows_revision.wrapping_add(1);
+        cx.notify();
+    }
+
+    /// The sidebar's feed of run briefs. `true` when it changed.
+    pub fn apply_workflow_activity(&mut self, activity: zeron_proto::WorkflowActivity) -> bool {
+        if self.workflow_activity == activity {
+            return false;
+        }
+        self.workflow_activity = activity;
+        true
+    }
+
+    fn clear_workflows(&mut self) {
+        if self.workflows != Default::default() {
+            self.workflows = Default::default();
+        }
+        self.workflows_revision = self.workflows_revision.wrapping_add(1);
     }
 
     /// The opt-in opening tail is provisional. Never replace a complete view
@@ -2089,6 +2212,8 @@ impl AppState {
         self.prepared_transcripts.clear();
         self.context_usage = None;
         self.goal = None;
+        self.clear_workflows();
+        self.workflow_activity = Default::default();
         self.transcript_revision = self.transcript_revision.wrapping_add(1);
         self.transcript_replayed = false;
         self.echoes.clear();
@@ -2303,6 +2428,14 @@ impl AppState {
             }),
             spawn_local_device_probe(cx, handle.clone()),
         ]);
+        if engine_info.supports(zeron_proto::capabilities::WORKFLOWS_V1) {
+            watch_tasks.push(spawn_watch(
+                cx,
+                handle.clone(),
+                methods::WATCH_WORKFLOW_ACTIVITY,
+                AppState::apply_workflow_activity,
+            ));
+        }
         if supports_harness_updates {
             watch_tasks.push(spawn_watch(
                 cx,
@@ -2478,6 +2611,7 @@ impl AppState {
                     entries,
                     context_usage: self.context_usage,
                     goal: self.goal.take(),
+                    workflows: std::mem::take(&mut self.workflows),
                     bytes,
                 });
                 while self.transcript_cache.len() > TRANSCRIPT_CACHE_CAP
@@ -2502,6 +2636,7 @@ impl AppState {
         self.transcript.clear();
         self.context_usage = None;
         self.goal = None;
+        self.clear_workflows();
         self.transcript_revision = self.transcript_revision.wrapping_add(1);
         self.transcript_replayed = false;
         if let Some(cached) = cached {
@@ -2521,6 +2656,8 @@ impl AppState {
             self.transcript = cached.entries;
             self.context_usage = cached.context_usage;
             self.goal = cached.goal;
+            self.workflows = cached.workflows;
+            self.workflows_revision = self.workflows_revision.wrapping_add(1);
             self.transcript_replayed = true;
         }
         self.transcript_task = None;
@@ -3773,6 +3910,87 @@ mod tests {
             continuation_of: None,
             duration_ms: None,
         }
+    }
+
+    fn wf_state(rev: u64, status: zeron_proto::WorkflowStatus) -> zeron_proto::WorkflowRunsState {
+        use zeron_proto::*;
+        WorkflowRunsState {
+            revision: rev,
+            runs: vec![WorkflowRun {
+                header: WorkflowRunHeader {
+                    run_id: "r1".into(),
+                    name: "Review".into(),
+                    status,
+                    ..Default::default()
+                },
+                ..Default::default()
+            }],
+        }
+    }
+
+    #[test]
+    fn workflow_frames_replace_apply_and_clear_the_selected_chats_runs() {
+        use zeron_proto::{WorkflowsUpdate, WorkflowStatus};
+        let mut state = AppState::new();
+        let r0 = state.workflows_revision;
+        // the opening frame carries the whole state
+        assert!(state.apply_workflows(
+            Some(WorkflowsUpdate::Full(wf_state(1, WorkflowStatus::Running))),
+            true
+        ));
+        assert_eq!(state.workflows.runs.len(), 1);
+        assert_ne!(state.workflows_revision, r0, "views are told");
+        // the same state again changes nothing (no spurious repaint)
+        let rev = state.workflows_revision;
+        assert!(!state.apply_workflows(
+            Some(WorkflowsUpdate::Full(wf_state(1, WorkflowStatus::Running))),
+            true
+        ));
+        assert_eq!(state.workflows_revision, rev);
+        // a delta moves it; replaying it is harmless
+        let delta = wf_state(1, WorkflowStatus::Running)
+            .diff(&wf_state(2, WorkflowStatus::Completed))
+            .unwrap();
+        assert!(state.apply_workflows(Some(WorkflowsUpdate::Delta(delta.clone())), false));
+        assert_eq!(state.workflows.runs[0].header.status, WorkflowStatus::Completed);
+        let rev = state.workflows_revision;
+        state.apply_workflows(Some(WorkflowsUpdate::Delta(delta)), false);
+        assert_eq!(state.workflows_revision, rev, "an old delta is ignored");
+        // a frame that carries nothing leaves the state alone…
+        assert!(!state.apply_workflows(None, false));
+        assert_eq!(state.workflows.runs.len(), 1);
+        // …but a reset frame without runs means the chat has none
+        assert!(state.apply_workflows(None, true));
+        assert!(state.workflows.runs.is_empty());
+    }
+
+    #[test]
+    fn a_workflow_failure_message_clears_when_the_state_moves() {
+        use zeron_proto::{WorkflowsUpdate, WorkflowStatus};
+        let mut state = AppState::new();
+        state.apply_workflows(
+            Some(WorkflowsUpdate::Full(wf_state(1, WorkflowStatus::Running))),
+            true,
+        );
+        state.workflow_failure = Some(("r1".into(), "Workflow command failed".into()));
+        state.apply_workflows(
+            Some(WorkflowsUpdate::Full(wf_state(2, WorkflowStatus::Completed))),
+            true,
+        );
+        assert!(state.workflow_failure.is_none());
+    }
+
+    #[test]
+    fn the_sidebar_feed_only_reports_real_changes() {
+        let mut state = AppState::new();
+        let mut activity = zeron_proto::WorkflowActivity::default();
+        assert!(!state.apply_workflow_activity(activity.clone()));
+        activity.chats.insert(
+            "c".into(),
+            vec![zeron_proto::WorkflowRunBrief::default()],
+        );
+        assert!(state.apply_workflow_activity(activity.clone()));
+        assert!(!state.apply_workflow_activity(activity));
     }
 
     #[gpui::test]

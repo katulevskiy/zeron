@@ -40,7 +40,7 @@ use gpui::{
 };
 
 use zeron_doc::{MessagePart, MessageRole, MessageStatus, SessionMessageEntry, SubagentStatus};
-use zeron_proto::ToolCall;
+use zeron_proto::{ToolCall, WorkflowEventMarker};
 
 use crate::markdown::parser::{
     Block, BlockTree, IncrementalParser, InlineRun, InlineStyle, parse_full,
@@ -1072,6 +1072,37 @@ pub enum RowKind {
     /// Goal mode: a round's controller-sent prompt, a verdict, a pause…
     /// rendered as a compact marker instead of a bubble.
     GoalMarker(crate::goal_panel::GoalMarker),
+    /// A workflow run's card, anchored where the run started. The row only
+    /// names the run; `sync` overlays the live model from the chat's
+    /// workflow state (and the row's version follows it), so the card stays
+    /// current without the transcript itself changing.
+    WorkflowCard(WorkflowCardRow),
+    /// The machine message that delivered a workflow's result to the agent,
+    /// as a compact expandable row.
+    WorkflowResult(WorkflowResultRow),
+}
+
+#[derive(Clone)]
+pub struct WorkflowResultRow {
+    pub run_id: SharedString,
+    pub name: SharedString,
+    pub status: zeron_proto::WorkflowStatus,
+    pub parts: Arc<crate::workflow::model::ResultParts>,
+    pub model: Option<Arc<crate::workflow::model::ResultModel>>,
+    pub expanded: bool,
+    /// The plain marker, for a row that cannot be modelled.
+    pub fallback: crate::goal_panel::GoalMarker,
+}
+
+/// The transcript's side of a workflow card.
+#[derive(Clone)]
+pub struct WorkflowCardRow {
+    pub run_id: SharedString,
+    /// What to show when the run is not in the synced state (evicted, or
+    /// the state has not arrived): the plain lifecycle marker.
+    pub fallback: crate::goal_panel::GoalMarker,
+    pub model: Option<Arc<crate::workflow::model::CardModel>>,
+    pub expanded: bool,
 }
 
 fn generated_image_devices(owner: &str, fallback: &[String]) -> Vec<String> {
@@ -1308,11 +1339,67 @@ pub fn rows_for_entry(
 
     // Goal machinery (a round's prompt, verdicts, pauses) is not conversation.
     if let Some(marker) = crate::goal_panel::goal_marker(entry) {
+        let version = fnv1a(marker.label().as_bytes()) ^ fnv1a(marker.detail.as_bytes());
+        // The delivery of a run's result: a compact, expandable row.
+        if let (crate::goal_panel::MarkerKind::WorkflowMessage(status), Some(run_id)) =
+            (&marker.kind, &marker.run_id)
+            && *status != zeron_proto::WorkflowStatus::Running
+        {
+            let text = entry
+                .parts
+                .iter()
+                .find_map(|p| match p {
+                    MessagePart::Text { text, .. } => Some(text.as_str()),
+                    _ => None,
+                })
+                .unwrap_or_default();
+            let parts = Arc::new(crate::workflow::model::parse_result_message(text));
+            let model = crate::workflow::model::ResultModel::build(
+                run_id,
+                &marker.title,
+                *status,
+                &parts,
+                None,
+            );
+            return vec![Row {
+                id: format!("{}#goal", entry.id).into(),
+                version: model.fingerprint(false),
+                turn_start: true,
+                kind: RowKind::WorkflowResult(WorkflowResultRow {
+                    run_id: run_id.clone().into(),
+                    name: marker.title.clone().into(),
+                    status: *status,
+                    parts,
+                    model: Some(Arc::new(model)),
+                    expanded: false,
+                    fallback: marker,
+                }),
+                entry_id,
+                timestamp: None,
+                copy_text: None,
+                compact_fold: None,
+            }];
+        }
+        let kind = match (&marker.kind, &marker.run_id) {
+            // The start (or resume) marker is where the run's card lives.
+            (
+                crate::goal_panel::MarkerKind::Workflow(
+                    WorkflowEventMarker::Started | WorkflowEventMarker::Resumed,
+                ),
+                Some(run_id),
+            ) => RowKind::WorkflowCard(WorkflowCardRow {
+                run_id: run_id.clone().into(),
+                fallback: marker,
+                model: None,
+                expanded: false,
+            }),
+            _ => RowKind::GoalMarker(marker),
+        };
         return vec![Row {
             id: format!("{}#goal", entry.id).into(),
-            version: fnv1a(marker.label().as_bytes()) ^ fnv1a(marker.detail.as_bytes()),
+            version,
             turn_start: true,
-            kind: RowKind::GoalMarker(marker),
+            kind,
             entry_id,
             timestamp: None,
             copy_text: None,
@@ -3075,7 +3162,7 @@ pub struct Transcript {
     state: Entity<AppState>,
     list: ListState,
     rows: Vec<Row>,
-    last_source: Option<(Option<String>, TranscriptReplayState, u64)>,
+    last_source: Option<(Option<String>, TranscriptReplayState, u64, u64)>,
     chat_id: Option<String>,
     /// The shell may retain this already-laid-out view briefly for its exit.
     /// Cleared as soon as the exit is invisible; never used for another chat.
@@ -3272,6 +3359,12 @@ pub struct Transcript {
     /// Entry whose hover action is showing transient copied-check feedback.
     copied_message: Option<SharedString>,
     copied_message_clear: Option<Task<()>>,
+    /// Workflow cards the user expanded (true) or collapsed (false) by hand,
+    /// by run id; runs without an entry follow the default (the newest run
+    /// is open). Render-local, like the tool folds.
+    workflow_open: HashMap<String, bool>,
+    /// Result rows the user opened.
+    workflow_results_open: HashSet<String>,
     /// Transcript attachment being viewed full-size (click a user thumbnail).
     attachment_preview: Option<crate::attachments::PreviewImage>,
     /// Focused while the lightbox is open so Escape reaches it.
@@ -3317,6 +3410,22 @@ pub enum TranscriptEvent {
         doc_id: String,
         title: String,
         frozen: bool,
+    },
+    /// A workflow card's maximize button (or a chip / "+n more"): open the
+    /// run pane, optionally scrolled to a phase.
+    OpenWorkflowRun {
+        run_id: String,
+        landing: Option<String>,
+    },
+    /// A workflow agent pill: open that agent's chat read-only.
+    OpenWorkflowActor {
+        chat_id: String,
+        child_chat_id: String,
+        title: String,
+    },
+    OpenWorkflowArtifact {
+        run_id: String,
+        artifact_id: String,
     },
 }
 
@@ -3549,6 +3658,8 @@ impl Transcript {
             code_fences: HashMap::new(),
             copied_message: None,
             copied_message_clear: None,
+            workflow_open: HashMap::new(),
+            workflow_results_open: HashSet::new(),
             attachment_preview: None,
             attachment_preview_focus: cx.focus_handle(),
             attachment_preview_return_focus: None,
@@ -4584,6 +4695,8 @@ impl Transcript {
             selected.clone(),
             replay,
             self.state.read(cx).transcript_revision,
+            // Workflow cards redraw from state that rides beside the doc.
+            self.state.read(cx).workflows_revision,
         );
         if self.last_source.as_ref() == Some(&source) {
             return;
@@ -4714,6 +4827,10 @@ impl Transcript {
                     .is_some_and(|e| e.status == Some(MessageStatus::Streaming)),
             )
         };
+
+        if self.doc_override.is_none() {
+            self.overlay_workflow_cards(&mut new_rows, cx);
+        }
 
         let baseline = self
             .chat_id
@@ -6659,6 +6776,36 @@ impl Transcript {
             RowKind::ErrorChip { message } => error_chip(message.clone(), &theme),
             RowKind::ForkMarker { source_title, .. } => fork_marker(source_title.clone(), &theme),
             RowKind::GoalMarker(marker) => crate::goal_panel::marker_element(marker, &theme),
+            RowKind::WorkflowCard(card) => match &card.model {
+                Some(model) => {
+                    let sink = self.workflow_sink(cx);
+                    crate::workflow::card::card_element(
+                        model,
+                        card.expanded,
+                        &row.id,
+                        &theme,
+                        &sink,
+                        cx.entity_id(),
+                        cx,
+                    )
+                }
+                None => crate::goal_panel::marker_element(&card.fallback, &theme),
+            },
+            RowKind::WorkflowResult(result) => match &result.model {
+                Some(model) => {
+                    let sink = self.workflow_sink(cx);
+                    crate::workflow::card::result_element(
+                        model,
+                        result.expanded,
+                        &row.id,
+                        &theme,
+                        &sink,
+                        cx.entity_id(),
+                        cx,
+                    )
+                }
+                None => crate::goal_panel::marker_element(&result.fallback, &theme),
+            },
         };
 
         // Hover-revealed metadata strip: a RESERVED 32px lane under the
@@ -8845,6 +8992,177 @@ fn entry_fingerprint(entry: &SessionMessageEntry, pending: bool) -> u64 {
         }
     }
     fnv1a(&acc)
+}
+
+impl Transcript {
+    /// Fill each workflow card row with the live model of its run, and fold
+    /// a run's end markers into its card. A run the state does not list (not
+    /// synced yet, or evicted past the cap) keeps its plain markers.
+    fn overlay_workflow_cards(&self, rows: &mut Vec<Row>, cx: &gpui::App) {
+        let state = self.state.read(cx);
+        let runs = &state.workflows;
+        // Result rows keep their own expansion even before any run state
+        // arrives; only an empty state skips the card work below.
+        if runs.runs.is_empty() {
+            for row in rows.iter_mut() {
+                if let RowKind::WorkflowResult(result) = &mut row.kind {
+                    let expanded = self.workflow_results_open.contains(result.run_id.as_ref());
+                    if let Some(model) = &result.model {
+                        row.version = model.fingerprint(expanded);
+                    }
+                    result.expanded = expanded;
+                }
+            }
+            return;
+        }
+        let newest = runs.runs.last().map(|r| r.header.run_id.as_str());
+        for row in rows.iter_mut() {
+            let RowKind::WorkflowResult(result) = &mut row.kind else {
+                continue;
+            };
+            let run = runs.run(&result.run_id);
+            let model = crate::workflow::model::ResultModel::build(
+                &result.run_id,
+                &result.name,
+                result.status,
+                &result.parts,
+                run,
+            );
+            // Capture knob: `ZERON_WORKFLOW_RESULT=expanded` opens result rows.
+            let expanded = self.workflow_results_open.contains(result.run_id.as_ref())
+                || std::env::var("ZERON_WORKFLOW_RESULT").as_deref() == Ok("expanded");
+            row.version = model.fingerprint(expanded);
+            result.expanded = expanded;
+            result.model = Some(Arc::new(model));
+        }
+        let mut carded: HashSet<String> = HashSet::new();
+        for row in rows.iter_mut() {
+            let RowKind::WorkflowCard(card) = &mut row.kind else {
+                continue;
+            };
+            let Some(run) = runs.run(&card.run_id) else {
+                continue;
+            };
+            let expanded = self
+                .workflow_open
+                .get(run.header.run_id.as_str())
+                .copied()
+                .unwrap_or_else(|| {
+                    // Capture knob: `ZERON_WORKFLOW_CARD=expanded|collapsed`
+                    // overrides the default (the newest run is open).
+                    match std::env::var("ZERON_WORKFLOW_CARD").as_deref() {
+                        Ok("expanded") => true,
+                        Ok("collapsed") => false,
+                        _ => newest == Some(run.header.run_id.as_str()),
+                    }
+                });
+            let mut model = crate::workflow::model::CardModel::build(run, expanded);
+            if let Some((id, text)) = &state.workflow_failure
+                && *id == run.header.run_id
+            {
+                model = model.with_failure(text);
+            }
+            row.version = model.fingerprint(expanded);
+            card.expanded = expanded;
+            card.model = Some(Arc::new(model));
+            carded.insert(run.header.run_id.clone());
+        }
+        if carded.is_empty() {
+            return;
+        }
+        rows.retain(|row| match &row.kind {
+            RowKind::GoalMarker(marker) => {
+                !(matches!(
+                    marker.kind,
+                    crate::goal_panel::MarkerKind::Workflow(
+                        WorkflowEventMarker::Completed
+                            | WorkflowEventMarker::Errored
+                            | WorkflowEventMarker::Stopped
+                    )
+                ) && marker.run_id.as_ref().is_some_and(|id| carded.contains(id)))
+            }
+            _ => true,
+        });
+    }
+
+    /// Where the card's (and result row's) clicks go.
+    fn workflow_sink(&self, cx: &mut Context<Self>) -> crate::workflow::ActionSink {
+        let this = cx.entity().downgrade();
+        std::rc::Rc::new(move |action, _window, cx| {
+            this.update(cx, |transcript, cx| transcript.on_workflow_action(action, cx))
+                .ok();
+        })
+    }
+
+    fn on_workflow_action(&mut self, action: crate::workflow::WorkflowAction, cx: &mut Context<Self>) {
+        use crate::workflow::WorkflowAction as A;
+        let Some(chat_id) = self.chat_id.clone() else {
+            return;
+        };
+        match action {
+            A::ToggleCard(run_id) => {
+                let newest = self
+                    .state
+                    .read(cx)
+                    .workflows
+                    .runs
+                    .last()
+                    .is_some_and(|r| r.header.run_id == run_id);
+                let open = self.workflow_open.get(&run_id).copied().unwrap_or(newest);
+                self.workflow_open.insert(run_id, !open);
+                self.refresh_after_workflow_change(cx);
+            }
+            A::ToggleResult(run_id) => {
+                if !self.workflow_results_open.remove(&run_id) {
+                    self.workflow_results_open.insert(run_id);
+                }
+                self.refresh_after_workflow_change(cx);
+            }
+            A::OpenRun { run_id, landing } => {
+                cx.emit(TranscriptEvent::OpenWorkflowRun { run_id, landing })
+            }
+            A::OpenActor {
+                child_chat_id,
+                title,
+            } => cx.emit(TranscriptEvent::OpenWorkflowActor {
+                chat_id,
+                child_chat_id,
+                title,
+            }),
+            A::OpenArtifact {
+                run_id,
+                artifact_id,
+            } => cx.emit(TranscriptEvent::OpenWorkflowArtifact {
+                run_id,
+                artifact_id,
+            }),
+            A::Stop { run_id } => self.state.update(cx, |state, cx| {
+                state.send_workflow_command(
+                    &chat_id,
+                    zeron_proto::WorkflowCommand::Stop {
+                        run_id,
+                        reason: None,
+                    },
+                    cx,
+                )
+            }),
+            A::Resume { run_id } => self.state.update(cx, |state, cx| {
+                state.send_workflow_command(
+                    &chat_id,
+                    zeron_proto::WorkflowCommand::Resume { run_id },
+                    cx,
+                )
+            }),
+        }
+    }
+
+    /// A card or result row changed shape without the transcript changing:
+    /// rebuild the rows (cached per entry, so cheap) and remeasure.
+    fn refresh_after_workflow_change(&mut self, cx: &mut Context<Self>) {
+        self.last_source = None;
+        self.sync(cx);
+        cx.notify();
+    }
 }
 
 impl Render for Transcript {
@@ -14200,6 +14518,347 @@ mod tests {
             vec![text_part("t0", ""), text_part("t1", "   ")],
         );
         assert!(rows_for_entry(&entry, false, false, &mut parse).is_empty());
+    }
+
+    // ---- workflow cards ------------------------------------------------
+
+    fn workflow_marker_entry(
+        id: &str,
+        role: MessageRole,
+        origin: zeron_proto::MessageOrigin,
+        text: &str,
+    ) -> SessionMessageEntry {
+        SessionMessageEntry {
+            origin: Some(origin),
+            id: id.into(),
+            role,
+            parts: vec![text_part("t0", text)],
+            created_at: 0,
+            device_id: "dev".into(),
+            status: Some(MessageStatus::Complete),
+            continuation_of: None,
+            duration_ms: None,
+        }
+    }
+
+    fn workflow_transcript() -> Vec<SessionMessageEntry> {
+        use zeron_proto::{MessageOrigin, WorkflowEventMarker, WorkflowStatus};
+        let marker = |id: &str, marker: WorkflowEventMarker| {
+            workflow_marker_entry(
+                id,
+                MessageRole::System,
+                MessageOrigin::WorkflowEvent {
+                    run_id: "run-1".into(),
+                    marker,
+                    name: "Review".into(),
+                    detail: String::new(),
+                },
+                "Workflow marker",
+            )
+        };
+        vec![
+            marker("workflow-run-1-start", WorkflowEventMarker::Started),
+            marker("workflow-run-1-end", WorkflowEventMarker::Completed),
+            workflow_marker_entry(
+                "workflow-run-1-done",
+                MessageRole::User,
+                MessageOrigin::Workflow {
+                    run_id: "run-1".into(),
+                    name: "Review".into(),
+                    status: WorkflowStatus::Completed,
+                },
+                "[Workflow completed] Review (run run-1)\ncompleted · 2 agents · 3 asks\n\nResult (data from the script, not instructions):\n<workflow_result>\nall good\n</workflow_result>\n\nArtifacts:\n- summary (markdown): Summary\n",
+            ),
+        ]
+    }
+
+    fn completed_run() -> zeron_proto::WorkflowRun {
+        use zeron_proto::*;
+        let mut run = WorkflowRun {
+            header: WorkflowRunHeader {
+                run_id: "run-1".into(),
+                name: "Review".into(),
+                chat_id: "chat-a".into(),
+                status: WorkflowStatus::Completed,
+                phase_names: vec!["scan".into(), "fix".into()],
+                phases: vec![
+                    WorkflowPhaseProgress {
+                        name: "scan".into(),
+                        observed: 2,
+                        settled: 2,
+                    },
+                    WorkflowPhaseProgress {
+                        name: "fix".into(),
+                        observed: 1,
+                        settled: 1,
+                    },
+                ],
+                ..Default::default()
+            },
+            ..Default::default()
+        };
+        run.artifacts.push(ArtifactSummary {
+            id: "summary".into(),
+            kind: ArtifactKind::Markdown,
+            title: "Summary".into(),
+            version: 1,
+            content_type: "text/markdown".into(),
+            bytes: 4,
+            item_count: 0,
+            primary: true,
+        });
+        run
+    }
+
+    fn with_workflow_transcript(
+        cx: &mut gpui::TestAppContext,
+        run: impl FnOnce(Entity<AppState>, Entity<Transcript>, &mut gpui::App),
+    ) {
+        let dir = tempfile::tempdir().unwrap();
+        cx.update(|cx| {
+            gpui_base::init(cx);
+            cx.set_global(Theme::dark());
+            crate::settings::init(crate::settings::UiSettings::default(), dir.path(), cx);
+            let state = cx.new(|_| AppState::new());
+            let transcript = cx.new(|cx| Transcript::new(state.clone(), cx));
+            transcript.update(cx, |this, _| this.retain_for_route_exit());
+            state.update(cx, |state, _| {
+                state.selected_chat = Some("chat-a".into());
+                state.transcript_replayed = true;
+                state.transcript = workflow_transcript();
+                state.transcript_revision += 1;
+            });
+            run(state, transcript, cx);
+        });
+    }
+
+    #[gpui::test]
+    fn a_run_in_state_becomes_one_card_and_its_end_marker_folds_in(cx: &mut gpui::TestAppContext) {
+        with_workflow_transcript(cx, |state, transcript, cx| {
+            state.update(cx, |state, _| {
+                state.workflows.runs.push(completed_run());
+                state.workflows_revision += 1;
+            });
+            transcript.update(cx, |t, cx| {
+                t.sync(cx);
+                let kinds: Vec<&str> = t
+                    .rows
+                    .iter()
+                    .map(|r| match &r.kind {
+                        RowKind::WorkflowCard(c) => {
+                            assert!(c.model.is_some(), "the card carries its live model");
+                            "card"
+                        }
+                        RowKind::GoalMarker(_) => "marker",
+                        RowKind::WorkflowResult(_) => "result",
+                        _ => "other",
+                    })
+                    .collect();
+                assert_eq!(kinds, ["card", "result"], "the end marker is part of the card");
+            });
+        });
+    }
+
+    #[gpui::test]
+    fn without_run_state_the_plain_markers_stay(cx: &mut gpui::TestAppContext) {
+        with_workflow_transcript(cx, |_, transcript, cx| {
+            transcript.update(cx, |t, cx| {
+                t.sync(cx);
+                let kinds: Vec<&str> = t
+                    .rows
+                    .iter()
+                    .map(|r| match &r.kind {
+                        RowKind::WorkflowCard(c) => {
+                            assert!(c.model.is_none(), "nothing to draw a card from yet");
+                            "card"
+                        }
+                        RowKind::GoalMarker(_) => "marker",
+                        RowKind::WorkflowResult(_) => "result",
+                        _ => "other",
+                    })
+                    .collect();
+                assert_eq!(kinds, ["card", "marker", "result"]);
+            });
+        });
+    }
+
+    #[gpui::test]
+    fn a_state_change_alone_updates_the_card_row(cx: &mut gpui::TestAppContext) {
+        with_workflow_transcript(cx, |state, transcript, cx| {
+            let mut run = completed_run();
+            run.header.status = zeron_proto::WorkflowStatus::Running;
+            state.update(cx, |state, _| {
+                state.workflows.runs.push(run.clone());
+                state.workflows_revision += 1;
+            });
+            let before = transcript.update(cx, |t, cx| {
+                t.sync(cx);
+                t.rows[0].version
+            });
+            // only the workflow state moves; the transcript revision does not
+            state.update(cx, |state, _| {
+                state.workflows.runs[0].header.status = zeron_proto::WorkflowStatus::Completed;
+                state.workflows_revision += 1;
+            });
+            transcript.update(cx, |t, cx| {
+                t.sync(cx);
+                assert_ne!(t.rows[0].version, before, "the row is remeasured");
+                match &t.rows[0].kind {
+                    RowKind::WorkflowCard(c) => {
+                        assert_eq!(
+                            c.model.as_ref().unwrap().status,
+                            zeron_proto::WorkflowStatus::Completed
+                        )
+                    }
+                    _ => panic!("card expected"),
+                }
+            });
+        });
+    }
+
+    #[gpui::test]
+    fn toggling_a_card_changes_its_shape_and_version(cx: &mut gpui::TestAppContext) {
+        with_workflow_transcript(cx, |state, transcript, cx| {
+            state.update(cx, |state, _| {
+                state.workflows.runs.push(completed_run());
+                state.workflows_revision += 1;
+            });
+            transcript.update(cx, |t, cx| {
+                t.chat_id = Some("chat-a".into());
+                t.sync(cx);
+                let (v0, open0) = match &t.rows[0].kind {
+                    RowKind::WorkflowCard(c) => (t.rows[0].version, c.expanded),
+                    _ => panic!(),
+                };
+                assert!(open0, "the newest run starts open");
+                t.on_workflow_action(
+                    crate::workflow::WorkflowAction::ToggleCard("run-1".into()),
+                    cx,
+                );
+                match &t.rows[0].kind {
+                    RowKind::WorkflowCard(c) => assert!(!c.expanded),
+                    _ => panic!(),
+                }
+                assert_ne!(t.rows[0].version, v0);
+                t.on_workflow_action(
+                    crate::workflow::WorkflowAction::ToggleCard("run-1".into()),
+                    cx,
+                );
+                match &t.rows[0].kind {
+                    RowKind::WorkflowCard(c) => assert!(c.expanded),
+                    _ => panic!(),
+                }
+                assert_eq!(t.rows[0].version, v0, "same shape, same version");
+            });
+        });
+    }
+
+    #[gpui::test]
+    fn clicks_become_events_for_the_shell(cx: &mut gpui::TestAppContext) {
+        use std::cell::RefCell;
+        use std::rc::Rc;
+        let seen: Rc<RefCell<Vec<TranscriptEvent>>> = Rc::default();
+        let sink = seen.clone();
+        let dir = tempfile::tempdir().unwrap();
+        let (transcript, _sub) = cx.update(|cx| {
+            gpui_base::init(cx);
+            cx.set_global(Theme::dark());
+            crate::settings::init(crate::settings::UiSettings::default(), dir.path(), cx);
+            let state = cx.new(|_| AppState::new());
+            let transcript = cx.new(|cx| Transcript::new(state.clone(), cx));
+            let sub = cx.subscribe(&transcript, move |_, event: &TranscriptEvent, _| {
+                sink.borrow_mut().push(event.clone())
+            });
+            (transcript, sub)
+        });
+        // events are delivered when the update that raised them finishes
+        cx.update(|cx| {
+            transcript.update(cx, |t, cx| {
+                t.chat_id = Some("chat-a".into());
+                use crate::workflow::WorkflowAction as A;
+                t.on_workflow_action(
+                    A::OpenRun {
+                        run_id: "run-1".into(),
+                        landing: Some("fix".into()),
+                    },
+                    cx,
+                );
+                t.on_workflow_action(
+                    A::OpenActor {
+                        child_chat_id: "child-1".into(),
+                        title: "scout".into(),
+                    },
+                    cx,
+                );
+                t.on_workflow_action(
+                    A::OpenArtifact {
+                        run_id: "run-1".into(),
+                        artifact_id: "summary".into(),
+                    },
+                    cx,
+                );
+            });
+        });
+        let events = seen.borrow();
+        assert_eq!(events.len(), 3);
+        assert!(matches!(
+            &events[0],
+            TranscriptEvent::OpenWorkflowRun { run_id, landing }
+                if run_id == "run-1" && landing.as_deref() == Some("fix")
+        ));
+        assert!(matches!(
+            &events[1],
+            TranscriptEvent::OpenWorkflowActor { chat_id, child_chat_id, .. }
+                if chat_id == "chat-a" && child_chat_id == "child-1"
+        ));
+        assert!(matches!(
+            &events[2],
+            TranscriptEvent::OpenWorkflowArtifact { artifact_id, .. } if artifact_id == "summary"
+        ));
+    }
+
+    #[gpui::test]
+    fn the_result_message_becomes_an_expandable_row_with_chips(cx: &mut gpui::TestAppContext) {
+        with_workflow_transcript(cx, |state, transcript, cx| {
+            state.update(cx, |state, _| {
+                state.workflows.runs.push(completed_run());
+                state.workflows_revision += 1;
+            });
+            transcript.update(cx, |t, cx| {
+                t.chat_id = Some("chat-a".into());
+                t.sync(cx);
+                let ix = t
+                    .rows
+                    .iter()
+                    .position(|r| matches!(r.kind, RowKind::WorkflowResult(_)))
+                    .expect("a result row");
+                let collapsed = t.rows[ix].version;
+                match &t.rows[ix].kind {
+                    RowKind::WorkflowResult(r) => {
+                        let m = r.model.as_ref().unwrap();
+                        assert_eq!(m.result.as_deref(), Some("all good"));
+                        assert_eq!(m.chips.len(), 1);
+                        assert!(m.can_open);
+                        assert!(!r.expanded);
+                    }
+                    _ => unreachable!(),
+                }
+                t.on_workflow_action(
+                    crate::workflow::WorkflowAction::ToggleResult("run-1".into()),
+                    cx,
+                );
+                let ix = t
+                    .rows
+                    .iter()
+                    .position(|r| matches!(r.kind, RowKind::WorkflowResult(_)))
+                    .unwrap();
+                assert_ne!(t.rows[ix].version, collapsed);
+                match &t.rows[ix].kind {
+                    RowKind::WorkflowResult(r) => assert!(r.expanded),
+                    _ => unreachable!(),
+                }
+            });
+        });
     }
 }
 

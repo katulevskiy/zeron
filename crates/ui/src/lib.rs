@@ -62,6 +62,7 @@ pub mod syntax_cache;
 pub mod terminal;
 mod goal_panel;
 mod todo_panel;
+pub mod workflow;
 pub mod theme;
 pub mod theme_library;
 pub mod transcript;

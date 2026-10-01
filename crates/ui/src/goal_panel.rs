@@ -320,6 +320,9 @@ pub struct GoalMarker {
     pub title: String,
     pub detail: String,
     pub verifier_chat_id: Option<String>,
+    /// The workflow run a workflow marker belongs to (the transcript folds
+    /// its end markers into the run's card).
+    pub run_id: Option<String>,
 }
 
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
@@ -346,6 +349,7 @@ pub(crate) fn goal_marker(entry: &SessionMessageEntry) -> Option<GoalMarker> {
                 title: title.clone(),
                 detail: String::new(),
                 verifier_chat_id: None,
+                run_id: None,
             })
         }
         MessageOrigin::GoalEvent {
@@ -361,20 +365,26 @@ pub(crate) fn goal_marker(entry: &SessionMessageEntry) -> Option<GoalMarker> {
             title: title.clone(),
             detail: detail.clone(),
             verifier_chat_id: verifier_chat_id.clone(),
+            run_id: None,
         }),
         MessageOrigin::WorkflowEvent {
             marker,
             name,
             detail,
-            ..
+            run_id,
         } => Some(GoalMarker {
             kind: MarkerKind::Workflow(*marker),
             round: 0,
             title: name.clone(),
             detail: detail.clone(),
             verifier_chat_id: None,
+            run_id: Some(run_id.clone()),
         }),
-        MessageOrigin::Workflow { name, status, .. } if entry.role == MessageRole::User => {
+        MessageOrigin::Workflow {
+            name,
+            status,
+            run_id,
+        } if entry.role == MessageRole::User => {
             let text = entry
                 .parts
                 .iter()
@@ -396,6 +406,7 @@ pub(crate) fn goal_marker(entry: &SessionMessageEntry) -> Option<GoalMarker> {
                 title: name.clone(),
                 detail,
                 verifier_chat_id: None,
+                run_id: Some(run_id.clone()),
             })
         }
         _ => None,
@@ -1689,6 +1700,7 @@ mod tests {
             title: String::new(),
             detail: String::new(),
             verifier_chat_id: None,
+            run_id: None,
         };
         assert_eq!(done.label(), "Goal complete · 4 rounds");
         assert_eq!(done.tone(), Tone::Success);
@@ -1703,6 +1715,7 @@ mod tests {
             title: format!("line one\n{}", "word ".repeat(100)),
             detail: String::new(),
             verifier_chat_id: None,
+            run_id: None,
         };
         let label = marker.label();
         assert!(!label.contains('\n'));

@@ -36,7 +36,7 @@ pub const WORKFLOW_HEAD_CHARS: usize = 240;
 
 // ── status vocabulary ─────────────────────────────────────────────────────
 
-#[derive(Debug, Clone, Copy, PartialEq, Eq, Serialize, Deserialize, Default)]
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Hash, Serialize, Deserialize, Default)]
 #[serde(rename_all = "camelCase")]
 pub enum WorkflowStatus {
     /// Created; waiting for the user's approval.
@@ -234,7 +234,7 @@ impl WorkflowReport {
     }
 }
 
-#[derive(Debug, Clone, Copy, PartialEq, Eq, Serialize, Deserialize)]
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Hash, Serialize, Deserialize)]
 #[serde(rename_all = "camelCase")]
 pub enum ArtifactKind {
     Markdown,

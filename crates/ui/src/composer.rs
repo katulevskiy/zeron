@@ -1819,6 +1819,14 @@ enum CaretAffinity {
     Downstream,
 }
 
+/// A workflow approval question, parsed once per request.
+struct WorkflowApprovalUi {
+    request_id: String,
+    model: crate::workflow::approval::ApprovalModel,
+    highlight: Option<zeron_syntax::HighlightedDocument>,
+    script_open: bool,
+}
+
 /// Multiline input entity: content + selection + IME marked text + measured
 /// layout (wrapped lines) for mouse mapping and auto-grow.
 pub struct ComposerInput {
@@ -5680,6 +5688,10 @@ pub struct Composer {
     /// visible trace of a failed send (2026-08-19).
     pub(crate) failure_key: Option<String>,
     wizard: Option<Wizard>,
+    /// The structured block of a workflow approval question: the model
+    /// parsed from the question's `meta`, its highlighted excerpt, and
+    /// whether the script is unfolded. Keyed by request id.
+    workflow_approval: Option<WorkflowApprovalUi>,
     wizard_focus: FocusHandle,
     /// Requests already answered locally (suppresses the panel until the doc
     /// frame marks them resolved).
@@ -5976,6 +5988,7 @@ impl Composer {
             launching_new_chat: false,
             failure: None,
             wizard: None,
+            workflow_approval: None,
             wizard_focus: cx.focus_handle(),
             answered_requests: HashSet::new(),
             failure_key: None,
@@ -9060,7 +9073,7 @@ impl Composer {
     /// border-white/[0.08] bg-white/[0.03] shadow-xl`), uppercase header +
     /// "1/3" counter chip, option rows with number kbd chips, a free-text
     /// override over a hairline, and Back / Next-Submit footer.
-    fn render_wizard(&mut self, cx: &mut Context<Self>) -> gpui::AnyElement {
+    fn render_wizard(&mut self, window: &mut Window, cx: &mut Context<Self>) -> gpui::AnyElement {
         let theme = Theme::of(cx).clone();
         let Some(wizard) = self.wizard.clone() else {
             return gpui::Empty.into_any_element();
@@ -9073,6 +9086,49 @@ impl Composer {
         let last = page + 1 >= wizard.questions.len();
         let typed_empty = self.input.read(cx).is_empty();
         let can_advance = wizard.page_has_pick() || !typed_empty || question.multiline;
+        // A workflow approval carries its analysed graph in `meta`: draw that
+        // instead of the plain text (which stays the contract for clients
+        // that cannot). The answers are the stock options either way.
+        let approval_meta = crate::workflow::approval::parse_meta(question.meta.as_ref());
+        match (&approval_meta, &self.workflow_approval) {
+            (Some(meta), current)
+                if current.as_ref().is_none_or(|a| a.request_id != wizard.request_id) =>
+            {
+                let model = crate::workflow::approval::ApprovalModel::from_meta(meta);
+                let highlight = crate::workflow::approval::highlight_excerpt(&model.excerpt);
+                self.workflow_approval = Some(WorkflowApprovalUi {
+                    request_id: wizard.request_id.clone(),
+                    model,
+                    highlight,
+                    // Capture knob: `ZERON_WORKFLOW_APPROVAL=script`.
+                    script_open: std::env::var("ZERON_WORKFLOW_APPROVAL").as_deref()
+                        == Ok("script"),
+                });
+            }
+            (None, Some(_)) => self.workflow_approval = None,
+            _ => {}
+        }
+        let is_approval = approval_meta.is_some();
+        let approval_block = approval_meta.is_some().then(|| {
+            let ui = self.workflow_approval.as_ref().expect("set above");
+            let this = cx.entity().downgrade();
+            crate::workflow::approval::approval_block(
+                &ui.model,
+                ui.highlight.as_ref(),
+                ui.script_open,
+                move |_, cx| {
+                    this.update(cx, |composer, cx| {
+                        if let Some(ui) = composer.workflow_approval.as_mut() {
+                            ui.script_open = !ui.script_open;
+                        }
+                        cx.notify();
+                    })
+                    .ok();
+                },
+                &theme,
+                window,
+            )
+        });
 
         let options = question.options.iter().enumerate().map(|(ix, label)| {
             // Selection reads on the row only while no typed override exists
@@ -9200,15 +9256,18 @@ impl Composer {
                                 )
                             }),
                     )
-                    .child(
-                        div()
-                            .mt(px(6.0))
-                            .text_size(crate::typography::ui_rems(15.0))
-                            .line_height(px(20.0))
-                            .font_weight(gpui::FontWeight::MEDIUM)
-                            .text_color(theme.text)
-                            .child(SharedString::from(question.question.clone())),
-                    )
+                    .when(approval_block.is_none(), |el| {
+                        el.child(
+                            div()
+                                .mt(px(6.0))
+                                .text_size(crate::typography::ui_rems(15.0))
+                                .line_height(px(20.0))
+                                .font_weight(gpui::FontWeight::MEDIUM)
+                                .text_color(theme.text)
+                                .child(SharedString::from(question.question.clone())),
+                        )
+                    })
+                    .children(approval_block)
                     .when(question.multi_select, |el| {
                         el.child(
                             div()
@@ -9227,17 +9286,20 @@ impl Composer {
                             .children(options),
                     )
                     // Free-text override over a hairline (shares the composer
-                    // input entity).
-                    .child(
-                        div()
-                            .mt(px(12.0))
-                            .border_t_1()
-                            .border_color(crate::theme::hairline(0.06))
-                            .pt(px(12.0))
-                            .pb(px(4.0))
-                            .px(px(4.0))
-                            .child(self.input.clone()),
-                    ),
+                    // input entity). An approval is a yes or a no: nothing to
+                    // type, and a typed reply would not match either label.
+                    .when(!is_approval, |el| {
+                        el.child(
+                            div()
+                                .mt(px(12.0))
+                                .border_t_1()
+                                .border_color(crate::theme::hairline(0.06))
+                                .pt(px(12.0))
+                                .pb(px(4.0))
+                                .px(px(4.0))
+                                .child(self.input.clone()),
+                        )
+                    }),
             )
             .child(
                 div()
@@ -10142,7 +10204,7 @@ impl Render for Composer {
             });
 
         if wizard_active {
-            let wizard = self.render_wizard(cx);
+            let wizard = self.render_wizard(window, cx);
             return container.child(motion::fade_quick("composer-wizard", div().child(wizard)));
         }
 
