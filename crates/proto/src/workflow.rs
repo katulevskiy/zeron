@@ -1279,4 +1279,126 @@ mod tests {
             "Workflow stopped: Review — quota exceeded"
         );
     }
+
+    #[test]
+    fn entries_round_trip_even_though_nodes_have_their_own_kind_field() {
+        let entries = vec![
+            WorkflowEntry::Node(node("3:5-3:20", 2, NodePhase::Executing)),
+            WorkflowEntry::Graph(WorkflowGraph::default()),
+            WorkflowEntry::Report(WorkflowReport {
+                index: 1,
+                text: "x".into(),
+                truncated: false,
+                artifact_id: None,
+                at: 3,
+            }),
+        ];
+        for entry in entries {
+            let json = serde_json::to_string(&entry).unwrap();
+            let back: WorkflowEntry = serde_json::from_str(&json).unwrap();
+            assert_eq!(back, entry, "{json}");
+        }
+        let json = serde_json::to_value(WorkflowEntry::Node(node("s", 0, NodePhase::Queued))).unwrap();
+        assert_eq!(json["entry"], "node");
+        assert_eq!(json["kind"], "ask", "the node's own kind is untouched");
+    }
+
+    #[test]
+    fn origins_commands_and_approval_meta_round_trip_and_old_readers_fall_back() {
+        let origin = crate::MessageOrigin::Workflow {
+            run_id: "r".into(),
+            name: "Demo".into(),
+            status: WorkflowStatus::Completed,
+        };
+        let json = serde_json::to_value(&origin).unwrap();
+        assert_eq!(json["kind"], "workflow");
+        assert_eq!(serde_json::from_value::<crate::MessageOrigin>(json).unwrap(), origin);
+        let marker = crate::MessageOrigin::WorkflowEvent {
+            run_id: "r".into(),
+            marker: WorkflowEventMarker::Stopped,
+            name: "Demo".into(),
+            detail: "quota".into(),
+        };
+        assert_eq!(
+            serde_json::from_value::<crate::MessageOrigin>(serde_json::to_value(&marker).unwrap()).unwrap(),
+            marker
+        );
+        // A newer kind this build does not know is `Unknown`, never an error.
+        let future: crate::MessageOrigin =
+            serde_json::from_str(r#"{"kind":"workflowCard","runId":"r"}"#).unwrap();
+        assert_eq!(future, crate::MessageOrigin::Unknown);
+
+        let command = WorkflowCommand::Answer {
+            run_id: "r".into(),
+            qid: "q".into(),
+            answer: "yes".into(),
+        };
+        let json = serde_json::to_value(&command).unwrap();
+        assert_eq!(json["action"], "answer");
+        assert_eq!(serde_json::from_value::<WorkflowCommand>(json).unwrap(), command);
+
+        let meta = WorkflowApprovalMeta {
+            run_id: "r".into(),
+            name: "Demo".into(),
+            script_hash: "h".into(),
+            draft_path: None,
+            graph: WorkflowGraph::default(),
+            max_concurrency: 4,
+            budgets: WorkflowBudgets::default(),
+            harness: None,
+            model: None,
+            excerpt: String::new(),
+        };
+        let back: WorkflowApprovalMeta = serde_json::from_value(serde_json::to_value(&meta).unwrap()).unwrap();
+        assert_eq!(back, meta);
+    }
+
+    #[test]
+    fn the_input_question_meta_is_additive() {
+        // A question written before `meta` existed still decodes…
+        let old: crate::UserInputQuestion = serde_json::from_str(
+            r#"{"id":"q","header":"h","question":"?","options":["a"]}"#,
+        )
+        .unwrap();
+        assert!(old.meta.is_none());
+        // …and one without meta serializes exactly as before (no key at all).
+        assert!(serde_json::to_value(&old).unwrap().get("meta").is_none());
+        let with = crate::UserInputQuestion {
+            meta: Some(serde_json::json!({"kind": WORKFLOW_APPROVAL_META_KIND})),
+            ..old
+        };
+        let back: crate::UserInputQuestion = serde_json::from_value(serde_json::to_value(&with).unwrap()).unwrap();
+        assert_eq!(back.meta.unwrap()["kind"], "workflowApproval");
+    }
+
+    #[test]
+    fn graphs_survive_the_wire_with_flattened_sites() {
+        let graph = WorkflowGraph {
+            phases: vec![GraphPhase {
+                name: "review".into(),
+                line: 5,
+                col: 5,
+                asks: vec![GraphAsk {
+                    site: GraphSite { site_id: "6:9-6:30".into(), line: 6, col: 9, fan_out: true },
+                    actor: Some("r".into()),
+                    instructions_head: Some("Review".into()),
+                    typed: true,
+                    read_only: true,
+                }],
+                commands: vec![],
+            }],
+            actors: vec![GraphActor {
+                site: GraphSite { site_id: "4:9-4:20".into(), line: 4, col: 9, fan_out: false },
+                name: Some("reviewer".into()),
+                harness: None,
+                model: None,
+            }],
+            commands: vec![],
+            unphased_asks: 0,
+        };
+        let json = serde_json::to_value(&graph).unwrap();
+        assert_eq!(json["phases"][0]["asks"][0]["siteId"], "6:9-6:30");
+        assert_eq!(json["phases"][0]["asks"][0]["fanOut"], true);
+        assert_eq!(serde_json::from_value::<WorkflowGraph>(json).unwrap(), graph);
+    }
 }

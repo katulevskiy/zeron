@@ -273,4 +273,30 @@ mod tests {
         let rebuilt = crate::rebuild_thin_doc(&doc).unwrap().doc;
         assert_eq!(rebuilt.workflow_runs(), doc.workflow_runs());
     }
+
+    #[test]
+    fn workflow_commands_round_trip_through_the_ledger() {
+        use crate::{SessionCommandEntry, SessionCommandKind, SessionCommandPayload, SessionCommandStatus};
+        let doc = SessionDoc::init("chat").unwrap();
+        let entry = SessionCommandEntry {
+            id: "c1".into(),
+            payload: SessionCommandPayload::Workflow {
+                command: WorkflowCommand::Stop {
+                    run_id: "r1".into(),
+                    reason: Some("enough".into()),
+                },
+            },
+            issued_by: "dev".into(),
+            issued_at: 1,
+            based_on: None,
+            expires_at: None,
+            status: SessionCommandStatus::Pending,
+            resolution: None,
+        };
+        doc.queue_command(&entry).unwrap();
+        let read = doc.read_commands().unwrap();
+        assert_eq!(read.len(), 1);
+        assert_eq!(read[0].kind(), SessionCommandKind::Workflow);
+        assert_eq!(read[0].payload, entry.payload);
+    }
 }
