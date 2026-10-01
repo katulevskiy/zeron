@@ -13,7 +13,7 @@ pub(super) struct Lease {
     pub(super) store_dir: Option<PathBuf>,
 }
 
-pub(super) fn state_root() -> PathBuf {
+pub(crate) fn state_root() -> PathBuf {
     let root = std::env::var_os("ZERON_CURSOR_STATE_DIR")
         .filter(|v| !v.is_empty())
         .map(PathBuf::from)

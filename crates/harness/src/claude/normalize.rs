@@ -235,6 +235,12 @@ impl Normalizer {
             .unwrap_or_else(|_| Self::new())
     }
 
+    /// The spawn tool id restored for `agent` by [`Self::for_resume`].
+    #[cfg(test)]
+    pub(crate) fn restored_spawn(&self, agent: &str) -> Option<&str> {
+        self.agent_tasks.get(agent).map(String::as_str)
+    }
+
     fn restore_spawns(config_root: &std::path::Path, session_id: &str) -> Self {
         use std::io::BufRead as _;
         let mut norm = Self::new();

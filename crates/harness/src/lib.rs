@@ -185,6 +185,11 @@ pub mod mock;
 mod model_context;
 pub mod opencode;
 pub mod pi;
+pub mod portable;
+pub use portable::{
+    ExportFile, ImportedSession, PortRoots, SessionExport, export_session, import_session,
+    snapshot_export,
+};
 pub mod process;
 mod scratch;
 pub mod shell_env;

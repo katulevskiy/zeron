@@ -38,7 +38,9 @@ use std::path::PathBuf;
 use std::time::Duration;
 
 mod catalog;
+pub(crate) mod port;
 mod state;
+pub(crate) use state::state_root;
 
 use async_trait::async_trait;
 use futures::StreamExt;

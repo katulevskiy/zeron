@@ -314,7 +314,7 @@ fn spawn_output_subagent_id(update: &Value) -> Option<String> {
 /// under the sessions root (`<root>/<urlencoded-cwd>/<child_session_id>/`) —
 /// scanning dodges reimplementing grok's cwd encoding, and the child's cwd
 /// can differ from the parent's anyway.
-fn locate_history(root: &Path, child_session_id: &str) -> Option<PathBuf> {
+pub(super) fn locate_history(root: &Path, child_session_id: &str) -> Option<PathBuf> {
     let entries = std::fs::read_dir(root).ok()?;
     for entry in entries.flatten() {
         let candidate = entry

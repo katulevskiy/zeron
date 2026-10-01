@@ -15,7 +15,7 @@ pub(super) struct Store {
 }
 /// Pi's settings directory: an explicit override, else `PI_CODING_AGENT_DIR`,
 /// else `~/.pi/agent`.
-pub(super) fn agent_dir(explicit: Option<PathBuf>) -> PathBuf {
+pub(crate) fn agent_dir(explicit: Option<PathBuf>) -> PathBuf {
     explicit.unwrap_or_else(|| {
         crate::model_context::root(
             "PI_CODING_AGENT_DIR",
@@ -32,6 +32,22 @@ impl Store {
             agent,
             legacy: home.join(".pi/pi-acp/session-map.json"),
         }
+    }
+    /// The store for an explicit agent dir and home (session moves address
+    /// another device's layout, not this process's environment).
+    pub fn at(agent: &Path, home: &Path) -> Self {
+        Self {
+            root: agent.join("zeron-sessions"),
+            agent: agent.to_owned(),
+            legacy: home.join(".pi/pi-acp/session-map.json"),
+        }
+    }
+    /// The Zeron index record for `id` (Null when absent).
+    pub fn record(&self, id: &str) -> Value {
+        json_file(&self.key(id))
+    }
+    pub fn put_record(&self, id: &str, value: &Value) -> Result<(), HarnessError> {
+        self.write(id, value)
     }
     /// Whether a steering mode is already set in the settings Pi loads for
     /// `cwd` (global, then project).

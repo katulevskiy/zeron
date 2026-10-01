@@ -2,8 +2,10 @@
 mod catalog;
 mod mcp;
 mod normalize;
+pub(crate) mod port;
 mod rpc;
 mod sessions;
+pub(crate) use sessions::agent_dir;
 mod ui;
 
 use crate::{

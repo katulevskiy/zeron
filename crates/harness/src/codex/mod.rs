@@ -38,6 +38,7 @@
 
 pub(crate) mod catalog;
 mod normalize;
+pub(crate) mod port;
 mod subagents;
 
 use std::collections::{HashMap, HashSet, VecDeque};

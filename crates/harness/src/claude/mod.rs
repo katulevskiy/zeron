@@ -34,6 +34,7 @@
 pub mod catalog;
 mod discovery;
 mod normalize;
+pub(crate) mod port;
 mod wire;
 
 use std::path::PathBuf;
