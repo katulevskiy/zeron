@@ -409,6 +409,25 @@ impl SessionsEngine {
         Ok((replay, rx))
     }
 
+    /// Every journaled event of `chat_id` on this device, oldest first (full
+    /// tool inputs live only here): what a move reads to find the files a
+    /// session used outside its workspace.
+    pub fn journal_events(&self, chat_id: &str) -> Result<Vec<AgentEvent>, EngineError> {
+        Ok(self
+            .inner
+            .journal
+            .replay(chat_id, 0)?
+            .into_iter()
+            .map(|(_, event)| event)
+            .collect())
+    }
+
+    /// Drop this device's cached harness session for `chat_id`: the chat
+    /// moved, and the session that continues it is the one on its row.
+    pub fn forget_harness_session(&self, chat_id: &str) {
+        lock(&self.inner.harness_sessions).remove(chat_id);
+    }
+
     /// Start (or route) a run for `chat_id`.
     ///
     /// - The user message entry is written to the doc immediately (id = `message_id`).
@@ -1484,12 +1503,9 @@ fn take_move_note(
             .unwrap_or_default()
             .into_iter()
             .filter(|entry| Some(entry.id.as_str()) != current)
-            .take_while(|entry| {
-                !entry
-                    .parts
-                    .iter()
-                    .any(|part| matches!(part, zeron_doc::MessagePart::Moved { .. }))
-            })
+            // Everything before THIS move's seam (earlier moves' seams carry
+            // no text, so they drop out of the replay by themselves).
+            .take_while(|entry| entry.id != format!("moved:{}", note.move_id))
             .collect();
         if let Some(history) = transcript_replay(&entries) {
             out.push_str(

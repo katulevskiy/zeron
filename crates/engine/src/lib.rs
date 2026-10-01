@@ -171,6 +171,8 @@ pub struct EngineCore {
     pub previews: zeron_preview::PreviewService,
     /// Device-to-device file transfer (docs/file-transfer.md).
     pub transfers: zeron_transfer::Transfers,
+    /// Moving chats to and from other devices (docs/session-move.md).
+    pub moves: moves::MoveService,
     pub change_requests: CheckoutChangeRequests,
     pub diff_sync: CheckoutDiffSync,
     pub spaces_sync: SpacesSync,
@@ -305,6 +307,7 @@ impl EngineCore {
         )
         .map_err(|e| EngineError::Other(e.to_string()))?;
         let transfer_links = Arc::new(std::sync::Mutex::new(None));
+        let move_tickets = Arc::new(moves::Tickets::default());
         let transfers = zeron_transfer::Transfers::new(
             zeron_transfer::TransfersConfig {
                 device_id: device_id.clone(),
@@ -318,6 +321,7 @@ impl EngineCore {
                 previews.clone(),
                 workspace.clone(),
                 transfer_links.clone(),
+                move_tickets.clone(),
             )),
         );
         file_transfers::register_peer_service(&previews, &transfers);
@@ -373,6 +377,22 @@ impl EngineCore {
             turn_diff.note_turn_start(chat_id, cwd);
         }));
         let spaces_sync = SpacesSync::start(repos.clone(), workspace.clone(), &device_id);
+        let moves = moves::MoveService::new(moves::MoveServiceConfig {
+            device_id: device_id.clone(),
+            device_name: local_device_name(&device_id),
+            sessions: sessions.clone(),
+            doc_host: doc_host.clone(),
+            workspace: workspace.clone(),
+            registry: registry.clone(),
+            repos: repos.clone(),
+            transfers: transfers.clone(),
+            accounts: agent_accounts.clone(),
+            uploads: uploads.clone(),
+            links: transfer_links.clone(),
+            dir: profile.store_root().join("moves"),
+            tickets: move_tickets,
+        });
+        moves.recover();
         Ok(Self {
             sessions,
             doc_host,
@@ -384,6 +404,7 @@ impl EngineCore {
             project_actions,
             previews,
             transfers,
+            moves,
             change_requests,
             diff_sync,
             spaces_sync,
@@ -530,6 +551,7 @@ impl EngineCore {
         .with_auth(self.auth())
         .with_previews(self.previews.clone())
         .with_transfers(self.transfers.clone())
+        .with_moves(self.moves.clone())
         .with_harness_updates(self.harness_updates.clone());
         if let Some(links) = self.links() {
             rpc = rpc.with_links(links);

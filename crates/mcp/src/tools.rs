@@ -182,6 +182,19 @@ fn catalog() -> Vec<ToolDef> {
             })),
         },
         ToolDef {
+            name: "move_chat",
+            description: "Move a chat — its running agent, project folder, the files it was using and the agent's own session — to another of the user's devices, where it continues (\"continue this on the GPU box\", \"move it to my laptop, I'm leaving\"). The workspace copies while the agent keeps working; the agent then stops between steps and resumes on the other device (when=now stops it at once). Moving the chat you are in stops you at your next step: finish what you are saying first, you continue there. Without `chat`, moves this chat. Returns once the move starts; its progress shows in get_chat (`move`).",
+            input_schema: json!({
+                "type": "object",
+                "properties": {
+                    "chat": { "type": "string", "description": "Chat id, unique id prefix, or exact title. Defaults to the chat you are in." },
+                    "device": { "type": "string", "description": "Device to move to (id or name, see list_devices)." },
+                    "when": { "type": "string", "enum": ["safePoint", "now"], "default": "safePoint", "description": "safePoint waits until no tool is running; now interrupts the current step." }
+                },
+                "required": ["device"]
+            }),
+        },
+        ToolDef {
             name: "send_files",
             description: "Send files or folders from this device straight to another of the user's devices (another computer, a server) over a direct tunnel — any size, folders recursively, resumable. Use it when the user asks for something you made (\"send me the build\", \"put the PDF on my laptop\"). Without `device`, it goes to the device the user's latest message in this chat came from. It lands in that device's Zeron Transfers inbox unless `destination` says otherwise. Returns once the transfer starts; wait=true blocks until it finishes. To get files FROM another device, use fetch_files.",
             input_schema: json!({
@@ -265,6 +278,15 @@ struct BatchArgs {
 #[derive(Deserialize)]
 struct ChatArgs {
     chat: String,
+}
+
+#[derive(Deserialize)]
+struct MoveChatArgs {
+    #[serde(default)]
+    chat: Option<String>,
+    device: String,
+    #[serde(default)]
+    when: Option<zeron_proto::MoveWhen>,
 }
 
 #[derive(Deserialize)]
@@ -436,6 +458,7 @@ fn summarize_chat(chat: &Chat, spaces: &[Space], sessions: &[Session]) -> Value 
         "lastMessageAt": chat.last_message_at,
         "lastMessagePreview": chat.last_message_preview,
         "createdAt": chat.created_at,
+        "move": chat.move_state,
     })
 }
 
@@ -478,6 +501,7 @@ impl Tools {
             "interrupt_chat" => self.interrupt_chat(parse(args)?).await,
             "respond_to_input" => self.respond_to_input(parse(args)?).await,
             "archive_chat" => self.archive_chat(parse(args)?).await,
+            "move_chat" => self.move_chat(parse(args)?).await,
             "send_files" => self.send_files(parse(args)?).await,
             "fetch_files" => self.fetch_files(parse(args)?).await,
             other => return Err(format!("unknown tool: {other}")),
@@ -928,6 +952,40 @@ impl Tools {
         }
         .map(std::path::PathBuf::from)
         .or_else(|| std::env::current_dir().ok())
+    }
+
+    async fn move_chat(&self, args: MoveChatArgs) -> anyhow::Result<Value> {
+        let key = match args.chat.as_deref().map(str::trim).filter(|c| !c.is_empty()) {
+            Some(chat) => chat.to_owned(),
+            None => self.zeron.origin().chat_id.clone().ok_or_else(|| {
+                anyhow::anyhow!("Not running inside a chat: say which chat to move")
+            })?,
+        };
+        let chat = self.zeron.resolve_chat(&key).await?;
+        let to = self.zeron.resolve_device_id(Some(&args.device)).await?;
+        anyhow::ensure!(
+            to != chat.device_id,
+            "chat {} already runs on that device",
+            short(&chat.id)
+        );
+        let reply = self
+            .zeron
+            .call(
+                zeron_rpc::methods::START_MOVE,
+                json!({
+                    "chatId": chat.id,
+                    "toDeviceId": to,
+                    "when": args.when.unwrap_or_default(),
+                    "targetDeviceId": chat.device_id,
+                }),
+            )
+            .await?;
+        Ok(json!({
+            "chatId": chat.id,
+            "moveId": reply.get("moveId").cloned().unwrap_or(Value::Null),
+            "toDeviceId": to,
+            "note": "The move runs in the background; get_chat shows its progress under `move`.",
+        }))
     }
 
     async fn send_files(&self, args: SendFilesArgs) -> anyhow::Result<Value> {

@@ -666,6 +666,7 @@ pub struct EngineRpc {
     project_actions: ProjectActionsStore,
     previews: Option<zeron_preview::PreviewService>,
     transfers: Option<zeron_transfer::Transfers>,
+    moves: Option<crate::moves::MoveService>,
     change_requests: CheckoutChangeRequests,
     diff_sync: CheckoutDiffSync,
     uploads: Uploads,
@@ -712,6 +713,7 @@ impl EngineRpc {
             project_actions,
             previews: None,
             transfers: None,
+            moves: None,
             change_requests,
             diff_sync,
             uploads,
@@ -733,6 +735,64 @@ impl EngineRpc {
     pub fn with_transfers(mut self, transfers: zeron_transfer::Transfers) -> Self {
         self.transfers = Some(transfers);
         self
+    }
+
+    pub fn with_moves(mut self, moves: crate::moves::MoveService) -> Self {
+        self.moves = Some(moves);
+        self
+    }
+
+    fn moves(&self) -> Result<&crate::moves::MoveService, RpcError> {
+        self.moves
+            .as_ref()
+            .ok_or_else(|| RpcError::Failed("moving chats is unavailable on this device".into()))
+    }
+
+    async fn handle_move(&self, method: &str, params: serde_json::Value) -> Result<RpcReply, RpcError> {
+        use crate::moves::protocol as p;
+        let failed = |e: crate::EngineError| RpcError::Failed(e.to_string());
+        let moves = self.moves()?;
+        match method {
+            methods::START_MOVE => {
+                let params: zeron_proto::StartMoveParams = parse_params(params)?;
+                RpcReply::value(&moves.start(params).map_err(failed)?)
+            }
+            methods::MOVE_NOW => {
+                let params: zeron_proto::MoveControlParams = parse_params(params)?;
+                moves.move_now(&params.chat_id).map_err(failed)?;
+                RpcReply::value(&serde_json::json!({}))
+            }
+            methods::CANCEL_MOVE => {
+                let params: zeron_proto::MoveControlParams = parse_params(params)?;
+                moves.cancel(&params.chat_id).map_err(failed)?;
+                RpcReply::value(&serde_json::json!({}))
+            }
+            methods::MOVE_CANDIDATES => {
+                let params: zeron_proto::MoveControlParams = parse_params(params)?;
+                RpcReply::value(&moves.candidates(&params.chat_id).await.map_err(failed)?)
+            }
+            methods::MOVE_PROBE => {
+                let params: p::ProbeParams = parse_params(params)?;
+                RpcReply::value(&moves.probe(params).await)
+            }
+            methods::MOVE_PREPARE => {
+                let params: p::PrepareParams = parse_params(params)?;
+                RpcReply::value(&moves.prepare(params).await.map_err(failed)?)
+            }
+            methods::MOVE_STAGE => {
+                let params: p::StageParams = parse_params(params)?;
+                RpcReply::value(&moves.stage(params).await.map_err(failed)?)
+            }
+            methods::MOVE_COMMIT => {
+                let params: p::CommitParams = parse_params(params)?;
+                RpcReply::value(&moves.commit(params).await.map_err(failed)?)
+            }
+            methods::MOVE_ABORT => {
+                let params: p::AbortParams = parse_params(params)?;
+                RpcReply::value(&moves.abort(params).await.map_err(failed)?)
+            }
+            other => Err(RpcError::UnknownMethod(other.to_string())),
+        }
     }
 
     fn transfers(&self) -> Result<&zeron_transfer::Transfers, RpcError> {
@@ -1502,6 +1562,8 @@ fn forward_deadline(method: &str) -> std::time::Duration {
         // queueing, verification, and the relayed response itself.
         methods::APPLY_HARNESS_UPDATE => Duration::from_secs(20 * 60),
         methods::CREATE_WORKTREE => Duration::from_secs(120),
+        // Every device is probed (4 s each, in parallel).
+        methods::MOVE_CANDIDATES => Duration::from_secs(15),
         // Walking a large folder into a manifest happens before the reply.
         methods::SEND_FILES => Duration::from_secs(120),
         // Allow the adapter discovery budget plus relay and shutdown overhead.
@@ -1620,6 +1682,11 @@ fn forwardable(method: &str) -> bool {
             | methods::CLEAR_FILE_TRANSFERS
             | methods::GET_FILE_TRANSFER_SETTINGS
             | methods::SET_FILE_TRANSFER_SETTINGS
+            // Moves: the chat's host runs them.
+            | methods::START_MOVE
+            | methods::MOVE_NOW
+            | methods::CANCEL_MOVE
+            | methods::MOVE_CANDIDATES
     )
 }
 
@@ -2412,6 +2479,15 @@ impl RpcService for EngineRpc {
             | methods::SET_FILE_TRANSFER_SETTINGS
             | methods::FILE_TRANSFER_PIPE
             | methods::FILE_TRANSFER_PIPE_WRITE => self.handle_file_transfer(method, params).await,
+            methods::START_MOVE
+            | methods::MOVE_NOW
+            | methods::CANCEL_MOVE
+            | methods::MOVE_CANDIDATES
+            | methods::MOVE_PROBE
+            | methods::MOVE_PREPARE
+            | methods::MOVE_STAGE
+            | methods::MOVE_COMMIT
+            | methods::MOVE_ABORT => self.handle_move(method, params).await,
             methods::WATCH_PREVIEWS => {
                 let p: zeron_proto::WatchPreviewsParams = parse_params(params)?;
                 if self

@@ -942,6 +942,9 @@ fn push_part(parts: &LoroList, part: &MessagePart) -> Result<(), DocError> {
     if let Some(subagent_tail) = &doc_part.subagent_tail {
         map.insert("subagentTail", subagent_tail.as_str())?;
     }
+    if let Some(moved) = &doc_part.moved {
+        map.insert("moved", loro_value_from_json(moved))?;
+    }
     Ok(())
 }
 
@@ -1491,6 +1494,49 @@ mod tests {
         assert_eq!(entries[0].role, MessageRole::System);
         assert_eq!(entries[0].parts, vec![seam]);
     }
+    #[test]
+    fn move_seam_and_note_round_trip_through_the_doc() {
+        let doc = SessionDoc::init("moved").unwrap();
+        let seam = MessagePart::Moved {
+            id: "moved:m1".into(),
+            seam: crate::parts::MoveSeam {
+                from_device_id: "laptop".into(),
+                from_device_name: "Laptop".into(),
+                to_device_id: "desktop".into(),
+                to_device_name: "Desktop".into(),
+                files_sent: 3,
+                bytes_sent: 1200,
+                duration_ms: 6100,
+                cwd: Some("/home/bob/dev/proj".into()),
+            },
+        };
+        doc.push_message(&SessionMessageEntry {
+            duration_ms: None,
+            id: "moved:m1".into(),
+            role: MessageRole::System,
+            parts: vec![seam.clone()],
+            created_at: 1,
+            device_id: "desktop".into(),
+            status: Some(MessageStatus::Complete),
+            continuation_of: None,
+        })
+        .unwrap();
+        // Through a snapshot, as another device would load it.
+        let loaded = loro::LoroDoc::new();
+        loaded.import(&doc.export_snapshot().unwrap()).unwrap();
+        let copy = SessionDoc::from_doc(loaded);
+        assert_eq!(copy.read_entries().unwrap()[0].parts, vec![seam]);
+        let note = MoveNote {
+            move_id: "m1".into(),
+            text: "[Zeron] moved".into(),
+            replay_history: true,
+        };
+        doc.set_move_note(Some(&note)).unwrap();
+        assert_eq!(doc.move_note(), Some(note));
+        doc.set_move_note(None).unwrap();
+        assert_eq!(doc.move_note(), None);
+    }
+
     use zeron_proto::{AgentEvent, ToolCall};
 
     #[test]

@@ -320,6 +320,19 @@ impl Uploads {
         }
     }
 
+    /// An attachment path from another device's uploads folder (a chat that
+    /// moved here: its transcript keeps the old host's absolute paths, and
+    /// the move copied the files into this device's uploads folder under the
+    /// same content-addressed names). Only the bare file name is used, so
+    /// the lookup can't leave the uploads folder.
+    fn moved_upload(&self, path: &str) -> Option<PathBuf> {
+        let name = path.rsplit(['/', '\\']).next()?;
+        if name.is_empty() || name == "." || name == ".." || name.contains('\0') {
+            return None;
+        }
+        std::fs::canonicalize(self.inner.dir.join(name)).ok()
+    }
+
     fn inspect(&self, path: &str, extra_roots: &[PathBuf]) -> Result<InspectedFile, EngineError> {
         let outside = || EngineError::Other("Attachment is outside the upload cache".into());
         // Queued-attachment refs resolve against this device's uploads dir
@@ -332,7 +345,10 @@ impl Uploads {
             path
         };
         // Canonicalize BOTH sides so `..` segments and symlinks can't escape.
-        let resolved = std::fs::canonicalize(path).map_err(|_| outside())?;
+        let resolved = match std::fs::canonicalize(path) {
+            Ok(resolved) => resolved,
+            Err(_) => self.moved_upload(path).ok_or_else(outside)?,
+        };
         let read_roots = self
             .inner
             .read_only_roots
@@ -488,6 +504,25 @@ mod tests {
             !racing.exists(),
             "abandoned empty staging dir must be swept"
         );
+    }
+
+    #[test]
+    fn another_devices_upload_path_reads_the_moved_copy_by_name() {
+        let dir = tempfile::tempdir().unwrap();
+        let uploads = Uploads::from_root(dir.path());
+        let png = [0x89u8, b'P', b'N', b'G', 0x0d, 0x0a, 0x1a, 0x0a, 0, 0, 0, 0];
+        std::fs::write(uploads.dir().join("abcd1234-shot.png"), png).unwrap();
+        let chunk = uploads
+            .read_chunk("/Users/alice/Library/zeron/uploads/abcd1234-shot.png", 0, &[])
+            .unwrap();
+        assert_eq!(chunk.name, "abcd1234-shot.png");
+        assert!(chunk.done);
+        assert!(
+            uploads
+                .read_chunk("/Users/alice/uploads/missing.png", 0, &[])
+                .is_err()
+        );
+        assert!(uploads.read_chunk("/x/..", 0, &[]).is_err());
     }
 
     #[test]

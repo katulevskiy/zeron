@@ -12256,6 +12256,7 @@ dependencies = [
  "uuid",
  "zeron-doc",
  "zeron-engine",
+ "zeron-harness",
  "zeron-proto",
  "zeron-rpc",
  "zeron-sync",

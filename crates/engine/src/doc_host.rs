@@ -1126,6 +1126,19 @@ impl DocHost {
         }
     }
 
+    /// Run `chat_id`'s pending commands and queue now: a chat that just moved
+    /// here has work that waited in its doc while it travelled, and nothing
+    /// else would wake it until the next nudge.
+    pub fn drain_now(&self, chat_id: &str) -> Result<(), EngineError> {
+        let handle = self.open(chat_id)?;
+        let host = self.clone();
+        self.spawn_worker(async move {
+            host.drain_commands(&handle).await;
+            host.drain_queue(&handle).await;
+        });
+        Ok(())
+    }
+
     fn move_held(&self, chat_id: &str) -> bool {
         lock(&self.inner.move_holds).contains(chat_id)
     }
@@ -1150,6 +1163,48 @@ impl DocHost {
             if tokio::time::Instant::now() >= deadline {
                 return Err(EngineError::Other(
                     "a command for this chat is still running".into(),
+                ));
+            }
+            tokio::time::sleep(std::time::Duration::from_millis(50)).await;
+        }
+    }
+
+    /// Wait until `chat_id`'s doc agrees with its room: everything written
+    /// here is pushed and acknowledged, and a fresh catch-up has pulled what
+    /// other devices wrote. A moving chat needs both: the source's last
+    /// writes must reach the room before it lets go, and the target must hold
+    /// the whole history before it appends the move seam (an append to a
+    /// partial doc would merge in ahead of entries it hadn't seen).
+    pub async fn await_synced(
+        &self,
+        chat_id: &str,
+        timeout: std::time::Duration,
+    ) -> Result<(), EngineError> {
+        if self.inner.config.edge.is_none() {
+            return Ok(()); // local-only: the doc is the whole truth
+        }
+        let handle = self.open(chat_id)?;
+        let deadline = tokio::time::Instant::now() + timeout;
+        // Let a just-made write reach the outbox (stream commits coalesce).
+        tokio::time::sleep(std::time::Duration::from_millis(300)).await;
+        let mut ticket: Option<u64> = None;
+        loop {
+            let ready = {
+                let chat2 = lock(&handle.chat2);
+                match chat2.as_ref() {
+                    None => false,
+                    Some(client) => {
+                        let ticket = *ticket.get_or_insert_with(|| client.request_catch_up());
+                        client.stats().pending_pushes == 0 && client.catch_up_completed(ticket)
+                    }
+                }
+            };
+            if ready {
+                return Ok(());
+            }
+            if tokio::time::Instant::now() >= deadline {
+                return Err(EngineError::Other(
+                    "the chat's history hasn't finished syncing".into(),
                 ));
             }
             tokio::time::sleep(std::time::Duration::from_millis(50)).await;
@@ -1183,53 +1238,10 @@ impl DocHost {
     /// Wire the workspace host (engine assembly) — the source of chat-ownership rows.
     pub fn set_workspace(&self, workspace: WorkspaceHost) {
         let chats = workspace.watch_chats();
-        let hosted = workspace.watch_chats();
         if self.inner.workspace.set(workspace).is_ok() {
             self.spawn_cutover_watcher(chats);
-            self.spawn_host_watcher(hosted);
             self.spawn_migration_sweep();
         }
-    }
-
-    /// A chat whose row starts naming this device (a move landed here, or a
-    /// tool re-homed it) opens and drains at once: commands queued while it
-    /// was on its way wait in the doc, and nothing else would wake them
-    /// until the next nudge.
-    fn spawn_host_watcher(&self, mut chats: watch::Receiver<Vec<zeron_proto::Chat>>) {
-        let host = self.clone();
-        let me = self.inner.config.device_id.clone();
-        let hosted_now = move |chats: &[zeron_proto::Chat]| -> HashSet<String> {
-            chats
-                .iter()
-                .filter(|c| c.device_id == me)
-                .map(|c| c.id.clone())
-                .collect()
-        };
-        let mut hosted = hosted_now(&chats.borrow_and_update());
-        self.spawn_worker(async move {
-            loop {
-                if chats.changed().await.is_err() {
-                    return; // workspace host gone (shutdown)
-                }
-                let now = hosted_now(&chats.borrow_and_update());
-                let arrived: Vec<String> = now.difference(&hosted).cloned().collect();
-                hosted = now;
-                for chat_id in arrived {
-                    match host.open(&chat_id) {
-                        Ok(handle) => {
-                            tracing::info!(chat = %chat_id, "chat now hosted here; draining");
-                            let drainer = host.clone();
-                            host.spawn_worker(async move {
-                                drainer.drain_commands(&handle).await;
-                                drainer.drain_queue(&handle).await;
-                            });
-                        }
-                        Err(err) => tracing::warn!(chat = %chat_id, error = %err,
-                            "opening a chat that moved here failed"),
-                    }
-                }
-            }
-        });
     }
 
     /// Host migration sweep: proactively seed this device's own s2 chats

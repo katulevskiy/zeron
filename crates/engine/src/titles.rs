@@ -242,7 +242,7 @@ impl TitleGenerator {
 /// The cheapest model a harness offers (zeron's `cheapestModel` heuristic):
 /// prefer a small-tier name (haiku/mini/nano/flash/small/lite), else the last
 /// listed model; `None` when the catalog is empty (harness picks its default).
-fn cheapest_model(models: &[Model]) -> Option<String> {
+pub(crate) fn cheapest_model(models: &[Model]) -> Option<String> {
     if models.is_empty() {
         return None;
     }
@@ -268,7 +268,7 @@ fn clean_title(raw: &str) -> String {
 
 /// Drive one titling run through the harness: no steering, questions resolved
 /// empty immediately (a titling prompt must never block on input).
-async fn collect_text(
+pub(crate) async fn collect_text(
     harness: &dyn zeron_harness::Harness,
     request: RunRequest,
     execution_lease: Option<Arc<tokio::sync::OwnedRwLockReadGuard<()>>>,

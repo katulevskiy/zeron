@@ -32,6 +32,8 @@ pub(crate) struct EngineNetwork {
     previews: zeron_preview::PreviewService,
     workspace: WorkspaceHost,
     links: Arc<Mutex<Option<Arc<LinkCache>>>>,
+    /// Staging grants of chats moving here (sync transfers, never the inbox).
+    move_tickets: Arc<crate::moves::Tickets>,
 }
 
 impl EngineNetwork {
@@ -40,12 +42,14 @@ impl EngineNetwork {
         previews: zeron_preview::PreviewService,
         workspace: WorkspaceHost,
         links: Arc<Mutex<Option<Arc<LinkCache>>>>,
+        move_tickets: Arc<crate::moves::Tickets>,
     ) -> Self {
         Self {
             device_id,
             previews,
             workspace,
             links,
+            move_tickets,
         }
     }
 
@@ -178,6 +182,10 @@ impl Network for EngineNetwork {
             .into_iter()
             .find(|d| d.id == device)
             .map(|d| d.name)
+    }
+
+    fn sync_grant(&self, peer: &str, ticket: &str) -> Option<zeron_transfer::SyncGrant> {
+        self.move_tickets.grant(peer, ticket)
     }
 
     fn destination_roots(&self) -> Vec<PathBuf> {

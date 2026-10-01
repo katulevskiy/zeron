@@ -170,6 +170,11 @@ impl Repos {
     }
 
     /// Explicit worktree root (tests).
+    /// Where this device keeps the worktrees it creates.
+    pub fn worktrees_root(&self) -> &Path {
+        &self.inner.worktrees_root
+    }
+
     pub fn with_worktrees_root(data_dir: &Path, device_id: &str, worktrees_root: PathBuf) -> Self {
         Self {
             inner: std::sync::Arc::new(ReposInner {
