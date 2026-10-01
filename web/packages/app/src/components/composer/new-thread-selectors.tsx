@@ -40,11 +40,6 @@ export interface NewThreadTarget {
   /** The device that runs the agents for this target. */
   readonly effectiveDevice: Device | null;
   readonly effectiveDeviceId: string | null;
-  /**
-   * Catalogs and refs come from the device that RUNS the agents — the
-   * space's device when it differs from the connected engine's own.
-   */
-  readonly targetDeviceId: string | null;
 }
 
 /**
@@ -80,10 +75,8 @@ export function useNewThreadTarget(): NewThreadTarget {
         : null;
     const effectiveDeviceId = space?.deviceId ?? canvasTarget.deviceId ?? own;
     const effectiveDevice = devices.find((device) => device.id === effectiveDeviceId) ?? null;
-    // Calls are already made on the resolved target owner; no cross-engine
-    // targetDeviceId passthrough is needed (or allowed) at the wire boundary.
-    const targetDeviceId = null;
-    return { devices, spaces, ownDeviceId: own, space, effectiveDevice, effectiveDeviceId, targetDeviceId };
+    // Every canvas RPC already uses the resolved owner's client.
+    return { devices, spaces, ownDeviceId: own, space, effectiveDevice, effectiveDeviceId };
     // `defaults` is a cached snapshot object; the memo keys on its identity,
     // which changes only when a pick lands.
     // eslint-disable-next-line react-hooks/exhaustive-deps
@@ -184,7 +177,7 @@ export function NewThreadGitSelectors() {
         currentBranch={null}
         draftBranch={draftBranch}
         checkout={checkout}
-        targetDeviceId={target.targetDeviceId}
+        targetDeviceId={null}
         canPick={session !== null}
         onPick={(name) => setDraftBranch(name)}
         onRefs={setRefs}
