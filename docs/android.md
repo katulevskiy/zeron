@@ -491,6 +491,8 @@ The desktop's Subagents view (#638, #647), on the phone:
 - Not recorded on the chip, so not shown: when a finished subagent ended
   (the list shows its last update instead).
 
+Tab-switch and screen-open performance (the Sessions/Settings pages stay composed, hidden pages hold still, wireframes, measuring): [`android-perf.md`](android-perf.md).
+
 ## Sounds and haptics
 
 Every tap, toggle, sheet, swipe and session event has a considered haptic and a

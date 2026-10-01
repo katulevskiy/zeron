@@ -115,6 +115,15 @@ class AppModel(private val app: Application) {
     /** A route to open once the main UI is up (`chat:<id>` from a notification). */
     val pendingRoute = MutableStateFlow<String?>(null)
 
+    /** Debug builds: a bottom-nav tab to switch to ("sessions" | "settings"), see the DEBUG_EVENT `tab` kind. */
+    val tabRequest = MutableStateFlow<String?>(null)
+
+    /** Debug builds: bumped to rebuild the home page from scratch, the way coming back from a chat does. */
+    val homeEpoch = MutableStateFlow(0)
+
+    /** Debug builds: false rebuilds a tab on every switch (the old behaviour), for A/B timing in the same session. */
+    val retainTabs = MutableStateFlow(true)
+
     private val _client = MutableStateFlow<CoreClient?>(null)
     val client: StateFlow<CoreClient?> = _client.asStateFlow()
 
@@ -305,6 +314,33 @@ class AppModel(private val app: Application) {
                 if (intent.getStringExtra("kind") in setOf("haptic", "cue")) return
                 // Device events: engine-setup | engine-failed | transfer-asked | -received | -sent | -failed.
                 when (val kind = intent.getStringExtra("kind").orEmpty()) {
+                    // `--es kind profile --ei ms 3000`: sample the main thread for a while (what an idle screen costs).
+                    "profile" -> {
+                        Perf.sampling = true
+                        Perf.begin("window")
+                        main.postDelayed({ Perf.finish("window") }, intent.getIntExtra("ms", 3000).toLong())
+                        return
+                    }
+                    // `--es kind route --es route engine|agents|transfers|sounds|search|new|chat:<id>`: time a screen opening.
+                    "route" -> {
+                        val route = intent.getStringExtra("route").orEmpty()
+                        Perf.sampling = intent.getBooleanExtra("sample", false)
+                        Perf.tailMs = intent.getIntExtra("tail", 250).toLong()
+                        Perf.begin("route->$route")
+                        Perf.finishAfterFrames(12)
+                        pendingRoute.value = route
+                        return
+                    }
+                    "tab" -> {
+                        val tab = intent.getStringExtra("tab").orEmpty()
+                        Perf.sampling = intent.getBooleanExtra("sample", false)
+                        Perf.tailMs = intent.getIntExtra("tail", 250).toLong()
+                        if (intent.hasExtra("retain")) retainTabs.value = intent.getBooleanExtra("retain", true)
+                        Perf.begin("tab->$tab" + (if (retainTabs.value) "" else " [rebuild]") + (if (intent.getBooleanExtra("cold", false)) " [cold]" else "") + (if (intent.getBooleanExtra("warm", false)) " [warm-up]" else ""))
+                        tabRequest.value = tab
+                        if (intent.getBooleanExtra("cold", false)) homeEpoch.value++
+                        return
+                    }
                     "engine-setup" -> deviceFeedback.engine(sh.zeron.android.feedback.EngineEvent.SetupDone).also { return }
                     "engine-failed" -> deviceFeedback.engine(sh.zeron.android.feedback.EngineEvent.Failed).also { return }
                     "transfer-asked" -> deviceFeedback.transfer("debug", sh.zeron.android.feedback.TransferEvent.Asked).also { return }

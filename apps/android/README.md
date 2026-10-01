@@ -53,6 +53,12 @@ which the build runs only while their outputs are missing
 (needs `rsvg-convert`). The Geist fonts are read straight from the iOS app's
 `Fonts/` folder, so both platforms measure and draw the same bytes.
 
+## Performance
+
+`core/Perf.kt` times interactions in debug builds (`adb logcat -s ZeronPerf`); `scripts/android/measure-tab-switch.sh`
+drives the Sessions/Settings switch through the debug broadcast and prints medians. The tab pages stay composed and
+are shown by layer properties (`ui/TabHost.kt`): see [`docs/android-perf.md`](../../docs/android-perf.md).
+
 ## Sounds and haptics
 
 `feedback/` is the app's sensory layer: `Feedback.kt` is the vocabulary

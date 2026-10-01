@@ -5,6 +5,7 @@ import sh.zeron.android.feedback.tapAction
 import androidx.compose.animation.AnimatedContent
 import androidx.compose.animation.fadeIn
 import androidx.compose.animation.fadeOut
+import androidx.compose.animation.core.tween
 import androidx.compose.animation.togetherWith
 import androidx.compose.foundation.layout.Box
 import androidx.compose.foundation.layout.fillMaxSize
@@ -26,11 +27,17 @@ import androidx.compose.runtime.Composable
 import androidx.compose.runtime.DisposableEffect
 import androidx.compose.runtime.LaunchedEffect
 import androidx.compose.runtime.collectAsState
+import androidx.compose.runtime.MutableState
+import androidx.compose.runtime.snapshotFlow
+import androidx.compose.runtime.withFrameNanos
+import kotlinx.coroutines.flow.collectLatest
+import kotlinx.coroutines.delay
 import androidx.compose.runtime.getValue
 import androidx.compose.runtime.mutableStateOf
 import androidx.compose.runtime.saveable.rememberSaveable
 import androidx.compose.runtime.setValue
 import androidx.compose.ui.Modifier
+import androidx.compose.ui.zIndex
 import androidx.compose.ui.Alignment
 import androidx.compose.ui.graphics.Brush
 import androidx.compose.ui.graphics.Color
@@ -85,6 +92,9 @@ fun ZeronRoot(model: AppModel) {
 }
 
 private enum class Gate { Main, FirstRun }
+
+private const val NAV_FADE_IN_MS = 180
+private const val NAV_FADE_OUT_MS = 120
 
 object Routes {
     const val HOME = "home"
@@ -168,7 +178,7 @@ private fun MainNav(model: AppModel) {
     val nav = rememberNavController()
     val focus = LocalFocusManager.current
     val keyboard = LocalSoftwareKeyboardController.current
-    // A screen stays composed through NavHost's exit fade (700 ms), and so
+    // A screen stays composed through NavHost's exit fade, and so
     // does its focused text field — the IME only went away once the field was
     // disposed, a second after leaving the chat. Drop focus and the keyboard
     // the moment the destination changes instead.
@@ -193,7 +203,16 @@ private fun MainNav(model: AppModel) {
         pending?.let { nav.openRoute(it) }
         model.pendingRoute.value = null
     }
-    NavHost(nav, startDestination = Routes.HOME) {
+    // NavHost's default is a 700 ms fade in and out: a page that starts transparent and takes most of a second to
+    // arrive does not feel instant, however fast it composed. Short fades keep the cross-dissolve and lose the wait.
+    NavHost(
+        nav,
+        startDestination = Routes.HOME,
+        enterTransition = { fadeIn(tween(NAV_FADE_IN_MS)) },
+        exitTransition = { fadeOut(tween(NAV_FADE_OUT_MS)) },
+        popEnterTransition = { fadeIn(tween(NAV_FADE_IN_MS)) },
+        popExitTransition = { fadeOut(tween(NAV_FADE_OUT_MS)) },
+    ) {
         composable(Routes.HOME) { Home(model, nav) }
         composable(Routes.CHAT, arguments = listOf(navArgument("subagents") { defaultValue = "false" })) { entry ->
             val id = entry.arguments?.getString("id") ?: return@composable
@@ -257,37 +276,88 @@ private fun MainNav(model: AppModel) {
 
 private enum class Tab { Sessions, Settings }
 
+private fun String?.toTab(): Tab? = when (this) {
+    "sessions" -> Tab.Sessions
+    "settings" -> Tab.Settings
+    else -> null
+}
+
 @Composable
 private fun Home(model: AppModel, nav: NavHostController) {
-    var tab by rememberSaveable { mutableStateOf(if (model.launch.route == "settings") Tab.Settings else Tab.Sessions) }
-    val workspace by model.workspace.collectAsState()
-    val summary = remember(workspace) { workspace?.let { liveSummary(it) } }
+    // A cold-open benchmark (`--ez cold true` on the debug tab event) rebuilds the page like coming back from a chat does.
+    val epoch by model.homeEpoch.collectAsState()
+    androidx.compose.runtime.key(epoch) { HomeTabs(model, nav) }
+}
+
+@Composable
+private fun HomeTabs(model: AppModel, nav: NavHostController) {
+    // `tab` is read only inside layer / effect / child scopes below, never in this body: a switch recomposes the
+    // two pages' wrappers and the chrome, not the whole home page.
+    val tab = rememberSaveable { mutableStateOf(model.tabRequest.value.toTab() ?: if (model.launch.route == "settings") Tab.Settings else Tab.Sessions) }
+    // Debug builds: `--es kind tab --es tab sessions|settings` flips the tab (scripts/android/measure-tab-switch.sh).
+    val tabRequest by model.tabRequest.collectAsState()
+    LaunchedEffect(tabRequest) {
+        tabRequest?.toTab()?.let { tab.value = it }
+        model.tabRequest.value = null
+    }
+    sh.zeron.android.core.PerfFrame(tab)
+    // Both tabs stay composed once they have been, so switching is a property change rather than a composition.
+    // The one shown first composes at once; the other idles in after the first frames (never in the way of the
+    // launch or the return from a chat). A tab asked for before that shows a wireframe for the frame it takes.
+    val sessionsReady = remember { mutableStateOf(tab.value == Tab.Sessions) }
+    val settingsReady = remember { mutableStateOf(tab.value == Tab.Settings) }
+    LaunchedEffect(Unit) {
+        snapshotFlow { tab.value }.collectLatest { shown ->
+            withFrameNanos { }
+            if (shown == Tab.Sessions) sessionsReady.value = true else settingsReady.value = true
+            delay(350)
+            withFrameNanos { }
+            sessionsReady.value = true
+            settingsReady.value = true
+        }
+    }
+    val retain by model.retainTabs.collectAsState()
     Box(Modifier.fillMaxSize().background(MaterialTheme.colorScheme.background)) {
-        when (tab) {
-            Tab.Sessions -> SessionsScreen(model, onOpen = { nav.open(Routes.chat(it)) })
-            Tab.Settings -> SettingsScreen(model, onOpen = { nav.open(it) })
+        TabPage(
+            active = { tab.value == Tab.Sessions },
+            ready = { if (retain) sessionsReady.value else tab.value == Tab.Sessions },
+            skeleton = { SessionsSkeleton() },
+        ) { SessionsScreen(model, onOpen = { nav.open(Routes.chat(it)) }) }
+        TabPage(
+            active = { tab.value == Tab.Settings },
+            ready = { if (retain) settingsReady.value else tab.value == Tab.Settings },
+            skeleton = { SettingsSkeleton() },
+        ) { SettingsScreen(model, onOpen = { nav.open(it) }) }
+        // Above the pages: the shown one is lifted over its hidden sibling (see TabPage).
+        HomeChrome(model, nav, tab, Modifier.align(Alignment.BottomCenter).zIndex(2f))
+    }
+}
+
+/** Floating chrome over a soft scrim: new session, then the nav capsule. */
+@Composable
+private fun HomeChrome(model: AppModel, nav: NavHostController, tab: MutableState<Tab>, modifier: Modifier) {
+    Column(
+        modifier
+            .fillMaxWidth()
+            .background(Brush.verticalGradient(0f to Color.Transparent, 0.25f to MaterialTheme.colorScheme.background.copy(alpha = 0.94f), 0.6f to MaterialTheme.colorScheme.background))
+            .navigationBarsPadding()
+            .padding(top = 28.dp, bottom = 8.dp),
+        verticalArrangement = Arrangement.spacedBy(10.dp),
+    ) {
+        if (tab.value == Tab.Sessions) {
+            val workspace by model.workspace.collectAsState()
+            val summary = remember(workspace) { workspace?.let { liveSummary(it) } }
+            NewSessionBar(summary, onClick = { nav.open(Routes.NEW) })
         }
-        // Floating chrome over a soft scrim: new session, then the nav capsule.
-        Column(
-            Modifier
-                .align(Alignment.BottomCenter)
-                .fillMaxWidth()
-                .background(Brush.verticalGradient(0f to Color.Transparent, 0.25f to MaterialTheme.colorScheme.background.copy(alpha = 0.94f), 0.6f to MaterialTheme.colorScheme.background))
-                .navigationBarsPadding()
-                .padding(top = 28.dp, bottom = 8.dp),
-            verticalArrangement = Arrangement.spacedBy(10.dp),
-        ) {
-            if (tab == Tab.Sessions) NewSessionBar(summary, onClick = { nav.open(Routes.NEW) })
-            FloatingNavBar(
-                listOf(
-                    NavItem("Sessions", ZIcons.TabSessions, tab == Tab.Sessions) { tab = Tab.Sessions },
-                    NavItem("Settings", ZIcons.TabSettings, tab == Tab.Settings) { tab = Tab.Settings },
-                ),
-                trailing = {
-                    TonalCircleButton(ZIcons.Search, "Search", onClick = { nav.open(Routes.SEARCH) }, size = 72.dp)
-                },
-            )
-        }
+        FloatingNavBar(
+            listOf(
+                NavItem("Sessions", ZIcons.TabSessions, tab.value == Tab.Sessions) { sh.zeron.android.core.Perf.begin("tab->sessions"); tab.value = Tab.Sessions },
+                NavItem("Settings", ZIcons.TabSettings, tab.value == Tab.Settings) { sh.zeron.android.core.Perf.begin("tab->settings"); tab.value = Tab.Settings },
+            ),
+            trailing = {
+                TonalCircleButton(ZIcons.Search, "Search", onClick = { nav.open(Routes.SEARCH) }, size = 72.dp)
+            },
+        )
     }
 }
 

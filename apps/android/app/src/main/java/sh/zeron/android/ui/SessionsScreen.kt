@@ -104,10 +104,11 @@ private fun liveCounts(ws: WorkspaceSnapshot): Pair<Int, Int> {
 @OptIn(ExperimentalMaterial3Api::class, ExperimentalMaterial3ExpressiveApi::class)
 @Composable
 fun SessionsScreen(model: AppModel, onOpen: (String) -> Unit) {
-    val workspace by model.workspace.collectAsState()
-    val connectivity by model.connectivity.collectAsState()
-    val engine by model.phone.state.collectAsState()
-    val client by model.client.collectAsState()
+    // Kept composed behind the Settings tab: while hidden it listens to nothing (see TabPage).
+    val workspace = model.workspace.collectAsStateWhile()
+    val connectivity = model.connectivity.collectAsStateWhile()
+    val engine = model.phone.state.collectAsStateWhile()
+    val client = model.client.collectAsStateWhile()
     var filter by rememberSaveable { mutableStateOf(Filter.All) }
     val snackbar = remember { SnackbarHostState() }
     val scope = rememberCoroutineScope()
@@ -157,7 +158,11 @@ fun SessionsScreen(model: AppModel, onOpen: (String) -> Unit) {
             state = pull,
             modifier = Modifier.fillMaxSize(),
             indicator = {
-                PullToRefreshDefaults.LoadingIndicator(
+                // Its shape-morph tables are the heaviest thing on first composition and nothing shows until a pull:
+                // compose it a frame after the page, not with it.
+                var warm by remember { mutableStateOf(false) }
+                LaunchedEffect(Unit) { androidx.compose.runtime.withFrameNanos { }; warm = true }
+                if (warm || refreshing) PullToRefreshDefaults.LoadingIndicator(
                     state = pull,
                     isRefreshing = refreshing,
                     modifier = Modifier.align(Alignment.TopCenter).padding(WindowInsets.statusBars.asPaddingValues()),
@@ -202,7 +207,11 @@ fun SessionsScreen(model: AppModel, onOpen: (String) -> Unit) {
                 if (client?.isDemo() != true && engine !is sh.zeron.runtime.RuntimeState.Running) {
                     item("engine") { EngineStatusStrip(model, engine, Modifier.padding(horizontal = 16.dp, vertical = 8.dp)) }
                 }
-                if (ws == null) return@LazyColumn
+                if (ws == null) {
+                    // Before the first snapshot: a wireframe of the list, not a blank page.
+                    item("skeleton", contentType = "skeleton") { SessionRowsSkeleton() }
+                    return@LazyColumn
+                }
                 val front = ws.front
                 when (filter) {
                     Filter.All -> {
