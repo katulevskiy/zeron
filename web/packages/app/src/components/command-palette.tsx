@@ -8,7 +8,7 @@ import { useSidebar } from "../state/sidebar";
 import { useResolvedAppearance } from "../state/appearance";
 import { appearanceStore } from "../state/appearance";
 import { useChatChangeRequests } from "../state/change-requests-store";
-import { ESCAPE_PRIORITY, registerEscapeSurface } from "../state/escape";
+import { ESCAPE_PRIORITY } from "../state/escape";
 import { commandPaletteStore, useCommandPaletteSnapshot } from "../state/command-palette";
 import {
   actionsFor,
@@ -98,28 +98,6 @@ export function CommandPalette() {
   // Only a true host unmount force-closes — nothing is left to paint, so
   // no exit window either.
   useEffect(() => () => commandPaletteStore.forceClose(), []);
-
-  // The shell's Escape ladder owns Escape at the command palette's
-  // priority — above every other surface, matching the desktop's
-  // capture-phase check order.
-  useEffect(() => {
-    if (state.status === "closed") {
-      return;
-    }
-    return registerEscapeSurface(ESCAPE_PRIORITY.commandPalette, () => {
-      commandPaletteStore.close();
-      // Consumed either way — closing still counts; a second Escape in the
-      // exit window must not fall through to the chat interrupt.
-      return true;
-    });
-  }, [state.status]);
-
-  // `focus_pending`: the search input takes focus on open.
-  useEffect(() => {
-    if (state.status === "open") {
-      inputRef.current?.focus({ preventScroll: true });
-    }
-  }, [state.status]);
 
   const live = state.status !== "closed";
   const chats = live ? (snapshot?.chats.rows ?? []) : [];
@@ -231,9 +209,6 @@ export function CommandPalette() {
       event.nativeEvent.ctrlKey,
     );
     switch (key) {
-      case "escape":
-        commandPaletteStore.close();
-        return true;
       case "up":
         commandPaletteStore.move(-1, entries.length);
         return true;
@@ -300,6 +275,8 @@ export function CommandPalette() {
       ariaLabel="Command palette"
       overlaySource="command-palette"
       overlayOpen
+      escapePriority={ESCAPE_PRIORITY.commandPalette}
+      initialFocus={inputRef}
       cardClassName="command-palette-frost"
     >
       <div className="command-palette-card">

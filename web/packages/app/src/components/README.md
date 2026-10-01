@@ -54,9 +54,21 @@ Two standing split rules, inherited from the Base UI adoption
    ride `PickerCard` (→ `RbPopover`) + `useCursorList`; only a surface whose
    desktop self is genuinely a focus-walking, typeahead menu uses
    `base/menu.tsx`'s `RbMenu`.
-2. **Escape is never the consumer's job.** It flows Base UI's dismiss
-   pipeline; `escapeFocusTarget` is how a surface opts into the focus
-   return.
+2. **Dismissal belongs to the wrapper, not a consumer key handler.**
+   Ordinary surfaces use Base UI's Escape/outside-press pipeline and focus
+   return (`escapeFocusTarget` for popovers, `initialFocus`/`finalFocus` for
+   dialogs). Shell-priority glass palettes pass `escapePriority` to
+   `RbDialogGlass`: the wrapper registers on the existing capture ladder
+   and calls Base UI's public `close()` action (`imperative-action` reason),
+   routing once through `onOpenChange(false)`. The ladder order is unchanged:
+   command palette (5), blocking overlays (10), drawer (12), rename dialogs
+   (20/30), add-project (40), then remaining shell surfaces. This is not a
+   universal "topmost DOM dialog wins" rule. Keep `overlayOpen` true through
+   the exit (`status !== "closed"`): the wrapper consumes Escape without
+   closing again and retains the session-navigation claim until
+   `onOpenChangeComplete(false)` drains the store. Consumers own store
+   lifecycle and non-Escape cursor keys, not duplicate Escape listeners.
+   Deliberate shell blockers remain on the ladder; they do not dismiss.
 
 ## Adding a new `ui/` component
 

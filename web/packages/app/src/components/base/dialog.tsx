@@ -38,11 +38,12 @@
  *   caller in if that ever changes.
  */
 
-import type { CSSProperties, ReactNode } from "react";
+import { useEffect, useRef, type CSSProperties, type ReactNode } from "react";
 import { Dialog, type DialogRootProps, type DialogPopupProps } from "@base-ui/react/dialog";
 import { useOverlayKeyboardSource } from "./overlay";
 import { drawerOnOpenChange, RbDrawerSheet } from "./responsive-surface";
 import { useIsPhone } from "../../state/media";
+import { registerEscapeSurface } from "../../state/escape";
 
 export interface RbDialogProps {
   /** Controlled open. Close-on-unmount is the normal parity pattern (no exit motion). */
@@ -103,12 +104,22 @@ export interface RbDialogGlassProps {
   readonly onOpenChange: NonNullable<DialogRootProps["onOpenChange"]>;
   /** The exit drained — the palette's "fully closed" moment (flow dropped). */
   readonly onOpenChangeComplete?: DialogRootProps["onOpenChangeComplete"];
+  /**
+   * Shell ladder priority. Escape uses Base UI's public close action
+   * (`imperative-action` reason), not a second consumer key handler.
+   * Omit for ordinary Base UI Escape handling.
+   */
+  readonly escapePriority?: number;
+  /** The element to focus on open — usually the palette's search input. */
+  readonly initialFocus?: DialogPopupProps["initialFocus"];
+  /** The element to restore on close; defaults to the previously focused control. */
+  readonly finalFocus?: DialogPopupProps["finalFocus"];
   /** The dialog's accessible name. */
   readonly ariaLabel?: string;
   /** Registers this name on the `overlayKeyboard` registry while claimed. */
   readonly overlaySource?: string;
   /**
-   * Overrides the registry window: the palette holds its claim through the
+   * Overrides BOTH the keyboard registry and ladder window: hold through the
    * exit (`status !== "closed"`) — the scrim is still up while the card
    * fades, and a jump firing under a visible modal would strand it over a
    * chat the user never picked (ticket 11's comment).
@@ -142,10 +153,22 @@ export interface RbDialogGlassProps {
  * contract's scrim press closes, same as at desktop.
  */
 export function RbDialogGlass(props: RbDialogGlassProps) {
-  // Registered here for the desktop arm; the phone sheet re-registers the
-  // same name through its own seam (idempotent — the registry is a Set, so
-  // both arms agree on the claim without fighting over it).
-  useOverlayKeyboardSource(props.overlaySource, props.overlayOpen ?? props.open);
+  // One owner across desktop and phone. The exit window blocks without
+  // requesting another close; Base UI owns dismissal, unmount, and focus.
+  const actionsRef = useRef<Dialog.Root.Actions | null>(null);
+  const claimed = props.overlayOpen ?? props.open;
+  useOverlayKeyboardSource(props.overlaySource, claimed);
+  useEffect(() => {
+    if (props.escapePriority === undefined || !claimed) {
+      return;
+    }
+    return registerEscapeSurface(props.escapePriority, () => {
+      if (props.open) {
+        actionsRef.current?.close();
+      }
+      return true;
+    });
+  }, [props.escapePriority, props.open, claimed]);
   const isPhone = useIsPhone();
   if (isPhone) {
     return (
@@ -157,8 +180,9 @@ export function RbDialogGlass(props: RbDialogGlassProps) {
         backdropClassName={`modal-glass-backdrop ${props.backdropClassName ?? ""}`}
         cardClassName={`rb-dialog-card ${props.cardClassName ?? ""}`}
         style={props.style}
-        overlaySource={props.overlaySource}
-        overlayOpen={props.overlayOpen}
+        actionsRef={actionsRef}
+        initialFocus={props.initialFocus}
+        finalFocus={props.finalFocus}
       >
         {props.children}
       </RbDrawerSheet>
@@ -169,6 +193,7 @@ export function RbDialogGlass(props: RbDialogGlassProps) {
       open={props.open}
       onOpenChange={props.onOpenChange}
       onOpenChangeComplete={props.onOpenChangeComplete}
+      actionsRef={actionsRef}
       modal
     >
       <Dialog.Portal>
@@ -177,6 +202,8 @@ export function RbDialogGlass(props: RbDialogGlassProps) {
           className={`modal-card rb-dialog-card ${props.cardClassName ?? ""}`}
           style={props.style}
           aria-label={props.ariaLabel}
+          initialFocus={props.initialFocus}
+          finalFocus={props.finalFocus}
         >
           {props.children}
         </Dialog.Popup>

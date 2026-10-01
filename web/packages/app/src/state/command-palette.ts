@@ -106,6 +106,11 @@ export class CommandPaletteStore {
    * Hard close for a host that is unmounting: nothing is left to paint, so
    * no exit window either.
    */
+  resetPrivateState(): void {
+    this.forceClose();
+    this.#context = null;
+  }
+
   forceClose(): void {
     this.close();
     this.unmounted();
