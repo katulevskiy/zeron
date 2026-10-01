@@ -560,6 +560,46 @@ impl WorkflowRunsState {
     }
 }
 
+// ── activity (sidebar) ────────────────────────────────────────────────────
+
+/// One run as the sidebar sees it: the header (phase progress included) and
+/// how many escalations wait for an answer. No entries — a chat that is not
+/// open needs a few hundred bytes per run, not its node list.
+#[derive(Debug, Clone, PartialEq, Serialize, Deserialize, Default)]
+#[serde(rename_all = "camelCase")]
+pub struct WorkflowRunBrief {
+    #[serde(flatten)]
+    pub header: WorkflowRunHeader,
+    #[serde(default)]
+    pub pending_questions: u32,
+}
+
+/// Runs of every chat the engine hosts (`WatchWorkflowActivity`): oldest
+/// first per chat, only chats that have any. Pushed whole when a brief
+/// changes (coalesced like the doc writes, ≤ 4 a second).
+#[derive(Debug, Clone, PartialEq, Serialize, Deserialize, Default)]
+#[serde(rename_all = "camelCase")]
+pub struct WorkflowActivity {
+    #[serde(default)]
+    pub chats: std::collections::BTreeMap<String, Vec<WorkflowRunBrief>>,
+}
+
+impl WorkflowRun {
+    pub fn brief(&self) -> WorkflowRunBrief {
+        WorkflowRunBrief {
+            header: self.header.clone(),
+            pending_questions: self.pending_questions.len() as u32,
+        }
+    }
+}
+
+impl WorkflowRunsState {
+    /// Briefs of every run, oldest first.
+    pub fn briefs(&self) -> Vec<WorkflowRunBrief> {
+        self.runs.iter().map(WorkflowRun::brief).collect()
+    }
+}
+
 // ── deltas ────────────────────────────────────────────────────────────────
 
 /// What changed in one run: its header (replaced whole, when present),

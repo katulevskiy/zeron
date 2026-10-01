@@ -2067,6 +2067,9 @@ impl RpcService for EngineRpc {
                 }
                 RpcReply::value(&out)
             }
+            methods::WATCH_WORKFLOW_ACTIVITY => Ok(RpcReply::Stream(watch_stream(
+                self.workflows()?.watch_activity(),
+            ))),
             methods::WORKFLOW_LIST => {
                 #[derive(Deserialize)]
                 #[serde(rename_all = "camelCase")]

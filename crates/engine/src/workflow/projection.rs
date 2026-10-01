@@ -17,8 +17,10 @@ use std::sync::atomic::{AtomicU64, Ordering};
 use std::sync::{Arc, Mutex, MutexGuard, PoisonError};
 use std::time::Duration;
 
+use tokio::sync::watch;
 use zeron_proto::{
-    WorkflowEvent, WorkflowEventKind, WorkflowRun, WorkflowRunsDelta, WorkflowRunsState,
+    WorkflowActivity, WorkflowEvent, WorkflowEventKind, WorkflowRun, WorkflowRunsDelta,
+    WorkflowRunsState,
 };
 use zeron_workflow::reduce;
 
@@ -55,6 +57,8 @@ pub struct Projection {
 struct Inner {
     doc_host: DocHost,
     chats: Mutex<HashMap<String, ChatProjection>>,
+    /// Every chat's runs as briefs, for the sidebar (`WatchWorkflowActivity`).
+    activity: watch::Sender<WorkflowActivity>,
     events: AtomicU64,
     writes: AtomicU64,
     bytes: AtomicU64,
@@ -77,11 +81,32 @@ impl Projection {
             inner: Arc::new(Inner {
                 doc_host,
                 chats: Mutex::default(),
+                activity: watch::channel(WorkflowActivity::default()).0,
                 events: AtomicU64::new(0),
                 writes: AtomicU64::new(0),
                 bytes: AtomicU64::new(0),
             }),
         }
+    }
+
+    /// The sidebar's feed: current value first, then every change.
+    pub fn watch_activity(&self) -> watch::Receiver<WorkflowActivity> {
+        self.inner.activity.subscribe()
+    }
+
+    /// Republish one chat's briefs (a no-op when nothing the sidebar shows
+    /// changed, so receivers wake only for real changes).
+    fn publish(&self, chat_id: &str, briefs: Vec<zeron_proto::WorkflowRunBrief>) {
+        self.inner.activity.send_if_modified(|activity| {
+            if briefs.is_empty() {
+                activity.chats.remove(chat_id).is_some()
+            } else if activity.chats.get(chat_id) == Some(&briefs) {
+                false
+            } else {
+                activity.chats.insert(chat_id.to_owned(), briefs);
+                true
+            }
+        });
     }
 
     pub fn stats(&self) -> ProjectionStats {
@@ -155,7 +180,11 @@ impl Projection {
                 return;
             };
             chat.flush_armed = false;
-            chat.pending.take()
+            let briefs = chat.state.briefs();
+            let pending = chat.pending.take();
+            drop(chats);
+            self.publish(chat_id, briefs);
+            pending
         };
         let Some(delta) = delta else { return };
         if delta.is_empty() {
@@ -203,6 +232,9 @@ impl Projection {
             chat.state.runs.sort_by_key(|r| r.header.created_at);
             chat.state.revision += 1;
             chat.pending = None;
+            let briefs = chat.state.briefs();
+            drop(chats);
+            self.publish(chat_id, briefs);
         }
         if let Ok(handle) = self.inner.doc_host.open(chat_id) {
             let _ = handle.doc().replace_workflow_run(run);

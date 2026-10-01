@@ -93,6 +93,9 @@ pub mod methods {
     pub const WORKFLOW_ARTIFACT_DATA: &str = "WorkflowArtifactData";
     /// A page of an artifact: `{runId, artifactId, version?, offset?, limit?}`.
     pub const WORKFLOW_ARTIFACT_READ: &str = "WorkflowArtifactRead";
+    /// Stream of `WorkflowActivity`: every locally hosted chat's runs as
+    /// briefs (header + pending-question count), for the sidebar's run lines.
+    pub const WATCH_WORKFLOW_ACTIVITY: &str = "WatchWorkflowActivity";
     pub const WATCH_DOC_MESSAGES: &str = "WatchDocMessages";
     /// Explicit user navigation, `{chatId}`. Prioritizes this device's sync
     /// connection; automatic subscriptions and retries must not call it.

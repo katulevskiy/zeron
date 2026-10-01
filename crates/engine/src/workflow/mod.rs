@@ -359,6 +359,11 @@ impl WorkflowService {
         self.shared.events_tx.subscribe()
     }
 
+    /// Every chat's runs as briefs: the sidebar's feed.
+    pub fn watch_activity(&self) -> tokio::sync::watch::Receiver<zeron_proto::WorkflowActivity> {
+        self.shared.projection.watch_activity()
+    }
+
     pub fn projection_stats(&self) -> ProjectionStats {
         self.shared.projection.stats()
     }
