@@ -126,6 +126,29 @@ struct RunHandle {
     /// This runtime's provider session holds the fork's copied history (a
     /// side chat's bootstrap went out on its run or on one of its steers).
     fork_history_sent: Arc<std::sync::atomic::AtomicBool>,
+    /// What the run is doing right now, for callers that must stop it only
+    /// between steps (moving a chat to another device).
+    activity: watch::Receiver<RunActivity>,
+}
+
+/// A live run's in-flight work, published by its run task after every
+/// event. A run is at a *safe point* when no tool is executing and no
+/// harness-native subagent is still working: interrupting it then loses at
+/// most the model's unfinished text, never a half-applied tool.
+#[derive(Debug, Clone, Copy, Default, PartialEq, Eq)]
+pub struct RunActivity {
+    /// Between turns: the child is warm, nothing is happening.
+    pub parked: bool,
+    pub tools_in_flight: usize,
+    /// Questions waiting for the user (safe: they are asked again later).
+    pub inputs_pending: usize,
+    pub subagents_live: usize,
+}
+
+impl RunActivity {
+    pub fn at_safe_point(&self) -> bool {
+        self.tools_in_flight == 0 && self.subagents_live == 0
+    }
 }
 
 /// One accepted-but-unconfirmed steer: enough to re-dispatch it verbatim.
@@ -343,6 +366,14 @@ impl SessionsEngine {
     }
 
     /// The chat's live run accepts steering into its mailbox.
+    /// The live run's activity feed (`None` = no live run: trivially at a
+    /// safe point).
+    pub fn watch_activity(&self, chat_id: &str) -> Option<watch::Receiver<RunActivity>> {
+        lock(&self.inner.runs)
+            .get(chat_id)
+            .map(|h| h.activity.clone())
+    }
+
     pub fn live_run_steerable(&self, chat_id: &str) -> bool {
         lock(&self.inner.runs)
             .get(chat_id)
@@ -588,9 +619,11 @@ impl SessionsEngine {
             interrupt: interrupt_token.clone(),
         };
 
+        let (activity_tx, activity) = watch::channel(RunActivity::default());
         lock(&self.inner.runs).insert(
             chat_id.to_string(),
             RunHandle {
+                activity,
                 run_id: run_id.clone(),
                 steerable: harness.supports_steering(),
                 runtime_config: RuntimeConfig::from_request(harness_id, &request),
@@ -632,6 +665,7 @@ impl SessionsEngine {
                 resume_injected,
                 startup_retry,
                 fork_history_sent,
+                activity: activity_tx,
             },
         ));
         Ok(run_id)
@@ -1718,6 +1752,7 @@ struct RunResumeState {
     resume_injected: bool,
     startup_retry: bool,
     fork_history_sent: Arc<std::sync::atomic::AtomicBool>,
+    activity: watch::Sender<RunActivity>,
 }
 
 fn cursor_unstarted_history(
@@ -2047,6 +2082,26 @@ async fn drive_run(
 
     let mut final_completed_turn = None;
     let final_status = loop {
+        let activity = RunActivity {
+            parked: idle_since.is_some(),
+            tools_in_flight: folded
+                .iter()
+                .filter(|p| {
+                    matches!(p, MessagePart::Tool { id, resolved: false, .. }
+                        if id != zeron_proto::LIVE_PLAN_TOOL_ID)
+                })
+                .count(),
+            inputs_pending: folded
+                .iter()
+                .filter(|p| matches!(p, MessagePart::Input { resolved: false, .. }))
+                .count(),
+            subagents_live: subagents.len(),
+        };
+        resume_state.activity.send_if_modified(|current| {
+            let changed = *current != activity;
+            *current = activity;
+            changed
+        });
         let event: AgentEvent = if let Some(event) = prepared_events.pop_front() {
             event
         } else {
