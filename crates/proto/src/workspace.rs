@@ -22,6 +22,9 @@ pub mod capabilities {
     /// `workflow` doc commands and projects runs into `meta.workflowRuns`
     /// (`docs/workflows.md`).
     pub const WORKFLOWS_V1: &str = "workflows-v1";
+    /// The host serves saved workflows: the `WorkflowSaved*` RPCs, and
+    /// `WorkflowStart {saved}` (`docs/workflows.md` → "Saved workflows").
+    pub const WORKFLOWS_SAVED_V1: &str = "workflows-saved-v1";
 
     pub const CURRENT: &[&str] = &[
         COMPOSER_REFERENCES_V1,
@@ -33,6 +36,7 @@ pub mod capabilities {
         HARNESS_UPDATES_V1,
         GOAL_MODE_V1,
         WORKFLOWS_V1,
+        WORKFLOWS_SAVED_V1,
     ];
 
     pub fn current() -> Vec<String> {
@@ -114,7 +118,8 @@ mod tests {
                     "message-queue-edit-lease-v1",
                     "harness-updates-v1",
                     "goal-mode-v1",
-                    "workflows-v1"
+                    "workflows-v1",
+                    "workflows-saved-v1"
                 ],
             })
         );
