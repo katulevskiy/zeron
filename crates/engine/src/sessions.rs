@@ -932,6 +932,7 @@ impl SessionsEngine {
                     .or_else(|| {
                         let (_, cwd) = sessions.inner.journal_harness_session(&chat_id)?;
                         Some(RunRequest {
+                            policy: Default::default(),
                             mcp: None,
                             prompt: String::new(),
                             harness: None,
@@ -3109,6 +3110,7 @@ mod tests {
 
     fn request() -> RunRequest {
         RunRequest {
+            policy: Default::default(),
             mcp: None,
             prompt: "first".into(),
             harness: None,

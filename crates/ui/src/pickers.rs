@@ -145,6 +145,7 @@ impl ResolvedRunConfig {
     /// The `ChatConfig` recorded on `Mutate createChat` (needs a known harness).
     pub fn chat_config(&self) -> Option<ChatConfig> {
         Some(ChatConfig {
+            policy: Default::default(),
             harness: self.harness?,
             model: self.model.clone(),
             reasoning: self.reasoning,
