@@ -21,7 +21,7 @@ use gpui::{
 
 use zeron_doc::{MessagePart, MessageRole, SessionMessageEntry};
 use zeron_proto::{
-    GOAL_OBJECTIVE_MAX_CHARS, Goal, GoalCommand, GoalEventKind, GoalLimits, GoalReasonKind,
+    GOAL_OBJECTIVE_MAX_CHARS, Goal, GoalCommand, GoalEventKind, GoalLimits,
     GoalStatus, MessageOrigin, TodoStatus, ToolCall, VerdictOutcome,
 };
 
@@ -314,7 +314,7 @@ pub(crate) fn rounds(goal: &Goal, entries: &[SessionMessageEntry]) -> Vec<RoundV
 
 /// A transcript marker: either a round's prompt or a lifecycle event.
 #[derive(Debug, Clone, PartialEq)]
-pub(crate) struct GoalMarker {
+pub struct GoalMarker {
     pub kind: MarkerKind,
     pub round: u32,
     pub title: String,
@@ -323,7 +323,7 @@ pub(crate) struct GoalMarker {
 }
 
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
-pub(crate) enum MarkerKind {
+pub enum MarkerKind {
     /// A round's prompt, sent by the controller.
     Round,
     Event(GoalEventKind),
@@ -412,24 +412,6 @@ impl GoalMarker {
 fn one_line(text: &str) -> String {
     let flat = text.split_whitespace().collect::<Vec<_>>().join(" ");
     zeron_proto::truncate_chars(&flat, 220)
-}
-
-/// What a stopped goal's reason means for the user, in a short noun phrase for
-/// tooltips.
-pub(crate) fn reason_label(kind: GoalReasonKind) -> &'static str {
-    match kind {
-        GoalReasonKind::User => "paused by you",
-        GoalReasonKind::Interrupted => "interrupted",
-        GoalReasonKind::TurnFailed => "the turn failed",
-        GoalReasonKind::VerifierFailed => "the verifier failed",
-        GoalReasonKind::NoProgress => "no progress",
-        GoalReasonKind::MaxRounds => "round limit",
-        GoalReasonKind::TokenBudget => "token budget",
-        GoalReasonKind::TimeBudget => "time budget",
-        GoalReasonKind::ReadOnly => "read-only chat",
-        GoalReasonKind::Restarted => "interrupted by a restart",
-        GoalReasonKind::Verified => "verified",
-    }
 }
 
 /// Per-chat presentation state. In memory only, like the todo tray's.
@@ -1193,7 +1175,7 @@ pub(crate) fn marker_element(marker: &GoalMarker, theme: &Theme) -> AnyElement {
 #[cfg(test)]
 mod tests {
     use super::*;
-    use zeron_proto::{GoalVerdict, TodoItem};
+    use zeron_proto::{GoalReasonKind, GoalVerdict, TodoItem};
 
     fn goal() -> Goal {
         Goal::new("g1", "Ship the thing", &GoalLimits::default(), 0).unwrap()
