@@ -103,8 +103,37 @@ pub enum Decision {
     Deny(String),
 }
 
+/// Zeron's own MCP tools that only read (or hand a result back to the
+/// engine that asked for it): allowed in every mode, so a verifier in plan
+/// mode can read the chat it checks and submit its verdict.
+const ZERON_READ_ONLY_TOOLS: &[&str] = &[
+    "whoami", "list_devices", "list_projects", "list_harnesses", "list_models", "list_chats",
+    "get_chat", "read_chat", "wait_for_turn", "get_goal", "submit_result", "submit_plan",
+    "search_chats",
+];
+
+fn zeron_read_only(action: &Action) -> bool {
+    action.kind == ActionKind::Mcp
+        && action.mcp.as_deref().is_some_and(|name| {
+            let name = name.strip_prefix("zeron__").or_else(|| name.strip_prefix("zeron_"));
+            name.is_some_and(|tool| ZERON_READ_ONLY_TOOLS.contains(&tool))
+        })
+}
+
 /// The verdict for `action` under `policy` in a chat working in `workspace`.
+/// An unattended run never asks: what would be a question is refused.
 pub fn decide(policy: &AgentPolicy, action: &Action, workspace: &Path) -> Decision {
+    match decide_attended(policy, action, workspace) {
+        Decision::Ask if policy.unattended => Decision::Deny(format!(
+            "No one is watching this run, so it can't ask for permission to {}. \
+             Do without it, or report that it's needed.",
+            action.summary()
+        )),
+        decision => decision,
+    }
+}
+
+fn decide_attended(policy: &AgentPolicy, action: &Action, workspace: &Path) -> Decision {
     if let Some(effect) = rule_for(&policy.rules, action) {
         return match effect {
             RuleEffect::Allow => Decision::Allow,
@@ -114,6 +143,9 @@ pub fn decide(policy: &AgentPolicy, action: &Action, workspace: &Path) -> Decisi
                 action.summary()
             )),
         };
+    }
+    if zeron_read_only(action) {
+        return Decision::Allow;
     }
     let inside = || action.paths.iter().all(|p| inside_workspace(p, workspace));
     match policy.mode {
@@ -658,6 +690,22 @@ mod tests {
         assert_eq!(decide(&policy, &Action::exec("Bash", "cargo build"), ws), Decision::Ask);
         policy.mode = PermissionMode::Bypass;
         assert!(matches!(decide(&policy, &Action::path(ActionKind::Edit, "Edit", "/home/bob/proj/deploy/x"), ws), Decision::Deny(_)), "deny rules hold even in bypass");
+    }
+
+    #[test]
+    fn zeron_read_tools_run_everywhere_and_unattended_runs_never_ask() {
+        let read = Action { mcp: Some("zeron__read_chat".into()), ..Action::new(ActionKind::Mcp, "mcp__zeron__read_chat") };
+        let spawn = Action { mcp: Some("zeron__create_chat".into()), ..Action::new(ActionKind::Mcp, "mcp__zeron__create_chat") };
+        assert_eq!(decide_in(PermissionMode::Plan, &read), Decision::Allow);
+        assert_eq!(decide_in(PermissionMode::Ask, &read), Decision::Allow);
+        assert_eq!(decide_in(PermissionMode::Plan, &spawn), Decision::Ask);
+        let mut verifier = AgentPolicy::read_only();
+        verifier.unattended = true;
+        let ws = Path::new(WS);
+        assert_eq!(decide(&verifier, &read, ws), Decision::Allow);
+        assert!(matches!(decide(&verifier, &spawn, ws), Decision::Deny(r) if r.contains("No one is watching")));
+        assert!(matches!(decide(&verifier, &Action::exec("Bash", "cargo build"), ws), Decision::Deny(_)));
+        assert_eq!(decide(&verifier, &Action::exec("Bash", "git diff --stat"), ws), Decision::Allow);
     }
 
     #[test]

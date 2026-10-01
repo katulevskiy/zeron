@@ -81,6 +81,7 @@ fn run_command(core: &zeron_engine::EngineCore, text: &str, id: &str) {
             CHAT,
             SessionCommandPayload::Run {
                 request: zeron_proto::RunRequest {
+                    policy: Default::default(),
                     mcp: None,
                     prompt: text.into(),
                     harness: None,

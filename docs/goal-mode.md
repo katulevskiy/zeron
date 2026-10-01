@@ -54,16 +54,20 @@ that reports usage and is lag-free), wall time and turns.
 
 ### Permissions of a headless child
 
-* The child's `auto_approve` is the requester's last request's value and its
-  sandbox is `min(requester's, wanted)` (`capped_sandbox`) — never wider. A
-  read-only ask requests `ReadOnly`.
-* **Honest limit:** no harness enforces the sandbox level for chat runs today.
-  Codex forces full access for every non-title run, Claude Code has no read-only
-  mode, and the others ignore it. Read-only intent for verifiers and analysis asks is
-  therefore carried by (a) the prompt ("do not create, modify, delete…") and (b) the
-  restricted MCP toolset (no `send_message`, `create_chat`, goals…), not by the
-  sandbox. The sandbox cap is still applied so the day a harness honours it, asks get
-  it.
+* The child runs under the requester's permission policy (`ChatConfig.policy`,
+  see [`plans/2026-09-30-agent-mobility-and-policy.md`](plans/2026-09-30-agent-mobility-and-policy.md)
+  Part 4), capped so it is never wider. A read-only ask (every verifier) runs
+  `AgentPolicy::read_only()`: Plan's rules plus a read-only sandbox. Every
+  harness that gates permissions (Claude Code, Codex, OpenCode, ACP agents)
+  enforces this: it can read, search and run read-only commands, and edits or
+  other commands are refused with a reason. Zeron's own read-only MCP tools
+  (`read_chat`, `get_chat`, `submit_result`, …) stay allowed.
+* The child's policy is **unattended**. An action the policy would ask about
+  is refused with a reason instead of parking on a question. The legacy
+  `auto_approve` and `sandbox` fields are still set as before, for older
+  harness builds.
+* Harnesses that can't gate yet (Cursor, Pi) report Bypass only. On those the
+  read-only intent still rests on the prompt and the restricted MCP toolset.
 * A child that parks on a question or an approval can never be answered — nobody
   watches it — so the ask **fails at once** with `NeedsInput(<question>)` instead of
   waiting out its timeout.
@@ -197,9 +201,11 @@ opened and ticked:
 
 ### Read-only chats instead of plan mode
 
-Zeron has no host-visible plan mode, so the analogue is a read-only chat
-(`config.sandbox == ReadOnly`): a goal set there is recorded and immediately
-`paused (readOnly)`; nothing is queued or verified.
+A chat in plan mode (`policy.mode == Plan`) or with a read-only sandbox (or
+the legacy `config.sandbox == ReadOnly`) is read-only. A goal set there is
+recorded and immediately `paused (readOnly)`, and nothing is queued or
+verified. Approving the chat's plan ([`plan-mode.md`](plan-mode.md)) leaves
+plan mode, and the goal can be resumed.
 
 ### Titling
 

@@ -44,7 +44,8 @@ use tokio::sync::Notify;
 use tokio_util::sync::CancellationToken;
 use zeron_doc::{MessagePart, MessageRole};
 use zeron_proto::{
-    AgentEvent, AskSpecInfo, AskSubmitReply, ChatConfig, HarnessId, ReasoningLevel, RunRequest,
+    AgentEvent, AgentPolicy, AskSpecInfo, AskSubmitReply, ChatConfig, HarnessId, ReasoningLevel,
+    RunRequest,
     SandboxLevel, SchemaViolation, SessionStatus,
 };
 
@@ -530,6 +531,18 @@ impl AskService {
             .sessions
             .last_request(parent_chat_id)
             .is_some_and(|r| r.auto_approve);
+        // Never more than the parent may do; a read-only ask is Plan's rules
+        // (enforced by every gating harness); nobody can answer its questions.
+        let parent_policy = parent_config
+            .as_ref()
+            .map(|c| c.policy.clone())
+            .unwrap_or_default();
+        let mut policy = if spec.read_only {
+            AgentPolicy::read_only().capped_by(&parent_policy)
+        } else {
+            parent_policy
+        };
+        policy.unattended = true;
         let cwd = parent.cwd.clone().unwrap_or_else(|| "~".into());
 
         let child_id = new_id();
@@ -543,6 +556,7 @@ impl AskService {
                 )
             })?;
         let config = ChatConfig {
+            policy: policy.clone(),
             harness,
             model: model.clone(),
             reasoning,
@@ -583,6 +597,7 @@ impl AskService {
         lock(&self.live).insert(child_id.clone(), state.clone());
 
         let request = RunRequest {
+            policy,
             prompt: String::new(),
             harness: Some(harness),
             model,

@@ -136,6 +136,11 @@ pub struct AgentPolicy {
     /// the user's and the project's rules at dispatch).
     #[serde(default, skip_serializing_if = "Vec::is_empty")]
     pub rules: Vec<PolicyRule>,
+    /// Nobody is there to answer (a headless child ask, a goal's verifier):
+    /// anything the policy would ask about is refused with a reason instead,
+    /// so the run keeps going rather than parking on a question forever.
+    #[serde(default, skip_serializing_if = "std::ops::Not::not")]
+    pub unattended: bool,
 }
 
 impl Default for AgentPolicy {
@@ -145,6 +150,7 @@ impl Default for AgentPolicy {
             sandbox: SandboxMode::Off,
             network: true,
             rules: Vec::new(),
+            unattended: false,
         }
     }
 }
@@ -157,14 +163,33 @@ impl AgentPolicy {
         }
     }
 
+    /// Read-only: investigates without changing anything (Plan's rules,
+    /// and a read-only sandbox where one is enforced).
+    pub fn read_only() -> Self {
+        Self {
+            mode: PermissionMode::Plan,
+            sandbox: SandboxMode::ReadOnly,
+            ..Self::default()
+        }
+    }
+
+    /// The agent can't change the workspace: Plan mode or a read-only sandbox.
+    pub fn is_read_only(&self) -> bool {
+        self.mode == PermissionMode::Plan || self.sandbox == SandboxMode::ReadOnly
+    }
+
     /// The same policy capped by `ceiling`: never more permissive than it in
     /// mode, sandbox or network (an agent-spawned chat under its spawner).
+    /// Standing rules carry over from both; unattended if either is.
     pub fn capped_by(&self, ceiling: &AgentPolicy) -> AgentPolicy {
+        let mut rules = ceiling.rules.clone();
+        rules.extend(self.rules.iter().cloned());
         AgentPolicy {
             mode: stricter_mode(self.mode, ceiling.mode),
             sandbox: stricter_sandbox(self.sandbox, ceiling.sandbox),
             network: self.network && ceiling.network,
-            rules: self.rules.clone(),
+            rules,
+            unattended: self.unattended || ceiling.unattended,
         }
     }
 }
@@ -273,12 +298,16 @@ mod tests {
             sandbox: SandboxMode::WorkspaceWrite,
             network: false,
             rules: vec![],
+            unattended: true,
         };
         let capped = child.capped_by(&parent);
         assert_eq!(capped.mode, PermissionMode::Ask);
         assert_eq!(capped.sandbox, SandboxMode::WorkspaceWrite);
         assert!(!capped.network);
+        assert!(capped.unattended, "an unattended ceiling stays unattended");
         let strict = AgentPolicy::with_mode(PermissionMode::Plan);
         assert_eq!(strict.capped_by(&parent).mode, PermissionMode::Plan);
+        assert!(AgentPolicy::read_only().is_read_only());
+        assert!(!AgentPolicy::default().is_read_only());
     }
 }

@@ -175,7 +175,7 @@ async fn the_child_never_runs_wider_than_its_parent() {
     let rig = rig(move |_, request, out, _c, client| {
         log.lock()
             .unwrap()
-            .push((request.sandbox, request.auto_approve));
+            .push((request.sandbox, request.auto_approve, request.policy.clone()));
         tokio::spawn(async move {
             submit(&client, &request, json!({"passed": true, "reason": "ok"})).await;
             text_turn(&out, "ok", None);
@@ -198,6 +198,12 @@ async fn the_child_never_runs_wider_than_its_parent() {
     // Nothing in the parent's history asked for auto-approval, so the child
     // does not get it either.
     assert!(!seen[0].1 && !seen[1].1);
+    // The permission policy: a read-only ask runs Plan's rules (which every
+    // gating harness enforces), and no child ever waits on a question.
+    assert!(seen[0].2.unattended && seen[1].2.unattended);
+    assert!(seen[1].2.is_read_only());
+    assert_eq!(seen[1].2.mode, zeron_proto::PermissionMode::Plan);
+    assert_eq!(seen[1].2.sandbox, zeron_proto::SandboxMode::ReadOnly);
 }
 
 #[tokio::test]

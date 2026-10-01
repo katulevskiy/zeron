@@ -12,7 +12,7 @@ agent to present its plan.
 
 ## The plan is part of the transcript
 
-`MessagePart::Plan { id, revision, markdown, status, decided_mode? }`:
+`MessagePart::PlanProposal { id, revision, markdown, status, decided_mode? }`. It is named so it isn't confused with the agent's checklist, which the todo panel shows: ACP plans and Codex `turn/plan/updated` feed that panel ([`todo-panel.md`](todo-panel.md)):
 
 - `status` is one of `proposed`, `approved`, `revised` or `rejected`.
 - The plan renders as a card, with its markdown and, while `proposed`, these
@@ -53,6 +53,20 @@ works from any device and phone, and the session shows *Awaiting input*.
   again.
 - **Hand off to preset P:** approve, then start a new chat (or switch this
   one) with preset P, giving it the plan as its first prompt.
+
+## With goal mode
+
+A goal set while the chat is planning waits, `paused (readOnly)`
+([`goal-mode.md`](goal-mode.md)). Approving the plan resumes it. The goal's
+rounds then run in the approved mode. Its verifier always runs read-only and
+unattended.
+
+## With native agent modes
+
+Claude Code, Cursor and OpenCode advertise their own Build/Plan modes. If
+those are exposed as model options (see the open native-interactions work),
+Zeron's mode decides them: Plan selects the agent's native plan mode where it
+has one, and the option is not offered separately.
 
 ## Desktop
 

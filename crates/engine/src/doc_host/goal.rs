@@ -618,7 +618,9 @@ impl DocHost {
             read_only_chat: self
                 .workspace()
                 .and_then(|ws| ws.chat_config(&handle.chat_id))
-                .is_some_and(|c| c.sandbox == zeron_proto::SandboxLevel::ReadOnly),
+                .is_some_and(|c| {
+                    c.sandbox == zeron_proto::SandboxLevel::ReadOnly || c.policy.is_read_only()
+                }),
             verifier_live: lock(&self.inner.goal_runs)
                 .get(&handle.chat_id)
                 .is_some_and(|run| run.goal_id == goal.id),

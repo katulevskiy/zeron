@@ -1693,6 +1693,7 @@ async fn accept_edits_allows_project_edits_and_sandboxes_natively() {
         sandbox: zeron_proto::SandboxMode::WorkspaceWrite,
         network: false,
         rules: Vec::new(),
+        unattended: false,
     };
     let (text, asked) = gated(policy, vec!["Deny"]).await;
     assert_eq!(
