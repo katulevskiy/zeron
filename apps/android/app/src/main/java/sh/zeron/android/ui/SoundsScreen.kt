@@ -80,6 +80,20 @@ fun SoundsScreen(model: AppModel, onBack: () -> Unit) {
                 SwitchRow(3, 4, ZIcons.Warning, "Errors", "A session failed, or the connection dropped mid-turn", s.errorSound, enabled = on) { v -> update { copy(errorSound = v) } }
             }
         }
+        item("notifications") {
+            val access = rememberNotificationAccess(model)
+            val granted = access.granted
+            Group {
+                SegmentedListItem(
+                    onClick = access.ask,
+                    enabled = !granted,
+                    shapes = segmentedShapes(0, 1),
+                    colors = ListItemDefaults.segmentedColors(containerColor = cardColor()),
+                    leadingContent = { IconTile(ZIcons.Bell) },
+                    supportingContent = { Text(if (granted) "On: sessions can alert you while Zeron is closed" else "Needed to alert you while Zeron is in the background") },
+                ) { Text(if (granted) "Background alerts" else "Allow notifications") }
+            }
+        }
         item("session-note") {
             Note("Only while Zeron is open. In the background the same chimes arrive with the notification, and follow your phone's notification settings.")
         }

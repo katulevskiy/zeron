@@ -1,5 +1,8 @@
 package sh.zeron.android.ui
 
+import sh.zeron.android.feedback.TapFeedback
+import sh.zeron.android.feedback.LocalFeedback
+import sh.zeron.android.feedback.Cue
 import androidx.compose.animation.AnimatedVisibility
 import androidx.compose.animation.core.MutableTransitionState
 import androidx.compose.animation.fadeIn
@@ -22,7 +25,9 @@ import androidx.compose.material3.MaterialTheme
 import androidx.compose.material3.Surface
 import androidx.compose.runtime.Composable
 import androidx.compose.runtime.getValue
+import androidx.compose.runtime.LaunchedEffect
 import androidx.compose.runtime.mutableFloatStateOf
+import androidx.compose.runtime.mutableStateOf
 import androidx.compose.runtime.remember
 import androidx.compose.runtime.setValue
 import androidx.compose.ui.Modifier
@@ -76,6 +81,13 @@ fun AnchoredPopover(
     )
     val visible = remember { MutableTransitionState(false) }
     visible.targetState = expanded
+    // Opening and closing are heard as they start, not when the animation ends.
+    val fb = LocalFeedback.current
+    var wasExpanded by remember { mutableStateOf(false) }
+    LaunchedEffect(expanded) {
+        if (expanded) fb.cue(Cue.Open) else if (wasExpanded) (fb as? TapFeedback)?.cueUnlessRecent(Cue.Close) ?: fb.cue(Cue.Close)
+        wasExpanded = expanded
+    }
     if (!visible.currentState && !visible.targetState && visible.isIdle) return
 
     val window = LocalWindowInfo.current.containerSize

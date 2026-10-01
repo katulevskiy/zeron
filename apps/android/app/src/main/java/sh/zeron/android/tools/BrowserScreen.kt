@@ -246,7 +246,7 @@ fun BrowserScreen(model: AppModel, ref: WorkspaceRef?, initialUrl: String?, onBa
                         if (!Browser.isWorkspace(url) && url.startsWith("http")) MenuAction("Open in another app", ZIcons.Link) { openExternally(context, url) } else null,
                         MenuAction("Copy link", ZIcons.Copy, haptic = sh.zeron.android.feedback.Haptic.Confirm, cue = sh.zeron.android.feedback.Cue.Copy) { clipboard.setText(AnnotatedString(url)) },
                         MenuAction("Print or save as PDF", ZIcons.Save) { print(context, web, title ?: Browser.display(url)) },
-                        MenuAction("Reload", ZIcons.Refresh) { web.reload() },
+                        MenuAction("Reload", ZIcons.Refresh, haptic = sh.zeron.android.feedback.Haptic.Select, cue = sh.zeron.android.feedback.Cue.Refresh) { web.reload() },
                     ),
                 )
             }
@@ -276,7 +276,7 @@ fun BrowserScreen(model: AppModel, ref: WorkspaceRef?, initialUrl: String?, onBa
             ) {
                 IconButton(onClick = { web.goBack() }, enabled = canBack) { ZIcon(ZIcons.Back, "Back", Modifier.size(22.dp)) }
                 IconButton(onClick = { web.goForward() }, enabled = canForward) { ZIcon(ZIcons.Forward, "Forward", Modifier.size(22.dp)) }
-                IconButton(onClick = { if (loading) web.stopLoading() else web.reload() }) {
+                IconButton(onClick = sh.zeron.android.feedback.feedbackAction(sh.zeron.android.feedback.Haptic.Select, if (loading) sh.zeron.android.feedback.Cue.Close else sh.zeron.android.feedback.Cue.Refresh) { if (loading) web.stopLoading() else web.reload() }) {
                     ZIcon(if (loading) ZIcons.Stop else ZIcons.Refresh, if (loading) "Stop" else "Reload", Modifier.size(22.dp))
                 }
                 if (ref?.chatId != null) {

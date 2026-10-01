@@ -127,6 +127,7 @@ fun Composer(
 ) {
     val draft = remember(c.chatId) { ComposerModel() }
     val fb = LocalFeedback.current
+    val notifications = rememberNotificationAccess(model)
     val scope = rememberCoroutineScope()
     val focus = remember { FocusRequester() }
     var error by remember { mutableStateOf<String?>(null) }
@@ -228,6 +229,7 @@ fun Composer(
             draft.clear()
             error = null
             delivery = Delivery.Queue
+            notifications.askOnce() // the first message: the moment background alerts make sense
             // An immediate send gets the runway; one queued behind a live turn
             // takes it over once its bubble lands.
             if (queued) transcript.expectQueuedTurn() else transcript.beginOwnTurn()

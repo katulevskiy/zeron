@@ -1,5 +1,8 @@
 package sh.zeron.android.ui
 
+import sh.zeron.android.feedback.feedbackAction
+import sh.zeron.android.feedback.Haptic
+import sh.zeron.android.feedback.Cue
 import androidx.compose.foundation.background
 import androidx.compose.foundation.clickable
 import androidx.compose.foundation.layout.Arrangement
@@ -224,7 +227,7 @@ private fun ColumnScope.BranchPickerContent(
         listOf(false to "Current checkout", true to "New worktree").forEachIndexed { i, (worktree, label) ->
             ToggleButton(
                 checked = draft.worktree == worktree,
-                onCheckedChange = { onCheckout(worktree) },
+                onCheckedChange = feedbackAction(Haptic.Select, Cue.Select) { onCheckout(worktree) }.let { act -> { _: Boolean -> if (draft.worktree != worktree) act() } },
                 shapes = if (i == 0) ButtonGroupDefaults.connectedLeadingButtonShapes() else ButtonGroupDefaults.connectedTrailingButtonShapes(),
                 modifier = Modifier.weight(1f).semantics { role = Role.RadioButton },
             ) {

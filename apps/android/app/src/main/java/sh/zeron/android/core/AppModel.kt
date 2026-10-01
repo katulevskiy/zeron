@@ -121,6 +121,11 @@ class AppModel(private val app: Application) {
     private val linkTransitions = LinkTransitions()
     private val sessionFeedback by lazy { SessionFeedbackPolicy(feedback, notifier, { inForeground }, android.os.SystemClock::uptimeMillis) }
 
+    /** The notification permission has been asked for once (it is asked in context, not at launch). */
+    var notificationsAsked: Boolean
+        get() = settings.getBoolean("asked.notifications", false)
+        set(value) = settings.edit().putBoolean("asked.notifications", value).apply()
+
     /** Routes asked for by a notification tap while the app is already running. */
     val routeRequests = MutableSharedFlow<String>(extraBufferCapacity = 4)
 
