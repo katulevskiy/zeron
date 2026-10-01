@@ -32,6 +32,7 @@ pub enum DocError {
     Json(#[from] serde_json::Error),
 }
 
+#[derive(ts_rs::TS)]
 #[derive(Debug, Clone, Copy, PartialEq, Eq, Serialize, Deserialize)]
 #[serde(rename_all = "lowercase")]
 pub enum MessageRole {
@@ -41,6 +42,7 @@ pub enum MessageRole {
 }
 
 /// One entry in the doc's `messages` list (`SessionMessageEntry` in TS).
+#[derive(ts_rs::TS)]
 #[derive(Debug, Clone, PartialEq, Serialize, Deserialize)]
 #[serde(rename_all = "camelCase")]
 pub struct SessionMessageEntry {
@@ -1317,6 +1319,7 @@ pub(crate) fn loro_value_from_json(v: &serde_json::Value) -> LoroValue {
 }
 
 /// Tail sidecar shape (`SessionTail` in TS).
+#[derive(ts_rs::TS)]
 #[derive(Debug, Clone, PartialEq, Serialize, Deserialize)]
 #[serde(rename_all = "camelCase")]
 pub struct SessionTail {

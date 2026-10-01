@@ -14,10 +14,6 @@ pub mod capabilities {
     pub const MESSAGE_QUEUE_CLEAN_ATTACHMENT_TEXT_V1: &str =
         "message-queue-clean-attachment-text-v1";
     pub const MESSAGE_QUEUE_EDIT_LEASE_V1: &str = "message-queue-edit-lease-v1";
-    /// The engine serves the browser web client: embedded pages at the
-    /// remote listener root, pre-auth sign-in routes, and first-frame
-    /// `Auth` WebSocket authentication.
-    pub const WEB_CLIENT: &str = "web-client";
 
     pub const CURRENT: &[&str] = &[
         COMPOSER_REFERENCES_V1,
@@ -26,7 +22,6 @@ pub mod capabilities {
         MESSAGE_QUEUE_ATTACHMENTS_V1,
         MESSAGE_QUEUE_CLEAN_ATTACHMENT_TEXT_V1,
         MESSAGE_QUEUE_EDIT_LEASE_V1,
-        WEB_CLIENT,
     ];
 
     pub fn current() -> Vec<String> {
@@ -38,7 +33,7 @@ pub mod capabilities {
 ///
 /// Authentication can change while a runtime is alive, but its workspace scope
 /// cannot. Switching scopes requires assembling a new runtime.
-#[derive(Debug, Clone, Copy, PartialEq, Eq, Serialize, Deserialize)]
+#[derive(ts_rs::TS, Debug, Clone, Copy, PartialEq, Eq, Serialize, Deserialize)]
 #[serde(rename_all = "camelCase")]
 pub enum WorkspaceScope {
     Local,
@@ -47,7 +42,7 @@ pub enum WorkspaceScope {
 }
 
 /// Stable information about the engine runtime reached by a client.
-#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
+#[derive(ts_rs::TS, Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
 #[serde(rename_all = "camelCase")]
 pub struct EngineInfo {
     pub device_id: String,
@@ -106,7 +101,6 @@ mod tests {
                     "message-queue-attachments-v1",
                     "message-queue-clean-attachment-text-v1",
                     "message-queue-edit-lease-v1",
-                    "web-client"
                 ],
             })
         );

@@ -1,0 +1,28 @@
+// RETAINED BROWSER MODEL — not generated or freshness-verified against upstream Rust.
+// See ../README.md; do not use this declaration as proof that a method is supported.
+
+import type { ChatConfig } from "../generated/ChatConfig";
+
+/**
+ * The Mutate surface (feature-inventory §2 DataRpc), tagged by `op`.
+ */
+export type MutateParams = { "op": "createChat", chatId: string,
+/**
+ * The project the chat is created in — fixes host device + base cwd.
+ * `None` mints a project-less chat: `deviceId` picks the host and the
+ * cwd defaults to `~` (expanded on the host at run time).
+ */
+spaceId?: string,
+/**
+ * Host device for a project-less chat; ignored when `spaceId` is set.
+ */
+deviceId?: string, config?: ChatConfig,
+/**
+ * The picked ref, named on the row from the first frame (the footer
+ * read "Select ref" until the diff reconciler stamped it).
+ */
+branch?: string,
+/**
+ * Cwd override (isolated-worktree path); default = the space's folder.
+ */
+cwd?: string, } | { "op": "createSpace", spaceId: string, deviceId: string, path: string, name?: string, gitDetected: boolean, } | { "op": "renameSpace", spaceId: string, name?: string, } | { "op": "deleteSpace", spaceId: string, } | { "op": "renameChat", chatId: string, title: string, } | { "op": "setChatBranch", chatId: string, branch: string, } | { "op": "setChatCwd", chatId: string, cwd: string, } | { "op": "setChatActivity", chatId: string, lastMessageAt?: number, createdAt?: number, } | { "op": "setChatHost", chatId: string, deviceId: string, } | { "op": "setChatArchived", chatId: string, archived: boolean, } | { "op": "setChatConfig", chatId: string, config: ChatConfig, } | { "op": "deleteChat", chatId: string, } | { "op": "renameDevice", deviceId: string, name: string, } | { "op": "markChatSeen", chatId: string, at?: number, };

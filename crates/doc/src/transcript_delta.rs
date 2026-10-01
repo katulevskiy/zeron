@@ -17,6 +17,7 @@ use crate::schema::SessionMessageEntry;
 
 /// Transcript changes and the current host-owned context snapshot travel together.
 /// Older readers ignore `contextUsage`; older hosts decode as unknown usage.
+#[derive(ts_rs::TS)]
 #[derive(Debug, Clone, Serialize, Deserialize)]
 #[serde(rename_all = "camelCase")]
 pub struct TranscriptUpdate {
@@ -34,6 +35,7 @@ pub struct TranscriptUpdate {
 /// Keeping the cutoff (rather than a one-frame boolean) lets a viewport
 /// coalesce historical and live updates without animating the history or
 /// swallowing the first live arrival. No transcript text is duplicated.
+#[derive(ts_rs::TS)]
 #[derive(Debug, Clone, Default, PartialEq, Eq, Serialize, Deserialize)]
 pub struct TranscriptBaseline {
     pub entries: HashMap<String, HashMap<String, usize>>,
@@ -101,6 +103,7 @@ impl TranscriptBaseline {
 }
 
 /// One `WatchDocMessages` stream item.
+#[derive(ts_rs::TS)]
 #[derive(Debug, Clone, Serialize, Deserialize)]
 #[serde(untagged)]
 pub enum TranscriptFrame {
@@ -123,6 +126,7 @@ pub enum TranscriptFrame {
 /// An inserted or replaced entry, positioned after `after` (`None` = head).
 /// Anchors are prior upserts of the same frame or unchanged entries, so
 /// applying upserts in frame order always finds them settled.
+#[derive(ts_rs::TS)]
 #[derive(Debug, Clone, Serialize, Deserialize)]
 pub struct TranscriptUpsert {
     pub after: Option<String>,
@@ -133,6 +137,7 @@ pub struct TranscriptUpsert {
 /// upserts re-send the whole live entry per tick, which for a long single
 /// reply is the whole reply again (continuations re-join before the watch);
 /// this carries only the new tokens.
+#[derive(ts_rs::TS)]
 #[derive(Debug, Clone, Serialize, Deserialize)]
 pub struct TextAppend {
     pub entry: String,

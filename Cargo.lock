@@ -4521,21 +4521,6 @@ dependencies = [
 ]
 
 [[package]]
-name = "jsonwebtoken"
-version = "9.3.1"
-source = "registry+https://github.com/rust-lang/crates.io-index"
-checksum = "5a87cc7a48537badeae96744432de36f4be2b4a34a05a5ef32e9dd8a1c169dde"
-dependencies = [
- "base64 0.22.1",
- "js-sys",
- "pem 3.0.6",
- "ring",
- "serde",
- "serde_json",
- "simple_asn1",
-]
-
-[[package]]
 name = "khronos-egl"
 version = "6.0.0"
 source = "registry+https://github.com/rust-lang/crates.io-index"
@@ -6191,16 +6176,6 @@ dependencies = [
 
 [[package]]
 name = "pem"
-version = "3.0.6"
-source = "registry+https://github.com/rust-lang/crates.io-index"
-checksum = "1d30c53c26bc5b31a98cd02d20f25a7c8567146caf63ed593a9d87b2775291be"
-dependencies = [
- "base64 0.22.1",
- "serde_core",
-]
-
-[[package]]
-name = "pem"
 version = "4.0.0"
 source = "registry+https://github.com/rust-lang/crates.io-index"
 checksum = "d354a98a3d1251555de99e8fdd8afda05573c31b82f59063a7b0a29b5527f120"
@@ -7219,7 +7194,7 @@ version = "0.14.10"
 source = "registry+https://github.com/rust-lang/crates.io-index"
 checksum = "8774e05a7d0de114588e6a28fe7e71694b82614ed569d86d8b389dfbc98b8ad8"
 dependencies = [
- "pem 4.0.0",
+ "pem",
  "ring",
  "rustls-pki-types",
  "time",
@@ -8437,18 +8412,6 @@ name = "similar"
 version = "2.7.0"
 source = "registry+https://github.com/rust-lang/crates.io-index"
 checksum = "bbbb5d9659141646ae647b42fe094daf6c6192d1620870b449d9557f748b2daa"
-
-[[package]]
-name = "simple_asn1"
-version = "0.6.4"
-source = "registry+https://github.com/rust-lang/crates.io-index"
-checksum = "0d585997b0ac10be3c5ee635f1bab02d512760d14b7c468801ac8a01d9ae5f1d"
-dependencies = [
- "num-bigint",
- "num-traits",
- "thiserror 2.0.20",
- "time",
-]
 
 [[package]]
 name = "simplecss"
@@ -9788,6 +9751,31 @@ name = "try-lock"
 version = "0.2.5"
 source = "registry+https://github.com/rust-lang/crates.io-index"
 checksum = "e421abadd41a4225275504ea4d6566923418b7f05506fbc9c0fe86ba7396114b"
+
+[[package]]
+name = "ts-rs"
+version = "12.0.1"
+source = "registry+https://github.com/rust-lang/crates.io-index"
+checksum = "756050066659291d47a554a9f558125db17428b073c5ffce1daf5dcb0f7231d8"
+dependencies = [
+ "chrono",
+ "serde_json",
+ "thiserror 2.0.20",
+ "ts-rs-macros",
+ "uuid",
+]
+
+[[package]]
+name = "ts-rs-macros"
+version = "12.0.1"
+source = "registry+https://github.com/rust-lang/crates.io-index"
+checksum = "38d90eea51bc7988ef9e674bf80a85ba6804739e535e9cab48e4bb34a8b652aa"
+dependencies = [
+ "proc-macro2",
+ "quote",
+ "syn 2.0.119",
+ "termcolor",
+]
 
 [[package]]
 name = "ttf-parser"
@@ -11240,6 +11228,19 @@ dependencies = [
 ]
 
 [[package]]
+name = "wiregen"
+version = "0.2.84"
+dependencies = [
+ "anyhow",
+ "syn 2.0.119",
+ "tempfile",
+ "ts-rs",
+ "zeron-doc",
+ "zeron-proto",
+ "zeron-update",
+]
+
+[[package]]
 name = "wit-bindgen"
 version = "0.57.1"
 source = "registry+https://github.com/rust-lang/crates.io-index"
@@ -11811,6 +11812,7 @@ dependencies = [
  "similar",
  "thiserror 2.0.20",
  "tracing",
+ "ts-rs",
  "zeron-proto",
 ]
 
@@ -11821,15 +11823,10 @@ dependencies = [
  "anyhow",
  "async-trait",
  "base64 0.22.1",
- "bytes",
  "chrono",
  "futures",
  "gethostname",
- "http-body-util",
- "hyper",
- "hyper-util",
  "ignore",
- "jsonwebtoken",
  "libc",
  "loro",
  "notify",
@@ -11837,7 +11834,6 @@ dependencies = [
  "portable-pty",
  "reqwest",
  "rusqlite",
- "rust-embed",
  "serde",
  "serde_json",
  "sha2",
@@ -11940,6 +11936,7 @@ dependencies = [
  "pulldown-cmark",
  "serde",
  "serde_json",
+ "ts-rs",
  "uuid",
 ]
 
@@ -12113,6 +12110,7 @@ dependencies = [
  "tempfile",
  "tokio",
  "tracing",
+ "ts-rs",
  "windows-sys 0.61.2",
 ]
 

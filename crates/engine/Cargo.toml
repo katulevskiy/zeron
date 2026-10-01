@@ -35,13 +35,6 @@ sha2.workspace = true
 reqwest.workspace = true
 ignore.workspace = true
 nucleo-matcher.workspace = true
-hyper.workspace = true
-hyper-util.workspace = true
-http-body-util.workspace = true
-bytes.workspace = true
-jsonwebtoken.workspace = true
-tokio-tungstenite.workspace = true
-rust-embed = "=8.7.2"
 
 tempfile.workspace = true
 
@@ -51,6 +44,6 @@ windows-sys = { version = "0.61", features = ["Win32_Foundation", "Win32_Securit
 [dev-dependencies]
 zeron-harness = { workspace = true, features = ["installer-fixture"] }
 zip.workspace = true
-# (tokio-tungstenite is a regular dependency — used by the remote listener)
+tokio-tungstenite.workspace = true
 # In-process registry server for the two-engine workspace integration tests.
 zeron-sync = { workspace = true, features = ["mock-server"] }

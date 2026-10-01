@@ -69,6 +69,7 @@ pub fn summarize_tool_output(text: &str) -> Option<String> {
 /// The inline diff was the bigger bomb than outputs — 32KB/edit, unexercised
 /// only because the claude harness emits none. Full diff text lives in the
 /// sidecar behind `diff_ref`.
+#[derive(ts_rs::TS)]
 #[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
 #[serde(rename_all = "camelCase")]
 pub struct ToolDiffStat {
@@ -102,6 +103,7 @@ pub fn diff_stat(diff: &ToolDiff) -> ToolDiffStat {
     }
 }
 
+#[derive(ts_rs::TS)]
 #[derive(Debug, Clone, Copy, PartialEq, Eq, Serialize, Deserialize)]
 #[serde(rename_all = "camelCase")]
 pub enum MessageStatus {
@@ -111,6 +113,7 @@ pub enum MessageStatus {
 }
 
 /// Lifecycle of a spawned subagent, carried on its spawn chip.
+#[derive(ts_rs::TS)]
 #[derive(Debug, Clone, Copy, PartialEq, Eq, Serialize, Deserialize)]
 #[serde(rename_all = "camelCase")]
 pub enum SubagentStatus {
@@ -120,6 +123,7 @@ pub enum SubagentStatus {
 }
 
 /// One rendered part of an assistant message.
+#[derive(ts_rs::TS)]
 #[derive(Debug, Clone, PartialEq, Serialize, Deserialize)]
 #[serde(tag = "kind", rename_all = "camelCase")]
 pub enum MessagePart {

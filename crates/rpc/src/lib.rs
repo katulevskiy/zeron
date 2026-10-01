@@ -24,7 +24,7 @@ mod pump;
 
 mod server;
 
-pub use client::{RpcClient, RpcSubscription, connect_ws, connect_ws_authenticated};
+pub use client::{RpcClient, RpcSubscription, connect_ws};
 pub use device_room::{
     DeviceFrameHeader, DeviceLink, HostRelay, HostRelayConfig, LinkCache, LinkCacheConfig,
     NudgeHandler, PeerLiveness, PeerLivenessProbe, StaticToken, TokenError, TokenSource,

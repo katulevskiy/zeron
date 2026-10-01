@@ -21,6 +21,7 @@ use serde::{Deserialize, Serialize};
 use crate::schema::{DocError, SessionDoc};
 
 /// One unsent message waiting its turn.
+#[derive(ts_rs::TS)]
 #[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
 #[serde(rename_all = "camelCase")]
 pub struct QueuedMessage {
@@ -54,6 +55,7 @@ pub struct QueuedMessage {
 /// Why a queued row is not currently eligible for automatic or explicit
 /// delivery. Kept on the row so moves preserve it and deleting the row cannot
 /// leave an orphaned lease behind.
+#[derive(ts_rs::TS)]
 #[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
 #[serde(
     tag = "kind",

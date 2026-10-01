@@ -27,6 +27,7 @@ pub fn validate_sidebar_pin_update(
     Ok(())
 }
 
+#[derive(ts_rs::TS)]
 #[derive(Debug, Clone, Default, PartialEq, Eq, Serialize, Deserialize)]
 #[serde(rename_all = "camelCase")]
 pub struct SidebarPreferences {
@@ -38,6 +39,7 @@ pub struct SidebarPreferences {
 
 /// A user-named sidebar section. Archived sessions retain membership so restoring
 /// them restores their section; deleting the section never deletes sessions.
+#[derive(ts_rs::TS)]
 #[derive(Debug, Clone, PartialEq, Eq, serde::Serialize, serde::Deserialize)]
 pub struct SidebarSection {
     pub id: String,
@@ -50,6 +52,7 @@ pub struct SidebarSection {
 
 /// Watch payload for pins. `initialized` records known cached state, including
 /// an empty list; `synced` records receipt of an authoritative registry state.
+#[derive(ts_rs::TS)]
 #[derive(Debug, Clone, Default, PartialEq, Eq, Serialize, Deserialize)]
 #[serde(rename_all = "camelCase")]
 pub struct SidebarPreferencesState {
@@ -72,6 +75,7 @@ impl SidebarPreferencesState {
     }
 }
 
+#[derive(ts_rs::TS)]
 #[derive(Debug, Clone, PartialEq, Serialize, Deserialize)]
 #[serde(rename_all = "camelCase")]
 pub struct Device {
@@ -107,6 +111,7 @@ impl Device {
 /// base cwd. Folders need not be git repos: `git_detected` is stamped by the
 /// owning device (SpacesSync) and gates branch pickers / the diff sidebar on
 /// every device without an RPC.
+#[derive(ts_rs::TS)]
 #[derive(Debug, Clone, PartialEq, Serialize, Deserialize)]
 #[serde(rename_all = "camelCase")]
 pub struct Space {
@@ -149,6 +154,7 @@ impl Space {
     }
 }
 
+#[derive(ts_rs::TS)]
 #[derive(Debug, Clone, PartialEq, Serialize, Deserialize)]
 #[serde(rename_all = "camelCase")]
 pub struct ChatConfig {
@@ -156,6 +162,7 @@ pub struct ChatConfig {
     pub model: Option<String>,
     pub reasoning: Option<ReasoningLevel>,
     #[serde(default)]
+    #[ts(type = "Record<string, unknown>")]
     pub model_options: serde_json::Map<String, serde_json::Value>,
     pub sandbox: SandboxLevel,
 }
@@ -165,6 +172,7 @@ pub struct ChatConfig {
 /// This is deliberately separate from the live checkout snapshot: another
 /// chat may change the branch at the same checkout without changing which
 /// branch this conversation belongs to.
+#[derive(ts_rs::TS)]
 #[derive(Debug, Clone, PartialEq, Serialize, Deserialize)]
 #[serde(rename_all = "camelCase")]
 pub struct ConversationSourceContext {
@@ -177,6 +185,7 @@ pub struct ConversationSourceContext {
     pub observed_at: DateTime<Utc>,
 }
 
+#[derive(ts_rs::TS)]
 #[derive(Debug, Clone, PartialEq, Serialize, Deserialize)]
 #[serde(rename_all = "camelCase")]
 pub struct Chat {
@@ -252,6 +261,7 @@ impl Chat {
 
 /// Display status for a chat row/tab: the four user-facing states plus a
 /// distinct Errored. Derived — never stored.
+#[derive(ts_rs::TS)]
 #[derive(Debug, Clone, Copy, PartialEq, Eq, Serialize, Deserialize)]
 #[serde(rename_all = "camelCase")]
 pub enum ChatIndicator {
@@ -275,6 +285,7 @@ pub fn chat_indicator(chat: &Chat, live: Option<&Session>) -> ChatIndicator {
     }
 }
 
+#[derive(ts_rs::TS)]
 #[derive(Debug, Clone, Copy, PartialEq, Eq, Serialize, Deserialize)]
 #[serde(rename_all = "camelCase")]
 pub enum SessionStatus {
@@ -287,6 +298,7 @@ pub enum SessionStatus {
 /// Live run status for a chat — drives the Working indicator and sidebar status dots.
 /// Staleness-checked client-side against `updated_at` so a crashed backend never shows
 /// an eternal "Working".
+#[derive(ts_rs::TS)]
 #[derive(Debug, Clone, PartialEq, Serialize, Deserialize)]
 #[serde(rename_all = "camelCase")]
 pub struct Session {

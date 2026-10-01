@@ -2,6 +2,7 @@
 
 use serde::{Deserialize, Serialize};
 
+#[derive(ts_rs::TS)]
 #[derive(Debug, Clone, Copy, PartialEq, Eq, Hash, Serialize, Deserialize)]
 #[serde(rename_all = "kebab-case")]
 pub enum HarnessId {
@@ -27,6 +28,7 @@ pub enum HarnessId {
     Mock,
 }
 
+#[derive(ts_rs::TS)]
 #[derive(Debug, Clone, Copy, PartialEq, Eq, PartialOrd, Ord, Serialize, Deserialize)]
 #[serde(rename_all = "lowercase")]
 pub enum ReasoningLevel {
@@ -43,6 +45,7 @@ pub enum ReasoningLevel {
     Ultrathink,
 }
 
+#[derive(ts_rs::TS)]
 #[derive(Debug, Clone, Copy, PartialEq, Eq, Serialize, Deserialize)]
 #[serde(rename_all = "kebab-case")]
 pub enum SandboxLevel {
@@ -51,6 +54,7 @@ pub enum SandboxLevel {
     DangerFullAccess,
 }
 
+#[derive(ts_rs::TS)]
 #[derive(Debug, Clone, Copy, PartialEq, Eq, Serialize, Deserialize)]
 #[serde(rename_all = "kebab-case")]
 pub enum SteeringMode {
@@ -60,6 +64,7 @@ pub enum SteeringMode {
     TurnBoundary,
 }
 
+#[derive(ts_rs::TS)]
 #[derive(Debug, Clone, PartialEq, Serialize, Deserialize)]
 #[serde(rename_all = "camelCase")]
 pub struct Model {
@@ -75,6 +80,7 @@ pub struct Model {
     pub options: Vec<ModelOption>,
 }
 
+#[derive(ts_rs::TS)]
 #[derive(Debug, Clone, PartialEq, Serialize, Deserialize)]
 #[serde(rename_all = "camelCase")]
 pub struct ModelOption {
@@ -84,6 +90,7 @@ pub struct ModelOption {
     pub default_choice: String,
 }
 
+#[derive(ts_rs::TS)]
 #[derive(Debug, Clone, PartialEq, Serialize, Deserialize)]
 #[serde(rename_all = "camelCase")]
 pub struct ModelOptionChoice {
@@ -91,6 +98,7 @@ pub struct ModelOptionChoice {
     pub label: String,
 }
 
+#[derive(ts_rs::TS)]
 #[derive(Debug, Clone, PartialEq, Serialize, Deserialize)]
 #[serde(rename_all = "camelCase")]
 pub struct RunRequest {
@@ -105,6 +113,7 @@ pub struct RunRequest {
     pub reasoning: Option<ReasoningLevel>,
     /// Harness-specific option selections (option id -> choice id), JSON round-tripped.
     #[serde(default)]
+    #[ts(type = "Record<string, unknown>")]
     pub model_options: serde_json::Map<String, serde_json::Value>,
     pub cwd: String,
     pub sandbox: SandboxLevel,
@@ -133,6 +142,7 @@ pub struct RunRequest {
 /// blocking CreateWorktree RPC — so the send path stays durable: a lost relay
 /// frame can't wedge the composer on "Sending…" while the session runs anyway
 /// (2026-08-18 user report).
+#[derive(ts_rs::TS)]
 #[derive(Debug, Clone, PartialEq, Serialize, Deserialize)]
 #[serde(rename_all = "camelCase")]
 pub struct WorktreeSpec {
@@ -155,6 +165,7 @@ pub struct WorktreeSpec {
 pub const LIVE_PLAN_TOOL_ID: &str = "acp-plan";
 
 /// A decoded tool invocation, reduced to the fields each kind renders.
+#[derive(ts_rs::TS)]
 #[derive(Debug, Clone, PartialEq, Serialize, Deserialize)]
 #[serde(tag = "kind", rename_all = "camelCase")]
 pub enum ToolCall {
@@ -168,22 +179,27 @@ pub enum ToolCall {
         path: String,
         /// Full content; STRIPPED by the render-parts policy before entering the doc.
         #[serde(skip_serializing_if = "Option::is_none")]
+        #[ts(optional = nullable)]
         content: Option<String>,
     },
     EditFile {
         path: String,
         #[serde(skip_serializing_if = "Option::is_none")]
+        #[ts(optional = nullable)]
         old_string: Option<String>,
         #[serde(skip_serializing_if = "Option::is_none")]
+        #[ts(optional = nullable)]
         new_string: Option<String>,
     },
     ApplyPatch {
         #[serde(skip_serializing_if = "Option::is_none")]
+        #[ts(optional = nullable)]
         path: Option<String>,
     },
     Search {
         pattern: String,
         #[serde(skip_serializing_if = "Option::is_none")]
+        #[ts(optional = nullable)]
         path: Option<String>,
     },
     Glob {
@@ -192,6 +208,7 @@ pub enum ToolCall {
     WebFetch {
         url: String,
         #[serde(skip_serializing_if = "Option::is_none")]
+        #[ts(optional = nullable)]
         prompt: Option<String>,
     },
     WebSearch {
@@ -205,11 +222,13 @@ pub enum ToolCall {
         server: String,
         tool: String,
         #[serde(skip_serializing_if = "Option::is_none")]
+        #[ts(type = "unknown", optional = nullable)]
         input: Option<serde_json::Value>,
     },
     Unknown {
         name: String,
         #[serde(skip_serializing_if = "Option::is_none")]
+        #[ts(type = "unknown", optional = nullable)]
         input: Option<serde_json::Value>,
     },
 }
@@ -275,6 +294,7 @@ pub const SUBAGENT_INPUT_KEEP: [&str; 5] = [
     "subagent_type",
 ];
 
+#[derive(ts_rs::TS)]
 #[derive(Debug, Clone, PartialEq, Serialize, Deserialize)]
 #[serde(rename_all = "camelCase")]
 pub struct TodoItem {
@@ -284,6 +304,7 @@ pub struct TodoItem {
 
 /// A slash command advertised by the agent (ACP `availableCommands`): typed as
 /// `/name` at the start of the composer, sent to the agent as prompt text.
+#[derive(ts_rs::TS)]
 #[derive(Debug, Clone, PartialEq, Serialize, Deserialize)]
 #[serde(rename_all = "camelCase")]
 pub struct SlashCommand {
@@ -297,6 +318,7 @@ pub struct SlashCommand {
 
 /// A file modification carried inline on a tool result (ACP
 /// `ToolCallContent::Diff`). `old_text: None` means a new file.
+#[derive(ts_rs::TS)]
 #[derive(Debug, Clone, PartialEq, Serialize, Deserialize)]
 #[serde(rename_all = "camelCase")]
 pub struct ToolDiff {
@@ -306,6 +328,7 @@ pub struct ToolDiff {
     pub new_text: String,
 }
 
+#[derive(ts_rs::TS)]
 #[derive(Debug, Clone, PartialEq, Serialize, Deserialize)]
 #[serde(rename_all = "camelCase")]
 pub struct UserInputQuestion {
@@ -317,6 +340,7 @@ pub struct UserInputQuestion {
     pub multi_select: bool,
 }
 
+#[derive(ts_rs::TS)]
 #[derive(Debug, Clone, PartialEq, Serialize, Deserialize)]
 #[serde(rename_all = "camelCase")]
 pub struct UserInputAnswer {
@@ -324,6 +348,7 @@ pub struct UserInputAnswer {
     pub labels: Vec<String>,
 }
 
+#[derive(ts_rs::TS)]
 #[derive(Debug, Clone, Copy, PartialEq, Eq, Serialize, Deserialize)]
 #[serde(rename_all = "camelCase")]
 pub enum DoneStatus {
@@ -335,6 +360,7 @@ pub enum DoneStatus {
 /// The normalized streaming event every harness emits.
 ///
 /// Mirrors zeron's `AgentEvent` tagged enum.
+#[derive(ts_rs::TS)]
 #[derive(Debug, Clone, PartialEq, Serialize, Deserialize)]
 #[serde(tag = "type", rename_all = "camelCase")]
 pub enum AgentEvent {
@@ -581,6 +607,7 @@ mod tests {
 }
 
 /// Host-owned context snapshot, replicated with the chat document.
+#[derive(ts_rs::TS)]
 #[derive(Debug, Clone, Copy, Default, PartialEq, Eq, Serialize, Deserialize)]
 #[serde(rename_all = "camelCase")]
 pub struct ContextUsage {

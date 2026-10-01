@@ -65,6 +65,7 @@ pub fn pin_order_key_between(
     Err("Pin ordering key is too long")
 }
 
+#[derive(ts_rs::TS)]
 #[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
 #[serde(tag = "action", rename_all = "camelCase")]
 pub enum SidebarPinChange {
@@ -131,6 +132,7 @@ impl SidebarPinChange {
 }
 
 /// Section intents share the pin queue so moves cannot overtake one another.
+#[derive(ts_rs::TS)]
 #[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
 #[serde(tag = "action", rename_all = "camelCase")]
 pub enum SidebarSectionChange {

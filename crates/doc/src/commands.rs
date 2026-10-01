@@ -14,6 +14,7 @@ use zeron_proto::{RunRequest, UserInputAnswer};
 
 use crate::constants::COMMAND_DEFAULT_TTL_MS;
 
+#[derive(ts_rs::TS)]
 #[derive(Debug, Clone, Copy, PartialEq, Eq, Serialize, Deserialize)]
 #[serde(rename_all = "camelCase")]
 pub enum SessionCommandKind {
@@ -23,6 +24,7 @@ pub enum SessionCommandKind {
     RespondInput,
 }
 
+#[derive(ts_rs::TS)]
 #[derive(Debug, Clone, Copy, PartialEq, Eq, Serialize, Deserialize)]
 #[serde(rename_all = "camelCase")]
 pub enum SessionCommandStatus {
@@ -34,6 +36,7 @@ pub enum SessionCommandStatus {
     Cancelled,
 }
 
+#[derive(ts_rs::TS)]
 #[derive(Debug, Clone, PartialEq, Serialize, Deserialize)]
 #[serde(tag = "kind", rename_all = "camelCase")]
 pub enum SessionCommandPayload {
@@ -67,6 +70,7 @@ impl SessionCommandPayload {
     }
 }
 
+#[derive(ts_rs::TS)]
 #[derive(Debug, Clone, PartialEq, Default, Serialize, Deserialize)]
 #[serde(rename_all = "camelCase")]
 pub struct CommandBasedOn {
@@ -74,6 +78,7 @@ pub struct CommandBasedOn {
     pub frontier: Option<String>,
 }
 
+#[derive(ts_rs::TS)]
 #[derive(Debug, Clone, PartialEq, Serialize, Deserialize)]
 #[serde(rename_all = "camelCase")]
 pub struct SessionCommandEntry {

@@ -1,0 +1,21 @@
+// RETAINED BROWSER MODEL — not generated or freshness-verified against upstream Rust.
+// See ../README.md; do not use this declaration as proof that a method is supported.
+
+import type { GitHistoryCommit } from "./GitHistoryCommit";
+import type { GitHistoryComparison } from "./GitHistoryComparison";
+
+export type GitHistoryPage = { commits: Array<GitHistoryCommit>,
+/**
+ * Deduplicated tips of every public local/remote branch. Populated with
+ * the first page so clients can switch to the compact overview without
+ * another round trip or loading the complete history.
+ */
+branchTips: Array<GitHistoryCommit>, headSha: string | null, nextCursor: number | null, totalCount: number | null,
+/**
+ * Number of commits reachable from the active checkout's HEAD.
+ */
+headCommitCount: number | null,
+/**
+ * Current branch divergence from the preferred integration branch.
+ */
+comparison?: GitHistoryComparison | null, };

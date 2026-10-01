@@ -27,7 +27,7 @@ export interface WatchQueueSnapshot {
   items: QueuedMessage[];
 }
 
-// HAND SHIM — ad-hoc `serde_json::json!` RPC replies (crates/engine/rpc.rs).
+// HAND SHIM — ad-hoc `serde_json::json!` RPC replies (crates/engine/src/rpc.rs).
 // No Rust types exist; these are the literal reply shapes.
 /** `QueueCommand` reply (send/steer/interrupt/respond-input all ride it). */
 export interface QueueCommandReply {
@@ -75,14 +75,6 @@ export interface UploadCommitReply {
 /** `FetchToolBlob` reply (full tool output or full diff text). */
 export interface FetchToolBlobReply {
   text: string;
-}
-/** `PrepareSpacePath` reply (`crates/engine/src/space_paths.rs::SpacePath`,
- * camelCase on the wire): the resolved absolute path, whether it exists, and
- * whether it sits inside a git work tree. */
-export interface PrepareSpacePathReply {
-  path: string;
-  exists: boolean;
-  gitDetected: boolean;
 }
 /** `RelayCommand` reply (peer-delivery fallback outcome). */
 export interface RelayCommandReply {

@@ -12,6 +12,7 @@ members = [
     "crates/update",
     "crates/ui",
     "crates/syntax",
+    "crates/wiregen",
     "crates/mcp",
     "apps/zeron",
 ]
@@ -104,6 +105,8 @@ json5 = "0.4"
 deser-hjson = "2.2"
 plist = "1"
 uuid = { version = "1", features = ["v4", "serde"] }
+# Browser wire types are generated from the same serde models.
+ts-rs = { version = "12", features = ["serde-json-impl", "chrono-impl", "uuid-impl"] }
 
 # storage
 rusqlite = { version = "0.32", features = ["bundled"] }
