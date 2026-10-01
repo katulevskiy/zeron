@@ -259,6 +259,33 @@ fn main() -> anyhow::Result<()> {
                 });
                 pause(cx, 1200).await;
                 capture(window.into(), cx, &output, "approval-prompt")?;
+                // A plan waiting for its decision.
+                state.update(cx, |s, cx| {
+                    s.receive_transcript_frame(
+                        zeron_doc::TranscriptFrame::Reset {
+                            reset: serde_json::from_value(serde_json::json!([
+                                {"id": "user", "role": "user", "createdAt": 1788900000000_i64, "deviceId": device,
+                                 "parts": [{"id": "t", "kind": "text", "text": "The sync test is flaky. Figure out why and fix it."}]},
+                                {"id": "assistant", "role": "assistant", "createdAt": 1788900001000_i64, "deviceId": device, "status": "streaming",
+                                 "parts": [
+                                    {"id": "a", "kind": "text", "text": "I've read the test and the sync code. Here's what I'd do."},
+                                    {"id": "in-r2", "kind": "input", "requestId": "r2", "resolved": false,
+                                     "questions": [{
+                                        "id": "plan:demo", "header": "Plan",
+                                        "question": "## Fix the flaky sync test\n\nThe test races the debounce timer against a wall clock.\n\n1. Inject a fake clock into `SyncScheduler`\n2. Advance it explicitly in `reconnect_resumes_after_backoff`\n3. Run the suite 50 times to confirm it is stable\n\n```sh\ncargo test -p zeron-sync -- --test-threads=1\n```\n\nNo public API changes.",
+                                        "options": zeron_proto::policy::plan_options(), "multiSelect": false
+                                     }]}
+                                 ]}
+                            ]))
+                            .unwrap(),
+                        },
+                        cx,
+                    )
+                    .unwrap();
+                    cx.notify();
+                });
+                pause(cx, 1200).await;
+                capture(window.into(), cx, &output, "plan-card")?;
                 Ok(())
             }
             .await;

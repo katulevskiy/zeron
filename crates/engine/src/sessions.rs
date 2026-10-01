@@ -2056,11 +2056,13 @@ async fn drive_run(
     // The host stamps its own MCP server onto every run it drives, so the
     // agent can spawn and talk to side chats through the engine it runs in.
     if request.mcp.is_none() {
-        // A harness without a native plan mode presents its plan through the
-        // server's `submit_plan` tool (docs/plan-mode.md).
+        // Every harness but Claude Code (whose `ExitPlanMode` the driver
+        // answers itself) presents its plan through the server's
+        // `submit_plan` tool, whatever plan mode of its own it has
+        // (docs/plan-mode.md).
         let planning = request.policy.mode == zeron_proto::PermissionMode::Plan
             && !request.policy.unattended
-            && !harness.policy_caps().native_plan;
+            && harness_id != HarnessId::ClaudeCode;
         request.mcp = if planning {
             inner.zeron_mcp_with(&chat_id, &[("ZERON_PLAN_MODE", "1")])
         } else {

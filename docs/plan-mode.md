@@ -10,56 +10,59 @@ Part 5). Under it, the shared gate allows reading, searching and read-only
 commands, and refuses edits and other commands with a reason telling the
 agent to present its plan.
 
-## The plan is part of the transcript
+## The plan is a question
 
-`MessagePart::PlanProposal { id, revision, markdown, status, decided_mode? }`. It is named so it isn't confused with the agent's checklist, which the todo panel shows: ACP plans and Codex `turn/plan/updated` feed that panel ([`todo-panel.md`](todo-panel.md)):
+A plan reaches the user as a question on the chat (id prefix `plan:`), so it
+reuses everything questions already have: it works from any device and the
+phones, the session shows *Awaiting input*, and the answer is durable in the
+transcript.
 
-- `status` is one of `proposed`, `approved`, `revised` or `rejected`.
-- The plan renders as a card, with its markdown and, while `proposed`, these
-  actions:
-  - **Approve**, with a mode to continue in (Auto by default, or Accept
-    edits, Ask or Bypass);
-  - **Keep planning**, with feedback text;
-  - **Hand off to…** another agent preset, once presets exist.
-- Every revision is a new part; the earlier one becomes `revised`. That keeps
-  the history of how the plan changed.
+- The question's text is the plan, as markdown. The desktop shows it as a
+  scrolling card (headings, numbered and bulleted steps, code blocks) above
+  the options; other clients show it as the question's text.
+- The options are **Approve · Auto**, **Approve · Accept edits**,
+  **Approve · Ask**, **Approve · Bypass** and **Keep planning**.
+- A typed answer is feedback: it sends the plan back with that text.
+- Each revision is a new question, so the transcript keeps how the plan
+  changed.
+
+A separate `PlanProposal` transcript part (revision history, a "hand off to
+another agent" action) was the first design. It isn't needed to approve a
+plan, and presets (`agent-presets.md`) are the place for hand-off, so it's left
+out until something needs it.
 
 ## How a plan reaches Zeron
 
 | Harness | How it presents a plan |
 | --- | --- |
 | Claude Code | Native: `--permission-mode plan`; the plan arrives as the `ExitPlanMode` tool call's `plan` input |
-| OpenCode | Native `plan` agent; the plan is its final message of the turn, submitted through `submit_plan` when instructed |
-| Every other harness | Emulated: the gate holds Plan semantics, the run gets a one-time instruction (like the move note) to present the plan by calling the Zeron MCP tool `submit_plan {plan}` |
+| Every other harness that can plan (Codex, OpenCode, the ACP agents) | The run's Zeron MCP server carries a `submit_plan {plan}` tool, and its instructions tell the agent to use it |
+| Cursor, Pi | Can't plan: they never ask before acting, so the menu doesn't offer Plan |
 
-Every run already has the Zeron MCP server, so `submit_plan` works for
-any harness.
+`submit_plan` only exists in a Plan-mode chat. The engine marks the server it
+hands such a run with `ZERON_PLAN_MODE=1`.
 
 ## The decision
 
-A plan is a pending input on the chat (question id prefix `plan:`, carrying
-the plan's part id). It reuses the existing question bridge, so the decision
-works from any device and phone, and the session shows *Awaiting input*.
-
 - **Approve (mode M):**
-  - The chat's `ChatConfig.policy.mode` becomes M.
+  - The chat's saved mode becomes M (`ChatConfig.policy.mode`), on every
+    device, as soon as the answer lands.
   - Claude: `ExitPlanMode` is allowed and the run's gate switches to M, so
     the same turn continues and starts executing.
-  - Emulated harnesses: `submit_plan` returns "approved; the user switched to
-    M", the turn ends, and the host queues *"Execute the approved plan."* as
-    the next turn under M. That is a fresh runtime, since the mode changed.
+  - Other harnesses: `submit_plan` returns "approved, now in M mode; end your
+    turn" and the engine queues *"The plan was approved. Carry it out."* behind
+    the turn. It runs as a fresh turn, because the mode changed and the
+    agent that asked is still running under Plan.
 - **Keep planning (feedback):** `ExitPlanMode` is denied, or `submit_plan`
-  returns, with the feedback as the message. The agent revises and presents
-  again.
-- **Hand off to preset P:** approve, then start a new chat (or switch this
-  one) with preset P, giving it the plan as its first prompt.
+  returns an error, with the feedback as the message. The agent revises and
+  presents again, still in Plan mode.
 
 ## With goal mode
 
 A goal set while the chat is planning waits, `paused (readOnly)`
-([`goal-mode.md`](goal-mode.md)). Approving the plan resumes it. The goal's
-rounds then run in the approved mode. Its verifier always runs read-only and
-unattended.
+([`goal-mode.md`](goal-mode.md)). Approving a plan resumes it, and its rounds
+then run in the approved mode. Its verifier always runs read-only and
+unattended. A goal paused for another reason stays paused.
 
 ## With native agent modes
 
@@ -71,7 +74,6 @@ has one, and the option is not offered separately.
 ## Desktop
 
 - The composer's mode picker offers **Plan**. Shift+Tab cycles to it.
-- The plan card lives in the transcript, and the question panel shows the
-  same three actions.
-- While a plan is pending, the composer's send turns into **Keep planning**,
-  which sends the text typed as feedback.
+- The plan card sits in the question panel, above its options. Typing in the
+  panel's text box and submitting sends the text as feedback ("Keep
+  planning").
