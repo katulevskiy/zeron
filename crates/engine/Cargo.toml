@@ -30,6 +30,7 @@ notify.workspace = true
 portable-pty.workspace = true
 base64 = "0.22"
 toml = "0.8"
+zeroize = "1"
 libc.workspace = true
 gethostname.workspace = true
 tokio-util = { workspace = true, features = ["rt"] }

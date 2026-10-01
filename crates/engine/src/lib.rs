@@ -44,7 +44,10 @@ pub mod uploads;
 pub mod workspace_files;
 pub mod workspace_host;
 
-pub use agent_accounts::{AgentAccounts, AgentAccountsConfig};
+pub use agent_accounts::{
+    AgentAccounts, AgentAccountsConfig, HandedLogin, LOGIN_HANDOFF_VERSION, LoginHandoff,
+    LoginImport,
+};
 pub use auth::{Auth, AuthConfig, AuthState, AuthUser, OrgMembership};
 pub use change_requests::{ChangeRequestCacheKey, CheckoutChangeRequests};
 pub use diff_sync::{

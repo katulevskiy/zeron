@@ -60,6 +60,10 @@
 //!    `authenticate`. A login run for ANOTHER device (`requester`) publishes
 //!    its callback port to [`zeron_preview::login`], so the requester can
 //!    forward its own loopback to it over the P2P link.
+//! 4. **Hand over** ([`handoff`]): a moving chat's target device that has no
+//!    login for the chat's agent receives the source's live login — exported
+//!    as its slot payload, installed as a slot there and made live. A login
+//!    the target already has is never replaced.
 //!
 //! Usage probes: all three providers expose the rate-limit view their own CLIs render
 //! (`/usage` in Claude Code, `/status` in Codex; Cursor's key has no quota view,
@@ -94,11 +98,14 @@ use zeron_proto::{
 use crate::repos::home_dir;
 use crate::{EngineError, new_id, now_ms};
 
+mod handoff;
 mod oauth;
 #[cfg(test)]
 mod provider_tests;
 mod stores;
 mod usage;
+
+pub use handoff::{HandedLogin, LOGIN_HANDOFF_VERSION, LoginHandoff, LoginImport};
 
 // Claude Code's public OAuth client (the one the CLI itself uses for the manual
 // "paste the code" flow — no secret involved, PKCE carries the proof).

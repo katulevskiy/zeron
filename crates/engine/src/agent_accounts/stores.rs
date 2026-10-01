@@ -351,7 +351,7 @@ pub(super) fn upstream_of(harness: HarnessId, store_key: &str) -> Option<Upstrea
 }
 
 /// An OAuth entry zeron can use: `type: "oauth"` with an access token.
-fn oauth_entry(entry: &serde_json::Value) -> bool {
+pub(super) fn oauth_entry(entry: &serde_json::Value) -> bool {
     entry.get("type").and_then(|v| v.as_str()) == Some("oauth")
         && str_field(entry, "access").is_some()
 }
@@ -823,7 +823,7 @@ impl AgentAccounts {
         write_file_atomic(file, devin_toml(credentials)?.as_bytes(), true)
     }
 
-    fn keyed_file(&self, harness: HarnessId) -> PathBuf {
+    pub(super) fn keyed_file(&self, harness: HarnessId) -> PathBuf {
         match harness {
             HarnessId::Pi => self.inner.config.pi_agent_dir.join("auth.json"),
             _ => self.inner.config.opencode_auth_file.clone(),
