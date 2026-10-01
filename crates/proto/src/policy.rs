@@ -278,6 +278,36 @@ pub const APPROVAL_ALLOW_ONCE: &str = "Allow once";
 pub const APPROVAL_ALLOW_ALWAYS: &str = "Always allow";
 pub const APPROVAL_DENY: &str = "Deny";
 
+/// The id of an approval question: the prefix, a nonce (no `:`), and — when
+/// "Always allow" can become a standing rule — that rule as JSON. The rule
+/// rides the id so the host that resolves the answer can remember it without
+/// a side channel (and without widening `UserInputQuestion`, which every
+/// harness builds by hand).
+pub fn approval_question_id(nonce: &str, rule: Option<&PolicyRule>) -> String {
+    let nonce = nonce.replace(':', "-");
+    match rule.and_then(|rule| serde_json::to_string(rule).ok()) {
+        Some(rule) => format!("{APPROVAL_QUESTION_PREFIX}{nonce}:{rule}"),
+        None => format!("{APPROVAL_QUESTION_PREFIX}{nonce}"),
+    }
+}
+
+pub fn is_approval_question(question_id: &str) -> bool {
+    question_id.starts_with(APPROVAL_QUESTION_PREFIX)
+}
+
+/// The standing rule an approval question's "Always allow" adds, if its id
+/// carries one (see [`approval_question_id`]).
+pub fn approval_rule(question_id: &str) -> Option<PolicyRule> {
+    let rest = question_id.strip_prefix(APPROVAL_QUESTION_PREFIX)?;
+    let (_, rule) = rest.split_once(':')?;
+    serde_json::from_str(rule).ok()
+}
+
+/// Whether a user's answer to an approval question was "Always allow".
+pub fn approval_answer_is_always(labels: &[String]) -> bool {
+    labels.first().map(String::as_str) == Some(APPROVAL_ALLOW_ALWAYS)
+}
+
 #[cfg(test)]
 mod tests {
     use super::*;
@@ -309,5 +339,23 @@ mod tests {
         assert_eq!(strict.capped_by(&parent).mode, PermissionMode::Plan);
         assert!(AgentPolicy::read_only().is_read_only());
         assert!(!AgentPolicy::default().is_read_only());
+    }
+
+    #[test]
+    fn approval_ids_carry_their_rule() {
+        let rule = PolicyRule {
+            kind: Some(ActionKind::Exec),
+            pattern: "cargo test: \"all\"".into(),
+            effect: RuleEffect::Allow,
+        };
+        let id = approval_question_id("a:b", Some(&rule));
+        assert!(is_approval_question(&id));
+        assert_eq!(approval_rule(&id), Some(rule));
+        let bare = approval_question_id("n1", None);
+        assert_eq!(bare, "approval:n1");
+        assert_eq!(approval_rule(&bare), None);
+        assert_eq!(approval_rule("q-sync"), None);
+        assert!(approval_answer_is_always(&[APPROVAL_ALLOW_ALWAYS.to_string()]));
+        assert!(!approval_answer_is_always(&[APPROVAL_ALLOW_ONCE.to_string()]));
     }
 }

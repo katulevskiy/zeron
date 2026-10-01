@@ -14,8 +14,10 @@
 
 use std::path::{Component, Path, PathBuf};
 
+#[cfg(test)]
+use zeron_proto::policy::APPROVAL_QUESTION_PREFIX;
 use zeron_proto::policy::{
-    APPROVAL_ALLOW_ALWAYS, APPROVAL_ALLOW_ONCE, APPROVAL_DENY, APPROVAL_QUESTION_PREFIX,
+    APPROVAL_ALLOW_ALWAYS, APPROVAL_ALLOW_ONCE, APPROVAL_DENY, approval_question_id,
 };
 use zeron_proto::{
     ActionKind, AgentPolicy, PermissionMode, PolicyRule, RuleEffect, UserInputAnswer,
@@ -530,10 +532,14 @@ fn program_name(word: &str) -> &str {
     word.rsplit('/').next().unwrap_or(word)
 }
 
-/// The question an `Ask` becomes.
+/// The question an `Ask` becomes. Its id carries the rule "Always allow"
+/// would add ([`rule_from`]), so the host can keep it across runs.
 pub fn approval_question(action: &Action) -> UserInputQuestion {
     UserInputQuestion {
-        id: format!("{APPROVAL_QUESTION_PREFIX}{}", uuid::Uuid::new_v4()),
+        id: approval_question_id(
+            &uuid::Uuid::new_v4().to_string(),
+            rule_from(action).as_ref(),
+        ),
         header: "Permission".into(),
         question: format!("Allow the agent to {}?", action.summary()),
         options: vec![
@@ -826,5 +832,6 @@ mod tests {
         assert_eq!(read_approval(&q, &[]), Verdict::Deny);
         let rule = rule_from(&action).unwrap();
         assert_eq!(rule.pattern, "make deploy");
+        assert_eq!(zeron_proto::policy::approval_rule(&q.id), Some(rule));
     }
 }
