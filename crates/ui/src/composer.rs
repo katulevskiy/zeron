@@ -5712,6 +5712,10 @@ pub struct Composer {
     mention_task: Option<Task<()>>,
     mention: FileMentionState,
     slash_task: Option<Task<()>>,
+    /// Saved workflows offered as `workflow:<name>` rows, per completion
+    /// context, fetched apart from the provider's own catalog.
+    slash_saved: HashMap<String, Vec<InvocationCandidate>>,
+    slash_saved_task: Option<Task<()>>,
     slash: SlashState,
     /// Advertised invocations for the current device/harness/workspace.
     /// Invalidated on context changes; filtering stays local while typing.
@@ -6027,6 +6031,8 @@ impl Composer {
             mention_task: None,
             mention: FileMentionState::default(),
             slash_task: None,
+            slash_saved: HashMap::new(),
+            slash_saved_task: None,
             slash: SlashState::default(),
             slash_cache: HashMap::new(),
             slash_scroll: gpui::ScrollHandle::new(),
@@ -7369,6 +7375,7 @@ impl Composer {
             self.slash.loading = false;
             if self.slash.catalog_context != catalog_context {
                 self.slash_cache.clear();
+                self.slash_saved.clear();
             } else if self.slash.error.is_some() || !self.slash.supported {
                 self.slash_cache.remove(&self.slash.context);
             }
@@ -7414,9 +7421,40 @@ impl Composer {
         self.slash.error = None;
         self.refilter_slash(cx);
         // Saved workflows of this chat's project (on its host) join the list.
-        let saved_params = (!skill && commands_allowed)
-            .then(|| self.saved_list_params(cx))
-            .flatten();
+        // They load on their own: a slow provider catalog must not hold them.
+        if !skill
+            && commands_allowed
+            && let Some(params) = self.saved_list_params(cx)
+        {
+            let engine = engine.clone();
+            let ctx = context.clone();
+            self.slash_saved_task = Some(cx.spawn(async move |this, cx| {
+                // An older host has no such method: no saved rows, no error.
+                let rows = engine
+                    .client()
+                    .call(methods::WORKFLOW_SAVED_LIST, params)
+                    .await
+                    .ok()
+                    .and_then(|v| serde_json::from_value::<zeron_proto::SavedWorkflowList>(v).ok())
+                    .map(|list| saved_workflow_candidates(&list.workflows))
+                    .unwrap_or_default();
+                this.update(cx, |composer, cx| {
+                    if composer.slash.context != ctx {
+                        return;
+                    }
+                    composer.slash_saved.insert(ctx.clone(), rows.clone());
+                    let in_chat = composer.state.read(cx).selected_chat.is_some();
+                    let entry = composer
+                        .slash_cache
+                        .entry(ctx)
+                        .or_insert_with(|| with_workspace_commands(vec![], in_chat));
+                    entry.retain(|row| row.saved_workflow.is_none());
+                    entry.extend(rows);
+                    composer.refilter_slash(cx);
+                })
+                .ok();
+            }));
+        }
         self.slash_task = Some(cx.spawn(async move |this, cx| {
             let result = async {
                 let commands = async {
@@ -7440,29 +7478,12 @@ impl Composer {
                     serde_json::from_value::<Option<Vec<zeron_proto::invocation::Skill>>>(value)
                         .map_err(|e| RpcError::Failed(e.to_string()))
                 };
-                // An older host has no such method: no saved rows, no error.
-                let saved = async {
-                    let Some(params) = saved_params else {
-                        return Vec::new();
-                    };
-                    engine
-                        .client()
-                        .call(methods::WORKFLOW_SAVED_LIST, params)
-                        .await
-                        .ok()
-                        .and_then(|v| {
-                            serde_json::from_value::<zeron_proto::SavedWorkflowList>(v).ok()
-                        })
-                        .map(|list| saved_workflow_candidates(&list.workflows))
-                        .unwrap_or_default()
-                };
-                let (commands, skills, saved) = futures::join!(commands, skills, saved);
+                let (commands, skills) = futures::join!(commands, skills);
                 merge_invocation_results(commands, skills, skill).map(
                     |(mut rows, supported, warning)| {
                         if !include_skills {
                             rows.retain(|row| row.invocation.prefix() == '/');
                         }
-                        rows.extend(saved);
                         (rows, supported, warning)
                     },
                 )
@@ -7488,6 +7509,14 @@ impl Composer {
                         } else {
                             candidates
                         };
+                        let mut candidates = candidates;
+                        candidates.extend(
+                            composer
+                                .slash_saved
+                                .get(&context)
+                                .cloned()
+                                .unwrap_or_default(),
+                        );
                         composer.slash_cache.insert(context, candidates);
                     }
                     Err(err) => {

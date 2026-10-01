@@ -271,9 +271,20 @@ impl Shell {
             self.open_save_workflow(chat, run, cx);
         } else if let Some(text) = spec.strip_prefix("slash:") {
             self.saved_ui.capture = None;
+            // Typing right at boot loses the draft to the composer's own
+            // chat switch: wait for the chat to settle, like a person would.
             let text = text.to_owned();
-            self.composer
-                .update(cx, |composer, cx| composer.capture_draft(&text, cx));
+            self.saved_ui.task = Some(cx.spawn(async move |this, cx| {
+                cx.background_executor()
+                    .timer(std::time::Duration::from_millis(2500))
+                    .await;
+                this.update(cx, |shell, cx| {
+                    shell
+                        .composer
+                        .update(cx, |composer, cx| composer.capture_draft(&text, cx))
+                })
+                .ok();
+            }));
         } else {
             self.saved_ui.capture = None;
         }
@@ -1093,7 +1104,7 @@ impl Shell {
         let can_run = !pending && !l.targets.is_empty();
         let card = popover::dialog_card(theme)
             .w(px(500.0))
-            .max_h(px(720.0))
+            .max_h(px(880.0))
             .on_key_down(cx.listener(|this, ev: &gpui::KeyDownEvent, _, cx| {
                 if ev.keystroke.key == "escape" {
                     this.close_saved_launcher(cx);
@@ -1134,7 +1145,7 @@ impl Shell {
                     .flex_col()
                     .gap(px(14.0))
                     .overflow_y_scroll()
-                    .max_h(px(480.0))
+                    .max_h(px(660.0))
                     .children(targets)
                     .children(no_target)
                     .when(has_args, |el| {

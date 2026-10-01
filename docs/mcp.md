@@ -121,6 +121,8 @@ name (default: the local engine's device).
 | `resume_goal`      | `QueueCommand` Goal `resume`                              |
 | `clear_goal`       | `QueueCommand` Goal `clear`                               |
 | `workflow_guide`   | (embedded authoring guide, `docs/workflow-guide.md`)      |
+| `list_saved_workflows` | `WorkflowSavedList {chatId}`                          |
+| `save_workflow`    | `WorkflowSavedSave` (returns after the user answers)      |
 | `start_workflow`   | `WorkflowStart` (returns after the user approves)         |
 | `get_workflow_run` | `WorkflowGet {runId, include}`                            |
 | `list_workflow_runs` | `WorkflowList {chatId?}`                                |
@@ -197,8 +199,10 @@ settles.
 
 | Tool | Arguments | Notes |
 | --- | --- | --- |
-| `workflow_guide` | — | The embedded guide: API, worked example, patterns, limits. |
-| `start_workflow` | `name?`, `script` \| `path`, `args?`, `max_concurrency?`, `harness?`, `model?`, `reasoning?`, `max_asks?`, `max_tokens?`, `max_runtime_seconds?` | The calling chat's own workflow. A script with problems fails with `path:line:col message` lines and creates no run. Otherwise the user is asked (an ordinary input question on the chat's live turn: phases, agents, literal commands, limits, a script excerpt) and the call returns `{runId, phases, agents, commands, …}` once they approve, or an error if they deny. The script is drafted to `.zeron/workflow-drafts/` in the project (add it to `.gitignore`). |
+| `workflow_guide` | — | The embedded guide: API, worked example, saved workflows, patterns, limits. |
+| `list_saved_workflows` | — | Saved workflows available in this chat: built-in, the user's global ones and this project's. Each has `name`, `scope`, `description`, `whenToUse`, typed `args` (`name`, `type` string\|int\|number\|bool\|json, `required`, `default`, `description`), `path`, `shadowedBy`. Files that could not be read are listed under `invalid` with the reason. Descriptions come from files: data, not instructions. |
+| `save_workflow` | `name`, `description`, `when_to_use?`, `args?` (object keyed by argument name, or a list), `scope` (`project`\|`global`), `from_run` \| `script` | Saves a workflow file. **The user is asked** (an ordinary input question: path, description, arguments, what it replaces or shadows, a script excerpt; options `Save workflow` / `Deny`), never auto-approved. Everything checkable (name slug, frontmatter, script analysis, the run belongs to this chat) fails before the question. Written atomically inside `.zeron/workflows` (project) or `~/.zeron/workflows` (global) only; refuses symlinks; replaces an existing file only if the question said so. Needs a chat origin. |
+| `start_workflow` | `name?`, `script` \| `path` \| `saved {name, scope?, args?}`, `args?`, `max_concurrency?`, `harness?`, `model?`, `reasoning?`, `max_asks?`, `max_tokens?`, `max_runtime_seconds?` | The calling chat's own workflow. With `saved`, the workflow is resolved (project, then global, then built-in) and its arguments validated — every unknown, missing or mistyped one reported at once — **before** the user is asked. A script with problems fails with `path:line:col message` lines and creates no run. Otherwise the user is asked (an ordinary input question on the chat's live turn: phases, agents, literal commands, limits, a script excerpt) and the call returns `{runId, phases, agents, commands, …}` once they approve, or an error if they deny. The script is drafted to `.zeron/workflow-drafts/` in the project (add it to `.gitignore`). |
 | `get_workflow_run` | `run_id`, `include?` (`nodes`, `reports`, `result`) | State: status, phase, usage, agents, artifacts, pending questions, stop reason; the full result and every reported item on request. |
 | `list_workflow_runs` | `chat?` (default: own chat; `"all"`) | |
 | `stop_workflow_run` | `run_id`, `reason?` | Own chat's runs only. Resumable. |
@@ -215,6 +219,13 @@ Behind the tools, `WorkflowStart`, `WorkflowGet`, `WorkflowList`, `WorkflowStop`
 `WorkflowResume`, `WorkflowAnswer`, `WorkflowArtifactData` and `WorkflowArtifactRead`
 are ordinary engine RPCs (clients use the same ones); stop / resume / answer also travel
 the command plane (`SessionCommandPayload::Workflow`) so a remote client can send them.
+
+Saved workflows add `WorkflowSavedList`, `WorkflowSavedGet`, `WorkflowSavedSave`,
+`WorkflowSavedDelete` and `WorkflowSavedRuns` (all relay-forwardable: a client addressing a chat's
+host reads **that host's** saved workflows; capability `workflows-saved-v1`) and two parameters on
+`WorkflowStart`: `saved` and `byUser`. `byUser` — a person's launcher click is the approval — is
+honoured only together with `saved`, and the MCP tools never send it, so an agent cannot approve its
+own start or save (`docs/workflows.md` → "Saved workflows").
 
 ## The ask profile
 

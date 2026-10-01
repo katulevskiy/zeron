@@ -169,6 +169,119 @@ raised keeps the one-line marker.
 
 ![A narrow window](screenshots/workflows-card/narrow-window.png)
 
+## Saved workflows
+
+Saved (reusable) workflows with arguments — the format, scopes, validation and engine side are in
+[`workflows.md`](workflows.md#saved-workflows). The desktop gives them a place to live, a launcher, a
+slash command and two card actions. Screenshots are from the live app with the mock harness:
+[`docs/screenshots/workflows-saved/`](screenshots/workflows-saved/).
+
+```
+crates/ui/src/workflow/saved.rs          PURE: args form (parse/defaults/errors), /workflow parsing and
+                                         name resolution, list grouping, run-history rows, save-dialog validation
+crates/ui/src/workflow/saved_view.rs     the highlighted script block
+crates/ui/src/settings/workflows.rs      Settings → Workflows: list, detail, delete
+crates/ui/src/shell/saved_workflows.rs   the launcher, "Save as workflow…" and "Run again" (shell-level dialogs)
+```
+
+### Settings → Workflows
+
+![Global, per-project and built-in workflows](screenshots/workflows-saved/settings-list.png)
+
+Between Devices and Files. **Global** (with the folder it reads), one group per project of this device
+that has workflows, then **Built-in**. A row is the name, the description, the arguments as `base=main,
+deep=false, ticket` (required bare, optional `x?`) and what it overrides ("Overrides the built-in
+workflow", "Hidden in api, web"); a file that cannot be used is listed in its folder with the
+`file:line:col` reasons instead of silently missing. The page reads on demand: when it opens, when it is
+shown again after a few seconds, when a project is added or removed, after a delete, and on **Refresh** —
+an edit in an editor shows up on the next one (no watcher: `workflows.md`).
+
+![A workflow's detail](screenshots/workflows-saved/settings-detail.png)
+
+The **detail view** (click a row; Escape or the back link returns): description and when-to-use, what
+the script would do (phases · agents · commands, from the same analysis the approval shows — or why it
+would not start), an **Arguments** table (type, `required`, default, description), the **script**
+highlighted as Python (frontmatter included — it is the file), and **Recent runs**; a built-in has no
+Delete. **Run** opens the launcher, **Open file** the file in the system editor, the bin deletes after an
+inline confirmation ("The file … is removed. This can't be undone.").
+
+![Recent runs of a workflow](screenshots/workflows-saved/run-history.png)
+
+Run history is `WorkflowSavedRuns`: the runs whose header names this workflow (and, for a project
+workflow, this project), newest first, with status, how long ago, duration, tokens and steps; a row opens
+the run in its chat.
+
+### The launcher
+
+![The launcher: where, and a generated args form](screenshots/workflows-saved/launcher-args.png)
+
+**Run** (Settings) and **/workflow** with a required argument missing open one dialog.
+*Run in* offers the open chat (when the workflow is visible there — a project workflow only in its own
+project) and a **new chat in** each local project (the composer's project first; a project workflow only
+its own; remote projects are reachable through their chats). *Arguments* is generated from the
+declaration: text for `string`, `int` and `number` (monospace for the latter two), a **switch** for
+`bool`, a multi-line box for `json` (Shift+Enter breaks the line; Enter would submit), defaults
+prefilled, a `required` marker, the description under the name, the type chip. An empty box means "not
+given" (the default applies). Validation is `ArgsForm::collect` — every field's problem inline ("Required",
+"Enter a whole number", "Not valid JSON: …") plus the shared rules for what the fields cannot see — and
+the engine re-checks. Below the form, *Starting it is your approval. It will run 2 phases, 2 agents and
+the commands …* (the approval's graph, loaded with `WorkflowSavedGet`).
+
+Run creates the chat if needed (`Mutate createChat` with the composer's resolved agent/model, titled
+`Workflow: <name>`), sends `WorkflowStart {saved, byUser: true}` to the chat's host and opens the chat,
+where the card appears as the engine journals the run. A refusal (engine error, bad arguments, an older
+host) is shown in the dialog and nothing is created twice. **A launcher click is the approval** (no agent
+turn exists to carry the engine's question); an agent's `start_workflow {saved}` still asks, and the
+approval block says which workflow and what values:
+
+![The approval block of a saved workflow](screenshots/workflows-saved/approval-saved.png)
+
+*Saved* names the workflow and its scope; *Arguments* lists what `main(args)` will receive (defaults
+filled, values cut to a line). The script excerpt skips the frontmatter. Ad-hoc runs with arguments show
+the same rows.
+
+### `/workflow`
+
+![The slash popup lists saved workflows](screenshots/workflows-saved/slash-popup.png)
+
+`/workflow` is a Zeron command next to `/goal` (in a chat only). The popup lists the chat's saved
+workflows as `workflow:<name>` rows (description, scope), fetched **separately from the provider's own
+command catalog** so a slow provider never holds them, from the chat's host (`targetDeviceId`) and only
+the ones that win in its project. Accepting a row types `/workflow <name> `. Then:
+
+* `/workflow pr-review base=dev deep` — a name (exact, else a unique prefix), `key=value` words typed
+  against the declaration (`'…'` / `"…"` quoting, `deep` alone switches a bool on), every problem
+  reported at once ("`nope` is not an argument of pr-review. It takes: base, deep, ticket.");
+* all required arguments present → it **starts in that chat**; one missing → the **launcher opens** with
+  what was typed filled in and "ticket is required.";
+* a bare `/workflow` opens Settings → Workflows. The line never reaches the agent (like `/goal`).
+
+### On the card and in the pane
+
+![A saved run's card](screenshots/workflows-saved/card-saved.png)
+
+A run started from a saved workflow shows a small **Project / Global / Built-in** chip after its name (the
+tooltip names the workflow); the pane header says "Saved project workflow contract-check". An ended
+saved run offers **Run again** — the same workflow, in the same chat, with the same arguments
+(`WorkflowGet` returns the run's `args` and `saved`; the engine re-reads the file, so edits apply, and
+re-validates).
+
+![An ad-hoc run offers Save as workflow…](screenshots/workflows-saved/card-adhoc-save.png)
+
+An ad-hoc run that ended offers **Save as workflow…**:
+
+![The Save as workflow dialog](screenshots/workflows-saved/save-as-dialog.png)
+
+Name (suggested from the run's title, validated live as a slug), description (required, one line),
+when-to-use, and where: **this project** (`.zeron/workflows`, shared with the repository) or **global**.
+If the run was started with arguments they are kept as declared defaults (types inferred). A name that
+exists in that scope turns the button into **Replace** after a conflict message; success says where it
+went ("Saved … Find it in Settings → Workflows"). The dialog is the approval (there is no live turn to
+ask on); an *agent's* `save_workflow` asks the user on its chat's turn instead.
+
+Cards and the pane never act: `WorkflowAction::{RerunSaved, SaveAsWorkflow}` become
+`TranscriptEvent` / `PaneEvent` and the shell opens the dialog or calls the engine, like Stop and Resume.
+
 ## Motion, accessibility, cost
 
 * Motion: the only animation is the shared mini spinner, which already follows the reduce-motion
@@ -193,6 +306,14 @@ now with **real hidden child chats** (so "open this agent" works) and determinis
 | starts with `ask` | escalates a question and waits for the answer (pending-question state) |
 | `slow` / `quick` | 6× / a third of the time |
 
+Saved-workflow capture knobs (read once): `ZERON_WORKFLOWS_DIR` relocates the global folder (also the
+test/isolation override); `ZERON_WORKFLOWS_DETAIL=<name>` opens that workflow's detail view on the first
+load of Settings → Workflows (`ZERON_OPEN_ROUTE=settings/workflows` opens the page);
+`ZERON_OPEN_SAVED=launch:<name>[:submit]` opens its launcher (`:submit` presses Run, showing the
+validation errors), `save[:<description>]` opens "Save as workflow…" for the newest run of the open chat,
+`slash:<text>` types into the composer to open its completion. Typing at boot loses the draft to the
+composer's own chat switch, so `slash:` waits 2.5 s.
+
 Capture knobs (read once, for screenshots): `ZERON_OPEN_WORKFLOW=run[:artifact=<id>|phase=<name>|actor]`
 opens the newest run's pane (`actor` also opens the first agent's chat beside it); `ZERON_WORKFLOW_CARD=expanded|collapsed` and
 `ZERON_WORKFLOW_RESULT=expanded` set the default open state; `ZERON_WORKFLOW_APPROVAL=script`
@@ -208,6 +329,8 @@ cargo test -p zeron-ui --lib workflow::          # model, artifacts, approval, s
 cargo test -p zeron-ui --lib transcript::tests   # card rows, folding end markers, toggles, events, result row
 cargo test -p zeron-ui --lib -- workflow_run_opens state::tests::workflow state::tests::the_sidebar
 cargo test -p zeron-engine --lib workflow::demo  # scripted agents
+cargo test -p zeron-ui --lib -- workflow::saved settings::workflows shell::saved_workflows   # saved workflows
+cargo test -p zeron-ui --lib composer::tests     # /workflow rows, accept, command routing
 ```
 
 ## Limits and deviations
@@ -218,6 +341,11 @@ cargo test -p zeron-engine --lib workflow::demo  # scripted agents
 * Markdown artifacts render without syntax highlighting in code blocks.
 * The approval block shows the engine's excerpt of the script, not the whole file (the draft path is
   in the question text for people who want it in their editor).
+* The launcher's new-chat targets are projects of the local device (a remote project's chat is reached
+  through that chat). The launcher, the Save dialog and Run again were driven by gpui tests and the
+  capture knobs; their buttons were not clicked by hand on the screenshot machine (see below). Argument
+  values in the approval block are listed alphabetically (JSON objects are unordered); the launcher
+  keeps the declaration's order.
 * Interactions (clicking a pill, pressing Stop / Answer) are covered by gpui tests that simulate the
   events and by the engine's own tests; they were **not** clicked by hand on the screenshot machine
   (an input injector aimed at a desktop session shared with other windows is not safe), so the

@@ -12,7 +12,7 @@ use crate::markdown::render::{self, RenderOptions};
 use crate::theme::Theme;
 
 /// Script height before it scrolls.
-pub const SCRIPT_MAX_HEIGHT: f32 = 340.0;
+pub const SCRIPT_MAX_HEIGHT: f32 = 260.0;
 
 /// A script as a highlighted (Python) code block, scrollable past
 /// [`SCRIPT_MAX_HEIGHT`].

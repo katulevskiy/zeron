@@ -149,7 +149,8 @@ zeron/
                                  # device-room host/peers, identity
     workflow/     zeron-workflow # dynamic workflows, pure half: the Starlark runtime and its
                                  # host API, static analysis + diagnostics, call-site identity,
-                                 # the run-state reducer (`docs/workflows.md`). Only the engine
+                                 # the run-state reducer, the saved-workflow file format and
+                                 # built-in examples (`docs/workflows.md`). Only the engine
                                  # (and tests) depend on it: clients and mobile consume the
                                  # wire/state types in zeron-proto and never link an interpreter
                                  # (desktop UI for it: `crates/ui/src/workflow/`, `docs/workflows-ui.md`)

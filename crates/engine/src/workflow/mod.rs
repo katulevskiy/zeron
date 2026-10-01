@@ -1013,7 +1013,7 @@ impl WorkflowService {
             if chat_id.is_some_and(|c| c != meta.chat_id) {
                 continue;
             }
-            let header = self
+            let mut header = self
                 .shared
                 .projection
                 .run(&meta.chat_id, &meta.run_id)
@@ -1031,6 +1031,12 @@ impl WorkflowService {
                     created_at: meta.created_at,
                     ..WorkflowRunHeader::default()
                 });
+            // The store is written when a run settles; the doc projection is
+            // batched and can lag behind an abrupt exit. A settled run is settled.
+            if meta.status.is_settled() && !header.status.is_settled() {
+                header.status = meta.status;
+                header.stop_reason = meta.stop_reason;
+            }
             out.push(header);
         }
         out

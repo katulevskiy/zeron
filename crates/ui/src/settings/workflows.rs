@@ -61,6 +61,7 @@ pub struct WorkflowsPage {
     scroll: widgets::PageScroll,
     list: Loadable<SavedWorkflowList>,
     loaded_at: Option<Instant>,
+    spaces_seen: Vec<String>,
     detail: Option<Detail>,
     /// The key whose Delete was clicked once (inline confirmation).
     confirm_delete: Option<WorkflowKey>,
@@ -91,12 +92,24 @@ fn params_for(summary: &SavedWorkflowSummary) -> serde_json::Value {
 
 impl WorkflowsPage {
     pub fn new(state: Entity<AppState>, cx: &mut Context<Self>) -> Self {
-        let observe = cx.observe(&state, |_, _, cx| cx.notify());
+        // A project added or removed changes what the list covers.
+        let observe = cx.observe(&state, |page, state, cx| {
+            let mut ids: Vec<String> = state.read(cx).spaces.iter().map(|s| s.id.clone()).collect();
+            ids.sort();
+            if ids != page.spaces_seen {
+                page.spaces_seen = ids;
+                if page.loaded_at.is_some() {
+                    page.refresh(cx);
+                }
+            }
+            cx.notify();
+        });
         let mut page = Self {
             state,
             scroll: widgets::PageScroll::default(),
             list: Loadable::Idle,
             loaded_at: None,
+            spaces_seen: Vec::new(),
             detail: None,
             confirm_delete: None,
             error: None,
@@ -651,12 +664,13 @@ impl WorkflowsPage {
                     .child(
                         div()
                             .flex_none()
-                            .w(px(132.0))
+                            .w(px(188.0))
                             .flex()
-                            .flex_col()
-                            .gap(px(4.0))
+                            .items_center()
+                            .gap(px(8.0))
                             .child(
                                 div()
+                                    .min_w_0()
                                     .font_family(theme.font_mono.clone())
                                     .text_size(px(theme.code_font_size))
                                     .font_weight(gpui::FontWeight::MEDIUM)
@@ -664,15 +678,10 @@ impl WorkflowsPage {
                                     .truncate()
                                     .child(SharedString::from(a.name.clone())),
                             )
-                            .child(
-                                div()
-                                    .flex()
-                                    .gap(px(4.0))
-                                    .child(mono_chip(theme, a.ty.as_str()))
-                                    .when(a.required, |el| {
-                                        el.child(widgets::badge_active(theme, "required"))
-                                    }),
-                            ),
+                            .child(mono_chip(theme, a.ty.as_str()))
+                            .when(a.required, |el| {
+                                el.child(widgets::badge_active(theme, "required"))
+                            }),
                     )
                     .child(
                         div()
@@ -974,7 +983,7 @@ impl WorkflowsPage {
                     .text_size(ui_rems(12.5))
                     .line_height(px(17.0))
                     .text_color(theme.text_muted)
-                    .child(SharedString::from(format!("Use it when: {w}")))
+                    .child(SharedString::from(format!("When to use: {w}")))
             }))
             .children(summary.shadowed_by.map(|s| {
                 div()

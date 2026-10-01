@@ -10,9 +10,10 @@ harness (a workflow may mix Claude Code and Codex), and that approval, results a
 the machinery the app already has.
 
 This page is the **engine**: the interpreter, the run model, the journal, the scheduler, the MCP
-tools and the authoring guide. The desktop card, run pane, approval block, sidebar lines and result
-row are described in [`workflows-ui.md`](workflows-ui.md); mobile (PR5) and saved workflows (PR6)
-consume the same state and RPCs.
+tools and the authoring guide. The desktop card, run pane, approval block, sidebar lines, result
+row and the saved-workflow launcher are described in [`workflows-ui.md`](workflows-ui.md); mobile
+consumes the same state and RPCs. Reusable workflows with arguments are
+[their own section](#saved-workflows) below.
 
 Screenshots (live app, mock harness with `ZERON_MOCK_WORKFLOW=1`; see "Demo" below). The approval
 is the ordinary question panel — graph-free clients show exactly this text; the desktop renders
@@ -35,8 +36,10 @@ with the machine message delivered to the agent as a compact row —
 
 ```
 crates/proto      workflow.rs   state, events, deltas, graph, commands, origins (serde, no interpreter)
-crates/workflow   zeron-workflow  Starlark runtime · static analysis · host seam · reducer   (pure)
+                  saved_workflow.rs   saved-workflow types · the argument contract (validate_args, parse_text, names)
+crates/workflow   zeron-workflow  Starlark runtime · static analysis · host seam · reducer · saved-file format   (pure)
 crates/engine     workflow/     service · run core (host + scheduler) · store/journal · world · projection
+                  workflow/saved.rs, saved_ops.rs   saved files on disk · list/get/save/delete/history
                   ask.rs        the child-ask layer, extended for persistent actors + escalate
 crates/doc        workflow_runs.rs   meta.workflowRuns in the chat's session doc
 crates/mcp        workflows.rs  the tools · docs/workflow-guide.md (embedded)
@@ -321,6 +324,166 @@ hosted chat's runs as `WorkflowRunBrief`s, for the sidebar); ask side `AskEscala
 `SessionCommandPayload::Workflow { command: WorkflowCommand::{Stop, Resume, Answer} }`, executed
 by the chat's host (older hosts skip the unknown payload). Capability: `workflows-v1`.
 
+## Saved workflows
+
+A workflow worth running again is **saved**: a Starlark file with a frontmatter comment block that
+names it, describes it and declares typed arguments. A saved workflow starts from the launcher
+(Settings → Workflows, `/workflow` in a composer — [`workflows-ui.md`](workflows-ui.md)) or from an
+agent (`list_saved_workflows`, `start_workflow {saved}`, `save_workflow`). Built-in examples ship
+with the app.
+
+### The file
+
+```text
+# zeron-workflow
+# name: pr-review
+# description: Review the pending changes with three reviewers and confirm findings
+# when_to_use: When the user asks for a thorough multi-agent review
+# args:
+#   base: {type: string, default: "main", description: "Branch to diff against"}
+#   deep: {type: bool, default: false}
+#   ticket: {type: int, required: true}
+
+def main(args):
+    ...
+```
+
+Comments, so the file is a script as it stands (highlighted in an editor, analysed and run as is).
+The grammar is deliberately small and strictly parsed by `zeron_workflow::saved` (`crates/workflow/src/saved.rs`):
+
+* The block is the leading run of `#` lines and starts with exactly `# zeron-workflow`; it ends at
+  the first line that is not a `#` comment (end it with a blank line — a plain comment right under
+  it would be read as frontmatter, and the error says so).
+* Top-level keys, plain text to the end of the line (no quoting, no continuation): `name`
+  (optional; must equal the file name), `description` (required, ≤ 300 characters), `when_to_use`
+  (≤ 600), `args`. Unknown or repeated keys are errors.
+* Under `args:`, one argument per indented line: `name: {type: T, required: true, default: V,
+  description: "…"}`, keys in any order and each at most once. `type` is a bare word — `string`,
+  `int`, `number`, `bool` or `json`; `default` and `description` are JSON values (strings in double
+  quotes); `required` is `true`/`false`. A required argument has no default; a default must have the
+  argument's type; at most 32 arguments, names are identifiers.
+* Every problem is reported with `path:line:col` and **all** of them at once, however hostile the
+  input (tested: huge files, a 5000-deep JSON default, control characters, CRLF and a BOM, near-miss
+  marks, duplicate keys, path-traversal names). Limits: file 256 KB, frontmatter 16 KB / 200 lines,
+  a string argument or default 16 KB, json 16 KB, all of a run's arguments 64 KB.
+
+Saving writes the block in a fixed key order, so saving twice writes the same bytes (no phantom diffs),
+and the writer re-parses what it wrote and refuses a file it could not read back.
+
+### Where they live and which one wins
+
+| Scope | Folder | Visible in |
+| --- | --- | --- |
+| `project` | `<project>/.zeron/workflows/<name>.star` | that project (committed with it) |
+| `global` | `$ZERON_WORKFLOWS_DIR`, else `~/.zeron/workflows/<name>.star` | every project on the device |
+| `builtin` | compiled in (`crates/workflow/builtin/*.star`) | everywhere, read-only |
+
+The global folder follows the repo's user-file convention — next to `~/.zeron/worktrees` (and, like
+`ZERON_WORKTREES_DIR`, relocatable for tests), not under the data dir, because it is something people
+edit and keep in dotfiles. The **name is the file stem** and a slug (`[a-z0-9][a-z0-9_-]{0,63}`, the
+alphabet *is* the path-traversal defence; Windows device names are refused). A project's file
+shadows a global one, which shadows a built-in. Every list says who wins: `shadowedBy` on the loser,
+`shadows` on the winner.
+
+**Rescan, not watch.** A listing reads two small folders (and each project's own), so every call
+rescans and there is no cache to go stale, no watcher thread to keep alive on a mobile/Android
+engine, and no platform differences in file notifications. Clients refresh when they show a list
+(Settings reloads when it is shown again), after each save or delete, and on a Refresh button.
+
+**Untrusted files.** A project's folder comes from whatever repository was cloned. The scan refuses a
+`.zeron` or `workflows` that is a symlink and any file that is not a regular file inside the project,
+reads at most 200 files of at most 256 KB, and a bad file never fails the listing — it is reported
+(`invalid`, with the reason) and skipped. Descriptions are shown as data; `list_saved_workflows` tells
+the agent so. Running a project workflow is still approval-gated like any script (below). A *global*
+folder may be a symlink (a person's dotfiles), a project's may not.
+
+### Arguments
+
+`zeron_proto::validate_args(specs, provided)` is the one place the rules live (engine, launcher,
+`/workflow`, mobile): unknown, missing and mistyped arguments are rejected with **every** problem in
+one message (`unknown argument 'x' (declared: a, b)`, `missing required argument 'ticket'`,
+`argument 'n': expected an int, got string "abc"`), defaults are filled, an optional argument with no
+default is left out (the script reads it with `args.get`), `null` counts as "not given" for every type
+but `json`. A workflow that declares nothing rejects any argument. `int` is a whole number within
+±2^53, `number` any finite number. In the script `args` stays the frozen dict it always was.
+
+The arguments are hashed with the script: a **resume** replays the run's stored copy of the whole
+file (frontmatter included) with its stored arguments, so editing the file afterwards neither breaks
+nor changes it; the existing checks (script hash, same `args`) are unchanged.
+
+### Starting
+
+`WorkflowStart` / `start_workflow` accept `saved: {name, scope?, args}` instead of `script` / `path`
+(exactly one of the three). The engine resolves the name (project, then global, then built-in, or the
+scope asked for), validates the arguments, and only then analyses the script and raises the approval —
+a call that cannot run never interrupts the user. The run is named after the workflow, runs the file
+as written (no draft copy: the file is its own draft) and records where it came from additively:
+`WorkflowRunHeader.savedName` / `savedScope`, `WorkflowRunsState` as usual, `RunMeta.saved` in the
+store. The approval question and `WorkflowApprovalMeta` additionally carry the saved name and scope
+and the argument values (`Saved workflow: pr-review (project)`, `Arguments: base = "dev"`); the
+script excerpt skips the frontmatter. Ad-hoc runs show their arguments too when they have any.
+
+**Who approves.** An agent's `start_workflow {saved}` asks like any start (a question on the chat's
+live turn, stock labels `Run workflow` / `Deny`). A *person's* click — the launcher, `/workflow`,
+"Run again" — is the approval: no agent turn exists to carry a question, and the launcher shows what
+the approval would (the graph summary, the commands, every argument value). The RPC flag is `byUser`
+and the engine honours it **only together with `saved`** — never for a script, a path or a resume of an
+agent's script — so an agent cannot launder an unreviewed script through it, and the MCP tool does not
+even have the parameter.
+
+### Saving
+
+`save_workflow {name, description, when_to_use?, args?, scope, from_run | script}` (MCP) and
+`WorkflowSavedSave` (RPC). Everything checkable is checked **before** anyone is asked: the name, the
+frontmatter (rendered and re-parsed), the script's analysis, and — for `from_run` — that the run belongs
+to the calling chat. Then the user is asked on the chat's live turn: *Save workflow "x" to this
+project's workflows?* with the file, `This REPLACES the existing file` when it does, what it shadows
+or is shadowed by, the description, arguments, a one-line graph summary and a script excerpt;
+options `Save workflow` / `Deny` (stock labels, so any client that renders a question can answer).
+Saving is **never auto-approved**, not even in an auto-approve chat: it leaves a lasting file that later
+runs (and other chats) will trust. An approved save replaces an existing file only if the question said so.
+
+The write is atomic and confined: the path is `<folder>/<validated name>.star` and nothing else; a
+temp file in the same folder is written, synced and renamed into place (`persist_noclobber` when it
+must not replace, so a file that appeared since the question wins); symlinks (the file, the folder,
+`.zeron`) are refused; the project folder is canonicalised and must stay inside the project; no temp
+files are left behind. If the script already carries frontmatter it is replaced by the arguments given
+(or kept when `args` is omitted — a re-save of a saved workflow), and a run started with arguments
+saved from the desktop keeps them as inferred defaults. A person's "Save as workflow…" dialog is its own
+approval (`byUser`, with an explicit `overwrite` after a conflict prompt).
+
+### Run history
+
+Runs carry `savedName`/`savedScope` in their header; `WorkflowSavedRuns {name, scope, chatId|spaceId,
+limit?}` lists a workflow's recent runs newest first (a project workflow's runs are that project's only),
+and `WorkflowGet` returns the run's `args` and `saved` so "Run again" can start the same workflow with
+the same values.
+
+### RPC
+
+All are served by the device that owns the folders and are `forwardable` (`targetDeviceId`), like the
+rest of a chat's surface: a client addressing a chat's host lists **that host's** saved workflows.
+
+| Method | Params → result |
+| --- | --- |
+| `WorkflowSavedList` | `{chatId? \| spaceId? \| all?}` → `{workflows[], invalid[], globalDir}` (`all`: every project of the device) |
+| `WorkflowSavedGet` | `{name, scope?, chatId? \| spaceId?}` → the summary + `script`, `graph`, `diagnostics` |
+| `WorkflowSavedSave` | `{chatId, name, description, whenToUse?, args?, scope, fromRun? \| script, byUser?, overwrite?}` → `{workflow, path, overwrote}` |
+| `WorkflowSavedDelete` | `{name, scope, chatId? \| spaceId?}` → `{deleted}` (a person's action; there is no agent tool) |
+| `WorkflowSavedRuns` | `{name, scope, chatId? \| spaceId?, limit?}` → run headers, newest first |
+| `WorkflowStart` | gains `saved {name, scope?, args}` and `byUser` |
+
+Capability: `workflows-saved-v1`. An older host answers `unknown method`; clients say so instead of failing.
+
+### Built-in examples
+
+`pr-review` (independent reviewers, a fresh agent tries to disprove every finding, a judge writes the
+conclusion), `fix-until-green` (a deterministic cargo gate drives at most N fixer rounds, then a fresh
+agent checks the diff did not cheat) and `repo-audit` (read-only: auditors share the files, every finding
+is confirmed by a fresh agent, delivered as a report). They apply the authoring guide's patterns and run
+with no arguments; `crates/workflow/tests/builtin.rs` runs each against the fake host, so they cannot
+drift from the language.
+
 ## Security model
 
 Scripts, ask results, reports and child output are **untrusted data**.
@@ -335,7 +498,9 @@ Scripts, ask results, reports and child output are **untrusted data**.
   group is killed on timeout or cancel; output is capped. World reads reject escapes, symlinks
   pointing out, over-cap results; git refs are validated so a ref can never be an option.
 * **Approval** is required by default and cannot be skipped by the agent (only an auto-approve chat
-  waives it). The approval shows what the script *can* do, not what it says it does.
+  waives it). The approval shows what the script *can* do, not what it says it does. A person's
+  launch of a *saved* workflow is its own approval (`byUser`, honoured only with `saved`); saving
+  one always asks, even in an auto-approve chat.
 * **Children never escalate their own permissions:** `auto_approve` inherited, sandbox capped to the
   parent's, a restricted MCP profile (`whoami`/`get_chat`/`read_chat`, `submit_result`, `escalate`
   — no `send_message`, `create_chat`, goals or workflows), one level of nesting.
@@ -355,6 +520,9 @@ Scripts, ask results, reports and child output are **untrusted data**.
 | What happens | Result |
 | --- | --- |
 | Script does not parse / violates a rule | `path:line:col message` lines; no run, no approval |
+| Saved workflow: unknown / missing / mistyped arguments | one message listing every problem; no run, no approval |
+| Saved file with bad frontmatter | listed under `invalid` with `file:line:col` reasons; asking for it by name says why |
+| Save: bad name, broken script, run of another chat | rejected before the user is asked; nothing is written |
 | User denies / no answer in 15 min / turn ended first | `stopped(denied)`, the start call errors |
 | An ask's result is invalid after 3 repairs, or missing after the nudge | that ask: `Result{ok: False, error}` |
 | An ask times out / its child needs an approval nobody can give | that ask fails likewise |
@@ -382,6 +550,9 @@ cargo test -p zeron-engine --test workflow_e2e  # real child chats + the real ap
 cargo test -p zeron-engine --test ask_child     # persistent children + escalate
 cargo test -p zeron-mcp
 cargo test -p zeron-ui --lib goal_panel         # marker rows
+cargo test -p zeron-workflow --test builtin     # the bundled workflows against the fake host
+cargo test -p zeron-engine --test workflows_saved   # saved workflows: list, start with args, save, resume, history, RPC
+cargo test -p zeron-ui --lib -- workflow::saved settings::workflows shell::saved_workflows
 cargo check -p zeron-workflow --target aarch64-unknown-linux-musl   # no C compiler needed
 ```
 
@@ -401,7 +572,7 @@ so it is still running when the question is raised.
 ## Follow-ups
 
 * Done in PR4 (`workflows-ui.md`): the workflow card, run pane, approval block, sidebar activity,
-  result row.
+  result row. Done in PR6: saved workflows (above) and their launcher.
 * Per-actor worktree isolation; charts/boards; a `Retry-After` header from the harness (today it is
   parsed from the error text); per-run permission narrowing for agents.
 * A resumed run's actors start fresh chats; carrying a stopped actor's chat forward is possible

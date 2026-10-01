@@ -634,7 +634,7 @@ pub struct RunRow {
     pub chat_id: String,
     pub status: &'static str,
     pub tone: Tone,
-    /// `3m ago`
+    /// `3m ago`, `just now`
     pub when: String,
     /// `3m 12s · 48.2k tokens · 12 steps`
     pub detail: String,
@@ -667,7 +667,10 @@ pub fn run_rows(headers: &[WorkflowRunHeader], now: chrono::DateTime<chrono::Utc
                 chat_id: h.chat_id.clone(),
                 status,
                 tone,
-                when: crate::state::format_time_ago(at, now),
+                when: match crate::state::format_time_ago(at, now).as_str() {
+                    "now" => "just now".to_owned(),
+                    ago => format!("{ago} ago"),
+                },
                 detail: super::model::meta_line(h),
                 resumed: h.resumed_from.is_some(),
             }
@@ -1247,7 +1250,8 @@ mod tests {
         assert_eq!(rows[1].status, "Denied");
         assert_eq!(rows[2].status, "Failed");
         assert!(rows[2].resumed);
-        assert!(!rows[0].when.is_empty());
+        assert_eq!(rows[0].when, "3m ago");
+        assert_eq!(rows[1].when, "just now");
     }
 
     // ── save dialog ──
