@@ -99,8 +99,8 @@ fun AnchoredPopover(
     val windowWidth = with(density) { window.width.toDp() } - Margin * 2
     val cardWidth = min(windowWidth, width ?: 560.dp)
 
-    val provider = remember(above, density) {
-        AnchoredPosition(above, with(density) { Margin.roundToPx() }, with(density) { Gap.roundToPx() })
+    val provider = remember(above, density, width) {
+        AnchoredPosition(above, with(density) { Margin.roundToPx() }, with(density) { Gap.roundToPx() }, startAligned = width != null)
     }
     if (scrim) {
         // A full-window layer under the card: dims the page and takes taps outside it.
@@ -146,11 +146,11 @@ private object ScrimPosition : PopupPositionProvider {
     override fun calculatePosition(anchorBounds: IntRect, windowSize: IntSize, layoutDirection: LayoutDirection, popupContentSize: IntSize) = IntOffset.Zero
 }
 
-/** Above (or below) the anchor, centred on it but kept inside the window's margins. */
-private class AnchoredPosition(private val above: Boolean, private val margin: Int, private val gap: Int) : PopupPositionProvider {
+/** Above (or below) the anchor, centred on it (or, for a fixed-width card, starting at its edge) but kept inside the window's margins. */
+private class AnchoredPosition(private val above: Boolean, private val margin: Int, private val gap: Int, private val startAligned: Boolean = false) : PopupPositionProvider {
     override fun calculatePosition(anchorBounds: IntRect, windowSize: IntSize, layoutDirection: LayoutDirection, popupContentSize: IntSize): IntOffset {
         val maxX = (windowSize.width - popupContentSize.width - margin).coerceAtLeast(margin)
-        val x = (anchorBounds.center.x - popupContentSize.width / 2).coerceIn(margin, maxX)
+        val x = (if (startAligned) anchorBounds.left else anchorBounds.center.x - popupContentSize.width / 2).coerceIn(margin, maxX)
         val y = if (above) anchorBounds.top - gap - popupContentSize.height else anchorBounds.bottom + gap
         return IntOffset(x, y.coerceIn(0, (windowSize.height - popupContentSize.height).coerceAtLeast(0)))
     }

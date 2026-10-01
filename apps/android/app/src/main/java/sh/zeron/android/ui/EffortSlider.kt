@@ -91,7 +91,7 @@ fun rememberReduceMotion(): Boolean {
 
 /** A looping 0…1 phase, only running while composed (callers gate it on there being something to animate). */
 @Composable
-private fun rememberPhase(periodMillis: Int): State<Float> {
+internal fun rememberPhase(periodMillis: Int): State<Float> {
     val transition = rememberInfiniteTransition(label = "phase")
     return transition.animateFloat(0f, 1f, infiniteRepeatable(tween(periodMillis, easing = LinearEasing)), label = "phase")
 }

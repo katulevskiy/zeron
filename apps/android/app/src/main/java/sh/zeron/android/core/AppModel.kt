@@ -480,7 +480,7 @@ class AppModel(private val app: Application) {
             draft.hostId != null -> SessionTarget.Projectless(draft.hostId)
             else -> return null
         }
-        val config = ChatConfig(draft.harness, draft.model, draft.effort, emptyMap(), SandboxLevel.WORKSPACE_WRITE)
+        val config = ChatConfig(draft.harness, draft.model, draft.effort, draft.options, SandboxLevel.WORKSPACE_WRITE)
         return try {
             // A new worktree is minted with the first send; otherwise the
             // session runs in the checkout — or in the picked branch's own
@@ -528,6 +528,8 @@ data class NewSessionDraft(
     val harness: String = "claude-code",
     val model: String? = null,
     val effort: String? = null,
+    /** Model option id → choice id picked for [model] (fast mode, context window…); empty = the defaults. */
+    val options: Map<String, String> = emptyMap(),
     val branch: String? = null,
     val worktree: Boolean = false,
     /** Run in this existing worktree of [branch] instead of the project folder. */

@@ -175,6 +175,14 @@ object ModelPickerRules {
     }
 
     /**
+     * Labels that more than one row carries (the same name from two providers,
+     * or two variants): only those rows show their description, to tell them apart.
+     */
+    fun ambiguousLabels(entries: List<Entry>): Set<String> =
+        entries.groupBy { it.choice.model.label.trim().lowercase() }.filterValues { it.size > 1 }.values
+            .flatMap { rows -> rows.map { it.choice.model.label } }.toSet()
+
+    /**
      * The first row to scroll to when the list opens on [selected]: the top if
      * the selection is among the first rows that fit, else it sits centred.
      */
