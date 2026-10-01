@@ -8,6 +8,8 @@
     "deploy": "wrangler deploy",
     "build": "wrangler deploy --dry-run --outdir dist",
     "typecheck": "tsc --noEmit",
+    "typecheck:workerd": "tsc --ignoreConfig --noEmit --target ES2022 --lib ES2022 --module ESNext --moduleResolution Bundler --strict --skipLibCheck --types @cloudflare/workers-types,@cloudflare/vitest-pool-workers/types test/workerd/*.ts",
+    "test:browser-candidate": "node scripts/browser-candidate-check.mjs",
     "test": "npm run test:unit && npm run test:workerd",
     "test:unit": "vitest run",
     "test:workerd": "vitest run -c vitest.workerd.config.ts",

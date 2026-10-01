@@ -14,36 +14,19 @@
  * snapshot for instant new-chat pickers §8.1; capability metadata) so pickers
  * render last-known state while the live RPC happens at confirm time.
  */
-import { BytesReader, BytesWriter } from "loro-protocol";
+import { decodeDeviceFrame, encodeDeviceFrame, type DeviceFrameHeader } from "./device-frame";
 import { createBlobStore, getJsonBlob, putJsonBlob, type BlobStore } from "./blobs";
 import { AUTH_USER_HEADER, type Env } from "./env";
 
-export interface DeviceFrameHeader {
-  /** Stream id, unique per (connId, logical stream). */
-  s: string;
-  /** Stream kind: "rpc" | "term" | ... — opaque to the relay. */
-  k: string;
-  /** Routing: host→client target. */
-  to?: string;
-  /** Routing: client→host origin (stamped by the relay). */
-  from?: string;
-}
+import {
+  SESSION_HASH_HEADER,
+  SESSION_ROOM_HEADER,
+  SESSION_STORE_HEADER,
+  bindBrowserSession,
+  unbindBrowserSession,
+  validateBrowserSession
+} from "./browser-sessions";
 
-export const encodeDeviceFrame = (header: DeviceFrameHeader, payload: Uint8Array): Uint8Array => {
-  const writer = new BytesWriter();
-  writer.pushVarString(JSON.stringify(header));
-  writer.pushBytes(payload);
-  return writer.finalize();
-};
-
-export const decodeDeviceFrame = (
-  bytes: Uint8Array
-): { header: DeviceFrameHeader; payload: Uint8Array } => {
-  const reader = new BytesReader(bytes);
-  const header = JSON.parse(reader.readVarString()) as DeviceFrameHeader;
-  const payload = reader.readBytes(reader.remaining);
-  return { header, payload };
-};
 
 interface SocketState {
   userId: string;
@@ -51,6 +34,11 @@ interface SocketState {
   connId: string;
   /** Accept time — the liveness floor until the socket's first auto-pong. */
   joinedAt?: number;
+  /** Present only for the cookie-authenticated browser client path. */
+  browserSessionHash?: string;
+  browserSessionGeneration?: number;
+  browserSessionExpiresAt?: number;
+  browserSessionRoom?: string;
 }
 
 const HOST_TAG = "host";
@@ -86,14 +74,17 @@ const RELAY_KIND = " relay";
 export const NUDGE_KIND = "nudge";
 const NUDGE_MAX_PENDING = 256;
 const CHAT_ID_RE = /^[A-Za-z0-9_-]{1,64}$/;
+const BROWSER_SESSION_RECHECK_MS = 5 * 60_000;
 
 export class DeviceRoom implements DurableObject {
   private readonly ctx: DurableObjectState;
   private readonly blobs: BlobStore;
 
+  private readonly env: Env;
+
   constructor(ctx: DurableObjectState, env: Env) {
     this.ctx = ctx;
-    void env;
+    this.env = env;
     ctx.storage.sql.exec(
       "CREATE TABLE IF NOT EXISTS meta (key TEXT PRIMARY KEY, value TEXT NOT NULL)"
     );
@@ -115,6 +106,20 @@ export class DeviceRoom implements DurableObject {
       key,
       value
     );
+  }
+
+
+  /** Keep the earliest scheduled browser-session check; repeated joins must
+   * never defer an existing expiration/idle check. */
+  private async scheduleBrowserAlarm(): Promise<void> {
+    const now = Date.now();
+    let next = now + BROWSER_SESSION_RECHECK_MS;
+    for (const socket of this.ctx.getWebSockets()) {
+      const state = socket.deserializeAttachment() as SocketState | null;
+      if (state?.browserSessionExpiresAt) next = Math.min(next, state.browserSessionExpiresAt);
+    }
+    const existing = await this.ctx.storage.getAlarm();
+    if (existing === null || next < existing) await this.ctx.storage.setAlarm(next);
   }
 
   /** The host socket to route to: the freshest one that has proven itself
@@ -143,12 +148,29 @@ export class DeviceRoom implements DurableObject {
 
   async fetch(request: Request): Promise<Response> {
     const url = new URL(request.url);
+    if (url.pathname === "/browser-revoke" && request.method === "POST" && request.headers.get(SESSION_STORE_HEADER) === "1") {
+      const body = (await request.json().catch(() => null)) as { hash?: string; connId?: string } | null;
+      if (!body?.hash || !body.connId) return new Response("bad request", { status: 400 });
+      const socket = this.ctx.getWebSockets(clientTag(body.connId))[0];
+      const state = socket?.deserializeAttachment() as SocketState | null;
+      if (socket && state?.browserSessionHash === body.hash) socket.close(4401, "browser session revoked");
+      return new Response(null, { status: 204 });
+    }
     const userId = request.headers.get(AUTH_USER_HEADER);
     if (!userId) return new Response("unauthenticated", { status: 401 });
     const owner = this.getMeta("owner");
 
     if (url.pathname === "/ws") {
       const role = url.searchParams.get("role") === "host" ? "host" : "client";
+
+      const browserSessionHash = request.headers.get(SESSION_HASH_HEADER);
+
+      const browserSessionRoom = request.headers.get(SESSION_ROOM_HEADER);
+      // This header is stamped only by the Worker cookie route. A browser is
+      // always a client and can never claim or supersede the backend host.
+      if (browserSessionHash && role !== "client") return new Response("forbidden", { status: 403 });
+
+      if (browserSessionHash && !browserSessionRoom) return new Response("unauthenticated", { status: 401 });
       if (role === "host") {
         // The device's own backend claims the room; the claim is the identity
         // anchor every later client join is checked against.
@@ -156,6 +178,12 @@ export class DeviceRoom implements DurableObject {
         else if (owner !== userId) return new Response("forbidden", { status: 403 });
       } else {
         if (!owner || owner !== userId) return new Response("forbidden", { status: 403 });
+      }
+
+      let browserSession: Awaited<ReturnType<typeof validateBrowserSession>>;
+      if (browserSessionHash) {
+        browserSession = await validateBrowserSession(this.env, browserSessionHash);
+        if (!browserSession || browserSession.ownerId !== userId) return new Response("unauthenticated", { status: 401 });
       }
       const connId = url.searchParams.get("connId") ?? crypto.randomUUID();
       const pair = new WebSocketPair();
@@ -173,8 +201,27 @@ export class DeviceRoom implements DurableObject {
       } else {
         this.ctx.acceptWebSocket(pair[1], [clientTag(connId)]);
       }
-      const state: SocketState = { userId, role, connId, joinedAt: Date.now() };
+      const state: SocketState = {
+        userId,
+        role,
+        connId,
+        joinedAt: Date.now(),
+        ...(browserSession ? {
+          browserSessionHash: browserSessionHash!,
+          browserSessionGeneration: browserSession.generation,
+          browserSessionExpiresAt: browserSession.expiresAt,
+          browserSessionRoom: browserSessionRoom!
+        } : {})
+      };
       pair[1].serializeAttachment(state);
+      if (browserSession && (await bindBrowserSession(this.env, browserSession.hash, browserSessionRoom!, connId))?.bound !== true) {
+        pair[1].close(4401, "browser session expired or revoked");
+        return new Response("browser session expired or revoked", { status: 401 });
+      }
+
+      if (browserSession) {
+        await this.scheduleBrowserAlarm();
+      }
       return new Response(null, { status: 101, webSocket: pair[0] });
     }
 
@@ -250,6 +297,17 @@ export class DeviceRoom implements DurableObject {
     this.ctx.storage.sql.exec("DELETE FROM pending_nudges");
   }
 
+  private async browserSessionActive(state: SocketState): Promise<boolean> {
+    if (!state.browserSessionHash) return true;
+    const session = await validateBrowserSession(this.env, state.browserSessionHash);
+    return Boolean(
+      session &&
+      session.ownerId === state.userId &&
+      session.generation === state.browserSessionGeneration &&
+      session.expiresAt === state.browserSessionExpiresAt
+    );
+  }
+
   webSocketMessage(ws: WebSocket, message: ArrayBuffer | string): void {
     if (typeof message === "string") return; // ping/pong auto-response
     const state = ws.deserializeAttachment() as SocketState;
@@ -263,15 +321,12 @@ export class DeviceRoom implements DurableObject {
     if (state.role === "client") {
       const host = this.liveHost();
       if (!host) {
-        // Host offline: bounce a relay-level error so the client can surface
-        // "device is asleep" instead of hanging.
         this.deliver(ws, { s: frame.header.s, k: RELAY_KIND }, encodeRelayError("host_offline"));
         return;
       }
       this.deliver(host, { s: frame.header.s, k: frame.header.k, from: state.connId }, frame.payload);
       return;
     }
-    // Host frame: route by `to`.
     const to = frame.header.to;
     if (!to) return;
     const target = this.ctx.getWebSockets(clientTag(to))[0];
@@ -282,9 +337,25 @@ export class DeviceRoom implements DurableObject {
     this.deliver(target, { s: frame.header.s, k: frame.header.k }, frame.payload);
   }
 
+  async alarm(): Promise<void> {
+    let hasBrowserClients = false;
+    for (const socket of this.ctx.getWebSockets()) {
+      const state = socket.deserializeAttachment() as SocketState | null;
+      if (!state?.browserSessionHash) continue;
+      hasBrowserClients = true;
+      if (!(await this.browserSessionActive(state))) socket.close(4401, "browser session expired or revoked");
+    }
+    if (hasBrowserClients) await this.scheduleBrowserAlarm();
+  }
+
+
   webSocketClose(ws: WebSocket): void {
     const state = ws.deserializeAttachment() as SocketState | null;
     if (!state) return;
+
+    if (state.browserSessionHash && state.browserSessionRoom) {
+      void unbindBrowserSession(this.env, state.browserSessionHash, state.browserSessionRoom, state.connId);
+    }
     if (state.role === "client") {
       // Tell the host so it can tear down any per-client streams (ptys etc.).
       const host = this.liveHost();

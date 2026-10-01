@@ -41,7 +41,8 @@
       { "name": "DEVICE_ROOMS", "class_name": "DeviceRoom" },
       { "name": "PREVIEW_ROOMS", "class_name": "PreviewRoom" },
       { "name": "REGISTRY_ROOMS", "class_name": "RegistryRoom" },
-      { "name": "CHAT_ROOMS", "class_name": "ChatRoom" }
+      { "name": "CHAT_ROOMS", "class_name": "ChatRoom" },
+      { "name": "BROWSER_SESSIONS", "class_name": "BrowserSessionStore" }
     ]
   },
   "migrations": [
@@ -61,7 +62,8 @@
       "tag": "v3",
       "new_sqlite_classes": ["ChatRoom"]
     },
-    { "tag": "v4", "new_sqlite_classes": ["PreviewRoom"] }
+    { "tag": "v4", "new_sqlite_classes": ["PreviewRoom"] },
+    { "tag": "v5", "new_sqlite_classes": ["BrowserSessionStore"] }
   ],
   "r2_buckets": [
     {

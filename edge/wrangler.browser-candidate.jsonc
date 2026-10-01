@@ -1,0 +1,32 @@
+{
+  // Isolated candidate only: no production hostname or resource registration.
+  "$schema": "node_modules/wrangler/config-schema.json",
+  "name": "zeron-pr526-browser-candidate",
+  "main": "src/production.ts",
+  "compatibility_date": "2026-07-01",
+  "workers_dev": false,
+  "routes": [],
+  "assets": { "directory": "../web/packages/app/dist", "binding": "ASSETS", "run_worker_first": true, "html_handling": "none", "not_found_handling": "none" },
+  "rules": [{ "type": "Text", "globs": ["**/*.sh"], "fallthrough": true }],
+  "alias": { "loro-crdt": "loro-crdt/base64" },
+  "durable_objects": { "bindings": [
+    { "name": "SESSION_ROOMS", "class_name": "SessionRoom" },
+    { "name": "DEVICE_ROOMS", "class_name": "DeviceRoom" },
+    { "name": "PREVIEW_ROOMS", "class_name": "PreviewRoom" },
+    { "name": "REGISTRY_ROOMS", "class_name": "RegistryRoom" },
+    { "name": "CHAT_ROOMS", "class_name": "ChatRoom" },
+    { "name": "BROWSER_SESSIONS", "class_name": "BrowserSessionStore" }
+  ] },
+  "migrations": [
+    { "tag": "v1", "new_sqlite_classes": ["SessionRoom", "DeviceRoom"] },
+    { "tag": "v2", "new_sqlite_classes": ["RegistryRoom"] },
+    { "tag": "v3", "new_sqlite_classes": ["ChatRoom"] },
+    { "tag": "v4", "new_sqlite_classes": ["PreviewRoom"] },
+    { "tag": "v5", "new_sqlite_classes": ["BrowserSessionStore"] }
+  ],
+  "r2_buckets": [
+    { "binding": "BLOBS", "bucket_name": "zeron-pr526-browser-candidate-blobs" },
+    { "binding": "RELEASES", "bucket_name": "zeron-pr526-browser-candidate-releases" }
+  ],
+  "vars": { "AUTH_MODE": "workos", "WORKOS_CLIENT_ID": "" }
+}

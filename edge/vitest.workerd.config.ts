@@ -18,11 +18,20 @@ export default defineConfig({
       main: "./test/workerd/fixture.ts",
       miniflare: {
         compatibilityDate: "2026-07-01",
+        bindings: {
+          AUTH_MODE: "dev", WORKOS_CLIENT_ID: "client_test", WORKOS_API_KEY: "test-only",
+          WORKOS_BROWSER_ORIGIN: "https://test", WORKOS_ISSUER: "https://test-issuer",
+          WORKOS_JWKS_URL: "https://test-issuer/jwks", BROWSER_SESSION_KEY: "workerd-test-session-key",
+          BROWSER_DEV_ORIGIN: "http://localhost", BROWSER_DEV_OWNER_SUBJECT: "browser-e2e-owner",
+          BROWSER_DEV_ORGANIZATION_ID: "dev-org"
+        },
         durableObjects: {
           TEST_LOG: { className: "TestLogRoom", useSQLite: true },
           CHAT_ROOMS: { className: "ChatRoom", useSQLite: true },
           PREVIEW_ROOMS: { className: "PreviewRoom", useSQLite: true },
-          REGISTRY_ROOMS: { className: "RegistryRoom", useSQLite: true }
+          REGISTRY_ROOMS: { className: "RegistryRoom", useSQLite: true },
+          DEVICE_ROOMS: { className: "DeviceRoom", useSQLite: true },
+          BROWSER_SESSIONS: { className: "BrowserSessionStore", useSQLite: true }
         }
       }
     })
