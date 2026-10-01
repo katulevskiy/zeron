@@ -1266,6 +1266,20 @@ impl Pickers {
         }
     }
 
+    /// Screenshot fixtures: close whatever popover is open.
+    pub fn fixture_close_menu(&mut self, cx: &mut Context<Self>) {
+        if self.is_open() {
+            self.animate_close(cx);
+        }
+    }
+
+    /// Screenshot fixtures: open the permissions menu.
+    pub fn fixture_open_mode_menu(&mut self, window: &mut Window, cx: &mut Context<Self>) {
+        if self.open_kind() != Some(PickerKind::Mode) {
+            self.toggle(PickerKind::Mode, window, cx);
+        }
+    }
+
     fn toggle(&mut self, kind: PickerKind, window: &mut Window, cx: &mut Context<Self>) {
         // A press that found this picker open closes it — the card's
         // `on_mouse_down_out` already began the close on that same press,
@@ -3693,6 +3707,8 @@ impl Pickers {
             (false, ModeTone::Accent) => (theme.text.opacity(0.9), crate::theme::ink(0.05)),
             (false, ModeTone::Marked) => (theme.accent, theme.accent.opacity(0.12)),
         };
+        // Icons take their colour from the element itself, not the row's text.
+        let fg = motion::hover_blend(&id, tint, theme.text);
         let tooltip = match &refusal {
             Some(reason) => format!("{reason}. Choose another mode."),
             None => format!("{} — {}. Shift+Tab to switch.", mode.label(), mode.description()),
@@ -3714,7 +3730,7 @@ impl Pickers {
             .rounded(px(8.0))
             .text_size(crate::typography::ui_rems(12.0))
             .font_weight(gpui::FontWeight::MEDIUM)
-            .text_color(motion::hover_blend(&id, tint, theme.text))
+            .text_color(fg)
             .bg(if open {
                 theme.element_hover
             } else {
@@ -3740,7 +3756,8 @@ impl Pickers {
                     mode_icon(mode)
                 })
                 .size(px(14.0))
-                .flex_none(),
+                .flex_none()
+                .text_color(fg),
             )
             .when_some(chip_label(mode), |chip, label| {
                 chip.child(div().flex_none().child(SharedString::from(label)))
