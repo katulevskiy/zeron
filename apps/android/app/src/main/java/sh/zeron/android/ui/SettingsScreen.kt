@@ -1,5 +1,6 @@
 package sh.zeron.android.ui
 
+import sh.zeron.android.feedback.tapAction
 import sh.zeron.android.feedback.toggleAction
 import sh.zeron.android.feedback.feedbackAction
 import sh.zeron.android.feedback.LocalFeedback
@@ -98,7 +99,7 @@ fun SettingsScreen(model: AppModel, onOpen: (String) -> Unit) {
             // The agents on any engine device (Demo: a simulated one).
             Column(Modifier.padding(horizontal = 16.dp)) {
                 SegmentedListItem(
-                    onClick = { onOpen(Routes.AGENTS) },
+                    onClick = tapAction { onOpen(Routes.AGENTS) },
                     shapes = segmentedShapes(0, 1),
                     colors = ListItemDefaults.segmentedColors(containerColor = cardColor()),
                     leadingContent = { IconTile(ZIcons.Bot) },
@@ -107,11 +108,11 @@ fun SettingsScreen(model: AppModel, onOpen: (String) -> Unit) {
                 ) { Text("Coding agents") }
             }
         }
-        section("Sounds & haptics")
+        section("Feedback")
         item {
             Column(Modifier.padding(horizontal = 16.dp)) {
                 SegmentedListItem(
-                    onClick = { onOpen(Routes.SOUNDS) },
+                    onClick = tapAction { onOpen(Routes.SOUNDS) },
                     shapes = segmentedShapes(0, 1),
                     colors = ListItemDefaults.segmentedColors(containerColor = cardColor()),
                     leadingContent = { IconTile(ZIcons.Volume) },
@@ -157,7 +158,7 @@ fun SettingsScreen(model: AppModel, onOpen: (String) -> Unit) {
                 }
                 val dynamic = toggleAction { model.setAppearance(appearance.copy(dynamicColor = it)) }
                 SegmentedListItem(
-                    onClick = { dynamic(!appearance.dynamicColor) },
+                    onClick = tapAction { dynamic(!appearance.dynamicColor) },
                     shapes = segmentedShapes(1, 2),
                     colors = ListItemDefaults.segmentedColors(containerColor = cardColor()),
                     leadingContent = { IconTile(ZIcons.Magic) },
@@ -174,7 +175,7 @@ fun SettingsScreen(model: AppModel, onOpen: (String) -> Unit) {
                 Column(Modifier.padding(horizontal = 16.dp), verticalArrangement = Arrangement.spacedBy(ListItemDefaults.SegmentedGap)) {
                     devices.forEachIndexed { i, device ->
                         SegmentedListItem(
-                            onClick = {},
+                            onClick = tapAction {},
                             shapes = segmentedShapes(i, devices.size),
                             colors = ListItemDefaults.segmentedColors(containerColor = cardColor()),
                             leadingContent = {
@@ -211,7 +212,7 @@ fun SettingsScreen(model: AppModel, onOpen: (String) -> Unit) {
         item {
             Column(Modifier.padding(horizontal = 16.dp), verticalArrangement = Arrangement.spacedBy(ListItemDefaults.SegmentedGap)) {
                 SegmentedListItem(
-                    onClick = {},
+                    onClick = tapAction {},
                     shapes = segmentedShapes(0, 2),
                     colors = ListItemDefaults.segmentedColors(containerColor = cardColor()),
                     leadingContent = { IconTile(ZIcons.Info) },
@@ -266,7 +267,7 @@ private fun WallpaperSettings(model: AppModel) {
     val rows = if (state.set) 3 else 1
     Column(Modifier.padding(horizontal = 16.dp), verticalArrangement = Arrangement.spacedBy(ListItemDefaults.SegmentedGap)) {
         SegmentedListItem(
-            onClick = {
+            onClick = tapAction {
                 picker.launch(androidx.activity.result.PickVisualMediaRequest(androidx.activity.result.contract.ActivityResultContracts.PickVisualMedia.ImageOnly))
             },
             shapes = segmentedShapes(0, rows),
@@ -277,7 +278,7 @@ private fun WallpaperSettings(model: AppModel) {
         if (state.set) {
             Box {
                 SegmentedListItem(
-                    onClick = { effects = true },
+                    onClick = tapAction { effects = true },
                     shapes = segmentedShapes(1, rows),
                     colors = ListItemDefaults.segmentedColors(containerColor = cardColor()),
                     leadingContent = { IconTile(ZIcons.Magic) },

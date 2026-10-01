@@ -1,5 +1,6 @@
 package sh.zeron.android.tools
 
+import sh.zeron.android.feedback.tapAction
 import sh.zeron.android.feedback.QuietTaps
 import sh.zeron.android.feedback.LocalFeedback
 import sh.zeron.android.feedback.Haptic
@@ -272,7 +273,7 @@ fun TerminalScreen(model: AppModel, ref: WorkspaceRef, onBack: () -> Unit) {
                 modifier = Modifier.align(Alignment.BottomEnd).padding(12.dp),
             ) {
                 SmallFloatingActionButton(
-                    onClick = { session?.takeIf { it.isAttached }?.screen?.scrollToBottom() },
+                    onClick = tapAction { session?.takeIf { it.isAttached }?.screen?.scrollToBottom() },
                     shape = CircleShape,
                     containerColor = MaterialTheme.colorScheme.surfaceContainerHigh,
                     contentColor = MaterialTheme.colorScheme.onSurface,
@@ -328,7 +329,7 @@ private fun TabStrip(tabs: List<TerminalTab>, selected: String?, onSelect: (Stri
                 label = "tab",
             )
             Surface(
-                onClick = { onSelect(tab.id) },
+                onClick = tapAction { onSelect(tab.id) },
                 shape = RoundedCornerShape(50),
                 color = container,
                 contentColor = if (active) MaterialTheme.colorScheme.onSecondaryContainer else MaterialTheme.colorScheme.onSurfaceVariant,
@@ -412,7 +413,7 @@ private fun ExtraKey(
         label = "key",
     )
     Surface(
-        onClick = {
+        onClick = tapAction {
             fb.haptic(Haptic.Tick)
             onClick()
         },

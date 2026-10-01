@@ -1,5 +1,6 @@
 package sh.zeron.android.ui
 
+import sh.zeron.android.feedback.tapAction
 import sh.zeron.android.feedback.toggleAction
 import sh.zeron.android.feedback.feedbackAction
 import sh.zeron.android.feedback.LocalFeedback
@@ -399,7 +400,7 @@ fun StatusBanner(text: String, action: Pair<String, () -> Unit>?) {
     ) {
         Row(Modifier.padding(start = 16.dp, end = if (action != null) 4.dp else 16.dp), verticalAlignment = Alignment.CenterVertically) {
             Text(text, style = MaterialTheme.typography.labelLarge, modifier = Modifier.padding(vertical = 10.dp).weight(1f, fill = false))
-            action?.let { (label, run) -> TextButton(onClick = run) { Text(label) } }
+            action?.let { (label, run) -> TextButton(onClick = tapAction(action = run)) { Text(label) } }
         }
     }
 }
@@ -477,7 +478,7 @@ fun QueuePanel(queue: List<QueueItem>, handle: SessionHandle, editingId: String?
                     }
                     var menu by remember { mutableStateOf(false) }
                     Box {
-                        IconButton(onClick = { menu = true }) { ZIcon(ZIcons.More, "Queued message actions", Modifier.size(20.dp)) }
+                        IconButton(onClick = tapAction { menu = true }) { ZIcon(ZIcons.More, "Queued message actions", Modifier.size(20.dp)) }
                         ActionMenu(
                             menu,
                             { menu = false },

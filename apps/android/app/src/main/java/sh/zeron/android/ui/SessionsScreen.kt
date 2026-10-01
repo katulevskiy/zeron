@@ -1,5 +1,6 @@
 package sh.zeron.android.ui
 
+import sh.zeron.android.feedback.tapAction
 import sh.zeron.android.feedback.pullFeedback
 import sh.zeron.android.feedback.feedbackAction
 import sh.zeron.android.feedback.OpenCloseFeedback
@@ -315,7 +316,7 @@ fun SessionItem(
     val fb = LocalFeedback.current
     Box {
         SegmentedListItem(
-            onClick = { onOpen(row.id) },
+            onClick = tapAction { onOpen(row.id) },
             onLongClick = {
                 fb.haptic(Haptic.LongPress)
                 menu = true
@@ -421,7 +422,7 @@ fun RenameDialog(current: String, onDismiss: () -> Unit, onRename: (String) -> U
         confirmButton = {
             TextButton(onClick = feedbackAction(Haptic.Confirm, Cue.Select) { onRename(text.trim()); onDismiss() }, enabled = text.isNotBlank()) { Text("Rename") }
         },
-        dismissButton = { TextButton(onClick = onDismiss) { Text("Cancel") } },
+        dismissButton = { TextButton(onClick = tapAction(action = onDismiss)) { Text("Cancel") } },
     )
 }
 

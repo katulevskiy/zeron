@@ -1,5 +1,6 @@
 package sh.zeron.android.tools
 
+import sh.zeron.android.feedback.tapAction
 import android.content.Context
 import android.content.Intent
 import android.graphics.Bitmap
@@ -301,11 +302,11 @@ private fun PdfPages(doc: PdfDoc) {
         }
         if (doc.pageCount > 1) {
             HorizontalFloatingToolbar(expanded = true, modifier = Modifier.align(Alignment.BottomCenter).navigationBarsPadding().padding(bottom = 12.dp)) {
-                IconButton(onClick = { scope.launch { list.animateScrollToItem((current - 1).coerceAtLeast(0)) } }, enabled = current > 0) {
+                IconButton(onClick = tapAction { scope.launch { list.animateScrollToItem((current - 1).coerceAtLeast(0)) } }, enabled = current > 0) {
                     ZIcon(ZIcons.ChevronUp, "Previous page", Modifier.size(22.dp))
                 }
                 Text("Page ${current + 1}", style = MaterialTheme.typography.labelLarge, modifier = Modifier.align(Alignment.CenterVertically).padding(horizontal = 8.dp))
-                IconButton(onClick = { scope.launch { list.animateScrollToItem((current + 1).coerceAtMost(doc.pageCount - 1)) } }, enabled = current < doc.pageCount - 1) {
+                IconButton(onClick = tapAction { scope.launch { list.animateScrollToItem((current + 1).coerceAtMost(doc.pageCount - 1)) } }, enabled = current < doc.pageCount - 1) {
                     ZIcon(ZIcons.ChevronDown, "Next page", Modifier.size(22.dp))
                 }
             }
@@ -335,12 +336,12 @@ fun BinaryInfo(name: String, size: Long?, onSave: () -> Unit, onOpenWith: () -> 
         if (size != null) Text(formatBytes(size), style = MaterialTheme.typography.bodyMedium, color = MaterialTheme.colorScheme.onSurfaceVariant)
         Spacer(Modifier.size(20.dp))
         Row(horizontalArrangement = Arrangement.spacedBy(12.dp)) {
-            androidx.compose.material3.Button(onClick = onSave) {
+            androidx.compose.material3.Button(onClick = tapAction(action = onSave)) {
                 ZIcon(ZIcons.Save, null, Modifier.size(18.dp))
                 Spacer(Modifier.width(8.dp))
                 Text("Save to Downloads")
             }
-            androidx.compose.material3.FilledTonalButton(onClick = onOpenWith) { Text("Open with…") }
+            androidx.compose.material3.FilledTonalButton(onClick = tapAction(action = onOpenWith)) { Text("Open with…") }
         }
     }
 }

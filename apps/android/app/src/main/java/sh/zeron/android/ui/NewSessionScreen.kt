@@ -1,5 +1,6 @@
 package sh.zeron.android.ui
 
+import sh.zeron.android.feedback.tapAction
 import sh.zeron.android.feedback.feedbackAction
 import sh.zeron.android.feedback.LocalFeedback
 import sh.zeron.android.feedback.Haptic
@@ -306,7 +307,7 @@ private fun NewProjectDialog(source: ProjectSource, device: DeviceView?, onDismi
         confirmButton = {
             androidx.compose.material3.TextButton(onClick = feedbackAction(Haptic.Confirm, Cue.Select, ::go), enabled = valid && !busy) { Text(if (clone) "Clone" else "Create") }
         },
-        dismissButton = { androidx.compose.material3.TextButton(onClick = onDismiss, enabled = !busy) { Text("Cancel") } },
+        dismissButton = { androidx.compose.material3.TextButton(onClick = tapAction(action = onDismiss), enabled = !busy) { Text("Cancel") } },
     )
 }
 
@@ -484,7 +485,7 @@ private fun ProjectRow(
     onClick: () -> Unit,
 ) {
     androidx.compose.material3.SegmentedListItem(
-        onClick = onClick,
+        onClick = tapAction(action = onClick),
         shapes = segmentedShapes(index, count),
         colors = androidx.compose.material3.ListItemDefaults.segmentedColors(
             containerColor = if (selected) MaterialTheme.colorScheme.secondaryContainer else cardColor(),

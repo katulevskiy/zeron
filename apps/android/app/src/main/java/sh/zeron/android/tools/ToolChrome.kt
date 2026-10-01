@@ -1,5 +1,6 @@
 package sh.zeron.android.tools
 
+import sh.zeron.android.feedback.tapAction
 import android.content.Context
 import android.widget.Toast
 import androidx.compose.animation.AnimatedVisibility
@@ -137,13 +138,13 @@ fun DownloadsStrip(model: AppModel, modifier: Modifier = Modifier) {
                             }
                             when (val s = job.state) {
                                 is Downloads.State.Done -> {
-                                    TextButton(onClick = {
+                                    TextButton(onClick = tapAction {
                                         runCatching { context.startActivity(model.downloads.openIntent(job.name, s.uri)) }
                                             .onFailure { toast(context, "Nothing can open ${job.name}") }
                                     }) { Text("Open") }
-                                    TextButton(onClick = { model.downloads.dismiss(job.id) }) { Text("Done") }
+                                    TextButton(onClick = tapAction { model.downloads.dismiss(job.id) }) { Text("Done") }
                                 }
-                                is Downloads.State.Failed -> TextButton(onClick = { model.downloads.dismiss(job.id) }) { Text("Dismiss") }
+                                is Downloads.State.Failed -> TextButton(onClick = tapAction { model.downloads.dismiss(job.id) }) { Text("Dismiss") }
                                 is Downloads.State.Running -> Spacer(Modifier.width(10.dp))
                             }
                         }

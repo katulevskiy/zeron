@@ -210,7 +210,10 @@ class AndroidFeedback(
                 val volume = (store.current.gain * spec.gain).coerceIn(0f, 1f)
                 val rate = if (cue == Cue.Detent) DetentLadder.rate(step) else 1f
                 val started = bank.play(cue, volume, rate, spec.priority)
-                log("cue $cue ${if (started) "play" else "skip: ${Skipped.NotLoaded.label}"} vol=${"%.2f".format(volume)} rate=${"%.2f".format(rate)}${if (cue == Cue.Detent) " step=$step" else ""}")
+                log(
+                    if (started) "cue $cue play vol=${"%.2f".format(volume)} rate=${"%.2f".format(rate)}${if (cue == Cue.Detent) " step=$step" else ""}"
+                    else "cue $cue skip: ${Skipped.NotLoaded.label}",
+                )
             }
         }
     }

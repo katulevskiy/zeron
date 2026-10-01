@@ -1,5 +1,6 @@
 package sh.zeron.android.ui
 
+import sh.zeron.android.feedback.tapAction
 import androidx.compose.foundation.layout.Arrangement
 import androidx.compose.foundation.layout.Column
 import androidx.compose.foundation.layout.Row
@@ -85,7 +86,7 @@ fun SoundsScreen(model: AppModel, onBack: () -> Unit) {
             val granted = access.granted
             Group {
                 SegmentedListItem(
-                    onClick = access.ask,
+                    onClick = tapAction(action = access.ask),
                     enabled = !granted,
                     shapes = segmentedShapes(0, 1),
                     colors = ListItemDefaults.segmentedColors(containerColor = cardColor()),
@@ -130,7 +131,7 @@ private fun SwitchRow(
 ) {
     val change = toggleAction(onChange)
     SegmentedListItem(
-        onClick = { change(!checked) },
+        onClick = tapAction { change(!checked) },
         enabled = enabled,
         shapes = segmentedShapes(index, count),
         colors = ListItemDefaults.segmentedColors(containerColor = cardColor()),
@@ -245,7 +246,7 @@ private fun PreviewRows(engine: AndroidFeedback, s: FeedbackSettings, fb: sh.zer
     Group {
         samples.forEachIndexed { i, sample ->
             SegmentedListItem(
-                onClick = { running = i },
+                onClick = tapAction { running = i },
                 enabled = running == -1 && (s.sounds || s.haptics),
                 shapes = segmentedShapes(i, samples.size),
                 colors = ListItemDefaults.segmentedColors(containerColor = cardColor()),

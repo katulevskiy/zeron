@@ -1,5 +1,6 @@
 package sh.zeron.android.tools
 
+import sh.zeron.android.feedback.tapAction
 import sh.zeron.android.feedback.feedbackAction
 import sh.zeron.android.feedback.OpenCloseFeedback
 import sh.zeron.android.feedback.LocalFeedback
@@ -301,7 +302,7 @@ private fun TextFile(
                 Loaded.Loading -> Box(Modifier.fillMaxSize(), contentAlignment = Alignment.Center) { LoadingIndicator() }
                 is Loaded.Failed -> Column(Modifier.fillMaxSize().padding(32.dp), horizontalAlignment = Alignment.CenterHorizontally) {
                     Hint(l.message)
-                    TextButton(onClick = { load() }) { Text("Try again") }
+                    TextButton(onClick = tapAction { load() }) { Text("Try again") }
                 }
                 is Loaded.Ready -> when {
                     l.file.binary || l.file.text == null -> BinaryInfo(name, l.file.size, onSave = { model.downloads.saveFile(ref, path) }, onOpenWith = {
@@ -328,12 +329,12 @@ private fun TextFile(
                 )
             },
             confirmButton = {
-                if (reason != "deleted") TextButton(onClick = { conflict = null; save(overwrite = true) }) { Text("Overwrite") }
+                if (reason != "deleted") TextButton(onClick = tapAction { conflict = null; save(overwrite = true) }) { Text("Overwrite") }
             },
             dismissButton = {
                 Row {
-                    TextButton(onClick = { conflict = null; editing = false; load() }) { Text("Reload") }
-                    TextButton(onClick = { conflict = null }) { Text("Keep editing") }
+                    TextButton(onClick = tapAction { conflict = null; editing = false; load() }) { Text("Reload") }
+                    TextButton(onClick = tapAction { conflict = null }) { Text("Keep editing") }
                 }
             },
         )
@@ -346,7 +347,7 @@ private fun TextFile(
                 OpenCloseFeedback()
                 Text("$name has unsaved edits.")
             },
-            confirmButton = { TextButton(onClick = { confirmDiscard = false; save() }) { Text("Save") } },
+            confirmButton = { TextButton(onClick = tapAction { confirmDiscard = false; save() }) { Text("Save") } },
             dismissButton = {
                 Row {
                     TextButton(onClick = feedbackAction(Haptic.Heavy, Cue.Delete) {
@@ -354,7 +355,7 @@ private fun TextFile(
                         editing = false
                         buffer = TextFieldValue(file?.text ?: "")
                     }) { Text("Discard") }
-                    TextButton(onClick = { confirmDiscard = false }) { Text("Cancel") }
+                    TextButton(onClick = tapAction { confirmDiscard = false }) { Text("Cancel") }
                 }
             },
         )

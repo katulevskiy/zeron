@@ -1,5 +1,6 @@
 package sh.zeron.android.ui
 
+import sh.zeron.android.feedback.tapAction
 import sh.zeron.android.feedback.feedbackAction
 import sh.zeron.android.feedback.Haptic
 import sh.zeron.android.feedback.Cue
@@ -266,7 +267,7 @@ private fun ColumnScope.BranchPickerContent(
     error?.let {
         Row(Modifier.fillMaxWidth().padding(start = 20.dp, end = 8.dp, top = 8.dp), verticalAlignment = Alignment.CenterVertically) {
             Text(it, style = MaterialTheme.typography.bodySmall, color = MaterialTheme.colorScheme.error, modifier = Modifier.weight(1f))
-            if (refs == null) TextButton(onClick = onRetry) { Text("Retry") }
+            if (refs == null) TextButton(onClick = tapAction(action = onRetry)) { Text("Retry") }
         }
     }
     Spacer(Modifier.size(8.dp))

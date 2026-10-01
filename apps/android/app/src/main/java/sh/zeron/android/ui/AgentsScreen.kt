@@ -1,5 +1,6 @@
 package sh.zeron.android.ui
 
+import sh.zeron.android.feedback.tapAction
 import sh.zeron.android.feedback.LocalFeedback
 import sh.zeron.android.feedback.feedbackAction
 import sh.zeron.android.feedback.OpenCloseFeedback
@@ -302,7 +303,7 @@ fun AgentsScreen(model: AppModel, onBack: () -> Unit) {
         actions = {
             if (device != null && !harnesses.isNullOrEmpty()) {
                 FilledTonalButton(
-                    onClick = { updateAll() },
+                    onClick = tapAction { updateAll() },
                     enabled = pending > 0 && !busyNow,
                     shapes = ButtonDefaults.shapes(),
                     contentPadding = ButtonDefaults.SmallContentPadding,
@@ -376,7 +377,7 @@ fun AgentsScreen(model: AppModel, onBack: () -> Unit) {
             }
             list.isEmpty() -> item {
                 EmptyNote(ZIcons.Warning, "Couldn't load the agents", error ?: "The device didn't answer.") {
-                    FilledTonalButton(onClick = { reloads++ }, shapes = ButtonDefaults.shapes()) { Text("Try again") }
+                    FilledTonalButton(onClick = tapAction { reloads++ }, shapes = ButtonDefaults.shapes()) { Text("Try again") }
                 }
             }
             else -> {
@@ -437,7 +438,7 @@ fun AgentsScreen(model: AppModel, onBack: () -> Unit) {
                     }
                 }) { Text("Sign out", color = MaterialTheme.colorScheme.error) }
             },
-            dismissButton = { TextButton(onClick = { signingOut = null }) { Text("Cancel") } },
+            dismissButton = { TextButton(onClick = tapAction { signingOut = null }) { Text("Cancel") } },
         )
     }
     uninstalling?.let { h ->
@@ -497,7 +498,7 @@ private fun UninstallDialog(model: AppModel, device: String, deviceName: String,
                 TextButton(onClick = feedbackAction(Haptic.Heavy, Cue.Delete, onConfirm)) { Text("Uninstall", color = MaterialTheme.colorScheme.error) }
             }
         },
-        dismissButton = { TextButton(onClick = onDismiss) { Text(if (preview?.isFailure == true) "Close" else "Cancel") } },
+        dismissButton = { TextButton(onClick = tapAction(action = onDismiss)) { Text(if (preview?.isFailure == true) "Close" else "Cancel") } },
     )
 }
 
@@ -584,14 +585,14 @@ private fun HarnessCard(
                     )
                 }
                 when {
-                    activity == Activity.Installing -> OutlinedButton(onClick = onCancel, shapes = ButtonDefaults.shapes()) { Text("Cancel") }
+                    activity == Activity.Installing -> OutlinedButton(onClick = tapAction(action = onCancel), shapes = ButtonDefaults.shapes()) { Text("Cancel") }
                     activity != null -> {}
-                    !h.installed && h.canInstall -> Button(onClick = onInstall, shapes = ButtonDefaults.shapes()) { Text("Install") }
-                    available && version?.canApply == true -> Button(onClick = onUpdate, enabled = canUpdate, shapes = ButtonDefaults.shapes()) { Text("Update") }
+                    !h.installed && h.canInstall -> Button(onClick = tapAction(action = onInstall), shapes = ButtonDefaults.shapes()) { Text("Install") }
+                    available && version?.canApply == true -> Button(onClick = tapAction(action = onUpdate), enabled = canUpdate, shapes = ButtonDefaults.shapes()) { Text("Update") }
                 }
                 if (h.installed && activity == null) {
                     Box {
-                        IconButton(onClick = { menu = true }) {
+                        IconButton(onClick = tapAction { menu = true }) {
                             ZIcon(ZIcons.More, "More for ${h.name}", Modifier.size(22.dp), tint = MaterialTheme.colorScheme.onSurfaceVariant)
                         }
                         ActionMenu(menu, { menu = false }, listOf(MenuAction("Uninstall", ZIcons.Delete, destructive = true, onClick = onUninstall)))
@@ -630,7 +631,7 @@ private fun HarnessCard(
                                     maxLines = 1,
                                 )
                             }
-                            TextButton(onClick = { onSignOut(a) }) { Text("Sign out") }
+                            TextButton(onClick = tapAction { onSignOut(a) }) { Text("Sign out") }
                         }
                     }
                 }
@@ -639,7 +640,7 @@ private fun HarnessCard(
                     Text(warning, style = MaterialTheme.typography.bodySmall, color = MaterialTheme.colorScheme.error)
                 }
                 Spacer(Modifier.height(12.dp))
-                FilledTonalButton(onClick = onSignIn, modifier = Modifier.fillMaxWidth(), shapes = ButtonDefaults.shapes()) {
+                FilledTonalButton(onClick = tapAction(action = onSignIn), modifier = Modifier.fillMaxWidth(), shapes = ButtonDefaults.shapes()) {
                     ZIcon(if (accounts.isEmpty()) ZIcons.Key else ZIcons.Plus, null, Modifier.size(ButtonDefaults.IconSize))
                     Spacer(Modifier.size(ButtonDefaults.IconSpacing))
                     Text(if (accounts.isEmpty()) "Sign in" else "Add account")
@@ -742,7 +743,7 @@ private fun SignInSheet(model: AppModel, device: String, h: Agents.Harness, scop
                 }
                 Spacer(Modifier.height(10.dp))
                 Row(horizontalArrangement = Arrangement.spacedBy(8.dp)) {
-                    FilledTonalButton(onClick = { openPage(context, model, url, force = true) }, modifier = Modifier.weight(1f), shapes = ButtonDefaults.shapes()) {
+                    FilledTonalButton(onClick = tapAction { openPage(context, model, url, force = true) }, modifier = Modifier.weight(1f), shapes = ButtonDefaults.shapes()) {
                         ZIcon(ZIcons.Link, null, Modifier.size(ButtonDefaults.IconSize))
                         Spacer(Modifier.size(ButtonDefaults.IconSpacing))
                         Text("Open page")
@@ -757,7 +758,7 @@ private fun SignInSheet(model: AppModel, device: String, h: Agents.Harness, scop
             Spacer(Modifier.height(20.dp))
             if (s?.mode == Agents.LoginMode.PasteCode && failure == null) {
                 Button(
-                    onClick = {
+                    onClick = tapAction {
                         busy = true
                         scope.launch {
                             runCatching { model.hostCall(device, Agents.COMPLETE_LOGIN, JSONObject().put("loginId", s.loginId).put("code", code.trim())) }
@@ -772,7 +773,7 @@ private fun SignInSheet(model: AppModel, device: String, h: Agents.Harness, scop
                 ) { Text("Finish sign-in") }
                 Spacer(Modifier.height(8.dp))
             }
-            TextButton(onClick = onDismiss, modifier = Modifier.fillMaxWidth()) { Text(if (failure != null) "Close" else "Cancel") }
+            TextButton(onClick = tapAction(action = onDismiss), modifier = Modifier.fillMaxWidth()) { Text(if (failure != null) "Close" else "Cancel") }
         }
     }
 }

@@ -42,7 +42,6 @@ fun ProvideFeedback(feedback: AndroidFeedback, content: @Composable () -> Unit) 
         onDispose { feedback.attachView(null) }
     }
     val base = LocalIndication.current
-    android.util.Log.d("ZeronFeedback", "base indication = $base ${base::class.java.name} factory=${base is IndicationNodeFactory}")
     val indication = remember(base) { if (base is IndicationNodeFactory) FeedbackIndication(base) else base }
     CompositionLocalProvider(
         LocalFeedback provides feedback,
@@ -73,7 +72,7 @@ fun QuietTaps(content: @Composable () -> Unit) {
  * here; long presses are ignored (they have their own feedback).
  */
 class FeedbackIndication(private val base: IndicationNodeFactory) : IndicationNodeFactory {
-    override fun create(interactionSource: InteractionSource): DelegatableNode = android.util.Log.d("ZeronFeedback", "indication create").let { Node(interactionSource, base.create(interactionSource)) }
+    override fun create(interactionSource: InteractionSource): DelegatableNode = Node(interactionSource, base.create(interactionSource))
 
     override fun equals(other: Any?) = other is FeedbackIndication && other.base == base
     override fun hashCode() = base.hashCode() * 31 + 1
@@ -90,7 +89,6 @@ class FeedbackIndication(private val base: IndicationNodeFactory) : IndicationNo
             coroutineScope.launch {
                 var pressedAt = 0L
                 source.interactions.collect { interaction ->
-                    android.util.Log.d("ZeronFeedback", "interaction $interaction")
                     when (interaction) {
                         is PressInteraction.Press -> pressedAt = System.nanoTime()
                         is PressInteraction.Release -> {
@@ -158,6 +156,24 @@ fun feedbackAction(haptic: Haptic? = Haptic.Select, cue: Cue? = Cue.Tap, action:
     val fb = LocalFeedback.current
     val latest = rememberUpdatedState(action)
     return remember(fb, haptic, cue) { { fb.play(haptic, cue); latest.value() } }
+}
+
+/**
+ * [action] followed by the default tap (a light haptic and the soft tap): for
+ * stock controls with no particular meaning of their own. The default stays
+ * quiet when the action asked for feedback itself (a toggle, a navigation's
+ * Open cue), so wrapping is always safe.
+ */
+@Composable
+fun tapAction(action: () -> Unit): () -> Unit {
+    val fb = LocalFeedback.current
+    val latest = rememberUpdatedState(action)
+    return remember(fb) {
+        {
+            latest.value()
+            (fb as? TapFeedback)?.defaultTap(0)
+        }
+    }
 }
 
 /** `onCheckedChange` for a switch or checkbox: on and off answer differently. */

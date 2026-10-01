@@ -1,5 +1,6 @@
 package sh.zeron.android.tools
 
+import sh.zeron.android.feedback.tapAction
 import sh.zeron.android.feedback.feedbackCombinedClickable
 import sh.zeron.android.feedback.feedbackAction
 import sh.zeron.android.feedback.Haptic
@@ -263,7 +264,7 @@ fun FilesScreen(
                     Spacer(Modifier.height(6.dp))
                     Text(error ?: "", style = MaterialTheme.typography.bodyMedium, color = MaterialTheme.colorScheme.onSurfaceVariant)
                     Spacer(Modifier.height(12.dp))
-                    TextButton(onClick = { load("") }) { Text("Try again") }
+                    TextButton(onClick = tapAction { load("") }) { Text("Try again") }
                 }
                 children[""] == null -> Box(Modifier.fillMaxSize(), contentAlignment = Alignment.Center) { LoadingIndicator() }
                 else -> LazyColumn(Modifier.fillMaxSize(), state = list, contentPadding = PaddingValues(top = 4.dp, bottom = 120.dp)) {
@@ -306,7 +307,7 @@ fun FilesScreen(
 
 @Composable
 private fun ToolbarButton(icon: Int, label: String, onClick: () -> Unit) {
-    IconButton(onClick = onClick) { ZIcon(icon, label, Modifier.size(22.dp)) }
+    IconButton(onClick = tapAction(action = onClick)) { ZIcon(icon, label, Modifier.size(22.dp)) }
 }
 
 /** Per-workspace tree state, kept for the app's lifetime. */
@@ -419,7 +420,7 @@ fun SearchField(value: String, onChange: (String) -> Unit, modifier: Modifier = 
                 )
             }
             if (value.isNotEmpty()) {
-                IconButton(onClick = { onChange("") }, modifier = Modifier.size(24.dp)) { ZIcon(ZIcons.Close, "Clear", Modifier.size(18.dp)) }
+                IconButton(onClick = tapAction { onChange("") }, modifier = Modifier.size(24.dp)) { ZIcon(ZIcons.Close, "Clear", Modifier.size(18.dp)) }
             }
         }
     }

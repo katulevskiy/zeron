@@ -1,5 +1,6 @@
 package sh.zeron.android.ui
 
+import sh.zeron.android.feedback.tapAction
 import androidx.annotation.DrawableRes
 import androidx.compose.animation.animateColorAsState
 import androidx.compose.foundation.background
@@ -55,7 +56,7 @@ fun TonalCircleButton(
     content: Color = MaterialTheme.colorScheme.onSurface,
 ) {
     FilledTonalIconButton(
-        onClick = onClick,
+        onClick = tapAction(action = onClick),
         shapes = IconButtonDefaults.shapes(),
         colors = IconButtonDefaults.filledTonalIconButtonColors(containerColor = container, contentColor = content),
         modifier = modifier.size(size),
@@ -92,7 +93,7 @@ fun Pill(label: String, selected: Boolean, onClick: () -> Unit, count: Int? = nu
     val fg = if (selected) MaterialTheme.colorScheme.onPrimary else MaterialTheme.colorScheme.onSurface
     // Choosing a pill is a selection; pressing the one already chosen is only a tap.
     val choose = feedbackAction(Haptic.Select, Cue.Select, onClick)
-    Surface(onClick = if (selected) onClick else choose, shape = RoundedCornerShape(50), color = container, contentColor = fg) {
+    Surface(onClick = tapAction(action = if (selected) onClick else choose), shape = RoundedCornerShape(50), color = container, contentColor = fg) {
         Row(
             Modifier.heightIn(min = 40.dp).padding(horizontal = 16.dp),
             verticalAlignment = Alignment.CenterVertically,
@@ -136,7 +137,7 @@ fun FloatingNavBar(items: List<NavItem>, modifier: Modifier = Modifier, trailing
                     // Switching tabs is a selection; the tab you are on answers with the plain tap.
                     val switchTab = feedbackAction(Haptic.Select, Cue.Select, item.onClick)
                     Surface(
-                        onClick = if (item.selected) item.onClick else switchTab,
+                        onClick = tapAction(action = if (item.selected) item.onClick else switchTab),
                         shape = RoundedCornerShape(30.dp),
                         color = bg,
                         contentColor = if (item.selected) MaterialTheme.colorScheme.onSecondaryContainer else MaterialTheme.colorScheme.onSurfaceVariant,
@@ -166,7 +167,7 @@ fun FloatingNavBar(items: List<NavItem>, modifier: Modifier = Modifier, trailing
 @Composable
 fun NewSessionBar(summary: String?, onClick: () -> Unit, modifier: Modifier = Modifier) {
     Surface(
-        onClick = onClick,
+        onClick = tapAction(action = onClick),
         shape = RoundedCornerShape(32.dp),
         color = MaterialTheme.colorScheme.primaryContainer,
         contentColor = MaterialTheme.colorScheme.onPrimaryContainer,

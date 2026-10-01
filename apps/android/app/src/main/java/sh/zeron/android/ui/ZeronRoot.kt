@@ -1,5 +1,7 @@
 package sh.zeron.android.ui
 
+import sh.zeron.android.feedback.AppFeedback
+import sh.zeron.android.feedback.tapAction
 import androidx.compose.animation.AnimatedContent
 import androidx.compose.animation.fadeIn
 import androidx.compose.animation.fadeOut
@@ -105,25 +107,46 @@ object Routes {
 private fun AppModel.refFor(ws: String): WorkspaceRef? =
     if (ws.startsWith("space:")) projectRef(ws.removePrefix("space:")) else workspaceRef(ws)
 
+/**
+ * Navigation announces itself when it is asked for, not when the transition
+ * lands (that can be a second later on a slow device): going deeper opens,
+ * coming back closes.
+ */
+private object NavCues {
+    var announced = false
+}
+
+private fun NavController.open(route: String) {
+    AppFeedback.current.cue(Cue.Open)
+    NavCues.announced = true
+    navigate(route)
+}
+
+private fun NavController.back() {
+    AppFeedback.current.cue(Cue.Close)
+    NavCues.announced = true
+    popBackStack()
+}
+
 /** Launch and notification routes: `chat:<id>`, `new`, `search`, `agents`, and the developer-tool routes. */
 private fun NavController.openRoute(route: String) {
     val nav = this
     when {
-        route == "new" -> nav.navigate(Routes.NEW)
-        route == "search" -> nav.navigate(Routes.SEARCH)
-        route == "agents" -> nav.navigate(Routes.AGENTS)
-        route == "sounds" -> nav.navigate(Routes.SOUNDS)
-        route.startsWith("chat:") -> nav.navigate(Routes.chat(route.removePrefix("chat:")))
+        route == "new" -> nav.open(Routes.NEW)
+        route == "search" -> nav.open(Routes.SEARCH)
+        route == "agents" -> nav.open(Routes.AGENTS)
+        route == "sounds" -> nav.open(Routes.SOUNDS)
+        route.startsWith("chat:") -> nav.open(Routes.chat(route.removePrefix("chat:")))
         // subagents:<chat> opens its panel; subagent:<chat>|<doc> one subagent.
-        route.startsWith("subagents:") -> nav.navigate(Routes.chatSubagents(route.removePrefix("subagents:")))
+        route.startsWith("subagents:") -> nav.open(Routes.chatSubagents(route.removePrefix("subagents:")))
         route.startsWith("subagent:") -> route.removePrefix("subagent:").split('|', limit = 2).let {
-            if (it.size == 2) nav.navigate(Routes.subagent(it[0], it[1]))
+            if (it.size == 2) nav.open(Routes.subagent(it[0], it[1]))
         }
         // Developer tools: files:<chat> / terminal:<chat> / browser:<chat>|<url> / file:<chat>|<path>
-        route.startsWith("files:") -> nav.navigate(Routes.files(route.removePrefix("files:")))
-        route.startsWith("terminal:") -> nav.navigate(Routes.terminal(route.removePrefix("terminal:")))
-        route.startsWith("file:") -> route.removePrefix("file:").split('|', limit = 2).let { nav.navigate(Routes.file(it[0], it.getOrElse(1) { "" })) }
-        route.startsWith("browser:") -> route.removePrefix("browser:").split('|', limit = 2).let { nav.navigate(Routes.browser(it[0], it.getOrNull(1))) }
+        route.startsWith("files:") -> nav.open(Routes.files(route.removePrefix("files:")))
+        route.startsWith("terminal:") -> nav.open(Routes.terminal(route.removePrefix("terminal:")))
+        route.startsWith("file:") -> route.removePrefix("file:").split('|', limit = 2).let { nav.open(Routes.file(it[0], it.getOrElse(1) { "" })) }
+        route.startsWith("browser:") -> route.removePrefix("browser:").split('|', limit = 2).let { nav.open(Routes.browser(it[0], it.getOrNull(1))) }
     }
 }
 
@@ -142,9 +165,11 @@ private fun MainNav(model: AppModel) {
         val listener = NavController.OnDestinationChangedListener { controller, _, _ ->
             focus.clearFocus(force = true)
             keyboard?.hide()
-            // Going deeper opens, coming back closes: the one place pages announce themselves.
+            // Pages announce themselves when asked to open or close (see open / back). The listener only
+            // covers what nobody asked for with a tap: the system back gesture.
             val now = controller.currentBackStack.value.count { it.destination !is androidx.navigation.NavGraph }
-            if (depth > 0 && now > depth) feedback.cue(Cue.Open) else if (depth > 0 && now < depth) feedback.cue(Cue.Close)
+            if (NavCues.announced) NavCues.announced = false
+            else if (depth > 0 && now < depth) feedback.cue(Cue.Close)
             depth = now
         }
         nav.addOnDestinationChangedListener(listener)
@@ -160,35 +185,35 @@ private fun MainNav(model: AppModel) {
         composable(Routes.CHAT, arguments = listOf(navArgument("subagents") { defaultValue = "false" })) { entry ->
             val id = entry.arguments?.getString("id") ?: return@composable
             val subagents = entry.arguments?.getString("subagents") == "true"
-            SessionScreen(model, id, onBack = { nav.popBackStack() }, onNavigate = { nav.navigate(it) }, showSubagents = subagents)
+            SessionScreen(model, id, onBack = { nav.back() }, onNavigate = { nav.open(it) }, showSubagents = subagents)
         }
         composable(Routes.SUBAGENT) { entry ->
             val chat = entry.arguments?.getString("chat") ?: return@composable
             val doc = entry.arguments?.getString("doc") ?: return@composable
-            SubagentScreen(model, chat, doc, onBack = { nav.popBackStack() }, onNavigate = { nav.navigate(it) })
+            SubagentScreen(model, chat, doc, onBack = { nav.back() }, onNavigate = { nav.open(it) })
         }
         composable(Routes.FILES) { entry ->
             val ws = entry.arguments?.getString("ws") ?: return@composable
-            val ref = remember(ws) { model.refFor(ws) } ?: return@composable Unavailable { nav.popBackStack() }
+            val ref = remember(ws) { model.refFor(ws) } ?: return@composable Unavailable { nav.back() }
             FilesScreen(
                 model,
                 ref,
-                onBack = { nav.popBackStack() },
-                onOpenFile = { nav.navigate(Routes.file(ws, it)) },
-                onTerminal = { nav.navigate(Routes.terminal(ws)) },
-                onBrowser = { nav.navigate(Routes.browser(ws, it)) },
+                onBack = { nav.back() },
+                onOpenFile = { nav.open(Routes.file(ws, it)) },
+                onTerminal = { nav.open(Routes.terminal(ws)) },
+                onBrowser = { nav.open(Routes.browser(ws, it)) },
             )
         }
         composable(Routes.FILE, arguments = listOf(navArgument("path") { defaultValue = "" })) { entry ->
             val ws = entry.arguments?.getString("ws") ?: return@composable
             val path = entry.arguments?.getString("path").orEmpty()
-            val ref = remember(ws) { model.refFor(ws) } ?: return@composable Unavailable { nav.popBackStack() }
-            FileScreen(model, ref, path, onBack = { nav.popBackStack() }, onBrowser = { nav.navigate(Routes.browser(ws, it)) })
+            val ref = remember(ws) { model.refFor(ws) } ?: return@composable Unavailable { nav.back() }
+            FileScreen(model, ref, path, onBack = { nav.back() }, onBrowser = { nav.open(Routes.browser(ws, it)) })
         }
         composable(Routes.TERMINAL) { entry ->
             val ws = entry.arguments?.getString("ws") ?: return@composable
-            val ref = remember(ws) { model.refFor(ws) } ?: return@composable Unavailable { nav.popBackStack() }
-            TerminalScreen(model, ref, onBack = { nav.popBackStack() })
+            val ref = remember(ws) { model.refFor(ws) } ?: return@composable Unavailable { nav.back() }
+            TerminalScreen(model, ref, onBack = { nav.back() })
         }
         composable(
             Routes.BROWSER,
@@ -197,19 +222,21 @@ private fun MainNav(model: AppModel) {
             val ws = entry.arguments?.getString("ws").orEmpty()
             val url = entry.arguments?.getString("url").orEmpty()
             val ref = remember(ws) { ws.ifEmpty { null }?.let { model.refFor(it) } }
-            BrowserScreen(model, ref, url.ifEmpty { null }, onBack = { nav.popBackStack() }, onOpenFile = { if (ws.isNotEmpty()) nav.navigate(Routes.file(ws, it)) })
+            BrowserScreen(model, ref, url.ifEmpty { null }, onBack = { nav.back() }, onOpenFile = { if (ws.isNotEmpty()) nav.open(Routes.file(ws, it)) })
         }
         composable(Routes.NEW) {
-            NewSessionScreen(model, onClose = { nav.popBackStack() }, onCreated = { id ->
+            NewSessionScreen(model, onClose = { nav.back() }, onCreated = { id ->
+                // Creating a session already sounded (send); the page swap itself stays quiet.
+                NavCues.announced = true
                 nav.popBackStack()
                 nav.navigate(Routes.chat(id))
             })
         }
         composable(Routes.SEARCH) {
-            SearchScreen(model, onBack = { nav.popBackStack() }, onOpen = { nav.navigate(Routes.chat(it)) })
+            SearchScreen(model, onBack = { nav.back() }, onOpen = { nav.open(Routes.chat(it)) })
         }
-        composable(Routes.AGENTS) { AgentsScreen(model, onBack = { nav.popBackStack() }) }
-        composable(Routes.SOUNDS) { SoundsScreen(model, onBack = { nav.popBackStack() }) }
+        composable(Routes.AGENTS) { AgentsScreen(model, onBack = { nav.back() }) }
+        composable(Routes.SOUNDS) { SoundsScreen(model, onBack = { nav.back() }) }
     }
 }
 
@@ -222,8 +249,8 @@ private fun Home(model: AppModel, nav: NavHostController) {
     val summary = remember(workspace) { workspace?.let { liveSummary(it) } }
     Box(Modifier.fillMaxSize().background(MaterialTheme.colorScheme.background)) {
         when (tab) {
-            Tab.Sessions -> SessionsScreen(model, onOpen = { nav.navigate(Routes.chat(it)) })
-            Tab.Settings -> SettingsScreen(model, onOpen = { nav.navigate(it) })
+            Tab.Sessions -> SessionsScreen(model, onOpen = { nav.open(Routes.chat(it)) })
+            Tab.Settings -> SettingsScreen(model, onOpen = { nav.open(it) })
         }
         // Floating chrome over a soft scrim: new session, then the nav capsule.
         Column(
@@ -235,14 +262,14 @@ private fun Home(model: AppModel, nav: NavHostController) {
                 .padding(top = 28.dp, bottom = 8.dp),
             verticalArrangement = Arrangement.spacedBy(10.dp),
         ) {
-            if (tab == Tab.Sessions) NewSessionBar(summary, onClick = { nav.navigate(Routes.NEW) })
+            if (tab == Tab.Sessions) NewSessionBar(summary, onClick = { nav.open(Routes.NEW) })
             FloatingNavBar(
                 listOf(
                     NavItem("Sessions", ZIcons.TabSessions, tab == Tab.Sessions) { tab = Tab.Sessions },
                     NavItem("Settings", ZIcons.TabSettings, tab == Tab.Settings) { tab = Tab.Settings },
                 ),
                 trailing = {
-                    TonalCircleButton(ZIcons.Search, "Search", onClick = { nav.navigate(Routes.SEARCH) }, size = 72.dp)
+                    TonalCircleButton(ZIcons.Search, "Search", onClick = { nav.open(Routes.SEARCH) }, size = 72.dp)
                 },
             )
         }
@@ -253,6 +280,6 @@ private fun Home(model: AppModel, nav: NavHostController) {
 private fun Unavailable(onBack: () -> Unit) {
     Column(Modifier.fillMaxSize().navigationBarsPadding().padding(32.dp), verticalArrangement = Arrangement.Center, horizontalAlignment = Alignment.CenterHorizontally) {
         Text("This workspace isn't available.", style = MaterialTheme.typography.titleMedium)
-        androidx.compose.material3.TextButton(onClick = onBack) { Text("Back") }
+        androidx.compose.material3.TextButton(onClick = tapAction(action = onBack)) { Text("Back") }
     }
 }

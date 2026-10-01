@@ -1,5 +1,6 @@
 package sh.zeron.android.ui
 
+import sh.zeron.android.feedback.tapAction
 import sh.zeron.android.feedback.feedbackAction
 import sh.zeron.android.feedback.LocalFeedback
 import sh.zeron.android.feedback.Haptic
@@ -93,7 +94,7 @@ fun SignInScreen(model: AppModel) {
         )
         Spacer(Modifier.height(48.dp))
         Button(
-            onClick = {
+            onClick = tapAction {
                 val url = model.beginSignIn()
                 CustomTabsIntent.Builder().setShowTitle(true).build().launchUrl(context, Uri.parse(url))
             },
@@ -131,14 +132,14 @@ fun SignInScreen(model: AppModel) {
                         ListItem(
                             headlineContent = { Text(org.name) },
                             trailingContent = {
-                                TextButton(onClick = { choice.complete(org) }) { Text("Open") }
+                                TextButton(onClick = tapAction { choice.complete(org) }) { Text("Open") }
                             },
                         )
                     }
                 }
             },
             confirmButton = {},
-            dismissButton = { TextButton(onClick = { choice.complete(null) }) { Text("Cancel") } },
+            dismissButton = { TextButton(onClick = tapAction { choice.complete(null) }) { Text("Cancel") } },
         )
     }
 }
@@ -170,6 +171,6 @@ private fun DevSignInDialog(onDismiss: () -> Unit, onSignIn: (String, String, St
             }
         },
         confirmButton = { TextButton(onClick = feedbackAction(Haptic.Confirm, Cue.Select) { onSignIn(edge, user, org) }) { Text("Sign in") } },
-        dismissButton = { TextButton(onClick = onDismiss) { Text("Cancel") } },
+        dismissButton = { TextButton(onClick = tapAction(action = onDismiss)) { Text("Cancel") } },
     )
 }

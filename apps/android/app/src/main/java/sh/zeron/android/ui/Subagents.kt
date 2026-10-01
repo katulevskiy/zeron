@@ -1,5 +1,6 @@
 package sh.zeron.android.ui
 
+import sh.zeron.android.feedback.tapAction
 import sh.zeron.android.feedback.feedbackClickable
 import sh.zeron.android.feedback.OpenCloseFeedback
 import sh.zeron.android.feedback.Haptic
@@ -233,7 +234,7 @@ fun SubagentsSheet(groups: SubagentGroups, onOpen: (SubagentView) -> Unit, onDis
                     is SubagentSlot.Item -> SubagentRow(slot.view, slot.nested, now) { onOpen(slot.view) }
                     is SubagentSlot.Header -> GroupHeader(slot) { state = state.toggled(slot.group) }
                     is SubagentSlot.ShowMore -> TextButton(
-                        onClick = { state = state.pagedUp(slot.group) },
+                        onClick = tapAction { state = state.pagedUp(slot.group) },
                         modifier = Modifier.padding(start = 48.dp).animateItem(),
                     ) { Text(slot.label) }
                 }

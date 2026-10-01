@@ -1,5 +1,6 @@
 package sh.zeron.android.ui
 
+import sh.zeron.android.feedback.tapAction
 import sh.zeron.android.feedback.feedbackClickable
 import sh.zeron.android.feedback.feedbackAction
 import sh.zeron.android.feedback.OpenCloseFeedback
@@ -209,7 +210,7 @@ private fun AttachButton(model: ComposerModel, enabled: Boolean) {
     val photos = rememberLauncherForActivityResult(ActivityResultContracts.PickMultipleVisualMedia(Staging.MAX_IMAGES)) { add(it) }
     val files = rememberLauncherForActivityResult(ActivityResultContracts.OpenMultipleDocuments()) { add(it) }
     Box {
-        IconButton(onClick = { open = true }, enabled = enabled && model.images.size < Staging.MAX_IMAGES) {
+        IconButton(onClick = tapAction { open = true }, enabled = enabled && model.images.size < Staging.MAX_IMAGES) {
             ZIcon(ZIcons.Plus, "Attach", Modifier.size(22.dp), tint = MaterialTheme.colorScheme.onSurfaceVariant)
         }
         val clip = if (open) context.getSystemService(android.content.ClipboardManager::class.java)?.primaryClip else null
