@@ -1,45 +1,28 @@
 package sh.zeron.android.feedback
 
 /**
- * What the device and the system are doing right now. Read per event, so
- * implementations cache (the real one answers from a snapshot refreshed by
- * system broadcasts and a short TTL, see `SystemEnvironment`): the gate sits
- * on the tap-to-sound path and must not make a binder call per event.
+ * What the device is doing right now. Read per event, so implementations
+ * cache (the real one answers from a snapshot refreshed by the screen
+ * broadcasts and a short TTL, see `SystemEnvironment`): the gate sits on the
+ * tap-to-sound path and must not make a binder call per event. It deliberately
+ * knows nothing of the phone's own touch-sound, touch-feedback, ringer or Do
+ * Not Disturb settings: the in-app switches are the single source of truth.
  */
 interface FeedbackEnvironment {
     /** The app is in the foreground and its screen is on and interactive. */
     val active: Boolean
 
-    /** System Settings > touch feedback / vibration (`HAPTIC_FEEDBACK_ENABLED`). */
-    val systemTouchHaptics: Boolean
-
-    /** System Settings > touch sounds (`SOUND_EFFECTS_ENABLED`). */
-    val systemTouchSounds: Boolean
-
-    /** The ringer is normal (not silent or vibrate-only). */
-    val ringerNormal: Boolean
-
-    /** Do Not Disturb is on in a mode that silences interface sounds (total silence or alarms only). */
-    val silencedByDnd: Boolean
-
     val hasVibrator: Boolean
-
-    /** The sound-effects stream is audible (volume above zero). */
-    val streamAudible: Boolean
 }
 
 /** Why a haptic or cue did not play. Logged by debug builds. */
 enum class Skipped(val label: String) {
+    MasterOff("sounds & haptics master off"),
     HapticsOff("haptics switch off"),
     NoVibrator("no vibrator"),
     Inactive("app not active (background or screen off)"),
-    SystemHapticsOff("system touch feedback off"),
     SoundsOff("sounds switch off"),
     CategoryOff("category switch off"),
-    SystemSoundsOff("system touch sounds off"),
-    Silent("ringer silent or vibrate"),
-    Dnd("do not disturb"),
-    Muted("sound stream at zero"),
     Rate("rate limited"),
     Streams("too many streams"),
     NotLoaded("sound not loaded"),
@@ -51,23 +34,20 @@ sealed interface Decision {
 }
 
 /**
- * Decides whether a haptic or cue plays: the in-app switches, the system's
- * own touch settings, whether the app is active, and rate limiting. Pure and
- * clock-injected so its rules are unit tested; the engine acts on the result.
+ * Decides whether a haptic or cue plays: the in-app switches, whether the app
+ * is active, and rate limiting. Pure and clock-injected so its rules are unit
+ * tested; the engine acts on the result.
  *
  * Rules, in order:
- *  - Haptics: the Haptics switch, a vibrator, an active app, and the system
- *    touch-feedback setting. The ringer mode does not matter (Android's own
- *    keyboard and touch haptics keep working on silent).
- *  - Sounds: the Sounds master and the category switch, an active app, the
- *    ringer (silent and vibrate mute), Do Not Disturb (total silence / alarms
- *    only), a non-zero stream volume, and for interface cues the system's
- *    touch-sounds setting unless the user turned on "play anyway"
- *    ([FeedbackSettings.ignoreSystemTouchSounds]): the cues are SoundPool
- *    sonification, not the system touch-sound path, so the flag is honoured by
- *    choice rather than by necessity. Session chimes ignore the touch-sounds
- *    setting (they are events, not touch feedback) but still follow every
- *    other rule.
+ *  - The **Sounds & haptics master** ([FeedbackSettings.master]) is absolute:
+ *    off, nothing plays; on, only the rules below apply.
+ *  - Haptics: the Haptics switch, a vibrator, an active app.
+ *  - Sounds: the Sounds switch and the category switch, an active app.
+ *  - Never consulted, on purpose: the phone's "Touch sounds" and "Touch
+ *    feedback" settings, the ringer mode, Do Not Disturb. When the master is on
+ *    the user has said "play", and the app does not second-guess it. (Android
+ *    itself may still mute the audio stream: silent mode or a zero system
+ *    volume are properties of the output, not decisions made here.)
  *  - Rate: the same haptic / cue never repeats inside its minimum gap, any
  *    two light events keep a short global gap, a burst of light events is
  *    capped per second, and sound streams are capped.
@@ -91,10 +71,10 @@ class FeedbackGate(
     @Synchronized
     fun haptic(haptic: Haptic, preview: Boolean = false): Decision {
         val s = settings()
+        if (!s.master) return skip(Skipped.MasterOff)
         if (!s.haptics) return skip(Skipped.HapticsOff)
         if (!env.hasVibrator) return skip(Skipped.NoVibrator)
         if (!env.active) return skip(Skipped.Inactive)
-        if (!env.systemTouchHaptics) return skip(Skipped.SystemHapticsOff)
         if (preview) return Decision.Play
         val spec = HapticTable.spec(haptic)
         val now = clock()
@@ -116,13 +96,10 @@ class FeedbackGate(
     fun cue(cue: Cue, preview: Boolean = false): Decision {
         val s = settings()
         val spec = CueTable.spec(cue)
+        if (!s.master) return skip(Skipped.MasterOff)
         if (!s.sounds) return skip(Skipped.SoundsOff)
         if (!preview && !s.allows(spec.category)) return skip(Skipped.CategoryOff)
         if (!env.active) return skip(Skipped.Inactive)
-        if (!env.ringerNormal) return skip(Skipped.Silent)
-        if (env.silencedByDnd) return skip(Skipped.Dnd)
-        if (!env.streamAudible) return skip(Skipped.Muted)
-        if (spec.category == CueCategory.Interface && !env.systemTouchSounds && !s.ignoreSystemTouchSounds) return skip(Skipped.SystemSoundsOff)
         if (preview) return Decision.Play
         val now = clock()
         if (now - (lastCue[cue] ?: Long.MIN_VALUE / 2) < spec.minGapMs) return skip(Skipped.Rate)

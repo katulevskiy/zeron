@@ -60,18 +60,6 @@ val genIcons by tasks.registering(Exec::class) {
     commandLine("bash", repoRoot.resolve("scripts/android/gen-icons.sh").path, out.resolve("assets/icons").path, out.resolve("res").path)
 }
 
-// Session chimes: the desktop's own done / request / attention WAV bytes, copied
-// into the APK as res/raw/fx_*.wav (the interface cues are committed under src/main/res/raw).
-val soundsOut = layout.buildDirectory.dir("generated/zeron-sounds/res")
-val genSounds by tasks.registering(Copy::class) {
-    description = "Copies the desktop session chimes into res/raw."
-    from(repoRoot.resolve("crates/ui/assets/sounds")) {
-        include("done.wav", "request.wav", "attention.wav")
-        rename { "fx_$it" }
-    }
-    into(soundsOut.get().asFile.resolve("raw"))
-}
-
 android {
     namespace = "sh.zeron.android"
     compileSdk = 37
@@ -109,7 +97,6 @@ android {
         assets.directories.add(repoRoot.resolve("apps/ios/Zeron/Fonts").path)
         assets.directories.add(iconsOut.get().asFile.resolve("assets").path)
         res.directories.add(iconsOut.get().asFile.resolve("res").path)
-        res.directories.add(soundsOut.get().asFile.path)
     }
 
     packaging {
@@ -130,7 +117,7 @@ android {
     testOptions { unitTests.isReturnDefaultValues = true }
 }
 
-tasks.named("preBuild") { dependsOn(buildCore, genIcons, genSounds, fetchProot, fetchRootfs, buildEngine) }
+tasks.named("preBuild") { dependsOn(buildCore, genIcons, fetchProot, fetchRootfs, buildEngine) }
 
 dependencies {
     implementation(project(":runtime"))

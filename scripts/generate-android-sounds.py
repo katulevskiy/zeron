@@ -28,17 +28,29 @@ MEANING IS PITCH DIRECTION
     high point. Lower and heavier means more destructive (Delete is the lowest).
 
 LOUDNESS
-    Every interface cue is scaled to the same RMS over its active region
-    (first to last sample above -30 dB re peak), default -38.0 dBFS (peaks
-    around -24 dBFS). That is the level the set always had (-44.0 dBFS) plus
-    BOOST_DB = 6.02 dB: SoundPool volume cannot exceed 1.0, so the headroom the
-    volume slider needs (100% is twice as loud as the old maximum, which is
-    now 50%) has to live in the files. The app plays them at half volume by
-    default (CueTable.ASSET_BOOST), so the default loudness is unchanged. The
-    promoted desktop auditions and the in-app copies of the three session
-    chimes (fx_chime_*) get the same boost and are the references the
-    interface cues stay 2 dB under. The desktop originals stay untouched
-    (the notification channels play them). Peaks stay under -3 dBFS.
+    Three layers, all measured by scripts/audit-android-sounds.py:
+      * Slider headroom (BOOST_DB = 6.02 dB). SoundPool volume cannot exceed 1.0,
+        so "100% is twice as loud as 50%" has to live in the files: the app
+        plays a cue at gain * trim / ASSET_BOOST (CueTable.volume), the default
+        slider (gain 1) at half volume, 100% (gain 2) at full volume.
+      * The "twice as loud again" lift (DEFAULT_LIFT_DB = 6.0 dB). Every file
+        is mastered so that the DEFAULT slider position plays 6 dB above where
+        the previous build's 100% played, and its 100% a further 6.02 dB above
+        that: interface cues sit at TARGET_RMS_DBFS = -38 + 6.0 + 6.02 = -25.98
+        dBFS active RMS; the promoted auditions and the in-app chimes are
+        their desktop level + 18.04 dB (the previous build already added 6.02).
+        The previous interface peaks were -24 to -30 dBFS, so this fits below
+        full scale without compressing; the chimes (crest factor 22 dB) are
+        the ones that touch the ceiling.
+      * Mastering (master()): a gentle +3.5 dB peaking boost at 2.6 kHz (Q 0.8),
+        the band where phone speakers are efficient and hearing is most
+        sensitive (everything but NO_EMPHASIS: the pure 880 Hz Detent, which SoundPool
+        transposes, and the Zip and Surge, whose direction would suffer), then a soft-knee tanh limiter
+        (knee -4 dBFS, ceiling PEAK_LIMIT_DBFS = -0.5 dBFS, so no sample can
+        clip), then the gain is iterated until the active RMS after limiting
+        equals the target. Peaks above the knee are rounded, not clipped.
+    The desktop originals stay untouched (crates/ui/assets); the notification
+    channels play the mastered fx_chime_* copies.
 
 LEADING SILENCE
     Latency matters more than tidy tails: every file is trimmed so its onset
@@ -91,10 +103,18 @@ DESKTOP_SOUNDS = ROOT / 'crates/ui/assets/sounds'
 
 # Active-region definition shared with scripts/audit-android-sounds.py.
 ACTIVE_FLOOR_DB = -30.0
-BOOST_DB = 20 * math.log10(2.0)  # CueTable.ASSET_BOOST
-TARGET_RMS_DBFS = -44.0 + BOOST_DB
-PEAK_LIMIT_DBFS = -3.0
+BOOST_DB = 20 * math.log10(2.0)  # CueTable.ASSET_BOOST: the slider's upper half
+PREVIOUS_RMS_DBFS = -38.0        # interface cues of the previous build (its slider 100% played them at this level)
+DEFAULT_LIFT_DB = 0.0            # the default slider position vs the previous build's 100%
+TARGET_RMS_DBFS = PREVIOUS_RMS_DBFS + DEFAULT_LIFT_DB + BOOST_DB
+PEAK_LIMIT_DBFS = -0.5           # hard ceiling of every sample after the limiter
+KNEE_DBFS = -4.0                 # the soft limiter starts bending here
+EQ_HZ, EQ_Q, EQ_GAIN_DB = 2600.0, 0.8, 3.5  # pre-emphasis where phone speakers and ears are most efficient
+# Cues left flat: the Detent is transposed by SoundPool and must stay a pure 880 Hz sine; the Zip is already all
+# 1.8-7.5 kHz and its meaning is the fall (the boost would pull its late half up); the Surge's meaning is the climb.
+NO_EMPHASIS = {'fx_detent', 'fx_zip', 'fx_surge'}
 ONSET_DB = -40.0       # onset = first sample this far under the peak
+ONSET_MARGIN_DB = 0.5  # trimming uses a threshold this much higher than the audit's
 LEAD_IN_MS = 0.25      # trimmed files start this long before the onset
 KEEP_ALIVE_MS = 100
 
@@ -107,14 +127,14 @@ C6, D6, E6, G6 = 1046.50, 1174.66, 1318.51, 1567.98
 A3, D3 = 220.00, 146.83
 A6, C7, D7, E7, G7 = 1760.00, 2093.00, 2349.32, 2637.02, 3135.96
 
-# name -> desktop session chime (in-app copy: mono, trimmed, boosted; the originals stay for notifications).
+# name -> desktop session chime (in-app copy: mono, trimmed, mastered; the originals stay for notifications).
 CHIMES = {
     'fx_chime_done': 'done.wav',
     'fx_chime_request': 'request.wav',
     'fx_chime_attention': 'attention.wav',
 }
 
-# name -> desktop audition source (copied mono, trimmed, boosted; otherwise no re-synthesis).
+# name -> desktop audition source (copied mono, trimmed, mastered; no re-synthesis).
 PROMOTED = {
     'fx_send': '01-send.wav',
     'fx_queued': '02-queued.wav',
@@ -287,7 +307,9 @@ def trim_lead(x):
     A raised-sine fade from exact zero over the kept lead-in keeps the start click-free. Works on floats or ints.
     """
     peak = max(abs(v) for v in x)
-    threshold = peak * 10 ** (ONSET_DB / 20)
+    # Half a dB above the audit's -40 dB, so rounding to 16 bits (or a slowly swelling sine whose crest just
+    # misses the line) can never push the audit's onset behind this one.
+    threshold = peak * 10 ** ((ONSET_DB + ONSET_MARGIN_DB) / 20)
     onset = next(i for i, v in enumerate(x) if abs(v) >= threshold)
     start = max(0, onset - max(2, samples(LEAD_IN_MS)))
     out = list(x[start:])
@@ -296,6 +318,64 @@ def trim_lead(x):
         out[k] = out[k] * math.sin(math.pi / 2 * k / ramp) ** 2
     out[0] = 0 * out[0]
     return out
+
+
+def peaking_eq(x, f0=EQ_HZ, q=EQ_Q, gain_db=EQ_GAIN_DB):
+    """RBJ peaking biquad (direct form I); causal, so the first sample of a signal that starts at 0 stays 0."""
+    a_lin = 10 ** (gain_db / 40)
+    w0 = TAU * f0 / RATE
+    alpha = math.sin(w0) / (2 * q)
+    cw = math.cos(w0)
+    b0, b1, b2 = 1 + alpha * a_lin, -2 * cw, 1 - alpha * a_lin
+    a0, a1, a2 = 1 + alpha / a_lin, -2 * cw, 1 - alpha / a_lin
+    b0, b1, b2, a1, a2 = b0 / a0, b1 / a0, b2 / a0, a1 / a0, a2 / a0
+    out = []
+    x1 = x2 = y1 = y2 = 0.0
+    for v in x:
+        y = b0 * v + b1 * x1 + b2 * x2 - a1 * y1 - a2 * y2
+        x2, x1, y2, y1 = x1, v, y1, y
+        out.append(y)
+    return out
+
+
+def soft_limit(x):
+    """Linear below KNEE_DBFS, then tanh into PEAK_LIMIT_DBFS: continuous in value and slope, never above the ceiling."""
+    knee, ceil = 10 ** (KNEE_DBFS / 20), 10 ** (PEAK_LIMIT_DBFS / 20)
+    out = []
+    for v in x:
+        a = abs(v)
+        if a > knee:
+            a = knee + (ceil - knee) * math.tanh((a - knee) / (ceil - knee))
+            v = math.copysign(a, v)
+        out.append(v)
+    return out
+
+
+def master(x, target_rms_dbfs, eq=True):
+    """Pre-emphasis, then gain and soft limiting solved together so the active RMS after limiting hits the target.
+
+    x is in full-scale units (1.0 = 32768) and already faded to zero at both ends. Returns floats."""
+    if eq:
+        x = peaking_eq(x)
+    target = 10 ** (target_rms_dbfs / 20)
+    gain = target / active_rms(x)
+    for _ in range(60):
+        y = soft_limit([v * gain for v in x])
+        err = target / active_rms(y)
+        gain *= err
+        if abs(20 * math.log10(err)) < 0.005:
+            break
+    y = soft_limit([v * gain for v in x])
+    assert abs(20 * math.log10(active_rms(y) / target)) < 0.05, 'limiter could not reach the target level'
+    return y
+
+
+def quantize(y, name):
+    pcm = [max(-32768, min(32767, round(v * 32768))) for v in y]
+    pcm[0] = pcm[-1] = 0
+    peak_db = 20 * math.log10(max(abs(v) for v in pcm) / 32768)
+    assert peak_db <= PEAK_LIMIT_DBFS + 0.01, f'{name}: peak {peak_db:.2f} dBFS'
+    return pcm
 
 
 # ---------------------------------------------------------------------- cues
@@ -555,14 +635,10 @@ def render(name, target_rms_dbfs):
     duration_ms, fade_in, fade_out, builder = CUES[name]
     buf = [0.0] * samples(duration_ms)
     builder(buf)
+    if name not in NO_EMPHASIS:
+        buf = peaking_eq(buf)
     master_fade(buf, fade_in, fade_out)
-    gain = 10 ** (target_rms_dbfs / 20) / active_rms(buf)
-    buf = trim_lead([v * gain for v in buf])
-    pcm = [max(-32768, min(32767, round(v * 32768))) for v in buf]
-    pcm[0] = pcm[-1] = 0
-    peak_db = 20 * math.log10(max(abs(v) for v in pcm) / 32768)
-    assert peak_db <= PEAK_LIMIT_DBFS, f'{name}: peak {peak_db:.1f} dBFS'
-    return pcm
+    return quantize(trim_lead(master(buf, target_rms_dbfs, eq=False)), name)
 
 
 def write_mono(path, pcm):
@@ -587,27 +663,30 @@ def read_mono(path):
             for i in range(count)], channels
 
 
-def boosted(pcm):
-    """Trim the leading silence, then apply the slider headroom (BOOST_DB), failing if it would not fit."""
-    pcm = trim_lead(pcm)
-    gain = 10 ** (BOOST_DB / 20)
-    out = [max(-32768, min(32767, round(v * gain))) for v in pcm]
-    out[0] = out[-1] = 0
-    peak_db = 20 * math.log10(max(abs(v) for v in out) / 32768)
-    assert peak_db <= PEAK_LIMIT_DBFS, f'boosted peak {peak_db:.1f} dBFS'
-    return out
+def mastered(pcm, name):
+    """A desktop sound as an in-app one: trimmed, short end fade, pre-emphasis and limiter, then
+    LIFT (BOOST_DB for the slider + DEFAULT_LIFT_DB) over where the previous build played it."""
+    pcm = trim_lead([v / 32768 for v in pcm])
+    tail = samples(2.0)
+    for k in range(tail):
+        pcm[-1 - k] *= math.sin(math.pi / 2 * k / tail) ** 2
+    pcm[-1] = 0.0
+    # The previous build's file was the desktop sound + BOOST_DB; this one is that + the slider headroom again + the lift.
+    target = 20 * math.log10(active_rms(pcm)) + 2 * BOOST_DB + DEFAULT_LIFT_DB
+    return quantize(master(pcm, target), name)
 
 
 def promote(out_dir):
-    """Copy desktop auditions and session chimes as mono 16-bit 48 kHz: trimmed, then BOOST_DB louder."""
+    """Copy desktop auditions and session chimes as mono 16-bit 48 kHz, mastered (also the notification sounds)."""
     for sources, folder in ((PROMOTED, AUDITIONS), (CHIMES, DESKTOP_SOUNDS)):
         for name, source in sources.items():
             pcm, channels = read_mono(folder / source)
             before = len(pcm)
-            out = boosted(pcm)
+            out = mastered(pcm, name)
             write_mono(out_dir / f'{name}.wav', out)
+            peak = 20 * math.log10(max(abs(v) for v in out) / 32768)
             print(f'{name}.wav: from {source} ({channels} ch -> mono, {before / RATE * 1000:.0f} ms -> '
-                  f'{len(out) / RATE * 1000:.0f} ms, +{BOOST_DB:.1f} dB)')
+                  f'{len(out) / RATE * 1000:.0f} ms, peak {peak:.1f} dBFS)')
 
 
 def main():

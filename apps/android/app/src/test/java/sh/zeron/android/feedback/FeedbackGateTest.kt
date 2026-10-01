@@ -6,23 +6,13 @@ import org.junit.Test
 
 class FakeEnv(
     override var active: Boolean = true,
-    override var systemTouchHaptics: Boolean = true,
-    override var systemTouchSounds: Boolean = true,
-    override var ringerNormal: Boolean = true,
-    override var silencedByDnd: Boolean = false,
     override var hasVibrator: Boolean = true,
-    override var streamAudible: Boolean = true,
 ) : FeedbackEnvironment
 
 class CountingEnv : FeedbackEnvironment {
     var reads = 0
     override val active: Boolean get() = true.also { reads++ }
-    override val systemTouchHaptics: Boolean get() = true.also { reads++ }
-    override val systemTouchSounds: Boolean get() = true.also { reads++ }
-    override val ringerNormal: Boolean get() = true.also { reads++ }
-    override val silencedByDnd: Boolean get() = false.also { reads++ }
     override val hasVibrator: Boolean get() = true.also { reads++ }
-    override val streamAudible: Boolean get() = true.also { reads++ }
 }
 
 class FeedbackGateTest {
@@ -38,21 +28,40 @@ class FeedbackGateTest {
         assertEquals(Decision.Play, gate.cue(Cue.Send))
     }
 
-    @Test fun hapticsSwitchAndSystemSettings() {
+    @Test fun hapticsSwitchAndVibrator() {
         settings = settings.copy(haptics = false)
         assertEquals(Skipped.HapticsOff, why(gate.haptic(Haptic.Confirm)))
         settings = FeedbackSettings()
-        env.systemTouchHaptics = false
-        assertEquals(Skipped.SystemHapticsOff, why(gate.haptic(Haptic.Confirm)))
-        env.systemTouchHaptics = true
         env.hasVibrator = false
         assertEquals(Skipped.NoVibrator, why(gate.haptic(Haptic.Confirm)))
     }
 
-    @Test fun hapticsStillPlayOnSilent() {
-        env.ringerNormal = false
-        env.silencedByDnd = true
+    @Test fun masterOffSilencesEverythingWhateverElseIsOn() {
+        settings = FeedbackSettings(master = false) // every sub-switch still on
+        assertEquals(Skipped.MasterOff, why(gate.haptic(Haptic.Confirm)))
+        assertEquals(Skipped.MasterOff, why(gate.haptic(Haptic.Error, preview = true)))
+        for (cue in Cue.entries) assertEquals(cue.name, Skipped.MasterOff, why(gate.cue(cue)))
+        assertEquals(Skipped.MasterOff, why(gate.cue(Cue.Done, preview = true)))
+        assertEquals(false, settings.soundsOn)
+        assertEquals(false, settings.hapticsOn)
+        for (category in CueCategory.entries) assertEquals(false, settings.allows(category))
+    }
+
+    @Test fun masterOnLetsTheSubSwitchesDecide() {
+        settings = FeedbackSettings(master = true, sounds = false)
+        assertEquals(Skipped.SoundsOff, why(gate.cue(Cue.Tap)))
+        assertEquals(Decision.Play, gate.haptic(Haptic.Confirm)) // haptics are their own switch
+        settings = FeedbackSettings(master = true, haptics = false)
+        assertEquals(Skipped.HapticsOff, why(gate.haptic(Haptic.Confirm)))
+        assertEquals(Decision.Play, gate.cue(Cue.Tap))
+    }
+
+    @Test fun theGateOnlyKnowsActiveAndVibratorNotThePhonesOwnSoundOrTouchSettings() {
+        // FeedbackEnvironment has no touch-sound, touch-feedback, ringer, DND or volume property any more: with
+        // the master on and the app active, a cue and a haptic play. (Compile-time: FakeEnv cannot express them.)
+        assertEquals(Decision.Play, gate.cue(Cue.Tap))
         assertEquals(Decision.Play, gate.haptic(Haptic.Confirm))
+        assertEquals(setOf("active", "hasVibrator"), FeedbackEnvironment::class.java.methods.map { it.name.removePrefix("get").replaceFirstChar(Char::lowercase) }.toSet())
     }
 
     @Test fun nothingPlaysInBackgroundOrScreenOff() {
@@ -87,22 +96,6 @@ class FeedbackGateTest {
         assertEquals(Skipped.CategoryOff, why(gate.cue(Cue.Request)))
         assertEquals(Skipped.CategoryOff, why(gate.cue(Cue.Attention)))
         assertEquals(Decision.Play, gate.cue(Cue.Tap))
-    }
-
-    @Test fun systemSoundState() {
-        env.ringerNormal = false
-        assertEquals(Skipped.Silent, why(gate.cue(Cue.Done)))
-        env.ringerNormal = true
-        env.silencedByDnd = true
-        assertEquals(Skipped.Dnd, why(gate.cue(Cue.Done)))
-        env.silencedByDnd = false
-        env.streamAudible = false
-        assertEquals(Skipped.Muted, why(gate.cue(Cue.Done)))
-        env.streamAudible = true
-        // Touch sounds off silences the interface layer only; session chimes are events.
-        env.systemTouchSounds = false
-        assertEquals(Skipped.SystemSoundsOff, why(gate.cue(Cue.Tap)))
-        assertEquals(Decision.Play, gate.cue(Cue.Done))
     }
 
     @Test fun sameCueNeverStacks() {
@@ -162,47 +155,17 @@ class FeedbackGateTest {
         assertEquals(Decision.Play, gate.cue(Cue.Tap))
     }
 
-    @Test fun playAnywayIgnoresTheSystemTouchSoundsFlag() {
-        env.systemTouchSounds = false
-        assertEquals(Skipped.SystemSoundsOff, why(gate.cue(Cue.Tap)))
-        settings = settings.copy(ignoreSystemTouchSounds = true)
-        now += 1000
-        assertEquals(Decision.Play, gate.cue(Cue.Tap))
-        // Only that one flag is overridden: silent, Do Not Disturb, a zero volume, the switches and an inactive app still win.
-        now += 1000
-        env.ringerNormal = false
-        assertEquals(Skipped.Silent, why(gate.cue(Cue.Tap)))
-        env.ringerNormal = true
-        env.silencedByDnd = true
-        assertEquals(Skipped.Dnd, why(gate.cue(Cue.Tap)))
-        env.silencedByDnd = false
-        env.streamAudible = false
-        assertEquals(Skipped.Muted, why(gate.cue(Cue.Tap)))
-        env.streamAudible = true
-        env.active = false
-        assertEquals(Skipped.Inactive, why(gate.cue(Cue.Tap)))
-        env.active = true
-        settings = settings.copy(interfaceSounds = false)
-        assertEquals(Skipped.CategoryOff, why(gate.cue(Cue.Tap)))
-    }
-
-    @Test fun playAnywayDoesNotTouchHaptics() {
-        env.systemTouchHaptics = false
-        settings = settings.copy(ignoreSystemTouchSounds = true)
-        assertEquals(Skipped.SystemHapticsOff, why(gate.haptic(Haptic.Confirm)))
-    }
-
     @Test fun theGateReadsTheEnvironmentOncePerDecisionNotPerProperty() {
         // Each decision touches each property a bounded number of times: the real environment answers from a
         // cached snapshot, and the gate must not multiply even those reads.
         val counting = CountingEnv()
         val g = FeedbackGate({ settings }, counting, { now })
         g.cue(Cue.Tap)
-        assertTrue("reads=${counting.reads}", counting.reads <= 7)
+        assertTrue("reads=${counting.reads}", counting.reads <= 2)
         counting.reads = 0
         now += 1000
         g.haptic(Haptic.Confirm)
-        assertTrue("reads=${counting.reads}", counting.reads <= 3)
+        assertTrue("reads=${counting.reads}", counting.reads <= 2)
     }
 
 }

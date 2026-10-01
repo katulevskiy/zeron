@@ -5,7 +5,6 @@ import androidx.compose.foundation.layout.Arrangement
 import androidx.compose.foundation.layout.Column
 import androidx.compose.foundation.layout.Row
 import androidx.compose.foundation.layout.Spacer
-import androidx.compose.foundation.layout.fillMaxWidth
 import androidx.compose.foundation.layout.height
 import androidx.compose.foundation.layout.padding
 import androidx.compose.foundation.layout.size
@@ -25,11 +24,9 @@ import androidx.compose.runtime.Composable
 import androidx.compose.runtime.LaunchedEffect
 import androidx.compose.runtime.collectAsState
 import androidx.compose.runtime.getValue
-import androidx.compose.runtime.mutableIntStateOf
-import androidx.compose.runtime.mutableStateOf
-import androidx.compose.ui.draw.clip
-import androidx.compose.runtime.remember
 import androidx.compose.runtime.setValue
+import androidx.compose.runtime.mutableIntStateOf
+import androidx.compose.runtime.remember
 import androidx.compose.ui.Modifier
 import androidx.compose.ui.semantics.Role
 import androidx.compose.ui.semantics.role
@@ -45,8 +42,6 @@ import sh.zeron.android.feedback.FeedbackSettings
 import sh.zeron.android.feedback.Haptic
 import sh.zeron.android.feedback.HapticStrength
 import sh.zeron.android.feedback.LocalFeedback
-import sh.zeron.android.feedback.SystemNote
-import sh.zeron.android.feedback.feedbackClickable
 import sh.zeron.android.feedback.toggleAction
 
 /**
@@ -63,47 +58,41 @@ fun SoundsScreen(model: AppModel, onBack: () -> Unit) {
     val s by engine.store.settings.collectAsState()
     val update = engine.store::update
     val fb = LocalFeedback.current
-    // The system state changes behind our back (the user goes to Settings and returns): read it again on every resume.
-    var resumes by remember { mutableIntStateOf(0) }
-    androidx.lifecycle.compose.LifecycleResumeEffect(Unit) {
-        resumes++
-        onPauseOrDispose {}
-    }
-    val notes = remember(resumes, s) { engine.systemNotes() }
-    var explainTouchSounds by remember { mutableStateOf(false) }
-    if (explainTouchSounds) {
-        TouchSoundsSheet(
-            playAnyway = s.ignoreSystemTouchSounds,
-            onPlayAnyway = { on -> update { copy(ignoreSystemTouchSounds = on) } },
-            onDismiss = { explainTouchSounds = false },
-        )
-    }
     SubPage("Sounds & haptics", "Chimes, taps and vibration", onBack) {
-        if (notes.isNotEmpty()) item("notes") { SystemNotes(notes) { explainTouchSounds = true } }
+        item("master") {
+            Group {
+                SwitchRow(
+                    0, 1, ZIcons.Volume, "Sounds & haptics",
+                    "Off silences every sound and vibration. On lets the switches below decide.",
+                    s.master,
+                ) { on -> update { copy(master = on) } }
+            }
+        }
 
         sectionTitle("Sounds")
         item("sounds") {
             Group {
-                SwitchRow(0, 2, ZIcons.Volume, "Sounds", "Every sound in Zeron. Off keeps the app silent.", s.sounds) { on -> update { copy(sounds = on) } }
-                SwitchRow(1, 2, ZIcons.Context, "Interface sounds", "Soft taps for toggles, menus, sheets and actions", s.interfaceSounds, enabled = s.sounds) { on -> update { copy(interfaceSounds = on) } }
+                SwitchRow(0, 2, ZIcons.Volume, "Sounds", "Every sound in Zeron. Off keeps the app silent.", s.sounds, enabled = s.master) { on -> update { copy(sounds = on) } }
+                SwitchRow(1, 2, ZIcons.Context, "Interface sounds", "Soft taps for toggles, menus, sheets and actions", s.interfaceSounds, enabled = s.soundsOn) { on -> update { copy(interfaceSounds = on) } }
             }
         }
         item("volume") {
-            Spacer(Modifier.height(VolumeGap)) // the switch group above and the slider card are separate rows
+            Spacer(Modifier.height(GroupGap)) // the switch group above and the slider card are separate rows
             VolumeRow(engine, s)
         }
 
         sectionTitle("Session sounds")
         item("session") {
             Group {
-                SwitchRow(0, 4, ZIcons.Bell, "Session sounds", "Chimes when a session needs you or finishes", s.sessionSounds, enabled = s.sounds) { on -> update { copy(sessionSounds = on) } }
-                val on = s.sounds && s.sessionSounds
+                SwitchRow(0, 4, ZIcons.Bell, "Session sounds", "Chimes when a session needs you or finishes", s.sessionSounds, enabled = s.soundsOn) { on -> update { copy(sessionSounds = on) } }
+                val on = s.soundsOn && s.sessionSounds
                 SwitchRow(1, 4, ZIcons.Check, "Completion", "A session finished its turn", s.completionSound, enabled = on) { v -> update { copy(completionSound = v) } }
                 SwitchRow(2, 4, ZIcons.Chat, "Input required", "A session is asking you something", s.inputSound, enabled = on) { v -> update { copy(inputSound = v) } }
                 SwitchRow(3, 4, ZIcons.Warning, "Errors", "A session failed, or the connection dropped mid-turn", s.errorSound, enabled = on) { v -> update { copy(errorSound = v) } }
             }
         }
         item("notifications") {
+            Spacer(Modifier.height(GroupGap)) // the Errors row above ends its group; this is the next one
             val access = rememberNotificationAccess(model)
             val granted = access.granted
             Group {
@@ -123,7 +112,7 @@ fun SoundsScreen(model: AppModel, onBack: () -> Unit) {
         sectionTitle("Haptics")
         item("haptics") {
             Group {
-                SwitchRow(0, 2, ZIcons.Phone, "Haptics", engine.hapticTier(), s.haptics) { on -> update { copy(haptics = on) } }
+                SwitchRow(0, 2, ZIcons.Phone, "Haptics", engine.hapticTier(), s.haptics, enabled = s.master) { on -> update { copy(haptics = on) } }
                 StrengthRow(1, 2, s, engine)
             }
         }
@@ -164,8 +153,8 @@ private fun SwitchRow(
 
 private val VolumeSteps = 10
 
-/** Space between the "Interface sounds" row and the volume card below it. */
-private val VolumeGap = 10.dp
+/** Space between two groups of rows that sit directly one under the other (a section title has its own, larger one). */
+private val GroupGap = 10.dp
 
 /** The master level: a ten-step slider whose detents climb the family's scale as you drag. */
 @Composable
@@ -196,7 +185,7 @@ private fun VolumeRow(engine: AndroidFeedback, s: FeedbackSettings) {
                     },
                     onValueChangeFinished = { engine.preview(null, Cue.Select) },
                     steps = VolumeSteps - 1,
-                    enabled = s.sounds,
+                    enabled = s.soundsOn,
                 )
             }
         }
@@ -221,7 +210,7 @@ private fun StrengthRow(index: Int, count: Int, s: FeedbackSettings, engine: And
                             // Feel the new strength at once: a choice, then a confirmation.
                             engine.preview(Haptic.Confirm, Cue.Select)
                         },
-                        enabled = s.haptics,
+                        enabled = s.hapticsOn,
                         modifier = Modifier.weight(1f).semantics { role = Role.RadioButton },
                         shapes = when (i) {
                             0 -> ButtonGroupDefaults.connectedLeadingButtonShapes()
@@ -272,36 +261,12 @@ private fun PreviewRows(engine: AndroidFeedback, s: FeedbackSettings, fb: sh.zer
         samples.forEachIndexed { i, sample ->
             SegmentedListItem(
                 onClick = { running = i }, // the preview is the answer; no extra tap on top
-                enabled = running == -1 && (s.sounds || s.haptics),
+                enabled = running == -1 && (s.soundsOn || s.hapticsOn),
                 shapes = segmentedShapes(i, samples.size),
                 colors = ListItemDefaults.segmentedColors(containerColor = cardColor()),
                 leadingContent = { IconTile(ZIcons.Play) },
                 supportingContent = { Text(sample.supporting) },
             ) { Text(sample.title) }
-        }
-    }
-}
-
-@Composable
-private fun SystemNotes(notes: List<SystemNote>, onTouchSounds: () -> Unit) {
-    Column(Modifier.fillMaxWidth().padding(horizontal = 16.dp, vertical = 8.dp), verticalArrangement = Arrangement.spacedBy(8.dp)) {
-        for (n in notes) {
-            val tappable = n.kind == SystemNote.Kind.TouchSounds
-            Surface(
-                shape = androidx.compose.foundation.shape.RoundedCornerShape(24.dp),
-                color = MaterialTheme.colorScheme.secondaryContainer,
-                contentColor = MaterialTheme.colorScheme.onSecondaryContainer,
-                modifier = Modifier.fillMaxWidth().then(
-                    if (tappable) Modifier.clip(androidx.compose.foundation.shape.RoundedCornerShape(24.dp)).feedbackClickable(Haptic.Select, Cue.Open, role = Role.Button, onClick = onTouchSounds)
-                    else Modifier,
-                ),
-            ) {
-                Row(Modifier.padding(16.dp), verticalAlignment = androidx.compose.ui.Alignment.Top) {
-                    ZIcon(ZIcons.Info, null, Modifier.size(18.dp))
-                    Spacer(Modifier.size(10.dp))
-                    Text(n.text, style = MaterialTheme.typography.bodyMedium, modifier = Modifier.weight(1f))
-                }
-            }
         }
     }
 }

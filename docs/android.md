@@ -318,8 +318,10 @@ over the chip:
 - the big **effort name**, the model under it with a chevron (tap for the
   model list) and, for models with a fast tier, a square **fast** button;
 - the **effort slider** (`ui/EffortSlider.kt`): a pill rail with a dot per
-  level, an accent fill to a springy pill thumb you drag, tap or fling, snapping
-  to the levels. The top of the ladder (`xhigh`, `max`, `ultra*`) shimmers, fast
+  level, an accent fill (a capsule tucked under the thumb) to a springy pill
+  thumb you drag or tap. The thumb does not follow the finger 1:1: each level is
+  a magnetic well it clings to, and a speed limit stops a flick from skipping
+  levels (`EffortTuning` / `EffortDrag` in `ui/EffortScale.kt`). The top of the ladder (`xhigh`, `max`, `ultra*`) shimmers, fast
   mode adds speed streaks and a halo. One detent per level crossed, not per
   frame: position to step goes through `EffortScale.snap` with hysteresis
   (`ui/EffortScale.kt`), so jitter at a boundary does not re-fire. For
@@ -497,12 +499,13 @@ Tab-switch and screen-open performance (the Sessions/Settings pages stay compose
 
 Every tap, toggle, sheet, swipe and session event has a considered haptic and a
 soft sound, played only while the app is open and in your control: Settings,
-**Sounds & haptics** has the master switches, interface and session sounds
+**Sounds & haptics** has one master switch (off silences every sound and vibration,
+on lets the switches below decide, whatever the phone's own touch-sound, ringer or
+Do Not Disturb settings say), interface and session sounds
 (completion, input required, errors, like the desktop), volume (default 50%; 100%
 is twice as loud), haptic strength (Subtle / Standard / Strong) and a Try them list.
-If the phone's Touch sounds setting is off a tappable note explains how to turn it
-on, or lets Zeron play its interface sounds anyway. The desktop's done / request /
-attention chimes are reused (trimmed and level-matched in the app, byte for byte for
+The desktop's done / request /
+attention chimes are reused (mastered louder and trimmed, in the app and for
 notifications); the interface cues are generated in the same family. When the app is in the background, session events arrive as
 notifications with the same sounds and matching vibration. Design, the cue and
 haptic tables and the policy: [`sound-design/android.md`](sound-design/android.md).

@@ -27,7 +27,7 @@ import sh.zeron.android.feedback.SessionEvent
  *    an incoming file transfer (silent, ongoing).
  *  - Session events while the app is in the background (finished, needs your
  *    input, failed), sounding the same cues the app plays in front: the
- *    desktop's done / request / attention chimes as channel sounds, with
+ *    desktop's done / request / attention chimes (the mastered `fx_chime_*` copies) as channel sounds, with
  *    vibration patterns matching the in-app haptics.
  *  - File-transfer events (another device asks to send, a file arrived, a
  *    transfer failed), which reuse the request / done / attention cues. They
@@ -68,18 +68,18 @@ class Notifier(
         val event: SessionEvent?,
         val prefix: String = SESSION_PREFIX,
     ) {
-        Done("done", "Task completed", "A session finished its turn", NotificationManager.IMPORTANCE_DEFAULT, "fx_done", CueCategory.Completion, longArrayOf(0, 24, 40, 30), SessionEvent.Done),
-        Input("input", "Input required", "A session is waiting on your answer or approval", NotificationManager.IMPORTANCE_HIGH, "fx_request", CueCategory.Input, longArrayOf(0, 18, 90, 18), SessionEvent.NeedsInput),
-        Failed("failed", "Errors", "A session failed", NotificationManager.IMPORTANCE_HIGH, "fx_attention", CueCategory.Errors, longArrayOf(0, 35, 55, 45), SessionEvent.Failed),
+        Done("done", "Task completed", "A session finished its turn", NotificationManager.IMPORTANCE_DEFAULT, "fx_chime_done", CueCategory.Completion, longArrayOf(0, 24, 40, 30), SessionEvent.Done),
+        Input("input", "Input required", "A session is waiting on your answer or approval", NotificationManager.IMPORTANCE_HIGH, "fx_chime_request", CueCategory.Input, longArrayOf(0, 18, 90, 18), SessionEvent.NeedsInput),
+        Failed("failed", "Errors", "A session failed", NotificationManager.IMPORTANCE_HIGH, "fx_chime_attention", CueCategory.Errors, longArrayOf(0, 35, 55, 45), SessionEvent.Failed),
 
         /** Another device asks to send this phone files (request chime). */
-        TransferAsk("ask", "Transfer requests", "Another device wants to send you files", NotificationManager.IMPORTANCE_HIGH, "fx_request", CueCategory.Input, longArrayOf(0, 18, 90, 18), null, TRANSFER_PREFIX),
+        TransferAsk("ask", "Transfer requests", "Another device wants to send you files", NotificationManager.IMPORTANCE_HIGH, "fx_chime_request", CueCategory.Input, longArrayOf(0, 18, 90, 18), null, TRANSFER_PREFIX),
 
         /** Files arrived (done chime). */
-        TransferReceived("received", "Files received", "Files from your other devices arrived", NotificationManager.IMPORTANCE_DEFAULT, "fx_done", CueCategory.Completion, longArrayOf(0, 24, 40, 30), null, TRANSFER_PREFIX),
+        TransferReceived("received", "Files received", "Files from your other devices arrived", NotificationManager.IMPORTANCE_DEFAULT, "fx_chime_done", CueCategory.Completion, longArrayOf(0, 24, 40, 30), null, TRANSFER_PREFIX),
 
         /** A transfer failed, was cancelled or declined by the other side (attention chime). */
-        TransferFailed("failed", "Transfer problems", "A file transfer failed or was declined", NotificationManager.IMPORTANCE_HIGH, "fx_attention", CueCategory.Errors, longArrayOf(0, 35, 55, 45), null, TRANSFER_PREFIX),
+        TransferFailed("failed", "Transfer problems", "A file transfer failed or was declined", NotificationManager.IMPORTANCE_HIGH, "fx_chime_attention", CueCategory.Errors, longArrayOf(0, 35, 55, 45), null, TRANSFER_PREFIX),
     }
 
     /** A channel id, e.g. `session-done-v1-sv` (sound + vibration), `-s`, `-v` or `-q` (silent). */
@@ -132,7 +132,7 @@ class Notifier(
         val kind = Kind.entries.first { it.event == event }
         val s = settings()
         val sound = s.allows(kind.category)
-        val vibrate = s.haptics
+        val vibrate = s.hapticsOn
         val row = runCatching { (context.applicationContext as sh.zeron.android.ZeronApplication).model.row(chatId) }.getOrNull()
         val title = row?.title ?: "Zeron"
         val text = when (event) {
@@ -295,6 +295,6 @@ class Notifier(
         private val LEGACY_CHANNELS = setOf("sessions", "transfers")
 
         /** Bump when a session channel's sound or pattern changes: channel sounds are immutable once created. */
-        const val CHANNEL_VERSION = 1
+        const val CHANNEL_VERSION = 2
     }
 }

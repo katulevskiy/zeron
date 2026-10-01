@@ -82,8 +82,9 @@ python3 scripts/generate-android-sounds.py && python3 scripts/audit-android-soun
 ```
 
 Full design, tables and policy: [`docs/sound-design/android.md`](../../docs/sound-design/android.md).
-The session chimes come from `crates/ui/assets/sounds` through the Gradle
-`genSounds` task; the rest are committed under `app/src/main/res/raw`.
+All sounds, including the mastered session chimes (also the notification
+channel sounds), are generated from `crates/ui/assets/sounds` and the audition set by
+`scripts/generate-android-sounds.py` and committed under `app/src/main/res/raw`.
 
 ## Layout
 

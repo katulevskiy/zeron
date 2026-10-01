@@ -149,14 +149,55 @@ class LatencyTest {
         }
     }
 
-    @Test fun everyCueIsMono48kWithRoomToSpare() {
+    @Test fun everyCueIsMono48kAndNeverClips() {
         for (f in committed()) {
             val w = Wav.parse(f.readBytes())!!
             assertEquals(f.name, 48_000, w.rate)
             assertEquals(f.name, 1, w.channels)
-            val peakDb = 20 * log10(w.samples.maxOf { abs(it.toInt()) } / 32768.0)
-            assertTrue("${f.name} peak $peakDb dBFS", peakDb <= -3.0)
+            val peak = w.samples.maxOf { abs(it.toInt()) }
+            val peakDb = 20 * log10(peak / 32768.0)
+            // The mastering limiter's ceiling is -0.5 dBFS: loud, but no sample is anywhere near full scale.
+            assertTrue("${f.name} peak $peakDb dBFS", peakDb <= -0.4)
+            assertTrue("${f.name} clips", peak < 32767)
         }
+    }
+
+    /** Active-region RMS (first to last sample within 30 dB of the peak) in dBFS, as the audit measures it. */
+    private fun activeRmsDb(f: File): Double {
+        val x = Wav.parse(f.readBytes())!!.samples
+        val floor = x.maxOf { abs(it.toInt()) } * 0.0316
+        val a = x.indexOfFirst { abs(it.toInt()) >= floor }
+        val b = x.indexOfLast { abs(it.toInt()) >= floor }
+        var sum = 0.0
+        for (i in a..b) sum += x[i].toDouble() * x[i]
+        return 20 * log10(Math.sqrt(sum / (b - a + 1)) / 32768.0)
+    }
+
+    @Test fun theDefaultSliderPlaysAtThePreviousBuildsLoudestSetting() {
+        // The previous build played these files (active RMS below, interface cues -38) at SoundPool volume `trim`
+        // at its slider 100%. The default slider now plays the new files at `trim / ASSET_BOOST`; the audit asserts
+        // the default is no quieter than that (twice the amplitude of the previous default) with an A-weighted measure as well, this is the independent JVM guard (plain RMS).
+        val previousRms = mapOf(
+            "fx_send" to -34.6, "fx_queued" to -36.7, "fx_upload_ready" to -35.7, "fx_reconnected" to -36.3, "fx_undo" to -36.8,
+            "fx_chime_done" to -34.3, "fx_chime_request" to -35.7, "fx_chime_attention" to -35.8,
+        )
+        val previousTrim = mapOf("fx_send" to 0.8, "fx_queued" to 0.8, "fx_upload_ready" to 0.8, "fx_reconnected" to 0.8, "fx_undo" to 0.8, "fx_fast_on" to 0.7, "fx_fast_off" to 0.8)
+        for (spec in CueTable.all) {
+            val old = (previousRms[spec.resource] ?: -38.0) + 20 * log10(previousTrim[spec.resource] ?: 1.0)
+            val volume = CueTable.volume(spec, FeedbackSettings().gain)
+            val new = activeRmsDb(File(raw, spec.resource + ".wav")) + 20 * log10(volume.toDouble())
+            assertTrue("${spec.cue}: ${"%.1f".format(new - old)} dB against the previous 100%", new - old >= -0.5)
+            // And the top of the slider is another 2x (6 dB) above the default, unclipped by SoundPool's 1.0 cap.
+            val top = CueTable.volume(spec, FeedbackSettings(volume = 1f).gain)
+            assertEquals(spec.cue.name, 6.02, 20 * log10((top / volume).toDouble()), 0.01)
+        }
+    }
+
+    @Test fun notificationChannelsPlayTheMasteredChimesAndTheChannelVersionWasBumped() {
+        val sounds = sh.zeron.android.core.Notifier.Kind.entries.map { it.sound }
+        assertEquals(listOf("fx_chime_done", "fx_chime_request", "fx_chime_attention"), sounds)
+        for (name in sounds) assertTrue(name, File(raw, "$name.wav").isFile)
+        assertTrue(sh.zeron.android.core.Notifier.CHANNEL_VERSION >= 2) // channel sounds are immutable once created
     }
 
     @Test fun theKeepAliveLoopIsSilentAndNotACue() {
