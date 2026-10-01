@@ -6,7 +6,9 @@ use std::collections::{HashMap, HashSet};
 use std::sync::Arc;
 
 use zeron_doc::{MessagePart, MessageRole, MessageStatus, SessionMessageEntry};
-use zeron_proto::{ChatIndicator, ContextUsage, UserInputQuestion};
+use zeron_proto::{
+    ChatIndicator, ContextUsage, Goal, TodoItem, ToolCall, UserInputQuestion, WorkflowRunsState,
+};
 
 use crate::connectivity::SendState;
 
@@ -104,6 +106,13 @@ pub struct SessionSnapshot {
     /// `entries[transcript_len..]` (same order, same ids).
     pub pending: Vec<PendingSend>,
     pub context_usage: Option<ContextUsage>,
+    /// The chat's goal (`meta.goal`, written by its host), when it has one.
+    pub goal: Option<Arc<Goal>>,
+    /// The chat's workflow runs (`meta.workflowRuns`), oldest first.
+    pub workflows: Arc<WorkflowRunsState>,
+    /// The checklist the agent most recently wrote (`None` when it never
+    /// wrote one, or the last write cleared it).
+    pub todo: Option<Arc<Vec<TodoItem>>>,
     /// Content is present (local snapshot loaded or first sync landed). False
     /// = show a loader, not an empty chat.
     pub hydrated: bool,
@@ -242,6 +251,10 @@ pub struct HostCapabilities {
     pub queued_attachments: bool,
     /// The chat's harness steers mid-turn (unknown until a live catalog).
     pub mid_turn_steering: Option<bool>,
+    /// The host runs goal mode (`goal-mode-v1`): it executes `goal` commands.
+    pub goal_mode: bool,
+    /// The host runs dynamic workflows (`workflows-v1`).
+    pub workflows: bool,
 }
 
 #[derive(Debug, Clone, PartialEq, Eq)]
@@ -299,4 +312,25 @@ pub struct ComposerState {
     /// The last message this device submitted (scroll-to-own-send target).
     pub last_submitted_message_id: Option<String>,
     pub context_usage: Option<ContextUsage>,
+}
+
+/// The checklist the agent wrote last. Every harness that plans writes the
+/// whole list on each update, so only the newest `Todo` part counts (ACP plans
+/// reuse one tool id: "latest part", not "first part with this id"). An empty
+/// write clears it. Walks back from the newest entry and stops at the first
+/// hit; a chat that never planned scans its parts once per change.
+pub fn latest_todo(entries: &[Arc<Entry>]) -> Option<Arc<Vec<TodoItem>>> {
+    let items = entries
+        .iter()
+        .rev()
+        .filter(|entry| entry.role() == MessageRole::Assistant)
+        .flat_map(|entry| entry.parts().iter().rev())
+        .find_map(|part| match part {
+            MessagePart::Tool {
+                call: ToolCall::Todo { items },
+                ..
+            } => Some(items),
+            _ => None,
+        })?;
+    (!items.is_empty()).then(|| Arc::new(items.clone()))
 }

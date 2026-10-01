@@ -70,6 +70,18 @@ pub fn parse_goal_input(text: &str) -> Option<Result<GoalInput, String>> {
     })
 }
 
+/// Shown when `/goal <objective>` would silently replace a live goal.
+pub const GOAL_REPLACE_HINT: &str =
+    "This chat already has a goal. Use /goal replace <objective>, or /goal clear first.";
+/// Shown for `/goal` (and pause / resume / clear) in a chat without a goal.
+pub const NO_GOAL_HINT: &str = "This chat has no goal. Type /goal followed by an objective.";
+
+/// A plain `/goal <text>` must not discard an objective that is still
+/// running or paused; the user asks for that with `replace`.
+pub fn set_needs_replace(goal: Option<&Goal>) -> bool {
+    goal.is_some_and(|g| !matches!(g.status, GoalStatus::Complete | GoalStatus::BudgetLimited))
+}
+
 impl GoalInput {
     pub fn command(&self) -> Option<GoalCommand> {
         Some(match self {

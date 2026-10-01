@@ -41,7 +41,7 @@ pub(crate) fn text_system() -> Arc<TextSystem> {
 
 fn worker(width: f32) -> Worker {
     let ts = text_system();
-    let mut w = Worker::new(&ts, Arc::new(Shared { frame: Mutex::new(Arc::new(LayoutFrame::empty())) }), Arc::new(Quiet));
+    let mut w = Worker::new(&ts, Arc::new(Shared::new()), Arc::new(Quiet));
     w.width = width;
     w
 }
@@ -446,7 +446,7 @@ fn bench_layout_passes() {
             continuation_of: None,
             duration_ms: None,
         }));
-        w.input = TranscriptInput { entries: e, pending: vec![], working: true, working_since_ms: None, streaming: true };
+        w.input = TranscriptInput { entries: e, working: true, streaming: true, ..Default::default() };
         let t = Instant::now();
         w.pass();
         total += t.elapsed();

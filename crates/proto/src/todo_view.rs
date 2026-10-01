@@ -2,6 +2,8 @@
 //! long list folds to. Shared by the desktop tray and the mobile strip so a
 //! phone and a laptop fold the same list the same way (`docs/todo-panel.md`).
 
+use std::collections::hash_map::DefaultHasher;
+use std::hash::{Hash, Hasher};
 use std::ops::Range;
 
 use crate::{TodoItem, TodoStatus};
@@ -117,6 +119,75 @@ pub fn rows(items: &[TodoItem], show_earlier: bool, show_later: bool) -> Vec<Tod
         });
     }
     out
+}
+
+/// Identity of a finished list, so a dismissal holds until the agent writes a
+/// different one.
+pub fn signature(items: &[TodoItem]) -> u64 {
+    let mut hasher = DefaultHasher::new();
+    for item in items {
+        item.text.hash(&mut hasher);
+        item.status().hash(&mut hasher);
+    }
+    hasher.finish()
+}
+
+/// Per-chat presentation state. In memory only — like the right-pane flags in
+/// `shell::SessionPanels` it lasts for the app run, not across restarts. The
+/// desktop tray and the phone's strip share it, so they open, tidy and
+/// dismiss the same way.
+#[derive(Debug, Default, Clone)]
+pub struct TodoPanelState {
+    /// The user's explicit choice; `None` follows the automatic rule: open
+    /// while work remains, compact once everything is done.
+    pub expanded: Option<bool>,
+    pub show_earlier: bool,
+    pub show_later: bool,
+    /// Signature of the finished list the user dismissed.
+    pub dismissed: Option<u64>,
+    /// Whether the previous frame was settled, to detect the transition.
+    pub was_settled: bool,
+    /// Bumped on every toggle so the list's fade-in replays.
+    pub epoch: u32,
+}
+
+impl TodoPanelState {
+    /// Feed the frame's facts in. `settled` is "everything done and the turn
+    /// idle": reaching it drops any explicit choice, so the panel tidies itself
+    /// to the compact state exactly once — a later manual expand is respected.
+    pub fn observe(&mut self, settled: bool) {
+        if settled && !self.was_settled {
+            self.expanded = None;
+        }
+        self.was_settled = settled;
+    }
+
+    /// A finished list is compact by default even while a new turn runs, so
+    /// last turn's checklist does not pop open again each time you send.
+    pub fn is_expanded(&self, finished: bool) -> bool {
+        self.expanded.unwrap_or(!finished)
+    }
+
+    pub fn toggle(&mut self, finished: bool) {
+        self.expanded = Some(!self.is_expanded(finished));
+        self.epoch = self.epoch.wrapping_add(1);
+    }
+
+    pub fn toggle_fold(&mut self, side: FoldSide) {
+        match side {
+            FoldSide::Earlier => self.show_earlier = !self.show_earlier,
+            FoldSide::Later => self.show_later = !self.show_later,
+        }
+    }
+
+    pub fn dismiss(&mut self, items: &[TodoItem]) {
+        self.dismissed = Some(signature(items));
+    }
+
+    /// A dismissal only applies to a finished list it was made on.
+    pub fn is_dismissed(&self, items: &[TodoItem], finished: bool) -> bool {
+        finished && self.dismissed == Some(signature(items))
+    }
 }
 
 #[cfg(test)]
@@ -252,5 +323,60 @@ mod tests {
         // Earlier items appear after their fold row, later items before theirs.
         assert_eq!(all[1], TodoRow::Item(0));
         assert_eq!(all[all.len() - 2], TodoRow::Item(9));
+    }
+
+    #[test]
+    fn panel_follows_the_work_then_tidies_itself_once() {
+        let mut state = TodoPanelState::default();
+        // Working: open by default.
+        state.observe(false);
+        assert!(state.is_expanded(false));
+        // A finished list stays compact when a new turn starts (not settled,
+        // since the turn is live) instead of popping open again.
+        assert!(!state.is_expanded(true));
+        // User collapses mid-run: respected.
+        state.toggle(false);
+        state.observe(false);
+        assert!(!state.is_expanded(false));
+        // Everything done and idle: compact, and the explicit choice resets.
+        state.toggle(false); // user had re-expanded
+        assert!(state.is_expanded(false));
+        state.observe(true);
+        assert!(!state.is_expanded(true));
+        // Opening the finished list by hand sticks (no re-collapse each frame).
+        state.toggle(true);
+        state.observe(true);
+        assert!(state.is_expanded(true));
+        // New work arrives: back to the automatic open state...
+        state.observe(false);
+        assert!(state.is_expanded(false));
+        // ...and finishing again tidies again.
+        state.observe(true);
+        assert!(!state.is_expanded(true));
+    }
+
+    #[test]
+    fn toggle_replays_the_fade_and_folds_toggle_independently() {
+        let mut state = TodoPanelState::default();
+        let before = state.epoch;
+        state.toggle(false);
+        assert_ne!(state.epoch, before);
+        state.toggle_fold(FoldSide::Later);
+        assert!(state.show_later && !state.show_earlier);
+        state.toggle_fold(FoldSide::Later);
+        assert!(!state.show_later);
+    }
+
+    #[test]
+    fn dismissal_holds_only_for_the_finished_list_it_was_made_on() {
+        let done = items("xxx");
+        let mut state = TodoPanelState::default();
+        assert!(!state.is_dismissed(&done, true));
+        state.dismiss(&done);
+        assert!(state.is_dismissed(&done, true));
+        // Never hides a list that still has work (e.g. it was reopened).
+        assert!(!state.is_dismissed(&items("xx."), false));
+        // A different finished list is a new thing worth showing.
+        assert!(!state.is_dismissed(&items("xxxx"), true));
     }
 }

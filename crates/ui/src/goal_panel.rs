@@ -849,14 +849,12 @@ impl Composer {
                     // An existing running or paused goal: `/goal <text>` is a
                     // replacement the user must ask for with `replace`.
                     let blocked = matches!(&input, GoalInput::Set { replace: false, .. })
-                        && self.state.read(cx).goal.as_ref().is_some_and(|g| {
-                            !matches!(g.status, GoalStatus::Complete | GoalStatus::BudgetLimited)
-                        });
-                    if blocked {
-                        self.failure = Some(
-                            "This chat already has a goal. Use /goal replace <objective>, or /goal clear first."
-                                .into(),
+                        && zeron_proto::goal_view::set_needs_replace(
+                            self.state.read(cx).goal.as_ref(),
                         );
+                    if blocked {
+                        self.failure =
+                            Some(zeron_proto::goal_view::GOAL_REPLACE_HINT.into());
                         self.failure_key = Some(chat_id);
                     } else {
                         self.send_goal_command(chat_id, command, cx);
@@ -877,8 +875,7 @@ impl Composer {
             panel.epoch = panel.epoch.wrapping_add(1);
             panel.followed = None;
         } else {
-            self.failure =
-                Some("This chat has no goal. Type /goal followed by an objective.".into());
+            self.failure = Some(zeron_proto::goal_view::NO_GOAL_HINT.into());
             self.failure_key = Some(chat_id.to_owned());
         }
         cx.notify();

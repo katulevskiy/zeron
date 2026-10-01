@@ -14,6 +14,9 @@ use gpui::{
 use serde::Deserialize;
 use serde_json::Value;
 use zeron_proto::ArtifactKind;
+pub use zeron_proto::artifact_view::{
+    MetricTile, TableData, format_value, parse_metrics, parse_table,
+};
 
 use super::model::format_bytes;
 use super::widgets::kind_word;
@@ -30,131 +33,6 @@ pub const TABLE_ROWS_PER_PAGE: usize = 200;
 pub const FILE_MAX_LINES: usize = 2000;
 
 // ── parsing ───────────────────────────────────────────────────────────────
-
-/// `1234567` → `1,234,567`; floats keep up to 4 decimals; null is a dash.
-pub fn format_value(v: &Value) -> String {
-    match v {
-        Value::Null => "—".into(),
-        Value::Bool(b) => b.to_string(),
-        Value::Number(n) => {
-            if let Some(i) = n.as_i64() {
-                group_digits(&i.to_string())
-            } else if let Some(u) = n.as_u64() {
-                group_digits(&u.to_string())
-            } else {
-                let f = n.as_f64().unwrap_or_default();
-                let mut s = format!("{f:.4}");
-                while s.ends_with('0') {
-                    s.pop();
-                }
-                if s.ends_with('.') {
-                    s.pop();
-                }
-                match s.split_once('.') {
-                    Some((int, frac)) => format!("{}.{frac}", group_digits(int)),
-                    None => group_digits(&s),
-                }
-            }
-        }
-        Value::String(s) => s.clone(),
-        other => other.to_string(),
-    }
-}
-
-fn group_digits(s: &str) -> String {
-    let (sign, digits) = match s.strip_prefix('-') {
-        Some(rest) => ("-", rest),
-        None => ("", s),
-    };
-    if digits.len() <= 4 {
-        // 1999 reads better ungrouped (years, ids)
-        return s.to_owned();
-    }
-    let mut out = String::with_capacity(digits.len() + digits.len() / 3);
-    for (i, c) in digits.chars().enumerate() {
-        if i > 0 && (digits.len() - i) % 3 == 0 {
-            out.push(',');
-        }
-        out.push(c);
-    }
-    format!("{sign}{out}")
-}
-
-#[derive(Debug, Clone, PartialEq)]
-pub struct TableData {
-    pub columns: Vec<String>,
-    pub rows: Vec<Vec<String>>,
-    /// Right-aligned: every non-null cell of the column is a number.
-    pub numeric: Vec<bool>,
-    /// Suggested pixel width per column.
-    pub widths: Vec<f32>,
-}
-
-pub fn parse_table(json: &str) -> Result<TableData, String> {
-    #[derive(Deserialize)]
-    struct Raw {
-        columns: Vec<String>,
-        rows: Vec<Vec<Value>>,
-    }
-    let raw: Raw = serde_json::from_str(json).map_err(|e| format!("not a table: {e}"))?;
-    let n = raw.columns.len();
-    let mut numeric = vec![true; n];
-    let mut longest: Vec<usize> = raw.columns.iter().map(|c| c.chars().count()).collect();
-    let rows: Vec<Vec<String>> = raw
-        .rows
-        .iter()
-        .map(|row| {
-            (0..n)
-                .map(|c| {
-                    let cell = row.get(c).unwrap_or(&Value::Null);
-                    if !matches!(cell, Value::Number(_) | Value::Null) {
-                        numeric[c] = false;
-                    }
-                    let text = format_value(cell);
-                    longest[c] = longest[c].max(text.chars().take(80).count());
-                    text
-                })
-                .collect()
-        })
-        .collect();
-    let widths = longest
-        .iter()
-        .map(|chars| (*chars as f32 * 7.4 + 28.0).clamp(72.0, 320.0))
-        .collect();
-    Ok(TableData {
-        columns: raw.columns,
-        rows,
-        numeric,
-        widths,
-    })
-}
-
-#[derive(Debug, Clone, PartialEq, Eq)]
-pub struct MetricTile {
-    pub label: String,
-    pub value: String,
-    pub unit: Option<String>,
-}
-
-pub fn parse_metrics(json: &str) -> Result<Vec<MetricTile>, String> {
-    #[derive(Deserialize)]
-    struct Raw {
-        label: String,
-        #[serde(default)]
-        value: Value,
-        #[serde(default)]
-        unit: Option<String>,
-    }
-    let raw: Vec<Raw> = serde_json::from_str(json).map_err(|e| format!("not metrics: {e}"))?;
-    Ok(raw
-        .into_iter()
-        .map(|m| MetricTile {
-            label: m.label,
-            value: format_value(&m.value),
-            unit: m.unit.filter(|u| !u.is_empty()),
-        })
-        .collect())
-}
 
 /// What the viewer draws.
 pub enum Content {
@@ -812,63 +690,6 @@ fn text_block(lines: &[SharedString], cut: bool, theme: &Theme) -> AnyElement {
 #[cfg(test)]
 mod tests {
     use super::*;
-
-    #[test]
-    fn numbers_group_thousands_and_trim_fractions() {
-        let f = |s: &str| format_value(&serde_json::from_str(s).unwrap());
-        assert_eq!(f("1234567"), "1,234,567");
-        assert_eq!(f("-98765"), "-98,765");
-        assert_eq!(f("1999"), "1999", "short numbers (years, ids) stay whole");
-        assert_eq!(f("12.50"), "12.5");
-        assert_eq!(f("3.0"), "3");
-        assert_eq!(f("1234567.8912"), "1,234,567.8912");
-        assert_eq!(f("0.000049"), "0");
-        assert_eq!(f("null"), "—");
-        assert_eq!(f("true"), "true");
-        assert_eq!(f("\"hi\""), "hi");
-        assert_eq!(f("[1,2]"), "[1,2]");
-    }
-
-    #[test]
-    fn a_table_parses_with_numeric_columns_and_widths() {
-        let t = parse_table(
-            r#"{"columns":["Region","Revenue","Note"],
-                "rows":[["EMEA",1200000,"strong"],["APAC",null,"n/a"],["AMER",980000.5,null]]}"#,
-        )
-        .unwrap();
-        assert_eq!(t.columns, ["Region", "Revenue", "Note"]);
-        assert_eq!(t.rows[0], ["EMEA", "1,200,000", "strong"]);
-        assert_eq!(t.rows[1][1], "—");
-        assert_eq!(t.rows[2][1], "980,000.5");
-        assert_eq!(t.numeric, [false, true, false]);
-        assert!(t.widths.iter().all(|w| (72.0..=320.0).contains(w)));
-        // short rows are padded, never panic
-        let t = parse_table(r#"{"columns":["a","b"],"rows":[["x"]]}"#).unwrap();
-        assert_eq!(t.rows[0], ["x", "—"]);
-        assert!(parse_table("{}").is_err());
-        assert!(parse_table("not json").is_err());
-    }
-
-    #[test]
-    fn long_cells_cap_their_column_width() {
-        let long = "x".repeat(500);
-        let t = parse_table(&format!(r#"{{"columns":["c"],"rows":[["{long}"]]}}"#)).unwrap();
-        assert_eq!(t.widths, [320.0]);
-    }
-
-    #[test]
-    fn metrics_parse_with_optional_units() {
-        let m = parse_metrics(
-            r#"[{"label":"Files","value":412},{"label":"Coverage","value":87.5,"unit":"%"},{"label":"x","value":"n/a","unit":""}]"#,
-        )
-        .unwrap();
-        assert_eq!(m[0].value, "412");
-        assert_eq!(m[0].unit, None);
-        assert_eq!(m[1].value, "87.5");
-        assert_eq!(m[1].unit.as_deref(), Some("%"));
-        assert_eq!(m[2].unit, None, "an empty unit is no unit");
-        assert!(parse_metrics("{}").is_err());
-    }
 
     #[test]
     fn decode_picks_the_viewer_for_the_kind() {
