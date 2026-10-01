@@ -41,6 +41,18 @@ mod sidebar_sections;
 /// Snapshot row id in the local `DocsStore` for the persisted registry state.
 pub const REGISTRY_DOC_ID: &str = "registry1";
 
+/// Where a chat runs: what [`RegistryDoc::set_chat_placement`] writes.
+#[derive(Debug, Clone, Copy, Default)]
+pub struct ChatPlacement<'a> {
+    pub device_id: &'a str,
+    pub space_id: Option<&'a str>,
+    pub cwd: Option<&'a str>,
+    pub branch: Option<&'a str>,
+    /// `(session id, cwd)` to resume on the new host; `("", cwd)` = start a
+    /// fresh harness session there. `None` leaves the stored pair alone.
+    pub harness_session: Option<(&'a str, &'a str)>,
+}
+
 // ── HLC ─────────────────────────────────────────────────────────────────────
 
 /// Encode an HLC string: `{ms:013}-{counter:06}-{device}`. Fixed-width zero
@@ -1073,6 +1085,69 @@ impl RegistryDoc {
             OpKind::Update,
             fields([("cwd", json!(cwd))]),
         );
+        Ok(true)
+    }
+
+    /// Re-home a chat in one op (moving it to another device): host, space,
+    /// folder, branch and resume session together, so no device ever sees
+    /// the new host paired with the old folder. Device-scoped git identity
+    /// is cleared for the new host's diff sync to stamp. One `Update` = one
+    /// clock: it never touches title, config or seen marks written
+    /// concurrently.
+    pub fn set_chat_placement(
+        &mut self,
+        chat_id: &str,
+        placement: &ChatPlacement<'_>,
+    ) -> Result<bool, DocError> {
+        if !self.row_exists(KIND_CHATS, chat_id) {
+            return Ok(false);
+        }
+        let mut set = fields([
+            ("deviceId", json!(placement.device_id)),
+            ("spaceId", opt_str(placement.space_id)),
+            ("cwd", opt_str(placement.cwd)),
+            ("branch", opt_str(placement.branch)),
+            ("checkoutId", Value::Null),
+            ("sourceContext", Value::Null),
+        ]);
+        if let Some((session_id, cwd)) = placement.harness_session {
+            set.insert("harnessSessionId".into(), json!(session_id));
+            set.insert("harnessSessionCwd".into(), json!(cwd));
+        }
+        self.write(KIND_CHATS, chat_id, OpKind::Update, set);
+        Ok(true)
+    }
+
+    /// Only the host field (tooling, tests). Targeted so a stale reader
+    /// can't clobber the rest of the row.
+    pub fn set_chat_device(&mut self, chat_id: &str, device_id: &str) -> Result<bool, DocError> {
+        if !self.row_exists(KIND_CHATS, chat_id) {
+            return Ok(false);
+        }
+        self.write(
+            KIND_CHATS,
+            chat_id,
+            OpKind::Update,
+            fields([("deviceId", json!(device_id))]),
+        );
+        Ok(true)
+    }
+
+    /// A move's progress on the chat row (`None` clears it). Written only by
+    /// the engine running the move.
+    pub fn set_chat_move(
+        &mut self,
+        chat_id: &str,
+        state: Option<&zeron_proto::ChatMove>,
+    ) -> Result<bool, DocError> {
+        if !self.row_exists(KIND_CHATS, chat_id) {
+            return Ok(false);
+        }
+        let value = match state {
+            Some(state) => serde_json::to_value(state)?,
+            None => Value::Null,
+        };
+        self.write(KIND_CHATS, chat_id, OpKind::Update, fields([("move", value)]));
         Ok(true)
     }
 

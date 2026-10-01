@@ -1420,36 +1420,87 @@ impl Inner {
                 })?
             }
         };
-        let history: Vec<_> = entries[..end]
-            .iter()
-            .map(|entry| {
-                let text = entry
+        let history = transcript_replay(&entries[..end])?;
+        Some(format!(
+            "Continue this side conversation using the following prior conversation as context.\n{history}\n\n{prompt}"
+        ))
+    }
+}
+
+/// The conversation in `entries` as a `<conversation>` block a fresh
+/// provider session can read (text and tool calls with their summarized
+/// output); `None` when there is nothing to carry.
+fn transcript_replay(entries: &[zeron_doc::SessionMessageEntry]) -> Option<String> {
+    let history: Vec<_> = entries
+        .iter()
+        .map(|entry| {
+            let text = entry
+                .parts
+                .iter()
+                .filter_map(|part| match part {
+                    zeron_doc::MessagePart::Text { text, .. } => Some(text.clone()),
+                    zeron_doc::MessagePart::Tool { call, output, .. } => Some(format!(
+                        "Tool: {}\n{}",
+                        serde_json::to_string(call).unwrap_or_default(),
+                        output.clone().unwrap_or_default()
+                    )),
+                    _ => None,
+                })
+                .collect::<Vec<_>>()
+                .join("\n");
+            (entry.role, text)
+        })
+        .filter(|(_, text)| !text.is_empty())
+        .map(|(role, text)| serde_json::json!({ "role": role, "text": text }))
+        .collect();
+    (!history.is_empty()).then(|| {
+        format!(
+            "<conversation>\n{}\n</conversation>",
+            serde_json::to_string(&history).unwrap_or_default()
+        )
+    })
+}
+
+/// A chat that just moved here: its pending note for the agent (and, when
+/// the harness session couldn't travel, the conversation above the move
+/// seam) in front of `prompt`. Consumes the note: it is said once.
+fn take_move_note(
+    doc: &SessionDoc,
+    harness_id: HarnessId,
+    prompt: &str,
+    current: Option<&str>,
+) -> Option<String> {
+    let note = doc.move_note()?;
+    if native_command(prompt, harness_id) {
+        return None; // stays pending for the next model-bound prompt
+    }
+    if let Err(err) = doc.set_move_note(None) {
+        tracing::warn!(error = %err, "could not clear a moved chat's note");
+    }
+    let mut out = note.text.clone();
+    if note.replay_history {
+        let entries: Vec<_> = doc
+            .read_entries()
+            .unwrap_or_default()
+            .into_iter()
+            .filter(|entry| Some(entry.id.as_str()) != current)
+            .take_while(|entry| {
+                !entry
                     .parts
                     .iter()
-                    .filter_map(|part| match part {
-                        zeron_doc::MessagePart::Text { text, .. } => Some(text.clone()),
-                        zeron_doc::MessagePart::Tool { call, output, .. } => Some(format!(
-                            "Tool: {}\n{}",
-                            serde_json::to_string(call).unwrap_or_default(),
-                            output.clone().unwrap_or_default()
-                        )),
-                        _ => None,
-                    })
-                    .collect::<Vec<_>>()
-                    .join("\n");
-                (entry.role, text)
+                    .any(|part| matches!(part, zeron_doc::MessagePart::Moved { .. }))
             })
-            .filter(|(_, text)| !text.is_empty())
-            .map(|(role, text)| serde_json::json!({ "role": role, "text": text }))
             .collect();
-        (!history.is_empty()).then(|| {
-            format!(
-                "Continue this side conversation using the following prior conversation as context.\n<conversation>\n{}\n</conversation>\n\n{}",
-                serde_json::to_string(&history).unwrap_or_default(),
-                prompt
-            )
-        })
+        if let Some(history) = transcript_replay(&entries) {
+            out.push_str(
+                "\n\nYour earlier session could not be carried over, so here is the conversation so far:\n",
+            );
+            out.push_str(&history);
+        }
     }
+    out.push_str("\n\n");
+    out.push_str(prompt);
+    Some(out)
 }
 
 /// Whether the provider routes this prompt as a native command: its delivered
@@ -1870,6 +1921,14 @@ async fn drive_run(
         resume_state
             .fork_history_sent
             .store(true, std::sync::atomic::Ordering::Release);
+    }
+    if let Some(prompt) = take_move_note(
+        &doc,
+        harness_id,
+        &request.prompt,
+        Some(&resume_state.user_message_id),
+    ) {
+        request.prompt = prompt;
     }
     // Startup can stop before the SDK saves user text, with no new session
     // ID or receipt. Bridge that unacknowledged tail from our transcript;

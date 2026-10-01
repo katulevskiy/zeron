@@ -1069,16 +1069,30 @@ impl WorkspaceHost {
         Ok(true)
     }
 
-    /// Re-home a chat to another device (tooling/seeds; a future device
-    /// migration flow will drive this). Returns false when the chat doesn't
+    /// Re-home a chat to another device (tooling/seeds; moves use
+    /// [`Self::set_chat_placement`]). Returns false when the chat doesn't
     /// exist.
     pub fn set_chat_host(&self, chat_id: &str, device_id: &str) -> Result<bool, EngineError> {
-        let Some(mut chat) = self.read(|doc| doc.chat(chat_id))? else {
-            return Ok(false);
-        };
-        chat.device_id = device_id.to_string();
-        self.mutate(|doc| doc.upsert_chat(&chat))?;
-        Ok(true)
+        Ok(self.mutate(|doc| doc.set_chat_device(chat_id, device_id))?)
+    }
+
+    /// Re-home a chat onto another device in one registry op (see
+    /// [`zeron_doc::RegistryDoc::set_chat_placement`]).
+    pub fn set_chat_placement(
+        &self,
+        chat_id: &str,
+        placement: &zeron_doc::ChatPlacement<'_>,
+    ) -> Result<bool, EngineError> {
+        Ok(self.mutate(|doc| doc.set_chat_placement(chat_id, placement))?)
+    }
+
+    /// Publish (or clear) a move's progress on the chat row.
+    pub fn set_chat_move(
+        &self,
+        chat_id: &str,
+        state: Option<&zeron_proto::ChatMove>,
+    ) -> Result<bool, EngineError> {
+        Ok(self.mutate(|doc| doc.set_chat_move(chat_id, state))?)
     }
 
     /// Upsert a chat row copied verbatim from another profile (local→synced

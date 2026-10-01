@@ -282,6 +282,10 @@ struct DocHostInner {
     /// terminalizes the latter as Rejected instead of leaving a forever-
     /// Pending entry no retry could ever reach (2026-08-19 swallowed-send).
     executing: Mutex<HashSet<String>>,
+    /// Chats being moved to another device past the point where the agent
+    /// stops: their commands and queue wait (in the doc) for whichever
+    /// engine hosts the chat once the move ends.
+    move_holds: Mutex<HashSet<String>>,
     /// Peer links (engine assembly, edge runtimes only) — the transport that
     /// pushes queued attachment bytes to a remote host.
     links: OnceLock<Arc<zeron_rpc::LinkCache>>,
@@ -914,6 +918,7 @@ impl DocHost {
                 transfers: watch::channel(Vec::new()).0,
                 connectivity_grace: Mutex::new(DegradeGrace::default()),
                 executing: Mutex::new(HashSet::new()),
+                move_holds: Mutex::new(HashSet::new()),
                 links: OnceLock::new(),
                 http: reqwest::Client::builder()
                     .pool_max_idle_per_host(2)
@@ -1101,13 +1106,130 @@ impl DocHost {
         }
     }
 
+    /// Stop executing `chat_id`'s commands and queue on this device while it
+    /// moves away. Entries keep arriving in the doc; [`Self::release_move_hold`]
+    /// (a cancelled move) drains them here, the new host drains them there.
+    pub fn hold_for_move(&self, chat_id: &str) {
+        lock(&self.inner.move_holds).insert(chat_id.to_owned());
+    }
+
+    pub fn release_move_hold(&self, chat_id: &str) {
+        if !lock(&self.inner.move_holds).remove(chat_id) {
+            return;
+        }
+        if let Some(handle) = lock(&self.inner.handles).get(chat_id).cloned() {
+            let host = self.clone();
+            self.spawn_worker(async move {
+                host.drain_commands(&handle).await;
+                host.drain_queue(&handle).await;
+            });
+        }
+    }
+
+    fn move_held(&self, chat_id: &str) -> bool {
+        lock(&self.inner.move_holds).contains(chat_id)
+    }
+
+    /// Wait until no command of `chat_id` is mid-execution here (the drain
+    /// marks before it executes and resolves after): what a move waits for
+    /// before handing the ledger over.
+    pub async fn settle_commands(&self, chat_id: &str) -> Result<(), EngineError> {
+        let handle = self.open(chat_id)?;
+        let deadline = tokio::time::Instant::now() + std::time::Duration::from_secs(30);
+        loop {
+            let ids: HashSet<String> = handle
+                .doc
+                .read_commands()?
+                .into_iter()
+                .map(|c| c.id)
+                .collect();
+            let busy = lock(&self.inner.executing).iter().any(|id| ids.contains(id));
+            if !busy {
+                return Ok(());
+            }
+            if tokio::time::Instant::now() >= deadline {
+                return Err(EngineError::Other(
+                    "a command for this chat is still running".into(),
+                ));
+            }
+            tokio::time::sleep(std::time::Duration::from_millis(50)).await;
+        }
+    }
+
+    /// This device's ledger claims for `chat_id`'s commands: they travel with
+    /// a moved chat so the new host never runs one of them again.
+    pub fn processed_commands_for(&self, chat_id: &str) -> Result<Vec<(String, i64)>, EngineError> {
+        let handle = self.open(chat_id)?;
+        let ids: HashSet<String> = handle
+            .doc
+            .read_commands()?
+            .into_iter()
+            .map(|c| c.id)
+            .collect();
+        Ok(self
+            .inner
+            .store
+            .processed_commands()?
+            .into_iter()
+            .filter(|(id, _)| ids.contains(id))
+            .collect())
+    }
+
+    /// Adopt another device's ledger claims (a chat moving here).
+    pub fn import_processed_commands(&self, rows: &[(String, i64)]) -> Result<usize, EngineError> {
+        Ok(self.inner.store.import_processed_commands(rows)?)
+    }
+
     /// Wire the workspace host (engine assembly) — the source of chat-ownership rows.
     pub fn set_workspace(&self, workspace: WorkspaceHost) {
         let chats = workspace.watch_chats();
+        let hosted = workspace.watch_chats();
         if self.inner.workspace.set(workspace).is_ok() {
             self.spawn_cutover_watcher(chats);
+            self.spawn_host_watcher(hosted);
             self.spawn_migration_sweep();
         }
+    }
+
+    /// A chat whose row starts naming this device (a move landed here, or a
+    /// tool re-homed it) opens and drains at once: commands queued while it
+    /// was on its way wait in the doc, and nothing else would wake them
+    /// until the next nudge.
+    fn spawn_host_watcher(&self, mut chats: watch::Receiver<Vec<zeron_proto::Chat>>) {
+        let host = self.clone();
+        let me = self.inner.config.device_id.clone();
+        let hosted_now = move |chats: &[zeron_proto::Chat]| -> HashSet<String> {
+            chats
+                .iter()
+                .filter(|c| c.device_id == me)
+                .map(|c| c.id.clone())
+                .collect()
+        };
+        let mut hosted = hosted_now(&chats.borrow_and_update());
+        self.spawn_worker(async move {
+            loop {
+                if chats.changed().await.is_err() {
+                    return; // workspace host gone (shutdown)
+                }
+                let now = hosted_now(&chats.borrow_and_update());
+                let arrived: Vec<String> = now.difference(&hosted).cloned().collect();
+                hosted = now;
+                for chat_id in arrived {
+                    match host.open(&chat_id) {
+                        Ok(handle) => {
+                            tracing::info!(chat = %chat_id, "chat now hosted here; draining");
+                            let drainer = host.clone();
+                            host.spawn_worker(async move {
+                                drainer.drain_commands(&handle).await;
+                                drainer.drain_queue(&handle).await;
+                            });
+                        }
+                        Err(err) => tracing::warn!(chat = %chat_id, error = %err,
+                            "opening a chat that moved here failed"),
+                    }
+                }
+            }
+        });
     }
 
     /// Host migration sweep: proactively seed this device's own s2 chats
@@ -3963,7 +4085,7 @@ impl DocHost {
         let Some(sessions) = self.sessions() else {
             return; // executor not wired yet; the set_sessions kick re-drains
         };
-        if !self.is_host(&handle.chat_id) {
+        if !self.is_host(&handle.chat_id) || self.move_held(&handle.chat_id) {
             return;
         }
         // One drain at a time per chat. Waiters are cheap: whoever takes the
@@ -4544,6 +4666,16 @@ impl DocHost {
         chat_id: &str,
         entry: SessionCommandEntry,
     ) -> Result<&'static str, EngineError> {
+        // The relay is only a fast road: the entry is already in the chat's
+        // doc. A former host (the chat moved away) or one mid-move leaves it
+        // there for whichever engine hosts the chat — answering the sender
+        // so it stops retrying a device that will never run it.
+        if !self.is_host(chat_id) {
+            return Ok("not-host");
+        }
+        if self.move_held(chat_id) {
+            return Ok("deferred");
+        }
         let handle = self.open(chat_id)?;
         // The sender sequences attachment transfers BEFORE the relay; refuse
         // (retryably) rather than run without the images.
@@ -4849,7 +4981,7 @@ impl DocHost {
         let Some(sessions) = self.sessions() else {
             return; // executor not wired yet (or retired); the set_sessions kick re-drains
         };
-        if !self.is_host(&handle.chat_id) {
+        if !self.is_host(&handle.chat_id) || self.move_held(&handle.chat_id) {
             return;
         }
         // Do not let another drain overtake a prompt waiting for mailbox

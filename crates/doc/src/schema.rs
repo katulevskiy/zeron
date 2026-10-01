@@ -410,6 +410,32 @@ impl SessionDoc {
         Ok(())
     }
 
+    /// A moved chat's note for its agent, waiting to be prepended (once) to
+    /// the next prompt its harness receives on the new host.
+    pub fn move_note(&self) -> Option<MoveNote> {
+        match self.doc.get_map("meta").get("moveNote") {
+            Some(loro::ValueOrContainer::Value(LoroValue::String(s))) => {
+                serde_json::from_str(&s).ok()
+            }
+            _ => None,
+        }
+    }
+
+    pub fn set_move_note(&self, note: Option<&MoveNote>) -> Result<(), DocError> {
+        let meta = self.doc.get_map("meta");
+        match note {
+            Some(note) => meta.insert("moveNote", serde_json::to_string(note)?)?,
+            None => {
+                if self.move_note().is_none() {
+                    return Ok(());
+                }
+                meta.delete("moveNote")?;
+            }
+        }
+        self.doc.commit();
+        Ok(())
+    }
+
     pub fn chat_id(&self) -> Option<String> {
         match self.doc.get_map("meta").get("chatId") {
             Some(loro::ValueOrContainer::Value(LoroValue::String(s))) => Some(s.to_string()),
@@ -1420,6 +1446,20 @@ pub fn materialize_tail(
         total_messages: total,
         updated_at: now,
     })
+}
+
+
+/// What a moved chat's agent is told before its first prompt on the new
+/// host (`meta.moveNote`): where things are now, what didn't come along.
+#[derive(Debug, Clone, PartialEq, Eq, Default, Serialize, Deserialize)]
+#[serde(rename_all = "camelCase")]
+pub struct MoveNote {
+    pub move_id: String,
+    pub text: String,
+    /// The harness's own session couldn't travel: replay the transcript
+    /// above the move seam into the fresh session along with the note.
+    #[serde(default)]
+    pub replay_history: bool,
 }
 
 #[cfg(test)]
