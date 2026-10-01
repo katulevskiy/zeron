@@ -107,7 +107,7 @@ cue is wired.
 | `ToggleOn` / `ToggleOff` | generated | 72 / 66 | Interface | `ToggleOn` / `ToggleOff` | every switch, question option chips, Settings toggles |
 | `Open` | generated | 108 | Interface | none (the tap's) | a page pushed, a sheet / dialog / menu / popover opens, a section expands, a terminal tab opens, the demo or the developer door opens |
 | `Close` | generated | 100 | Interface | none | back, a sheet / dialog / menu closes (quiet after a chosen item), a section collapses, stop a run, close a terminal tab, remove a staged photo, leave the demo / sign out |
-| `Detent` | generated, pitch-shifted | 38 | Interface | `Tick` | effort levels (climbs the ladder per level), the volume slider (ten steps) |
+| `Detent` | generated, pitch-shifted | 38 | Interface | `Tick` (effort: `EffortStep`, firmer per level) | effort levels (climbs the ladder per level), the volume slider (ten steps) |
 | `Star` / `Unstar` | generated | 108 / 92 | Interface | `Pop` | favorites (the model picker); `Unstar` also unpins a session |
 | `Pin` | generated | 84 | Interface | `Pop` | pin a session (list menu, session menu) |
 | `Archive` | generated | 112 | Interface | `Confirm` | archive by swipe, menu, session menu or search |
@@ -116,7 +116,18 @@ cue is wired.
 | `Error` | generated | 176 | Interface | `Error` | a refusal or failure: save failed or conflicted, send failed, install / update / save-to-Downloads failed, terminal could not open, toasts |
 | `Refresh` | generated | 118 | Interface | `Select` / `Confirm` | pull to refresh, reload, retry, refresh files |
 
-Detent gets `Haptic.Tick`; pull and swipe thresholds have haptic only (`Threshold`).
+Detent gets `Haptic.Tick` (on the effort slider `Haptic.EffortStep` with `level = index / (n - 1)`);
+pull and swipe thresholds have haptic only (`Threshold`).
+
+Model picker (compact card): the effort bar adds `Stretch` (once on entering the
+rubber band, once at the wall), `Rebound` + `Cue.Rebound` on release, and, once the
+user has settled on an end (180 ms dwell, or right after release), `Surge` +
+`Cue.Surge` at the top and `Zip` + `Cue.Zip` at the bottom. The fast button plays
+`Lightning` + `FastOn` when it turns on and `FastOff` + `Tick` when it turns off.
+The provider rail answers a tap with `Select` + `Cue.forProvider(harness)`, moving
+the finger onto the next provider (or scrolling the list across a section) with
+`RailTick` (plus the provider's cue when scrubbing). Arrival and lightning effects
+are skipped, not the feedback, when animations are off.
 Not every vocabulary entry is wired by this layer: `Star`, `Pop` for favorites and
 the model chip are used by the model picker, `Press` is reserved.
 

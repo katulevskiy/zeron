@@ -154,7 +154,7 @@ fun FastLightning(active: Boolean, modifier: Modifier = Modifier) {
     val paths = remember { arrayOf(Path(), Path(), Path()) }
     val strokes = remember(density) { Strokes(density.density) }
     val age = remember { mutableFloatStateOf(if (reduceMotion) STILL_AGE else 1f) }
-    // [width, height, seed]: shared between the clock (new seed per strike) and the drawing (rebuild on resize).
+    // The panel's [width, height] and the current strike's seed, shared by the clock (new strike) and the drawing (resize).
     val panel = remember { floatArrayOf(0f, 0f) }
     val seed = remember { longArrayOf(STILL_SEED) }
 
@@ -233,7 +233,7 @@ private fun DrawScope.drawBolt(buffer: BoltBuffer, paths: Array<Path>, strokes: 
     val glow = if (dark) GlowDark else GlowLight
     val halo = if (dark) HaloDark else HaloLight
     val core = if (dark) CoreDark else CoreLight
-    val gain = if (dark) 1f else 0.8f
+    val gain = if (dark) 1f else 1.5f
     // A flash of light around where the strike leaves the button.
     val ax = size.width - FastAnchorFromRight.toPx()
     val ay = FastAnchorFromTop.toPx()
