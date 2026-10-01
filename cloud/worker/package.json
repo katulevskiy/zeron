@@ -1,0 +1,10 @@
+{
+  "name": "zeron-cloud-worker",
+  "version": "0.0.0",
+  "private": true,
+  "type": "module",
+  "description": "The Worker Zeron deploys into the user's Cloudflare account (docs/cloud.md). Uploaded as-is; no build step.",
+  "scripts": {
+    "test": "node --import ./test/register.mjs --test test/*.test.js"
+  }
+}
