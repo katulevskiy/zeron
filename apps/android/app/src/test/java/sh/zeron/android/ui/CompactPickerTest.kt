@@ -300,6 +300,15 @@ class ModelListTest {
         assertEquals(5, ModelPickerRules.entries(catalog, emptyList(), "", catalog[0], false).size)
     }
 
+    @Test fun onlyRepeatedNamesNeedTheirDescription() {
+        val rows = ModelPickerRules.entries(
+            listOf(entry("a", "x1", "Sonnet", "via A"), entry("b", "x2", "sonnet ", "via B"), entry("a", "x3", "Opus", "plain")),
+            emptyList(), "", null, false,
+        )
+        assertEquals(setOf("Sonnet", "sonnet "), ModelPickerRules.ambiguousLabels(rows))
+        assertEquals(emptySet<String>(), ModelPickerRules.ambiguousLabels(rows.takeLast(1)))
+    }
+
     @Test fun opensOnTheSelection() {
         assertEquals(0, ModelPickerRules.initialScrollIndex(-1))
         assertEquals(0, ModelPickerRules.initialScrollIndex(0))

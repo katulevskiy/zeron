@@ -24,8 +24,7 @@ engine answers, so every screen below can be tried offline.
   `user@org`, and joins an `AUTH_MODE=dev` edge with no WorkOS (see
   [Development](#development)).
 - **New session**: projects grouped by computer, each with "No project"; a
-  model picker (providers along the bottom, models of the chosen harness,
-  a star to favorite — favorites are their own tab); the draft's working
+  [compact model picker](#compact-model-picker); the draft's working
   branch and context-usage chips; **New project** clones a repository or
   creates an empty one on the chosen computer through its engine
   (`CloneRepo` / `CreateRepo`).
@@ -42,6 +41,50 @@ engine answers, so every screen below can be tried offline.
   context window in use; tapping it opens the desktop's context card
   (tokens used, remaining). The Demo reports it as turns run.
 - The keyboard is dismissed the moment a screen is left.
+
+## Compact model picker
+
+The composer's model chip (New session and an open session) is the desktop's
+compact picker adapted to touch: **provider mark, model and the dim effort**
+("GPT-5.4  High", a small bolt when fast mode is on). Tapping it opens a card
+over the chip:
+
+- the big **effort name**, the model under it with a chevron (tap for the
+  model list) and, for models with a fast tier, a square **fast** button;
+- the **effort slider** (`ui/EffortSlider.kt`): a pill rail with a dot per
+  level, an accent fill to a springy pill thumb you drag, tap or fling, snapping
+  to the levels. The top of the ladder (`xhigh`, `max`, `ultra*`) shimmers, fast
+  mode adds speed streaks and a halo. One detent per level crossed, not per
+  frame: position to step goes through `EffortScale.snap` with hysteresis
+  (`ui/EffortScale.kt`), so jitter at a boundary does not re-fire. For
+  TalkBack it is a slider (state "High, 3 of 6", set-progress and
+  increase/decrease actions); hardware keys step it;
+- a row per other model option ("Context Window  200K ›", opening its
+  choices), and **Reset to defaults** when anything differs from the model's
+  defaults. Fast mode, the effort and the option rows are driven by the model's
+  real options (`ModelOptions` in `ui/ModelPickerRules.kt`, ported from the
+  desktop's `fast_mode_values`, `compact_fast_choice`, `compact_option_visible`).
+
+The **model list** is one page deeper (animated, the card's height eases):
+search over model name, id, provider and description; one list with the
+provider mark on each row, **starred models first** (stars are device-local,
+`core/Favorites.kt`; rows keep their identity when a star re-sorts the list and
+the list follows a row that leaves the screen), the current model checked,
+a loading skeleton, "No models match", and a per-catalog "unavailable — Retry"
+row beside the models that did load. An open session lists only its own
+harness; choosing a model returns to the card to set its effort.
+
+Feedback goes through `LocalFeedback` (`feedback/Feedback.kt`): a detent per
+step (`Haptic.Tick`, `Haptic.Threshold` at the ends, with `Cue.Detent`), a
+release `Select`, fast `ToggleOn/Off`, star `Pop` with `Star/Unstar`, choosing a
+model or option `Select`, opening/closing `Open/Close` + `Tick`, Reset `Confirm`.
+
+![Card](media/android/compact-picker-card.png)
+![Fast mode on](media/android/compact-picker-fast.png)
+![Model list](media/android/compact-picker-models.png)
+![No match](media/android/compact-picker-no-match.png)
+![Dark card](media/android/compact-picker-card-dark.png)
+![Dark list](media/android/compact-picker-models-dark.png)
 
 ## Developer tools
 
