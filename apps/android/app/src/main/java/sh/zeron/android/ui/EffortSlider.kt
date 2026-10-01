@@ -8,7 +8,6 @@ import androidx.compose.animation.core.animateFloat
 import androidx.compose.animation.core.animateFloatAsState
 import androidx.compose.animation.core.infiniteRepeatable
 import androidx.compose.animation.core.rememberInfiniteTransition
-import androidx.compose.animation.core.spring
 import androidx.compose.animation.core.tween
 import androidx.compose.foundation.Canvas
 import androidx.compose.foundation.background
@@ -30,6 +29,7 @@ import androidx.compose.runtime.Stable
 import androidx.compose.runtime.State
 import androidx.compose.runtime.getValue
 import androidx.compose.runtime.mutableFloatStateOf
+import androidx.compose.runtime.mutableIntStateOf
 import androidx.compose.runtime.mutableStateOf
 import androidx.compose.runtime.remember
 import androidx.compose.runtime.rememberCoroutineScope
@@ -41,16 +41,16 @@ import androidx.compose.ui.draw.clip
 import androidx.compose.ui.draw.drawWithCache
 import androidx.compose.ui.draw.shadow
 import androidx.compose.ui.geometry.CornerRadius
+import androidx.compose.ui.geometry.RoundRect
 import androidx.compose.ui.geometry.Offset
 import androidx.compose.ui.geometry.Size
 import androidx.compose.ui.graphics.Brush
 import androidx.compose.ui.graphics.Color
 import androidx.compose.ui.graphics.Path
 import androidx.compose.ui.graphics.StrokeCap
-import androidx.compose.ui.graphics.TransformOrigin
 import androidx.compose.ui.graphics.drawscope.DrawScope
 import androidx.compose.ui.graphics.drawscope.Stroke
-import androidx.compose.ui.graphics.drawscope.clipRect
+import androidx.compose.ui.graphics.drawscope.clipPath
 import androidx.compose.ui.graphics.drawscope.translate
 import androidx.compose.ui.graphics.graphicsLayer
 import androidx.compose.ui.input.key.Key
@@ -61,9 +61,9 @@ import androidx.compose.ui.input.key.type
 import androidx.compose.ui.input.pointer.PointerId
 import androidx.compose.ui.input.pointer.pointerInput
 import androidx.compose.ui.input.pointer.positionChanged
-import androidx.compose.ui.input.pointer.util.VelocityTracker
 import androidx.compose.ui.layout.onSizeChanged
 import androidx.compose.ui.platform.LocalContext
+import androidx.compose.ui.platform.LocalDensity
 import androidx.compose.ui.semantics.CustomAccessibilityAction
 import androidx.compose.ui.semantics.ProgressBarRangeInfo
 import androidx.compose.ui.semantics.contentDescription
@@ -180,15 +180,26 @@ fun EffortSlider(
 
     var dragging by remember { mutableStateOf(false) }
     var railWidth by remember { mutableFloatStateOf(0f) }
-    var pointerFraction by remember { mutableFloatStateOf(EffortScale.fraction(step, count)) }
     val tracker = remember(count) { DetentTracker(count, step) }
     // A step set from outside (reset, accessibility, a new model) retargets the tracker.
     LaunchedEffect(step, count) { tracker.jump(step) }
 
-    // Rubber band: how far (px, outward positive) the thumb is stretched past the end `stretchEnd` (+1 high, -1 low).
-    var stretch by remember { mutableFloatStateOf(0f) }
-    var stretchEnd by remember { mutableFloatStateOf(1f) }
-    var stretchJob by remember { mutableStateOf<Job?>(null) }
+    // The ONE motion state: the thumb's centre in steps (0 = first level; below 0 / above count - 1 while stretched
+    // past an end). Thumb, fill, dots and halo are all derived from it, so they can never disagree.
+    val spring = remember(count) { ThumbSpring(step.toFloat()) }
+    var thumbX by remember(count) { mutableFloatStateOf(step.toFloat()) }
+    // The finger as the slider sees it: where it is (steps) and the speed-limited position the thumb works from.
+    val finger = remember(count) { floatArrayOf(step.toFloat()) }
+    val effective = remember(count) { floatArrayOf(step.toFloat()) }
+    // Mode of the spring: following a finger that has pulled out of its well, dropping into a level, or rebounding from a stretch.
+    var engaged by remember { mutableStateOf(false) }
+    var rebounding by remember { mutableStateOf(false) }
+    // The level the thumb settles on when not dragging (set at release before the parent's recomposition catches up).
+    var restStep by remember(count) { mutableIntStateOf(step) }
+    val loopRunning = remember { booleanArrayOf(false) }
+    // [entered the stretch, reached the wall] of the current pull, for the Stretch haptics.
+    val pull = remember { booleanArrayOf(false, false) }
+    val density = LocalDensity.current
     // Arrival bursts: 0 when idle, 0..1 while playing.
     var arrival by remember { mutableFloatStateOf(0f) }
     var arrivalEnd by remember { mutableStateOf(EffortEnd.High) }
@@ -232,13 +243,83 @@ fun EffortSlider(
         userMoved = false
     }
 
-    // The thumb tracks the finger tightly, then springs to its stop on release.
-    val spatial = MaterialTheme.motionScheme.defaultSpatialSpec<Float>()
-    val shown = animateFloatAsState(
-        targetValue = if (dragging) pointerFraction else EffortScale.fraction(step, count),
-        animationSpec = if (dragging) spring(dampingRatio = 1f, stiffness = 1600f) else spatial,
-        label = "thumb",
-    )
+    // One frame of the thumb's life; true once it is at rest and nothing is dragging (the loop then stops: idle costs nothing).
+    fun tick(dt: Float): Boolean {
+        val span = (count - 1).coerceAtLeast(1)
+        val inset = with(density) { ThumbWidth.toPx() } / 2
+        val travel = (railWidth - 2 * inset).coerceAtLeast(1f)
+        val stepPx = travel / span
+        val maxStretch = with(density) { EffortFx.MAX_STRETCH_DP.dp.toPx() } / stepPx
+        val busy = dragging && engaged
+        val target: Float
+        if (busy) {
+            effective[0] = EffortDrag.advance(effective[0], finger[0], dt)
+            target = EffortDrag.target(effective[0], count, maxStretch)
+            // Stretch haptics fire once per pull: entering it, then reaching the wall.
+            val mag = EffortGeometry.stretch(target, count, travel)
+            if (!pull[0] && mag > 1.5f * density.density) {
+                pull[0] = true
+                currentFeedback.haptic(Haptic.Stretch, 0.35f)
+            } else if (pull[0] && mag < 0.5f * density.density) {
+                pull[0] = false
+                pull[1] = false
+            }
+            if (pull[0] && !pull[1] && mag > 0.8f * maxStretch * stepPx) {
+                pull[1] = true
+                currentFeedback.haptic(Haptic.Stretch, 1f)
+            }
+        } else {
+            target = restStep.toFloat()
+        }
+        if (reduceMotion) {
+            spring.snapTo(target)
+        } else {
+            val (k, z) = when {
+                busy -> EffortTuning.FOLLOW_STIFFNESS to EffortTuning.FOLLOW_DAMPING_RATIO
+                rebounding -> EffortTuning.REBOUND_STIFFNESS to EffortTuning.REBOUND_DAMPING_RATIO
+                else -> EffortTuning.SETTLE_STIFFNESS to EffortTuning.SETTLE_DAMPING_RATIO
+            }
+            spring.step(target, dt, k, z)
+        }
+        // The spring may swing a little past a level, but never further than the rubber band allows.
+        spring.x = spring.x.coerceIn(-maxStretch, (count - 1) + maxStretch)
+        thumbX = spring.x
+        // The selection changes when the thumb itself crosses over, so the haptic lands with the spring.
+        if (busy) tracker.update((spring.x / span).coerceIn(0f, 1f))?.let { restStep = it; detent(it) }
+        if (!busy && spring.isSettled(target)) {
+            spring.snapTo(target)
+            thumbX = target
+            rebounding = false
+            return true
+        }
+        return false
+    }
+
+    fun ensureLoop() {
+        if (loopRunning[0]) return
+        loopRunning[0] = true
+        scope.launch {
+            var last = 0L
+            while (true) {
+                var done = false
+                androidx.compose.runtime.withFrameNanos { now ->
+                    val dt = if (last == 0L) 1f / 60f else ((now - last) / 1e9f).coerceIn(0.001f, 0.05f)
+                    last = now
+                    done = tick(dt)
+                    // Cleared in the frame itself so a gesture starting right now can restart the loop.
+                    if (done) loopRunning[0] = false
+                }
+                if (done) break
+            }
+        }
+    }
+
+    // A level set from outside (reset, accessibility, a new model) or by a tap: the thumb springs to it.
+    LaunchedEffect(step, count) {
+        restStep = step
+        if (!dragging) ensureLoop()
+    }
+
     val thumbWidth by animateDpAsState(if (dragging) ThumbWidthPressed else ThumbWidth, MaterialTheme.motionScheme.fastSpatialSpec(), label = "thumbWidth")
     val thumbHeight by animateDpAsState(if (dragging) ThumbHeightPressed else ThumbHeight, MaterialTheme.motionScheme.fastSpatialSpec(), label = "thumbHeight")
     val lift by animateDpAsState(if (dragging) 8.dp else 3.dp, MaterialTheme.motionScheme.fastEffectsSpec(), label = "lift")
@@ -286,84 +367,60 @@ fun EffortSlider(
             }
             .pointerInput(count) {
                 val inset = ThumbWidth.toPx() / 2
-                val maxStretch = EffortFx.MAX_STRETCH_DP.dp.toPx()
                 awaitEachGesture {
                     val down = awaitFirstDown(requireUnconsumed = false)
                     down.consume()
-                    stretchJob?.cancel()
                     val width = size.width.toFloat()
                     val travel = (width - 2 * inset).coerceAtLeast(1f)
-                    val velocity = VelocityTracker()
+                    val span = (count - 1).coerceAtLeast(1)
+                    fun stepsAt(x: Float) = EffortScale.rawFractionAt(x, width, inset) * span
                     var moved = false
-                    // Stretch haptics fire once per pull: entering it, then reaching the wall.
-                    var pulling = false
-                    var atWall = false
-                    fun follow(x: Float) {
-                        val raw = EffortScale.rawFractionAt(x, width, inset)
-                        val f = raw.coerceIn(0f, 1f)
-                        pointerFraction = f
-                        tracker.update(f)?.let { detent(it) }
-                        val over = EffortFx.damp(EffortFx.overshoot(raw, travel), maxStretch)
-                        if (over != 0f) stretchEnd = if (over > 0f) 1f else -1f
-                        stretch = abs(over)
-                        val mag = abs(over)
-                        if (!pulling && mag > 1.5.dp.toPx()) {
-                            pulling = true
-                            currentFeedback.haptic(Haptic.Stretch, 0.35f)
-                        } else if (pulling && mag < 0.5.dp.toPx()) {
-                            pulling = false
-                            atWall = false
-                        }
-                        if (pulling && !atWall && mag > 0.8f * maxStretch) {
-                            atWall = true
-                            currentFeedback.haptic(Haptic.Stretch, 1f)
-                        }
-                    }
-                    // Pressing is a tap already: the thumb heads for the stop under the finger.
-                    pointerFraction = EffortScale.fractionAt(down.position.x, width, inset)
+                    engaged = false
+                    rebounding = false
+                    pull[0] = false
+                    pull[1] = false
+                    finger[0] = stepsAt(down.position.x)
                     dragging = true
-                    follow(down.position.x)
-                    velocity.addPosition(down.uptimeMillis, down.position)
                     try {
                         var id: PointerId = down.id
                         while (true) {
                             val event = awaitPointerEvent()
                             val change = event.changes.firstOrNull { it.id == id } ?: break
                             if (change.positionChanged()) {
-                                if (abs(change.position.x - down.position.x) > viewConfiguration.touchSlop) moved = true
-                                follow(change.position.x)
-                                velocity.addPosition(change.uptimeMillis, change.position)
+                                finger[0] = stepsAt(change.position.x)
+                                if (!engaged && abs(change.position.x - down.position.x) > viewConfiguration.touchSlop) {
+                                    // Out of the tap: from here the thumb works from where it is, toward the finger, at a limited speed.
+                                    moved = true
+                                    engaged = true
+                                    effective[0] = spring.x.coerceIn(0f, span.toFloat())
+                                    ensureLoop()
+                                }
                                 change.consume()
                             }
                             if (!change.pressed) break
                         }
-                        // Flung: carry on to the stop the release velocity projects to.
-                        val perSecond = velocity.calculateVelocity().x / travel
-                        val land = EffortScale.landing(pointerFraction, perSecond, count, tracker.step)
+                        // A tap lands on the stop under the finger; a drag on the stop nearest the (speed-limited) thumb.
+                        // No fling: a flick must not carry the selection past what the drag itself covered.
+                        val landAt = if (engaged) effective[0] / span else EffortScale.fractionAt(down.position.x, width, inset)
+                        val land = EffortScale.nearestStep(landAt.coerceIn(0f, 1f), count)
                         if (land != tracker.step) {
                             tracker.jump(land)
                             detent(land)
                         }
-                        val startStretch = stretch
-                        if (startStretch > 1.dp.toPx()) {
+                        restStep = land
+                        if (EffortGeometry.stretch(spring.x, count, travel) > EffortTuning.STRETCH_REBOUND_MIN_DP.dp.toPx()) {
                             // Let go while stretched: the thumb springs back with a bounce.
                             rebounded = true
+                            rebounding = true
                             currentFeedback.haptic(Haptic.Rebound)
                             currentFeedback.cue(Cue.Rebound)
-                            if (reduceMotion) {
-                                stretch = 0f
-                            } else {
-                                stretchJob = scope.launch {
-                                    animate(startStretch, 0f, animationSpec = spring(dampingRatio = 0.26f, stiffness = 420f)) { v, _ -> stretch = v }
-                                    stretch = 0f
-                                }
-                            }
-                        } else {
-                            stretch = 0f
-                            if (moved && EffortScale.isEnd(tracker.step, count).not()) currentFeedback.haptic(Haptic.Select)
+                        } else if (moved && EffortScale.isEnd(land, count).not()) {
+                            currentFeedback.haptic(Haptic.Select)
                         }
                     } finally {
+                        engaged = false
                         dragging = false
+                        ensureLoop()
                     }
                 }
             },
@@ -390,24 +447,25 @@ fun EffortSlider(
                 .background(trackColor)
                 .border(1.dp, outline, CircleShape),
         ) {
-            // The fill: colour from the level, up to the thumb.
+            // The fill: a capsule from the rail's left edge whose right cap is tucked under the thumb. Its end is derived
+            // from the same thumb position as the thumb itself (EffortGeometry), so the two can never disagree, and it stays
+            // round while the thumb stretches past an end or springs back.
             Canvas(Modifier.fillMaxSize()) {
                 val inset = ThumbWidth.toPx() / 2
                 val travel = size.width - 2 * inset
-                val centre = inset + shown.value * travel
-                val fillEnd = (centre + size.height / 2).coerceIn(0f, size.width)
-                clipRect(left = 0f, top = 0f, right = fillEnd, bottom = size.height) {
-                    drawRect(
-                        Brush.horizontalGradient(
-                            listOf(Color(EffortFx.startColor(level.value)), Color(EffortFx.endColor(level.value))),
-                            startX = 0f,
-                            endX = fillEnd.coerceAtLeast(1f),
-                        ),
-                    )
-                }
+                val fillRight = fillRightPx(thumbX, count, inset, travel, size.height)
+                drawRoundRect(
+                    Brush.horizontalGradient(
+                        listOf(Color(EffortFx.startColor(level.value)), Color(EffortFx.endColor(level.value))),
+                        startX = 0f,
+                        endX = fillRight.coerceAtLeast(1f),
+                    ),
+                    size = Size(fillRight, size.height),
+                    cornerRadius = CornerRadius(size.height / 2),
+                )
                 for (i in 0 until count) {
                     val x = inset + EffortScale.fraction(i, count) * travel
-                    val on = x < fillEnd - 2.dp.toPx()
+                    val on = x < fillRight - 2.dp.toPx()
                     drawCircle(
                         if (on) Color.White.copy(alpha = 0.7f) else scheme.onSurface.copy(alpha = 0.30f),
                         radius = 2.2.dp.toPx(),
@@ -423,13 +481,17 @@ fun EffortSlider(
                         val band = (size.width * 0.34f).coerceAtLeast(60.dp.toPx())
                         val sweep = Brush.horizontalGradient(listOf(Color.Transparent, Color.White, Color.Transparent), startX = 0f, endX = band)
                         val streak = Path()
+                        val capsule = Path()
                         onDrawBehind {
                             val inset = ThumbWidth.toPx() / 2
-                            val fillEnd = (inset + shown.value * (size.width - 2 * inset) + size.height / 2).coerceIn(0f, size.width)
+                            val fillEnd = fillRightPx(thumbX, count, inset, size.width - 2 * inset, size.height)
                             if (fillEnd <= 0f) return@onDrawBehind
                             val lv = level.value
                             val phase = if (reduceMotion) 0.5f else clock.shimmer - floor(clock.shimmer)
-                            clipRect(left = 0f, top = 0f, right = fillEnd, bottom = size.height) {
+                            // Clipped to the fill's own capsule so the shimmer never shows a square end.
+                            capsule.rewind()
+                            capsule.addRoundRect(RoundRect(0f, 0f, fillEnd, size.height, CornerRadius(size.height / 2)))
+                            clipPath(capsule) {
                                 // Shimmer band sweeping across the filled part.
                                 val x = -band + (fillEnd + band) * phase
                                 translate(left = x) {
@@ -442,23 +504,13 @@ fun EffortSlider(
                     },
             )
         }
-        // Over the rail, under the thumb: the stretch bulge, fast mode's halo and the arrival bursts.
+        // Over the rail, under the thumb: fast mode's halo and the arrival bursts.
         Canvas(Modifier.fillMaxSize()) {
             val inset = ThumbWidth.toPx() / 2
             val travel = size.width - 2 * inset
-            val centre = inset + shown.value * travel
+            val centre = EffortGeometry.centre(thumbX, count, inset, travel)
             val cy = size.height / 2
             val lv = level.value
-            if (stretch > 0.5f) {
-                // The fill bulges past the rail's end, following the thumb.
-                val h = RailHeight.toPx() * 0.92f
-                val c = Color(EffortFx.endColor(lv))
-                if (stretchEnd > 0f) {
-                    drawRoundRect(c, Offset(size.width - h, cy - h / 2), Size(h + stretch, h), CornerRadius(h / 2))
-                } else {
-                    drawRoundRect(c, Offset(-stretch, cy - h / 2), Size(h + stretch, h), CornerRadius(h / 2))
-                }
-            }
             if (power > 0.001f) {
                 val breath = 0.55f + 0.45f * (0.5f + 0.5f * sin((if (reduceMotion) 0.25f else clock.time * 0.45f) * 2f * PI.toFloat()))
                 // Stacked discs rather than a gradient: nothing is allocated per frame.
@@ -476,23 +528,30 @@ fun EffortSlider(
             Modifier
                 .offset {
                     val inset = ThumbWidth.toPx() / 2
-                    IntOffset((inset + shown.value * (railWidth - 2 * inset) - thumbWidth.toPx() / 2).roundToInt(), 0)
+                    IntOffset((EffortGeometry.centre(thumbX, count, inset, railWidth - 2 * inset) - thumbWidth.toPx() / 2).roundToInt(), 0)
                 }
                 .align(Alignment.CenterStart)
                 .size(thumbWidth, thumbHeight)
                 .graphicsLayer {
-                    // Stretched: the outer edge follows the finger while the inner edge stays. The bounce
-                    // back swings `stretch` below zero, which pushes the thumb in from its stop and squashes it.
+                    // Stretched past an end: the pill widens about its centre (the fill's end is tucked under its centre, so
+                    // it stays covered) and flattens a little. Zero between the stops, and while the spring swings back inside.
+                    val inset = ThumbWidth.toPx() / 2
+                    val pull = EffortGeometry.stretch(thumbX, count, railWidth - 2 * inset)
                     val w = thumbWidth.toPx()
-                    scaleX = (1f + stretch / w).coerceAtLeast(0.85f)
-                    if (stretch < 0f) translationX = stretchEnd * stretch
-                    scaleY = 1f - 0.08f * (stretch / EffortFx.MAX_STRETCH_DP.dp.toPx()).coerceIn(0f, 1f)
-                    transformOrigin = TransformOrigin(if (stretchEnd > 0f) 0f else 1f, 0.5f)
+                    scaleX = 1f + 2f * EffortTuning.THUMB_STRETCH_GAIN * pull / w
+                    scaleY = 1f - 0.08f * (pull / EffortFx.MAX_STRETCH_DP.dp.toPx()).coerceIn(0f, 1f)
                 }
                 .shadow(lift, CircleShape, ambientColor = Color.Black.copy(alpha = 0.5f), spotColor = Color.Black.copy(alpha = 0.5f))
                 .background(thumbColor, CircleShape),
         )
     }
+}
+
+/** The fill's right end in px for a thumb at [x] steps (see [EffortGeometry.fillRight]), on a rail [railHeight] tall. */
+private fun fillRightPx(x: Float, count: Int, inset: Float, travel: Float, railHeight: Float): Float {
+    val centre = EffortGeometry.centre(x, count, inset, travel)
+    val half = EffortGeometry.thumbHalf(inset, EffortGeometry.stretch(x, count, travel))
+    return EffortGeometry.fillRight(centre, half, railHeight)
 }
 
 /** Slanted speed streaks racing toward the thumb (fast mode). */
