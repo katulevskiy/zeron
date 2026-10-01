@@ -56,6 +56,44 @@ fun ProvideFeedback(feedback: AndroidFeedback, content: @Composable () -> Unit) 
     )
 }
 
+/**
+ * Wraps the theme's indication (the ripple): the visuals are untouched, and
+ * every press released inside its target also asks the engine for the default
+ * tap. Presses that turn into drags are cancelled by Compose and never reach
+ * here; long presses are ignored (they have their own feedback).
+ */
+class FeedbackIndication(private val base: IndicationNodeFactory) : IndicationNodeFactory {
+    override fun create(interactionSource: InteractionSource): DelegatableNode = Node(interactionSource, base.create(interactionSource))
+
+    override fun equals(other: Any?) = other is FeedbackIndication && other.base == base
+    override fun hashCode() = base.hashCode() * 31 + 1
+
+    private class Node(
+        private val source: InteractionSource,
+        private val inner: DelegatableNode,
+    ) : DelegatingNode(), CompositionLocalConsumerModifierNode {
+        init {
+            delegate(inner)
+        }
+
+        override fun onAttach() {
+            coroutineScope.launch {
+                var pressedAt = 0L
+                source.interactions.collect { interaction ->
+                    when (interaction) {
+                        is PressInteraction.Press -> pressedAt = System.nanoTime()
+                        is PressInteraction.Release -> {
+                            val held = (System.nanoTime() - pressedAt) / 1_000_000
+                            (currentValueOf(LocalFeedback) as? TapFeedback)?.defaultTap(held)
+                        }
+                        else -> Unit
+                    }
+                }
+            }
+        }
+    }
+}
+
 /** A click that answers with [haptic] and [cue] (null = none) before running [onClick]. */
 fun Modifier.feedbackClickable(
     haptic: Haptic? = Haptic.Select,
