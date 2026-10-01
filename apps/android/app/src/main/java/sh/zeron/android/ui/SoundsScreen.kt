@@ -63,7 +63,7 @@ fun SoundsScreen(model: AppModel, onBack: () -> Unit) {
             Group {
                 SwitchRow(
                     0, 1, ZIcons.Volume, "Sounds & haptics",
-                    "Every sound and vibration in Zeron. Off keeps it silent and still, whatever else is set. On plays what the switches below allow, whatever the phone's own sound settings say.",
+                    "Off silences every sound and vibration. On lets the switches below decide.",
                     s.master,
                 ) { on -> update { copy(master = on) } }
             }
