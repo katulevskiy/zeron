@@ -418,7 +418,7 @@ pub const SUBAGENT_INPUT_KEEP: [&str; 5] = [
 /// Where one checklist item stands. Claude's TodoWrite, OpenCode and ACP plans
 /// distinguish the item being worked on from those still waiting; Codex and
 /// Cursor only report done / not done.
-#[derive(Debug, Clone, Copy, PartialEq, Eq, Default, Serialize, Deserialize)]
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Hash, Default, Serialize, Deserialize)]
 #[serde(rename_all = "camelCase")]
 pub enum TodoStatus {
     #[default]

@@ -889,7 +889,14 @@ pub fn call_block(call: &ToolCall) -> Option<ToolDetail> {
         ToolCall::WebSearch { query } => query.clone(),
         ToolCall::Todo { items } => items
             .iter()
-            .map(|i| format!("{} {}", if i.done { "[x]" } else { "[ ]" }, i.text))
+            .map(|i| {
+                let mark = match i.status() {
+                    zeron_proto::TodoStatus::Completed => "[x]",
+                    zeron_proto::TodoStatus::InProgress => "[~]",
+                    zeron_proto::TodoStatus::Pending => "[ ]",
+                };
+                format!("{mark} {}", i.text)
+            })
             .collect::<Vec<_>>()
             .join("\n"),
         ToolCall::Mcp {
@@ -13908,14 +13915,15 @@ mod tests {
         let Some(ToolDetail::Output { lines, .. }) = call_block(&ToolCall::Todo {
             items: vec![
                 zeron_proto::TodoItem::new("a", zeron_proto::TodoStatus::Completed),
-                zeron_proto::TodoItem::new("b", zeron_proto::TodoStatus::Pending),
+                zeron_proto::TodoItem::new("b", zeron_proto::TodoStatus::InProgress),
+                zeron_proto::TodoItem::new("c", zeron_proto::TodoStatus::Pending),
             ],
         }) else {
             panic!("expected an output block")
         };
         assert_eq!(
             lines.iter().map(|l| l.as_ref()).collect::<Vec<_>>(),
-            vec!["[x] a", "[ ] b"]
+            vec!["[x] a", "[~] b", "[ ] c"]
         );
 
         // Blank invocation → no block; the chip stays a plain card.
