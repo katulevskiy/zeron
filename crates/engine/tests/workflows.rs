@@ -845,6 +845,7 @@ async fn stop_cancels_in_flight_asks_and_the_run_is_resumable() {
             .iter()
             .all(|n| n.outcome == Some(NodeOutcome::Cancelled))
     );
+    wait_delivered(&rig, &out.run_id).await; // the executor has fully wound down
     assert!(
         !rig.svc.stop(&out.run_id, None).unwrap(),
         "already finished"

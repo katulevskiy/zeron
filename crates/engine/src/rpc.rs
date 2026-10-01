@@ -1352,6 +1352,16 @@ fn forwardable(method: &str) -> bool {
     matches!(
         method,
         methods::FORK_SIDE_CHAT
+            // A chat's workflows run on its host: reads and controls are
+            // addressed to that device like the rest of the chat's surface.
+            | methods::WORKFLOW_START
+            | methods::WORKFLOW_GET
+            | methods::WORKFLOW_LIST
+            | methods::WORKFLOW_STOP
+            | methods::WORKFLOW_RESUME
+            | methods::WORKFLOW_ANSWER
+            | methods::WORKFLOW_ARTIFACT_DATA
+            | methods::WORKFLOW_ARTIFACT_READ
             | methods::LIST_HARNESSES
             | methods::INSTALL_HARNESS
             | methods::CANCEL_INSTALL
