@@ -43,4 +43,6 @@ tracing-subscriber.workspace = true
 zeron-engine.workspace = true
 zeron-proto.workspace = true
 zeron-harness.workspace = true
+zeron-cloud = { workspace = true, features = ["mock"] }
+chrono.workspace = true
 tokio = { workspace = true, features = ["test-util"] }
