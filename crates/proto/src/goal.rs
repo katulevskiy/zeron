@@ -336,9 +336,7 @@ impl Goal {
 
     /// Round cap after any "resume past the cap" extensions.
     pub fn effective_max_rounds(&self) -> u32 {
-        self.max_rounds
-            .saturating_mul(1 + self.extensions)
-            .min(u32::MAX)
+        self.max_rounds.saturating_mul(1 + self.extensions)
     }
 
     pub fn effective_token_budget(&self) -> Option<u64> {
