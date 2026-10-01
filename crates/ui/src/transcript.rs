@@ -13826,14 +13826,8 @@ mod tests {
         );
         let todo = ToolCall::Todo {
             items: vec![
-                zeron_proto::TodoItem {
-                    text: "a".into(),
-                    done: true,
-                },
-                zeron_proto::TodoItem {
-                    text: "b".into(),
-                    done: false,
-                },
+                zeron_proto::TodoItem::new("a", zeron_proto::TodoStatus::Completed),
+                zeron_proto::TodoItem::new("b", zeron_proto::TodoStatus::Pending),
             ],
         };
         assert_eq!(tool_chip_content(&todo), ("Todo", "1/2 done".to_string()));
@@ -13913,14 +13907,8 @@ mod tests {
         // Todos list one item per line with checkbox state.
         let Some(ToolDetail::Output { lines, .. }) = call_block(&ToolCall::Todo {
             items: vec![
-                zeron_proto::TodoItem {
-                    text: "a".into(),
-                    done: true,
-                },
-                zeron_proto::TodoItem {
-                    text: "b".into(),
-                    done: false,
-                },
+                zeron_proto::TodoItem::new("a", zeron_proto::TodoStatus::Completed),
+                zeron_proto::TodoItem::new("b", zeron_proto::TodoStatus::Pending),
             ],
         }) else {
             panic!("expected an output block")
