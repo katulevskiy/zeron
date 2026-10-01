@@ -256,7 +256,7 @@ pub fn picker_rows(
             let problem = non_empty(candidate.problem.as_deref()).or_else(|| {
                 if !candidate.supported {
                     Some("Needs a newer Zeron".to_string())
-                } else if !candidate.online {
+                } else if !candidate.online && !candidate.asleep {
                     Some("Offline".to_string())
                 } else if !candidate.harness_installed {
                     Some(format!("{harness} isn't installed there"))
@@ -279,7 +279,8 @@ pub fn picker_rows(
                 device_id: candidate.device_id.clone(),
                 name: candidate.device_name.clone(),
                 platform: device.map(|d| d.platform.clone()).unwrap_or_default(),
-                online: candidate.online,
+                // An asleep cloud box wakes when the move starts.
+                online: candidate.online || candidate.asleep,
                 selectable,
                 secondary,
             })
@@ -535,6 +536,7 @@ mod tests {
         phone.supported = false;
         let unknown_login = candidate("zz", "Attic");
         let mut asleep = candidate("cloud", "Cloud");
+        asleep.online = false;
         asleep.asleep = true;
         asleep.note = Some("Asleep — wakes when you move".into());
 

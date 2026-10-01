@@ -263,6 +263,23 @@ pub mod methods {
     pub const MOVE_STAGE: &str = "MoveStage";
     pub const MOVE_COMMIT: &str = "MoveCommit";
     pub const MOVE_ABORT: &str = "MoveAbort";
+
+    // Cloud boxes in the user's own cloud account (docs/cloud.md §7). All are
+    // forwardable: connecting, provisioning and removing run on the device
+    // holding the API token; the rest work anywhere (the synced record
+    // carries the box's key).
+    /// `{apiToken, accountId?}` → `{accountId, accountName}`.
+    pub const CLOUD_CONNECT: &str = "CloudConnect";
+    /// `{name, instanceType, idleMinutes, region?}` → `CloudBox`.
+    pub const CLOUD_PROVISION: &str = "CloudProvision";
+    /// → `{boxes, connected, accountId?}`.
+    pub const CLOUD_BOXES: &str = "CloudBoxes";
+    /// `{deviceId}` → `CloudBox`.
+    pub const CLOUD_WAKE: &str = "CloudWake";
+    /// `{deviceId}` → `CloudBox`.
+    pub const CLOUD_STOP: &str = "CloudStop";
+    /// `{deviceId, keepData}` → `{}`.
+    pub const CLOUD_DESTROY: &str = "CloudDestroy";
 }
 
 #[derive(Debug, thiserror::Error)]

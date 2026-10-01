@@ -20,6 +20,7 @@ pub mod auth;
 pub mod change_requests;
 pub mod chat2_host;
 mod chat_persistence;
+pub mod cloud_boxes;
 pub mod diff_sync;
 pub mod doc_host;
 mod file_transfers;
@@ -173,6 +174,8 @@ pub struct EngineCore {
     pub transfers: zeron_transfer::Transfers,
     /// Moving chats to and from other devices (docs/session-move.md).
     pub moves: moves::MoveService,
+    /// Cloud boxes in the user's own cloud account (docs/cloud.md).
+    pub cloud: cloud_boxes::CloudBoxes,
     pub change_requests: CheckoutChangeRequests,
     pub diff_sync: CheckoutDiffSync,
     pub spaces_sync: SpacesSync,
@@ -370,6 +373,11 @@ impl EngineCore {
             registry.clone(),
             repos.clone(),
         ));
+        let cloud = cloud_boxes::CloudBoxes::new(cloud_boxes::CloudBoxesConfig {
+            data_dir: data_dir.to_path_buf(),
+            workspace: workspace.clone(),
+            edge: edge.clone(),
+        });
         let diff_sync = CheckoutDiffSync::start(repos.clone(), workspace.clone(), &device_id, edge);
         // Turn starts snapshot the checkout tree — the "Latest turn" diff base.
         let turn_diff = diff_sync.clone();
@@ -405,6 +413,7 @@ impl EngineCore {
             previews,
             transfers,
             moves,
+            cloud,
             change_requests,
             diff_sync,
             spaces_sync,
@@ -552,6 +561,7 @@ impl EngineCore {
         .with_previews(self.previews.clone())
         .with_transfers(self.transfers.clone())
         .with_moves(self.moves.clone())
+        .with_cloud(self.cloud.clone())
         .with_harness_updates(self.harness_updates.clone());
         if let Some(links) = self.links() {
             rpc = rpc.with_links(links);

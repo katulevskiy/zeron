@@ -2904,7 +2904,7 @@ impl AgentAccounts {
 // Every call is bounded at 15s: an unanswered Keychain consent dialog blocks
 // `security` INDEFINITELY, and this runs on every list.
 #[cfg(target_os = "macos")]
-mod keychain {
+pub(crate) mod keychain {
     use super::*;
 
     const EXEC_TIMEOUT: Duration = Duration::from_secs(15);
@@ -2939,6 +2939,43 @@ mod keychain {
         exec(&["find-generic-password", "-s", service, "-a", account])
             .await
             .0
+    }
+
+    /// A generic password Zeron owns (`service`, `account`): `Ok(None)` when
+    /// there is none, `Err` when the Keychain refused.
+    pub(crate) async fn read_secret(service: &str, account: &str) -> Result<Option<String>, String> {
+        if !has_account_item(service, account).await {
+            return Ok(None);
+        }
+        let (ok, stdout, stderr) =
+            exec(&["find-generic-password", "-a", account, "-s", service, "-w"]).await;
+        if ok {
+            Ok(Some(stdout.trim_end_matches('\n').to_string()))
+        } else {
+            Err(format!(
+                "macOS Keychain denied access to “{service}” — approve the prompt (choose “Always Allow”): {}",
+                stderr.trim()
+            ))
+        }
+    }
+
+    pub(crate) async fn write_secret(service: &str, account: &str, secret: &str) -> Result<(), String> {
+        let (ok, _, stderr) = exec(&[
+            "add-generic-password",
+            "-U",
+            "-a",
+            account,
+            "-s",
+            service,
+            "-w",
+            secret,
+        ])
+        .await;
+        if ok { Ok(()) } else { Err(format!("Keychain write failed: {}", stderr.trim())) }
+    }
+
+    pub(crate) async fn delete_secret(service: &str, account: &str) {
+        let _ = exec(&["delete-generic-password", "-a", account, "-s", service]).await;
     }
 
     pub(super) async fn read_credentials(

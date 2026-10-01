@@ -106,6 +106,8 @@ pub(super) struct Inner {
     pub incoming: Mutex<HashMap<String, Incoming>>,
     /// Where each commit this engine received stands (for aborts racing it).
     pub commits: Mutex<HashMap<String, CommitState>>,
+    /// Wakes cloud boxes before a move to them (docs/cloud.md §8).
+    pub cloud: zeron_cloud::WorkerClient,
 }
 
 #[derive(Clone)]
@@ -155,6 +157,7 @@ impl MoveService {
             outgoing: Mutex::new(HashMap::new()),
             incoming: Mutex::new(HashMap::new()),
             commits: Mutex::new(HashMap::new()),
+            cloud: zeron_cloud::WorkerClient::new(),
         }))
     }
 
@@ -211,14 +214,24 @@ impl MoveService {
             .workspace
             .read_devices()?
             .into_iter()
-            .find(|d| d.id == params.to_device_id)
-            .ok_or_else(|| EngineError::Other("Unknown device".into()))?;
-        if !device.supports(capabilities::SESSION_MOVE_V1) {
-            return Err(EngineError::Other(format!(
-                "{} runs a version of Zeron that can't take chats yet; update it first",
-                device.name
-            )));
-        }
+            .find(|d| d.id == params.to_device_id);
+        // A cloud box that isn't here yet is woken first (docs/cloud.md §8);
+        // its engine version is checked once it's present.
+        let asleep_box = inner
+            .workspace
+            .cloud_box(&params.to_device_id)
+            .filter(|_| !super::cloud::present(self, &params.to_device_id));
+        let to_device_name = match (&device, &asleep_box) {
+            (_, Some(record)) => record.name.clone(),
+            (Some(device), None) if !device.supports(capabilities::SESSION_MOVE_V1) => {
+                return Err(EngineError::Other(format!(
+                    "{} runs a version of Zeron that can't take chats yet; update it first",
+                    device.name
+                )));
+            }
+            (Some(device), None) => device.name.clone(),
+            (None, None) => return Err(EngineError::Other("Unknown device".into())),
+        };
         let move_id = uuid::Uuid::new_v4().to_string();
         let (control, control_rx) = watch::channel(match params.when {
             MoveWhen::Now => Control::Now,
@@ -237,8 +250,8 @@ impl MoveService {
         let state = ChatMove {
             id: move_id.clone(),
             from_device_id: inner.device_id.clone(),
-            to_device_id: device.id.clone(),
-            to_device_name: device.name.clone(),
+            to_device_id: params.to_device_id.clone(),
+            to_device_name,
             phase: MovePhase::Preparing,
             when: params.when,
             detail: None,
@@ -261,7 +274,17 @@ impl MoveService {
         let service = self.clone();
         tokio::spawn(async move {
             let chat_id = chat.id.clone();
-            super::source::run(service.clone(), chat, state, control_rx).await;
+            let mut state = state;
+            let woken = match asleep_box {
+                Some(record) => {
+                    super::cloud::wake_for_move(&service, &chat_id, &mut state, &record, &control_rx)
+                        .await
+                }
+                None => true,
+            };
+            if woken {
+                super::source::run(service.clone(), chat, state, control_rx).await;
+            }
             service
                 .0
                 .outgoing
@@ -361,9 +384,10 @@ impl MoveService {
                 }
             });
         let mut out = futures::future::join_all(probes).await;
+        super::cloud::add_asleep_boxes(&inner.workspace.read_cloud_boxes(), &inner.device_id, &mut out);
         out.sort_by(|a, b| {
-            (b.online && b.problem.is_none())
-                .cmp(&(a.online && a.problem.is_none()))
+            ((b.online || b.asleep) && b.problem.is_none())
+                .cmp(&((a.online || a.asleep) && a.problem.is_none()))
                 .then_with(|| a.device_name.cmp(&b.device_name))
         });
         Ok(out)

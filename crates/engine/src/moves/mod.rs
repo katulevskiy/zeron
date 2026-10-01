@@ -6,6 +6,7 @@
 //! own session, and the target takes the chat over. See `service.rs` for
 //! the shape, `source.rs` and `target.rs` for each end.
 
+mod cloud;
 pub mod git;
 mod harvest;
 mod lineage;

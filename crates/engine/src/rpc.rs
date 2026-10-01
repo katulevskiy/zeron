@@ -667,6 +667,7 @@ pub struct EngineRpc {
     previews: Option<zeron_preview::PreviewService>,
     transfers: Option<zeron_transfer::Transfers>,
     moves: Option<crate::moves::MoveService>,
+    cloud: Option<crate::cloud_boxes::CloudBoxes>,
     change_requests: CheckoutChangeRequests,
     diff_sync: CheckoutDiffSync,
     uploads: Uploads,
@@ -714,6 +715,7 @@ impl EngineRpc {
             previews: None,
             transfers: None,
             moves: None,
+            cloud: None,
             change_requests,
             diff_sync,
             uploads,
@@ -740,6 +742,48 @@ impl EngineRpc {
     pub fn with_moves(mut self, moves: crate::moves::MoveService) -> Self {
         self.moves = Some(moves);
         self
+    }
+
+    pub fn with_cloud(mut self, cloud: crate::cloud_boxes::CloudBoxes) -> Self {
+        self.cloud = Some(cloud);
+        self
+    }
+
+    /// Cloud boxes (docs/cloud.md §7).
+    async fn handle_cloud(&self, method: &str, params: serde_json::Value) -> Result<RpcReply, RpcError> {
+        let cloud = self
+            .cloud
+            .as_ref()
+            .ok_or_else(|| RpcError::Failed("cloud boxes are unavailable on this device".into()))?;
+        let failed = |e: crate::EngineError| RpcError::Failed(e.to_string());
+        match method {
+            methods::CLOUD_CONNECT => {
+                let p: zeron_proto::CloudConnectParams = parse_params(params)?;
+                RpcReply::value(&cloud.connect(p).await.map_err(failed)?)
+            }
+            methods::CLOUD_PROVISION => {
+                let p: zeron_proto::CloudProvisionParams = parse_params(params)?;
+                RpcReply::value(&cloud.provision(p).await.map_err(failed)?)
+            }
+            methods::CLOUD_BOXES => RpcReply::value(&cloud.list().await),
+            methods::CLOUD_WAKE => {
+                let p: zeron_proto::CloudBoxParams = parse_params(params)?;
+                RpcReply::value(&cloud.wake(&p.device_id).await.map_err(failed)?)
+            }
+            methods::CLOUD_STOP => {
+                let p: zeron_proto::CloudBoxParams = parse_params(params)?;
+                RpcReply::value(&cloud.stop(&p.device_id).await.map_err(failed)?)
+            }
+            methods::CLOUD_DESTROY => {
+                let p: zeron_proto::CloudDestroyParams = parse_params(params)?;
+                cloud
+                    .destroy(&p.device_id, p.keep_data)
+                    .await
+                    .map_err(failed)?;
+                RpcReply::value(&serde_json::json!({}))
+            }
+            other => Err(RpcError::UnknownMethod(other.to_string())),
+        }
     }
 
     fn moves(&self) -> Result<&crate::moves::MoveService, RpcError> {
@@ -1564,6 +1608,9 @@ fn forward_deadline(method: &str) -> std::time::Duration {
         methods::CREATE_WORKTREE => Duration::from_secs(120),
         // Every device is probed (4 s each, in parallel).
         methods::MOVE_CANDIDATES => Duration::from_secs(15),
+        // Provisioning makes a dozen Cloudflare calls, one a Worker upload;
+        // removing a box may empty its checkpoints first.
+        methods::CLOUD_PROVISION | methods::CLOUD_DESTROY => Duration::from_secs(5 * 60),
         // Walking a large folder into a manifest happens before the reply.
         methods::SEND_FILES => Duration::from_secs(120),
         // Allow the adapter discovery budget plus relay and shutdown overhead.
@@ -1687,6 +1734,14 @@ fn forwardable(method: &str) -> bool {
             | methods::MOVE_NOW
             | methods::CANCEL_MOVE
             | methods::MOVE_CANDIDATES
+            // Cloud boxes: the device holding the Cloudflare token
+            // provisions and removes them.
+            | methods::CLOUD_CONNECT
+            | methods::CLOUD_PROVISION
+            | methods::CLOUD_BOXES
+            | methods::CLOUD_WAKE
+            | methods::CLOUD_STOP
+            | methods::CLOUD_DESTROY
     )
 }
 
@@ -2488,6 +2543,12 @@ impl RpcService for EngineRpc {
             | methods::MOVE_STAGE
             | methods::MOVE_COMMIT
             | methods::MOVE_ABORT => self.handle_move(method, params).await,
+            methods::CLOUD_CONNECT
+            | methods::CLOUD_PROVISION
+            | methods::CLOUD_BOXES
+            | methods::CLOUD_WAKE
+            | methods::CLOUD_STOP
+            | methods::CLOUD_DESTROY => self.handle_cloud(method, params).await,
             methods::WATCH_PREVIEWS => {
                 let p: zeron_proto::WatchPreviewsParams = parse_params(params)?;
                 if self
