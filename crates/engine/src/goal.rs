@@ -479,13 +479,12 @@ fn budget_line(goal: &Goal, round: u32) -> String {
         "{} elapsed",
         format_duration(goal.time_used_seconds)
     ));
-    match goal.effective_time_budget_seconds() {
-        Some(cap) => parts.push(format!(
+    if let Some(cap) = goal.effective_time_budget_seconds() {
+        parts.push(format!(
             "time budget {} ({} left)",
             format_duration(cap),
             format_duration(cap.saturating_sub(goal.time_used_seconds))
-        )),
-        None => {}
+        ));
     }
     let used = goal.total_tokens();
     match goal.effective_token_budget() {

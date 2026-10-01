@@ -448,7 +448,7 @@ impl DocHost {
             GoalStep::Done => {}
             GoalStep::Drain => self.drain_queue(handle).await,
             GoalStep::Recheck(after) => self.schedule_goal_tick(handle, after),
-            GoalStep::Verify(goal, round) => self.spawn_verification(handle, goal, round),
+            GoalStep::Verify(goal, round) => self.spawn_verification(handle, *goal, round),
         }
     }
 
@@ -521,7 +521,7 @@ impl DocHost {
                     tracing::warn!(chat = %handle.chat_id, error = %err, "goal ledger write failed");
                     return GoalStep::Done;
                 }
-                GoalStep::Verify(goal, round)
+                GoalStep::Verify(Box::new(goal), round)
             }
             stop @ Action::Stop { .. } => {
                 self.fold_turn(handle, &mut goal, now);
@@ -652,7 +652,7 @@ impl DocHost {
                 )
             })
         });
-        let outcome = match assistants().last() {
+        let outcome = match assistants().next_back() {
             Some(last) if last.status == Some(MessageStatus::Complete) => RoundOutcome::Completed,
             Some(_) => RoundOutcome::Aborted,
             // The prompt landed but no reply: the run died before writing one.
@@ -825,5 +825,5 @@ enum GoalStep {
     /// Run the queue drain (a round prompt was queued).
     Drain,
     Recheck(Duration),
-    Verify(Goal, u32),
+    Verify(Box<Goal>, u32),
 }
