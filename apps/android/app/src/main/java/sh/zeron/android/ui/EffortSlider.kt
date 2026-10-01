@@ -105,6 +105,17 @@ fun rememberReduceMotion(): Boolean {
     return remember { Settings.Global.getFloat(resolver, Settings.Global.ANIMATOR_DURATION_SCALE, 1f) == 0f }
 }
 
+/**
+ * Developer options' "Animator duration scale" for the thumb's own spring (Android's animators honour it, a hand-rolled
+ * spring must do so itself): 1 normally, 10 plays everything ten times slower, which is how motion is inspected frame by
+ * frame. Zero (animations off) is [rememberReduceMotion], not a speed.
+ */
+@Composable
+internal fun rememberAnimatorScale(): Float {
+    val resolver = LocalContext.current.contentResolver
+    return remember { Settings.Global.getFloat(resolver, Settings.Global.ANIMATOR_DURATION_SCALE, 1f).coerceIn(0.1f, 100f) }
+}
+
 /** A looping 0…1 phase, only running while composed (callers gate it on there being something to animate). */
 @Composable
 internal fun rememberPhase(periodMillis: Int): State<Float> {
@@ -174,6 +185,7 @@ fun EffortSlider(
     val step = selected.coerceIn(0, count - 1)
     val feedback = LocalFeedback.current
     val reduceMotion = rememberReduceMotion()
+    val animatorScale = rememberAnimatorScale()
     val currentOnSelected by rememberUpdatedState(onSelected)
     val currentFeedback by rememberUpdatedState(feedback)
     val scope = rememberCoroutineScope()
@@ -279,7 +291,7 @@ fun EffortSlider(
                 rebounding -> EffortTuning.REBOUND_STIFFNESS to EffortTuning.REBOUND_DAMPING_RATIO
                 else -> EffortTuning.SETTLE_STIFFNESS to EffortTuning.SETTLE_DAMPING_RATIO
             }
-            spring.step(target, dt, k, z)
+            spring.step(target, dt / animatorScale, k, z)
         }
         // The spring may swing a little past a level, but never further than the rubber band allows.
         spring.x = spring.x.coerceIn(-maxStretch, (count - 1) + maxStretch)
