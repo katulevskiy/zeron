@@ -1,5 +1,6 @@
 package sh.zeron.android.ui
 
+import sh.zeron.android.feedback.TapFeedback
 import sh.zeron.android.feedback.tapAction
 import sh.zeron.android.feedback.feedbackClickable
 import sh.zeron.android.feedback.feedbackAction
@@ -293,8 +294,11 @@ fun ChoiceMenu(expanded: Boolean, onDismiss: () -> Unit, sections: List<MenuSect
                         selected = choice.selected,
                         onClick = {
                             // A new choice is a selection; an ordered ladder (effort) climbs a scale instead.
+                            (fb as? TapFeedback)?.quietClose()
                             if (!choice.selected) {
                                 if (steps) fb.both(Haptic.Tick, Cue.Detent, position) else fb.both(Haptic.Select, Cue.Select)
+                            } else {
+                                (fb as? TapFeedback)?.defaultTap(0)
                             }
                             choice.onClick()
                             onDismiss()

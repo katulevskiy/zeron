@@ -120,6 +120,8 @@ class AndroidFeedback(
         }, ClaimTracker.DEFER_MS)
     }
 
+    override fun quietClose() = claims.quiet()
+
     override fun cueUnlessRecent(cue: Cue, windowMs: Long) {
         if (claims.cueWithin(windowMs)) log("cue $cue skip: another cue just played") else cue(cue)
     }

@@ -1,5 +1,6 @@
 package sh.zeron.android.ui
 
+import sh.zeron.android.feedback.TapFeedback
 import sh.zeron.android.feedback.play
 import sh.zeron.android.feedback.OpenCloseFeedback
 import sh.zeron.android.feedback.LocalFeedback
@@ -182,9 +183,13 @@ fun ActionMenu(expanded: Boolean, onDismiss: () -> Unit, actions: List<MenuActio
                 val tint = if (a.destructive) MaterialTheme.colorScheme.error else MaterialTheme.colorScheme.onSurface
                 DropdownMenuItem(
                     onClick = {
-                        fb.play(a.haptic, a.cue)
+                        // The item answers (its own feedback, else the default tap); the menu's close stays quiet.
+                        val tap = fb as? TapFeedback
+                        tap?.quietClose()
+                        if (a.haptic != null || a.cue != null) fb.play(a.haptic, a.cue)
                         onDismiss()
                         a.onClick()
+                        if (a.haptic == null && a.cue == null) tap?.defaultTap(0)
                     },
                     text = { Text(a.label, color = tint) },
                     shape = MenuDefaults.itemShape(i, actions.size).shape,

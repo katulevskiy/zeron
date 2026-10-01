@@ -11,6 +11,7 @@ package sh.zeron.android.feedback
 class ClaimTracker(private val clock: () -> Long) {
     private var hapticAt = Long.MIN_VALUE / 2
     private var cueAt = Long.MIN_VALUE / 2
+    private var quietAt = Long.MIN_VALUE / 2
 
     fun claimHaptic() {
         hapticAt = clock()
@@ -26,7 +27,12 @@ class ClaimTracker(private val clock: () -> Long) {
     fun cueClaimed(releasedAt: Long): Boolean = cueAt >= releasedAt - WINDOW_BEFORE_MS
 
     /** Was any cue requested in the last [windowMs]? */
-    fun cueWithin(windowMs: Long): Boolean = clock() - cueAt < windowMs
+    fun cueWithin(windowMs: Long): Boolean = clock() - maxOf(cueAt, quietAt) < windowMs
+
+    /** A menu item was chosen: the menu closing right after is the item's doing, not a sound of its own. */
+    fun quiet() {
+        quietAt = clock()
+    }
 
     companion object {
         /** Explicit feedback this far before the release still counts (the click handler runs just ahead of it). */
@@ -51,4 +57,7 @@ interface TapFeedback {
      * action's sound, and the close would only muddy it.
      */
     fun cueUnlessRecent(cue: Cue, windowMs: Long = 250)
+
+    /** A menu item was chosen: the close that follows stays silent. */
+    fun quietClose()
 }
