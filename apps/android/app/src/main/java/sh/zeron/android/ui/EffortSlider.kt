@@ -399,7 +399,7 @@ fun EffortSlider(
                 clipRect(left = 0f, top = 0f, right = fillEnd, bottom = size.height) {
                     drawRect(
                         Brush.horizontalGradient(
-                            listOf(Color(EffortFx.startColor(level.value)).copy(alpha = 0.9f), Color(EffortFx.endColor(level.value))),
+                            listOf(Color(EffortFx.startColor(level.value)), Color(EffortFx.endColor(level.value))),
                             startX = 0f,
                             endX = fillEnd.coerceAtLeast(1f),
                         ),
@@ -539,7 +539,9 @@ private fun DrawScope.drawSparkles(level: Float, time: Float, fillEnd: Float) {
 /** The top level's power burst: a flare sweeping the bar, two energy rings and rays from the thumb. */
 private fun DrawScope.drawSurge(t: Float, width: Float, cy: Float, inset: Float) {
     val unit = 1.dp.toPx()
-    val hot = Color(EffortFx.endColor(1f))
+    // Strong colours: the burst plays over a light or dark card, not just over the bar's own fill.
+    val hot = Color(EffortFx.startColor(1f))
+    val gold = Color(0xFFFFB020)
     val core = Color(0xFFFFF1C7)
     val cx = width - inset
     // A bright flare racing from the left end to the thumb.
@@ -551,10 +553,10 @@ private fun DrawScope.drawSurge(t: Float, width: Float, cy: Float, inset: Float)
     drawRoundRect(Color.White.copy(alpha = 0.8f * flareAlpha), Offset(sweepX - 5 * unit, cy - bandH / 2), Size(10 * unit, bandH), CornerRadius(5 * unit))
     // Energy rings from the thumb.
     val ring1 = t
-    drawCircle(hot.copy(alpha = 0.85f * EffortFx.fadeOut(ring1)), radius = (8 + 74 * ring1) * unit, center = Offset(cx, cy), style = Stroke(((6f * (1f - ring1)) + 1f) * unit))
+    drawCircle(hot.copy(alpha = 0.9f * EffortFx.fadeOut(ring1)), radius = (8 + 74 * ring1) * unit, center = Offset(cx, cy), style = Stroke(((9f * (1f - ring1)) + 1.5f) * unit))
     if (t > 0.15f) {
         val ring2 = (t - 0.15f) / 0.85f
-        drawCircle(core.copy(alpha = 0.7f * EffortFx.fadeOut(ring2)), radius = (6 + 52 * ring2) * unit, center = Offset(cx, cy), style = Stroke(((4f * (1f - ring2)) + 0.8f) * unit))
+        drawCircle(gold.copy(alpha = 0.85f * EffortFx.fadeOut(ring2)), radius = (6 + 52 * ring2) * unit, center = Offset(cx, cy), style = Stroke(((6f * (1f - ring2)) + 1f) * unit))
     }
     // Core flash.
     val flash = EffortFx.fadeOut(t * 1.4f)
@@ -567,10 +569,10 @@ private fun DrawScope.drawSurge(t: Float, width: Float, cy: Float, inset: Float)
         val r0 = (16 + 40 * t) * unit
         val r1 = r0 + (10 + 12 * (1f - t)) * unit
         drawLine(
-            hot.copy(alpha = 0.9f * rayAlpha),
+            gold.copy(alpha = 0.95f * rayAlpha),
             Offset(cx + cos(a) * r0, cy + sin(a) * r0),
             Offset(cx + cos(a) * r1, cy + sin(a) * r1),
-            strokeWidth = 2 * unit,
+            strokeWidth = 2.5f * unit,
             cap = StrokeCap.Round,
         )
     }
@@ -582,8 +584,9 @@ private fun DrawScope.drawZip(t: Float, width: Float, cy: Float, inset: Float) {
     val left = inset - 14 * unit
     val right = width - 6 * unit
     val h = RailHeight.toPx()
-    val cool = Color(0xFFBFF3FF)
-    val ice = Color(0xFF6FD6E8)
+    // Deep cyan on the outside so the streaks read on a pale track, white-hot at the head.
+    val cool = Color(0xFF2BB6E6)
+    val ice = Color(0xFF3FA7D6)
     for (i in 0 until EffortFx.ZIP_STREAKS) {
         val p = EffortFx.zipProgress(i, t)
         val a = EffortFx.zipAlpha(p)
@@ -592,14 +595,14 @@ private fun DrawScope.drawZip(t: Float, width: Float, cy: Float, inset: Float) {
         val head = right - (right - left) * p
         val len = (34 + 38 * EffortFx.hash01(i * 5 + 1)) * unit
         // Brightest at the head, trailing off behind it.
-        drawLine(ice.copy(alpha = 0.35f * a), Offset(head, lane), Offset(head + len, lane), strokeWidth = 2.4f * unit, cap = StrokeCap.Round)
-        drawLine(cool.copy(alpha = 0.7f * a), Offset(head, lane), Offset(head + len * 0.55f, lane), strokeWidth = 1.6f * unit, cap = StrokeCap.Round)
+        drawLine(ice.copy(alpha = 0.55f * a), Offset(head, lane), Offset(head + len, lane), strokeWidth = 3f * unit, cap = StrokeCap.Round)
+        drawLine(cool.copy(alpha = 0.9f * a), Offset(head, lane), Offset(head + len * 0.55f, lane), strokeWidth = 2f * unit, cap = StrokeCap.Round)
         drawLine(Color.White.copy(alpha = 0.95f * a), Offset(head, lane), Offset(head + len * 0.22f, lane), strokeWidth = 1.2f * unit, cap = StrokeCap.Round)
     }
     // A pale wipe following the streaks.
     val wipe = ((t - 0.1f) / 0.7f).coerceIn(0f, 1f)
     if (wipe in 0.01f..0.99f) {
         val x = right - (right - left) * wipe
-        drawRoundRect(cool.copy(alpha = 0.22f * (1f - wipe)), Offset(x - 20 * unit, cy - h / 2), Size(40 * unit, h), CornerRadius(h / 2))
+        drawRoundRect(cool.copy(alpha = 0.30f * (1f - wipe)), Offset(x - 20 * unit, cy - h / 2), Size(40 * unit, h), CornerRadius(h / 2))
     }
 }

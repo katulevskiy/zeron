@@ -43,25 +43,23 @@ object EffortFx {
 
     // ---- Level -> look ----------------------------------------------------
 
-    /** Where the colors turn: calm below [WARM_AT], hot above [HOT_AT]. */
-    private const val WARM_AT = 0.5f
-
-    private const val COOL_START = 0xFF3FA7D6.toInt()
-    private const val COOL_END = 0xFF6FD6E8.toInt()
-    private const val WARM_START = 0xFFF0A030.toInt()
-    private const val WARM_END = 0xFFFF7E45.toInt()
-    private const val HOT_START = 0xFFFF3B5C.toInt()
-    private const val HOT_END = 0xFFFFC447.toInt()
+    // Fill gradient stops along the level: cool blue, fresh teal, warm amber, hot red. Going straight
+    // from blue to amber would pass through a muddy olive, hence the teal in between.
+    private val STOPS = floatArrayOf(0f, 0.3f, 0.6f, 1f)
+    private val STARTS = intArrayOf(0xFF3FA7D6.toInt(), 0xFF2FB89A.toInt(), 0xFFF0A030.toInt(), 0xFFFF3B5C.toInt())
+    private val ENDS = intArrayOf(0xFF6FD6E8.toInt(), 0xFF6EDDA6.toInt(), 0xFFFF7E45.toInt(), 0xFFFFC447.toInt())
 
     /** Fill gradient start color (left edge) for [level]. */
-    fun startColor(level: Float): Int = ramp(level, COOL_START, WARM_START, HOT_START)
+    fun startColor(level: Float): Int = ramp(level, STARTS)
 
     /** Fill gradient end color (at the thumb) for [level]. */
-    fun endColor(level: Float): Int = ramp(level, COOL_END, WARM_END, HOT_END)
+    fun endColor(level: Float): Int = ramp(level, ENDS)
 
-    private fun ramp(level: Float, low: Int, mid: Int, high: Int): Int {
+    private fun ramp(level: Float, colors: IntArray): Int {
         val l = level.coerceIn(0f, 1f)
-        return if (l < WARM_AT) lerpColor(low, mid, l / WARM_AT) else lerpColor(mid, high, (l - WARM_AT) / (1f - WARM_AT))
+        var i = 1
+        while (i < STOPS.size - 1 && l > STOPS[i]) i++
+        return lerpColor(colors[i - 1], colors[i], (l - STOPS[i - 1]) / (STOPS[i] - STOPS[i - 1]))
     }
 
     fun lerpColor(a: Int, b: Int, t: Float): Int {

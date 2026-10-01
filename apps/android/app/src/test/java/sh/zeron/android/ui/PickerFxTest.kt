@@ -148,7 +148,7 @@ class EffortFxTest {
         val high = EffortFx.startColor(1f)
         assertTrue("cool is blue-ish", b(low) > r(low))
         assertTrue("hot is red-ish", r(high) > b(high) + 100)
-        assertTrue("warm sits between in red", r(low) < r(mid) && r(mid) <= 0xFF)
+        assertTrue("warm is redder than cool", r(low) < r(mid))
         assertNotEquals(low, mid)
         assertNotEquals(mid, high)
         // Endpoints are exact and the ramp is continuous across the midpoint.
