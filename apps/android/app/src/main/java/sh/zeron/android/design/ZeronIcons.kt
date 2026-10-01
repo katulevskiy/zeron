@@ -89,6 +89,7 @@ object ZIcons {
     val DocumentAdd = R.drawable.zi_document_add
     val Return = R.drawable.zi_return
     val HardDrive = R.drawable.zi_hard_drive
+    val Volume = R.drawable.zi_volume_loud
 }
 
 @Composable

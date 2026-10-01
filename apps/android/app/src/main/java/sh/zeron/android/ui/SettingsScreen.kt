@@ -1,5 +1,10 @@
 package sh.zeron.android.ui
 
+import sh.zeron.android.feedback.toggleAction
+import sh.zeron.android.feedback.feedbackAction
+import sh.zeron.android.feedback.LocalFeedback
+import sh.zeron.android.feedback.Haptic
+import sh.zeron.android.feedback.Cue
 import androidx.compose.foundation.background
 import androidx.compose.foundation.layout.Arrangement
 import androidx.compose.foundation.layout.Box
@@ -58,6 +63,7 @@ fun SettingsScreen(model: AppModel, onOpen: (String) -> Unit) {
     val workspace by model.workspace.collectAsState()
     val devices = workspace?.devices.orEmpty()
     val list = androidx.compose.foundation.lazy.rememberLazyListState()
+    val fb = LocalFeedback.current
     Box(Modifier.fillMaxSize()) {
     LazyColumn(
         Modifier.fillMaxSize(),
@@ -101,6 +107,19 @@ fun SettingsScreen(model: AppModel, onOpen: (String) -> Unit) {
                 ) { Text("Coding agents") }
             }
         }
+        section("Sounds & haptics")
+        item {
+            Column(Modifier.padding(horizontal = 16.dp)) {
+                SegmentedListItem(
+                    onClick = { onOpen(Routes.SOUNDS) },
+                    shapes = segmentedShapes(0, 1),
+                    colors = ListItemDefaults.segmentedColors(containerColor = cardColor()),
+                    leadingContent = { IconTile(ZIcons.Volume) },
+                    supportingContent = { Text("Chimes, interface sounds, volume and vibration") },
+                    trailingContent = { ZIcon(ZIcons.ChevronRight, null, Modifier.size(20.dp)) },
+                ) { Text("Sounds & haptics") }
+            }
+        }
         section("Appearance")
         item {
             Column(Modifier.padding(horizontal = 16.dp), verticalArrangement = Arrangement.spacedBy(ListItemDefaults.SegmentedGap)) {
@@ -117,7 +136,10 @@ fun SettingsScreen(model: AppModel, onOpen: (String) -> Unit) {
                             modes.forEachIndexed { index, (mode, label, icon) ->
                                 ToggleButton(
                                     checked = appearance.mode == mode,
-                                    onCheckedChange = { model.setAppearance(appearance.copy(mode = mode)) },
+                                    onCheckedChange = {
+                                        if (appearance.mode != mode) fb.both(Haptic.Select, Cue.Select)
+                                        model.setAppearance(appearance.copy(mode = mode))
+                                    },
                                     modifier = Modifier.weight(1f).semantics { role = Role.RadioButton },
                                     shapes = when (index) {
                                         0 -> ButtonGroupDefaults.connectedLeadingButtonShapes()
@@ -133,13 +155,14 @@ fun SettingsScreen(model: AppModel, onOpen: (String) -> Unit) {
                         }
                     }
                 }
+                val dynamic = toggleAction { model.setAppearance(appearance.copy(dynamicColor = it)) }
                 SegmentedListItem(
-                    onClick = { model.setAppearance(appearance.copy(dynamicColor = !appearance.dynamicColor)) },
+                    onClick = { dynamic(!appearance.dynamicColor) },
                     shapes = segmentedShapes(1, 2),
                     colors = ListItemDefaults.segmentedColors(containerColor = cardColor()),
                     leadingContent = { IconTile(ZIcons.Magic) },
                     supportingContent = { Text("Tint Zeron with your wallpaper's palette") },
-                    trailingContent = { Switch(appearance.dynamicColor, { model.setAppearance(appearance.copy(dynamicColor = it)) }) },
+                    trailingContent = { Switch(appearance.dynamicColor, dynamic) },
                 ) { Text("Wallpaper colors") }
             }
         }
@@ -195,7 +218,7 @@ fun SettingsScreen(model: AppModel, onOpen: (String) -> Unit) {
                     supportingContent = { Text("Zeron for Android · core ${coreVersion()}") },
                 ) { Text("Version") }
                 SegmentedListItem(
-                    onClick = { model.signOut() },
+                    onClick = feedbackAction(Haptic.Confirm, Cue.Close) { model.signOut() },
                     shapes = segmentedShapes(1, 2),
                     colors = ListItemDefaults.segmentedColors(containerColor = cardColor()),
                     leadingContent = { IconTile(ZIcons.Logout, MaterialTheme.colorScheme.errorContainer, MaterialTheme.colorScheme.onErrorContainer) },
@@ -265,7 +288,7 @@ private fun WallpaperSettings(model: AppModel) {
                 })))
             }
             SegmentedListItem(
-                onClick = { store.remove() },
+                onClick = feedbackAction(Haptic.Confirm, Cue.Delete) { store.remove() },
                 shapes = segmentedShapes(2, rows),
                 colors = ListItemDefaults.segmentedColors(containerColor = cardColor()),
                 leadingContent = { IconTile(ZIcons.Delete, MaterialTheme.colorScheme.errorContainer, MaterialTheme.colorScheme.onErrorContainer) },

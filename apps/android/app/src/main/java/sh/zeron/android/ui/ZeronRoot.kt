@@ -82,6 +82,7 @@ object Routes {
     const val NEW = "new"
     const val SEARCH = "search"
     const val AGENTS = "agents"
+    const val SOUNDS = "settings/sounds"
     const val FILES = "files/{ws}"
     const val FILE = "file/{ws}?path={path}"
     const val TERMINAL = "terminal/{ws}"
@@ -111,6 +112,7 @@ private fun NavController.openRoute(route: String) {
         route == "new" -> nav.navigate(Routes.NEW)
         route == "search" -> nav.navigate(Routes.SEARCH)
         route == "agents" -> nav.navigate(Routes.AGENTS)
+        route == "sounds" -> nav.navigate(Routes.SOUNDS)
         route.startsWith("chat:") -> nav.navigate(Routes.chat(route.removePrefix("chat:")))
         // subagents:<chat> opens its panel; subagent:<chat>|<doc> one subagent.
         route.startsWith("subagents:") -> nav.navigate(Routes.chatSubagents(route.removePrefix("subagents:")))
@@ -207,6 +209,7 @@ private fun MainNav(model: AppModel) {
             SearchScreen(model, onBack = { nav.popBackStack() }, onOpen = { nav.navigate(Routes.chat(it)) })
         }
         composable(Routes.AGENTS) { AgentsScreen(model, onBack = { nav.popBackStack() }) }
+        composable(Routes.SOUNDS) { SoundsScreen(model, onBack = { nav.popBackStack() }) }
     }
 }
 

@@ -78,13 +78,15 @@ class FeedbackGate(
     private var lastAnyCuePriority = 0
     private val streams = ArrayDeque<Pair<Long, Int>>() // end time, priority
 
+    /** [preview]: the Settings page auditioning a feedback: the rate limits do not apply (a tap on a row is intent). */
     @Synchronized
-    fun haptic(haptic: Haptic): Decision {
+    fun haptic(haptic: Haptic, preview: Boolean = false): Decision {
         val s = settings()
         if (!s.haptics) return skip(Skipped.HapticsOff)
         if (!env.hasVibrator) return skip(Skipped.NoVibrator)
         if (!env.active) return skip(Skipped.Inactive)
         if (!env.systemTouchHaptics) return skip(Skipped.SystemHapticsOff)
+        if (preview) return Decision.Play
         val spec = HapticTable.spec(haptic)
         val now = clock()
         if (now - (lastHaptic[haptic] ?: Long.MIN_VALUE / 2) < spec.minGapMs) return skip(Skipped.Rate)
@@ -100,17 +102,19 @@ class FeedbackGate(
         return Decision.Play
     }
 
+    /** [preview]: as for [haptic], and the category switches do not apply (hearing a muted category's sound is the point of the row). */
     @Synchronized
-    fun cue(cue: Cue): Decision {
+    fun cue(cue: Cue, preview: Boolean = false): Decision {
         val s = settings()
         val spec = CueTable.spec(cue)
         if (!s.sounds) return skip(Skipped.SoundsOff)
-        if (!s.allows(spec.category)) return skip(Skipped.CategoryOff)
+        if (!preview && !s.allows(spec.category)) return skip(Skipped.CategoryOff)
         if (!env.active) return skip(Skipped.Inactive)
         if (!env.ringerNormal) return skip(Skipped.Silent)
         if (env.silencedByDnd) return skip(Skipped.Dnd)
         if (!env.streamAudible) return skip(Skipped.Muted)
         if (spec.category == CueCategory.Interface && !env.systemTouchSounds) return skip(Skipped.SystemSoundsOff)
+        if (preview) return Decision.Play
         val now = clock()
         if (now - (lastCue[cue] ?: Long.MIN_VALUE / 2) < spec.minGapMs) return skip(Skipped.Rate)
         if (spec.priority <= lastAnyCuePriority && now - lastAnyCue < GLOBAL_CUE_GAP_MS) return skip(Skipped.Rate)

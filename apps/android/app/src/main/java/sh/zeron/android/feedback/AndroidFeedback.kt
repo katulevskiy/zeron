@@ -124,10 +124,34 @@ class AndroidFeedback(
         if (claims.cueWithin(windowMs)) log("cue $cue skip: another cue just played") else cue(cue)
     }
 
+    /** The Settings page auditioning a moment: ignores rate limits and category switches, nothing else. */
+    fun preview(haptic: Haptic?, cue: Cue?, step: Int = 0) {
+        haptic?.let { claims.claimHaptic(); play(it, preview = true) }
+        cue?.let { claims.claimCue(); play(it, step, preview = true) }
+    }
+
+    /** What the system is doing to this app's feedback right now, for the Settings page (empty when nothing). */
+    fun systemNotes(): List<String> = buildList {
+        if (!env.hasVibrator) add("This device has no vibration motor, so haptics are off.")
+        else if (!env.systemTouchHaptics) add("Touch vibration is turned off in system settings, so haptics are off.")
+        if (!env.ringerNormal) add("The phone is on silent or vibrate, so sounds are muted.")
+        else if (env.silencedByDnd) add("Do Not Disturb is silencing sounds.")
+        else if (!env.streamAudible) add("The system sound volume is at zero.")
+        else if (!env.systemTouchSounds) add("Touch sounds are turned off in system settings, so interface sounds are muted.")
+    }
+
+    /** How richly this vibration motor renders haptics, for the Settings page. */
+    fun hapticTier(): String = when {
+        vibrator?.hasVibrator() != true -> "No vibration motor"
+        VibrationEffect.Composition.PRIMITIVE_CLICK in primitives && VibrationEffect.Composition.PRIMITIVE_TICK in primitives -> "Rich haptics: precise clicks and ticks"
+        amplitudeControl -> "Standard haptics: adjustable vibration"
+        else -> "Basic haptics: a simple on/off motor"
+    }
+
     // ── haptics ────────────────────────────────────────────────────────────
 
-    private fun play(haptic: Haptic) {
-        when (val d = gate.haptic(haptic)) {
+    private fun play(haptic: Haptic, preview: Boolean = false) {
+        when (val d = gate.haptic(haptic, preview)) {
             is Decision.Skip -> log("haptic $haptic skip: ${d.why.label}")
             Decision.Play -> {
                 val view = viewRef.get()?.takeIf { it.isAttachedToWindow }
@@ -178,8 +202,8 @@ class AndroidFeedback(
 
     // ── sound ──────────────────────────────────────────────────────────────
 
-    private fun play(cue: Cue, step: Int) {
-        when (val d = gate.cue(cue)) {
+    private fun play(cue: Cue, step: Int, preview: Boolean = false) {
+        when (val d = gate.cue(cue, preview)) {
             is Decision.Skip -> log("cue $cue skip: ${d.why.label}")
             Decision.Play -> {
                 val spec = CueTable.spec(cue)
