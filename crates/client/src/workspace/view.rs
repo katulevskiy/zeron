@@ -321,6 +321,9 @@ pub(crate) struct DeriveContext<'a> {
     pub change_requests: &'a [CheckoutChangeRequestStatus],
     /// Oldest-unadopted-send state per chat (open sessions only).
     pub send_states: &'a HashMap<String, SendState>,
+    /// Running subagents per the spawn chips of chats this client has warm
+    /// and live (see `SessionCore::chip_subagents`).
+    pub chip_subagents: &'a HashMap<String, u32>,
     pub synced: bool,
     pub previous: Option<&'a WorkspaceSnapshot>,
 }
@@ -422,6 +425,27 @@ struct RowContext<'a> {
     section_of: HashMap<&'a str, &'a str>,
 }
 
+/// The subagent count a row shows: what the hosting engine published on the
+/// chat's status row (fresh rows only), or -- when that engine predates the
+/// field, or has not published a streaming subagent yet -- what the spawn
+/// chips of a transcript this client already holds live say, whichever is
+/// larger. Chips only speak for a host that is online: a host that went away
+/// can leave chips "running" that nothing will ever settle.
+fn running_subagents(
+    chat_id: &str,
+    session: Option<&Session>,
+    host_online: bool,
+    cx: &DeriveContext<'_>,
+) -> u32 {
+    let published = zeron_proto::view::running_subagents(session, cx.now);
+    let from_chips = if host_online {
+        cx.chip_subagents.get(chat_id).copied().unwrap_or(0)
+    } else {
+        0
+    };
+    published.max(from_chips)
+}
+
 fn build_row(chat: &Chat, rc: &RowContext<'_>, cx: &DeriveContext<'_>) -> Arc<SessionRow> {
     let now_ms = cx.now.timestamp_millis();
     let session = rc.sessions.get(chat.id.as_str()).copied();
@@ -452,6 +476,7 @@ fn build_row(chat: &Chat, rc: &RowContext<'_>, cx: &DeriveContext<'_>) -> Arc<Se
             color_index: project_color_index(&space.path),
         });
     let device = rc.devices.get(chat.device_id.as_str());
+    let host_online = device_online(&chat.device_id, cx.presence, cx.self_device_id, now_ms);
     let config = chat.config.as_ref();
     let harness = config.and_then(|c| {
         serde_json::to_value(c.harness)
@@ -481,7 +506,7 @@ fn build_row(chat: &Chat, rc: &RowContext<'_>, cx: &DeriveContext<'_>) -> Arc<Se
         project,
         device_id: chat.device_id.clone(),
         device_name: device.and_then(|d| device_display_name(d)),
-        device_online: device_online(&chat.device_id, cx.presence, cx.self_device_id, now_ms),
+        device_online: host_online,
         harness_label: harness.as_deref().map(catalog::harness_label),
         model_label: match (harness.as_deref(), model.as_deref()) {
             (Some(h), Some(m)) => Some(catalog::model_label(h, m)),
@@ -512,7 +537,7 @@ fn build_row(chat: &Chat, rc: &RowContext<'_>, cx: &DeriveContext<'_>) -> Arc<Se
         send_state,
         parent_chat_id: chat.parent_chat_id.clone(),
         room_gen: chat.room_gen.unwrap_or(1),
-        running_subagents: zeron_proto::view::running_subagents(session, cx.now),
+        running_subagents: running_subagents(&chat.id, session, host_online, cx),
         pending_callbacks: zeron_proto::view::pending_callbacks(session, cx.now),
     };
     row.revision = hash_row(&row);
@@ -789,6 +814,68 @@ impl Hash for DeviceView {
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    fn context<'a>(
+        chips: &'a HashMap<String, u32>,
+        presence: &'a HashMap<String, i64>,
+        now: DateTime<Utc>,
+    ) -> DeriveContext<'a> {
+        // Leaked: a per-test empty map, never mutated.
+        let empty: &'static HashMap<String, SendState> = Box::leak(Box::default());
+        DeriveContext {
+            self_device_id: "phone",
+            now,
+            presence,
+            change_requests: &[],
+            send_states: empty,
+            chip_subagents: chips,
+            synced: true,
+            previous: None,
+        }
+    }
+
+    fn row(chat_id: &str, running: u32, updated_at: DateTime<Utc>) -> Session {
+        Session {
+            last_completed_turn: None,
+            chat_id: chat_id.into(),
+            device_id: "host".into(),
+            status: zeron_proto::SessionStatus::Idle,
+            started_at: None,
+            updated_at,
+            running_subagents: running,
+            pending_callbacks: 0,
+        }
+    }
+
+    #[test]
+    fn subagent_count_is_the_larger_of_the_published_and_the_chip_count() {
+        let now = Utc::now();
+        let presence = HashMap::new();
+        let chips = HashMap::from([("c".to_owned(), 2)]);
+        let cx = context(&chips, &presence, now);
+        // A legacy host publishes nothing (or no row at all): chips decide.
+        assert_eq!(running_subagents("c", None, true, &cx), 2);
+        assert_eq!(running_subagents("c", Some(&row("c", 0, now)), true, &cx), 2);
+        // A newer engine that counts more than the synced chips yet wins.
+        assert_eq!(running_subagents("c", Some(&row("c", 3, now)), true, &cx), 3);
+        // A chat nobody holds warm has no chips to add.
+        assert_eq!(running_subagents("other", Some(&row("other", 1, now)), true, &cx), 1);
+        assert_eq!(running_subagents("other", None, true, &cx), 0);
+    }
+
+    #[test]
+    fn chips_of_an_offline_host_count_nothing_and_stale_published_counts_expire() {
+        let now = Utc::now();
+        let presence = HashMap::new();
+        let chips = HashMap::from([("c".to_owned(), 2)]);
+        let cx = context(&chips, &presence, now);
+        // The host went away: chips nothing will settle must not badge.
+        assert_eq!(running_subagents("c", None, false, &cx), 0);
+        // A published count on a row older than the staleness window is dead.
+        let stale = now - chrono::Duration::milliseconds(zeron_proto::view::SESSION_STALE_MS + 1);
+        assert_eq!(running_subagents("c", Some(&row("c", 5, stale)), false, &cx), 0);
+        assert_eq!(running_subagents("c", Some(&row("c", 5, stale)), true, &cx), 2);
+    }
 
     #[test]
     fn time_labels() {

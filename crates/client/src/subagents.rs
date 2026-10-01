@@ -168,6 +168,32 @@ pub fn subagents(entries: &[Arc<SessionMessageEntry>]) -> Vec<SubagentItem> {
     running
 }
 
+/// How many of a chat's subagents its spawn chips say are streaming right
+/// now. Agrees with [`SubagentGroups::running`] (a steered subagent is one
+/// subagent, judged by its latest chip) without building the display rows, so
+/// it is cheap enough to run on every transcript change.
+pub fn running_count<'a>(entries: impl IntoIterator<Item = &'a SessionMessageEntry>) -> u32 {
+    let mut latest: std::collections::HashMap<&str, bool> = std::collections::HashMap::new();
+    for entry in entries {
+        for part in &entry.parts {
+            if let MessagePart::Tool {
+                call,
+                subagent_ref: Some(doc_id),
+                subagent_status,
+                ..
+            } = part
+                && call.is_subagent_spawn()
+            {
+                latest.insert(
+                    doc_id.as_str(),
+                    matches!(subagent_status, Some(SubagentStatus::Running)),
+                );
+            }
+        }
+    }
+    u32::try_from(latest.values().filter(|running| **running).count()).unwrap_or(u32::MAX)
+}
+
 /// The lists the Subagents panel draws, in order.
 #[derive(Debug, Clone, Default, PartialEq, Eq)]
 pub struct SubagentGroups {
@@ -375,6 +401,31 @@ mod tests {
     const RUN: Option<SubagentStatus> = Some(SubagentStatus::Running);
     const DONE: Option<SubagentStatus> = Some(SubagentStatus::Done);
     const FAIL: Option<SubagentStatus> = Some(SubagentStatus::Failed);
+
+    #[test]
+    fn running_count_agrees_with_the_groups_a_panel_would_draw() {
+        let entries = vec![
+            turn(
+                1_000,
+                vec![
+                    spawn("a", "Agent: a", RUN),
+                    spawn("b", "Agent: b", DONE),
+                    spawn("x", "Agent: x", RUN),
+                    // A stray ref on an ordinary tool is no subagent.
+                    spawn("ls", "Bash", RUN),
+                ],
+            ),
+            // "a" is steered later: still one subagent, still running.
+            turn(2_000, vec![spawn("a", "Agent: a", RUN)]),
+            // "x" settled in a later turn: the latest chip decides.
+            turn(3_000, vec![spawn("x", "Agent: x", DONE)]),
+            turn(4_000, vec![spawn("p", "Agent: p", None)]),
+        ];
+        let groups = SubagentGroups::from_entries(&entries);
+        assert_eq!(groups.running(), 1);
+        assert_eq!(running_count(entries.iter().map(|e| e.as_ref())), 1);
+        assert_eq!(running_count(std::iter::empty()), 0);
+    }
 
     #[test]
     fn running_lead_longest_first_then_settled_newest_first() {

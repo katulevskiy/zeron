@@ -131,10 +131,19 @@ impl ClientInner {
             .iter()
             .filter_map(|core| core.send_state().map(|s| (core.chat_id.clone(), s)))
             .collect();
+        let chip_subagents: HashMap<String, u32> = self
+            .cores()
+            .iter()
+            .map(|core| (core.chat_id.clone(), core.chip_subagents()))
+            .filter(|(_, running)| *running > 0)
+            .collect();
         let synced = self.synced.load(Ordering::Acquire);
-        if let Some(revision) =
-            self.workspace
-                .recompute(&self.config.device_id, &send_states, synced)
+        if let Some(revision) = self.workspace.recompute(
+            &self.config.device_id,
+            &send_states,
+            &chip_subagents,
+            synced,
+        )
         {
             self.events.workspace(revision);
             // Host presence / live status feed every open session's snapshot

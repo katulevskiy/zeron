@@ -200,6 +200,9 @@ pub(crate) struct SessionCore {
     view_attached: AtomicBool,
     /// Last open/attach/detach (warm-set eviction order).
     touched_ms: std::sync::atomic::AtomicI64,
+    /// Subagents this transcript's spawn chips say are running (see
+    /// [`Self::chip_subagents`]); refreshed with every transcript change.
+    chip_running: std::sync::atomic::AtomicU32,
 }
 
 impl SessionCore {
@@ -254,6 +257,7 @@ impl SessionCore {
             recompute_gate: Mutex::new(()),
             view_attached: AtomicBool::new(false),
             touched_ms: std::sync::atomic::AtomicI64::new(now_ms()),
+            chip_running: std::sync::atomic::AtomicU32::new(0),
         });
         // Coalesced republish for remote imports (a backfill of N rows costs
         // ~one refresh per frame, not N).
@@ -431,12 +435,19 @@ impl SessionCore {
                 )
             });
         let mut transcript_event = None;
+        let mut chips_changed = false;
         let send_before;
         let send_after;
         {
             let mut st = lock(&self.state);
             send_before = oldest_state(&st.pending);
             let change = st.tracker.refresh(self.doc.doc(), &dirty);
+            if change.is_some() || st.transcript_revision == 0 {
+                let running = crate::subagents::running_count(
+                    st.tracker.entries().iter().map(|e| e.message.as_ref()),
+                );
+                chips_changed = self.chip_running.swap(running, Ordering::AcqRel) != running;
+            }
             if dirty.queue {
                 st.queue = self.doc.read_queue().unwrap_or_default();
             }
@@ -478,7 +489,7 @@ impl SessionCore {
             client.events.session(&self.chat_id, revision);
         }
         self.recompute_composer(&client);
-        if send_before != send_after {
+        if send_before != send_after || chips_changed {
             client.recompute_workspace();
         }
     }
@@ -601,6 +612,18 @@ impl SessionCore {
 
     pub(crate) fn touch(&self) {
         self.touched_ms.store(now_ms(), Ordering::Release);
+    }
+
+    /// Subagents of this chat running per its spawn chips, for the Sessions
+    /// list when the hosting engine publishes no count of its own (every
+    /// engine that predates `Session::running_subagents`). Only a transcript
+    /// that is hydrated AND tailing a live room counts: a replica restored
+    /// from disk can hold chips that settled long ago.
+    pub(crate) fn chip_subagents(&self) -> u32 {
+        if !self.snapshot().hydrated || !self.room().is_some_and(|room| room.connected()) {
+            return 0;
+        }
+        self.chip_running.load(Ordering::Acquire)
     }
 
     pub(crate) fn touched_ms(&self) -> i64 {

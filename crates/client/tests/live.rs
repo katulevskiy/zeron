@@ -1073,3 +1073,117 @@ async fn own_engine_calls_and_streams_use_its_ipc_port() {
     exercise_streams(&client, PHONE, &service).await;
     client.shutdown();
 }
+
+/// Hosts that predate `Session::running_subagents` (every released desktop
+/// engine at the time of writing) publish the status row without a count.
+/// A chat the phone has warm still knows its subagents from the spawn chips
+/// in its synced transcript, so the Sessions list must badge it from those
+/// -- no need to be looking at the chat -- and follow the count as chips
+/// settle.
+#[tokio::test(flavor = "multi_thread", worker_threads = 2)]
+async fn legacy_host_rows_take_their_subagent_count_from_a_warm_chats_chips() {
+    use zeron_doc::SubagentStatus;
+    use zeron_proto::{Session, SessionStatus, ToolCall};
+
+    let edge = MockEdge::start().await;
+    let host = HostRegistry::start(&edge).await;
+    {
+        // The legacy shape: a fresh row, a parked parent, no count.
+        let mut doc = host.doc.lock().unwrap();
+        doc.upsert_session(&Session {
+            last_completed_turn: None,
+            chat_id: CHAT.into(),
+            device_id: HOST.into(),
+            status: SessionStatus::Idle,
+            started_at: None,
+            updated_at: Utc::now(),
+            running_subagents: 0,
+            pending_callbacks: 0,
+        })
+        .unwrap();
+    }
+    host.client.nudge();
+
+    // The parent's transcript: three spawn chips, two still running.
+    let host_doc = LoroDoc::new();
+    let session = SessionDoc::from_doc(host_doc.clone());
+    let spawn = |id: &str, status| MessagePart::Tool {
+        id: id.into(),
+        call: ToolCall::Unknown {
+            name: "Agent: probe".into(),
+            input: None,
+        },
+        is_error: false,
+        resolved: true,
+        output: None,
+        diff: None,
+        output_ref: None,
+        output_bytes: None,
+        diff_ref: None,
+        diff_stats: None,
+        subagent_ref: Some(format!("{CHAT}--sub--{id}")),
+        subagent_status: status,
+        subagent_tail: None,
+    };
+    session
+        .push_message(&SessionMessageEntry {
+            id: "parent-turn".into(),
+            role: MessageRole::Assistant,
+            parts: vec![
+                spawn("a", Some(SubagentStatus::Running)),
+                spawn("b", Some(SubagentStatus::Running)),
+                spawn("c", Some(SubagentStatus::Done)),
+            ],
+            created_at: zeron_client_now(),
+            device_id: HOST.into(),
+            status: Some(zeron_doc::MessageStatus::Complete),
+            continuation_of: None,
+            duration_ms: None,
+        })
+        .unwrap();
+    host_doc.commit();
+    edge.inject(CHAT, HOST, host_doc.export(ExportMode::all_updates()).unwrap());
+
+    let dir = tempfile::tempdir().unwrap();
+    let client = phone(&edge, dir.path());
+    let counted = |client: &Client| {
+        client
+            .workspace()
+            .session(CHAT)
+            .map(|row| row.running_subagents)
+    };
+    tokio::task::spawn_blocking({
+        let client = client.clone();
+        move || {
+            wait_for("the status row", Duration::from_secs(10), || {
+                client.workspace().device(HOST).is_some_and(|d| d.online)
+                    && client.workspace().session(CHAT).is_some()
+            });
+            assert_eq!(counted(&client), Some(0), "nothing warm, nothing published");
+            // What the app does on start: warm the front page's chats.
+            client.preload_sessions();
+            wait_for("two running chips counted", Duration::from_secs(10), || {
+                counted(&client) == Some(2)
+            });
+        }
+    })
+    .await
+    .unwrap();
+
+    // One settles, in the room; the badge follows without anyone opening the chat.
+    let before = host_doc.oplog_vv();
+    assert!(session.update_subagent_chip("a", None, Some("done"), None).unwrap());
+    host_doc.commit();
+    edge.inject(CHAT, HOST, host_doc.export(ExportMode::updates(&before)).unwrap());
+    tokio::task::spawn_blocking({
+        let client = client.clone();
+        move || {
+            wait_for("one running chip", Duration::from_secs(10), || {
+                counted(&client) == Some(1)
+            })
+        }
+    })
+    .await
+    .unwrap();
+    client.shutdown();
+}
