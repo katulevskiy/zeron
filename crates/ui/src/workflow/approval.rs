@@ -151,7 +151,8 @@ impl ApprovalModel {
                 (None, None) => None,
             },
             draft_path: meta.draft_path.clone(),
-            excerpt: meta.excerpt.clone(),
+            // A script that opens with blank lines would draw an empty band.
+            excerpt: meta.excerpt.trim_start_matches(['\r', '\n']).to_owned(),
         }
     }
 
@@ -609,6 +610,16 @@ mod tests {
             ..Default::default()
         };
         assert_eq!(caps(4, &b)[1], "2 h of run time");
+    }
+
+    #[test]
+    fn leading_blank_lines_of_the_excerpt_are_dropped() {
+        let mut m = meta();
+        m.excerpt = "\n\n  def main(args):\n    pass\n".into();
+        assert_eq!(
+            ApprovalModel::from_meta(&m).excerpt,
+            "  def main(args):\n    pass\n"
+        );
     }
 
     #[test]

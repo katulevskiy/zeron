@@ -59,12 +59,7 @@ fn dots(line: &RunLine, theme: &Theme) -> gpui::Div {
 }
 
 /// The strip. `on_open` receives the run id of a clicked line.
-pub fn run_lines(
-    lines: &[RunLine],
-    overflow: u32,
-    theme: &Theme,
-    on_open: OpenRun,
-) -> AnyElement {
+pub fn run_lines(lines: &[RunLine], overflow: u32, theme: &Theme, on_open: OpenRun) -> AnyElement {
     let n = lines.len();
     div()
         .w_full()

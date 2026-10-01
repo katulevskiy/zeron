@@ -9028,9 +9028,8 @@ impl Transcript {
                 &result.parts,
                 run,
             );
-            // Capture knob: `ZERON_WORKFLOW_RESULT=expanded` opens result rows.
             let expanded = self.workflow_results_open.contains(result.run_id.as_ref())
-                || std::env::var("ZERON_WORKFLOW_RESULT").as_deref() == Ok("expanded");
+                || crate::workflow::result_open_override();
             row.version = model.fingerprint(expanded);
             result.expanded = expanded;
             result.model = Some(Arc::new(model));
@@ -9048,13 +9047,9 @@ impl Transcript {
                 .get(run.header.run_id.as_str())
                 .copied()
                 .unwrap_or_else(|| {
-                    // Capture knob: `ZERON_WORKFLOW_CARD=expanded|collapsed`
-                    // overrides the default (the newest run is open).
-                    match std::env::var("ZERON_WORKFLOW_CARD").as_deref() {
-                        Ok("expanded") => true,
-                        Ok("collapsed") => false,
-                        _ => newest == Some(run.header.run_id.as_str()),
-                    }
+                    // The newest run starts open (a capture knob overrides).
+                    crate::workflow::card_open_override()
+                        .unwrap_or(newest == Some(run.header.run_id.as_str()))
                 });
             let mut model = crate::workflow::model::CardModel::build(run, expanded);
             if let Some((id, text)) = &state.workflow_failure

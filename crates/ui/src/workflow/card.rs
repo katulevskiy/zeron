@@ -160,7 +160,8 @@ fn header_row(
             el.child(
                 div()
                     .min_w_0()
-                    .flex_shrink(1.0)
+                    // Gives way first: the name says more than the counts.
+                    .flex_shrink(4.0)
                     .truncate()
                     .text_size(ui_rems(12.0))
                     .text_color(theme.text_faint)

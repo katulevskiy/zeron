@@ -161,31 +161,39 @@ impl WorkflowRunPane {
     }
 
     fn on_state(&mut self, cx: &mut Context<Self>) {
-        let (live, here, replayed) = {
+        // Read what is needed under the borrow; the run (up to a thousand
+        // nodes) is not cloned for every unrelated state change.
+        let artifact_id = match &self.view {
+            View::Artifact(view) => Some(view.read(cx).artifact_id().to_owned()),
+            _ => None,
+        };
+        let (live, here, replayed, latest, waiting) = {
             let state = self.state.read(cx);
+            let run = state.workflows.run(&self.run_id);
             (
-                state.workflows.run(&self.run_id).cloned(),
+                run.is_some(),
                 state.selected_chat.as_deref() == Some(self.chat_id.as_str()),
                 state.transcript_replayed,
+                run.zip(artifact_id.as_deref()).and_then(|(run, id)| {
+                    run.artifacts.iter().find(|a| a.id == id).map(|a| a.version)
+                }),
+                run.map(|run| {
+                    run.pending_questions
+                        .iter()
+                        .map(|q| q.qid.clone())
+                        .collect::<HashSet<String>>()
+                }),
             )
         };
         // Follow newly published versions of the artifact on screen.
-        if let (View::Artifact(view), Some(run)) = (&self.view, &live) {
-            let id = view.read(cx).artifact_id().to_owned();
-            if let Some(a) = run.artifacts.iter().find(|a| a.id == id) {
-                let latest = a.version;
-                view.update(cx, |v, cx| v.refresh_if_newer(latest, cx));
-            }
+        if let (View::Artifact(view), Some(latest)) = (&self.view, latest) {
+            view.update(cx, |v, cx| v.refresh_if_newer(latest, cx));
         }
-        if let Some(run) = &live {
-            let waiting: HashSet<&str> = run
-                .pending_questions
-                .iter()
-                .map(|q| q.qid.as_str())
-                .collect();
-            self.sent.retain(|q| waiting.contains(q.as_str()));
-            self.answers.retain(|q, _| waiting.contains(q.as_str()));
-        } else if here
+        if let Some(waiting) = waiting {
+            self.sent.retain(|q| waiting.contains(q));
+            self.answers.retain(|q, _| waiting.contains(q));
+        } else if !live
+            && here
             && replayed
             && self.fetched.is_none()
             && self.fetching.is_none()

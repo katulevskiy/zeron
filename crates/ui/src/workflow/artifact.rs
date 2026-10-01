@@ -582,18 +582,27 @@ impl ArtifactView {
     ) -> AnyElement {
         let limit = (pages * TABLE_ROWS_PER_PAGE).min(data.rows.len());
         let total_width: f32 = data.widths.iter().sum();
+        let last = data.columns.len().saturating_sub(1);
+        // The last column takes the slack, so the table spans the pane when
+        // its content is narrower and scrolls sideways when it is wider.
+        let column = |c: usize| {
+            let col = div().min_w(px(data.widths[c]));
+            if c == last {
+                col.flex_1()
+            } else {
+                col.w(px(data.widths[c])).flex_none()
+            }
+        };
         let header = div()
             .flex()
             .flex_row()
-            .w(px(total_width))
+            .w_full()
             .h(px(28.0))
             .items_center()
             .border_b_1()
             .border_color(crate::theme::hairline(0.14))
             .children(data.columns.iter().enumerate().map(|(c, name)| {
-                div()
-                    .w(px(data.widths[c]))
-                    .flex_none()
+                column(c)
                     .px(px(10.0))
                     .truncate()
                     .when(data.numeric[c], |el| el.text_right())
@@ -606,14 +615,12 @@ impl ArtifactView {
             div()
                 .flex()
                 .flex_row()
-                .w(px(total_width))
+                .w_full()
                 .min_h(px(26.0))
                 .items_center()
                 .when(r % 2 == 1, |el| el.bg(crate::theme::ink(0.025)))
                 .children(row.iter().enumerate().map(|(c, cell)| {
-                    div()
-                        .w(px(data.widths[c]))
-                        .flex_none()
+                    column(c)
                         .px(px(10.0))
                         .py(px(4.0))
                         .when(data.numeric[c], |el| el.text_right())
@@ -637,7 +644,15 @@ impl ArtifactView {
                     .rounded(px(8.0))
                     .border_1()
                     .border_color(crate::theme::hairline(0.1))
-                    .child(div().flex().flex_col().child(header).children(rows)),
+                    .child(
+                        div()
+                            .flex()
+                            .flex_col()
+                            .w_full()
+                            .min_w(px(total_width))
+                            .child(header)
+                            .children(rows),
+                    ),
             )
             .child(
                 div()

@@ -56,3 +56,20 @@ pub(crate) fn one_line(text: &str) -> String {
     let flat = text.split_whitespace().collect::<Vec<_>>().join(" ");
     zeron_proto::truncate_chars(&flat, 220)
 }
+
+/// Capture knob `ZERON_WORKFLOW_CARD=expanded|collapsed`: the default open
+/// state of every card (screenshots). Read once.
+pub(crate) fn card_open_override() -> Option<bool> {
+    static KNOB: std::sync::OnceLock<Option<bool>> = std::sync::OnceLock::new();
+    *KNOB.get_or_init(|| match std::env::var("ZERON_WORKFLOW_CARD").as_deref() {
+        Ok("expanded") => Some(true),
+        Ok("collapsed") => Some(false),
+        _ => None,
+    })
+}
+
+/// Capture knob `ZERON_WORKFLOW_RESULT=expanded`: result rows start open.
+pub(crate) fn result_open_override() -> bool {
+    static KNOB: std::sync::OnceLock<bool> = std::sync::OnceLock::new();
+    *KNOB.get_or_init(|| std::env::var("ZERON_WORKFLOW_RESULT").as_deref() == Ok("expanded"))
+}
