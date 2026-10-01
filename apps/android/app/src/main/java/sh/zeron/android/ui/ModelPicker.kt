@@ -20,6 +20,7 @@ import androidx.compose.animation.togetherWith
 import androidx.compose.foundation.background
 import androidx.compose.foundation.border
 import androidx.compose.foundation.clickable
+import androidx.compose.foundation.combinedClickable
 import androidx.compose.foundation.interaction.DragInteraction
 import androidx.compose.runtime.DisposableEffect
 import androidx.compose.runtime.rememberCoroutineScope
@@ -92,6 +93,7 @@ import androidx.compose.ui.unit.IntOffset
 import androidx.compose.ui.unit.dp
 import androidx.compose.ui.unit.sp
 import sh.zeron.android.core.FavoriteModel
+import sh.zeron.android.core.AccountUsage
 import sh.zeron.android.design.HarnessMark
 import sh.zeron.android.design.LocalDarkTheme
 import sh.zeron.android.design.ZIcon
@@ -796,8 +798,14 @@ fun ModelPickerChip(
     statuses: List<CatalogStatus> = emptyList(),
     onRetry: (String) -> Unit = {},
     onOpen: () -> Unit = {},
+    usage: AccountUsageState? = null,
 ) {
     var open by remember { mutableStateOf(false) }
+    var usageOpen by remember(usage, harness) { mutableStateOf(false) }
+    val scope = rememberCoroutineScope()
+    val feedback = LocalFeedback.current
+    val usedFraction = AccountUsage.fraction(usage?.snapshot, harness)
+    val selectModel = tapAction { usageOpen = false; open = true; onOpen() }
     val model: ModelInfo? = current?.model
     val parts = ChipText.parts(
         model?.label ?: fallbackLabel,
@@ -807,17 +815,31 @@ fun ModelPickerChip(
     )
     Box(modifier) {
         Surface(
-            onClick = tapAction { open = true; onOpen() },
             shape = RoundedCornerShape(50),
             color = chipContainer(),
             contentColor = MaterialTheme.colorScheme.onSurface,
-            modifier = Modifier.semantics {
+            modifier = Modifier.combinedClickable(
+                role = Role.Button,
+                onClickLabel = "Choose model",
+                onLongClickLabel = if (usage != null) "Show usage" else null,
+                hapticFeedbackEnabled = false,
+                onLongClick = usage?.let { state -> {
+                    feedback.haptic(Haptic.LongPress)
+                    open = false
+                    usageOpen = true
+                    scope.launch { state.refresh(force = true) }
+                } },
+                onClick = selectModel,
+            ).semantics {
                 contentDescription = ChipText.describe(parts)
-                stateDescription = if (open) "Expanded" else "Collapsed"
+                stateDescription = listOfNotNull(
+                    if (open || usageOpen) "Expanded" else "Collapsed",
+                    usedFraction?.let(AccountUsage::percent),
+                ).joinToString(", ")
             },
         ) {
             Row(
-                Modifier.heightIn(min = 34.dp).padding(start = 10.dp, end = 12.dp),
+                Modifier.accountUsageFill(usedFraction).heightIn(min = 34.dp).padding(start = 10.dp, end = 12.dp),
                 verticalAlignment = Alignment.CenterVertically,
                 horizontalArrangement = Arrangement.spacedBy(6.dp),
             ) {
@@ -850,5 +872,6 @@ fun ModelPickerChip(
             statuses = statuses,
             onRetry = onRetry,
         )
+        usage?.let { AccountUsagePopover(usageOpen, { usageOpen = false }, it, harness) }
     }
 }

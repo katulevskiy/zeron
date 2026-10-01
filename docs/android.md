@@ -310,6 +310,13 @@ data dir. Guest paths map to host paths through the rootfs (`/tmp` →
 
 ### Compact model picker
 
+In an open session, a **purple wave fill** behind the model chip shows the
+active account's most-used subscription limit, as on desktop. **Hold the chip**
+for a long-press haptic and an account card: provider, subscription, all reported
+usage windows (5 hour, weekly, etc.), and local reset times. The data comes from
+the session's host device; missing limits leave the chip unfilled. Usage refreshes
+while the composer is visible and pauses while the app is in the background.
+
 The composer's model chip (New session and an open session) is the desktop's
 compact picker adapted to touch: **provider mark, model and the dim effort**
 ("GPT-5.4  High", a small bolt when fast mode is on). Tapping it opens a card

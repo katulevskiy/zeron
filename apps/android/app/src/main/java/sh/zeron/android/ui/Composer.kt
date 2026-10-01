@@ -323,6 +323,7 @@ private fun SessionChips(app: AppModel, client: CoreClient, c: ComposerState, ro
     val context = LocalContext.current
     val harness = row?.harness ?: "claude-code"
     val deviceId = c.host.deviceId
+    val usage = rememberAccountUsage(app, client, deviceId)
     val favorites by app.favorites.favorites.collectAsState()
     val workspace by app.workspace.collectAsState()
     // The harness's models: the built-in catalog at once, then the device's list.
@@ -387,6 +388,7 @@ private fun SessionChips(app: AppModel, client: CoreClient, c: ComposerState, ro
             statuses = statuses,
             onRetry = { load() },
             onOpen = { if (models == null && !loading) load() },
+            usage = usage,
         )
     }
     val pr = row?.pullRequest

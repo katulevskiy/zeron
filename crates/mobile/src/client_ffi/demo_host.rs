@@ -14,7 +14,7 @@ use std::future::Future;
 use std::pin::Pin;
 use std::sync::{Arc, Mutex};
 use std::task::{Context, Poll, Waker};
-use std::time::Duration;
+use std::time::{Duration, SystemTime};
 
 use serde_json::{Value, json};
 
@@ -177,6 +177,20 @@ impl DemoHost {
 
     fn accounts(&self) -> Value {
         let s = self.state.lock().unwrap();
+        let now = SystemTime::now();
+        // Demo-only subscription limits for the Android account card and pill.
+        let windows = [
+            zeron_proto::AgentUsageWindow {
+                label: "5 hour".into(),
+                used_fraction: 0.38,
+                resets_at: Some((now + Duration::from_secs(3 * 60 * 60)).into()),
+            },
+            zeron_proto::AgentUsageWindow {
+                label: "Weekly".into(),
+                used_fraction: 0.64,
+                resets_at: Some((now + Duration::from_secs(4 * 24 * 60 * 60)).into()),
+            },
+        ];
         json!({
             "accounts": s.accounts.iter().map(|(harness, id, email, plan)| json!({
                 "id": id,
@@ -184,7 +198,7 @@ impl DemoHost {
                 "email": email,
                 "planLabel": plan,
                 "active": true,
-                "usageWindows": [],
+                "usageWindows": windows,
                 "authKind": "oauth",
                 "switchable": true,
             })).collect::<Vec<_>>(),

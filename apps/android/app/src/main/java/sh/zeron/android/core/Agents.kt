@@ -46,9 +46,14 @@ object Agents {
         val displayName: String?,
         val plan: String?,
         val active: Boolean,
+        val provider: String? = null,
+        val usageWindows: List<UsageWindow> = emptyList(),
+        val usageError: String? = null,
     ) {
         val title: String get() = email ?: displayName ?: "Signed in"
     }
+
+    data class UsageWindow(val label: String, val usedFraction: Float, val resetsAt: String?)
 
     data class Accounts(val accounts: List<Account>, val warnings: Map<String, String>) {
         fun forHarness(id: String) = accounts.filter { it.harness == id }
@@ -133,6 +138,9 @@ object Agents {
                 displayName = a.str("displayName"),
                 plan = a.str("planLabel"),
                 active = a.optBoolean("active", false),
+                provider = a.str("provider"),
+                usageWindows = usageWindows(a.optJSONArray("usageWindows")),
+                usageError = a.str("usageError"),
             )
         }
         val warnings = o.optJSONArray("warnings") ?: JSONArray()
@@ -141,6 +149,20 @@ object Agents {
             w.optString("harness") to w.optString("message")
         }.toMap()
         return Accounts(accounts, byHarness)
+    }
+
+    private fun usageWindows(windows: JSONArray?): List<UsageWindow> {
+        if (windows == null) return emptyList()
+        return (0 until windows.length()).mapNotNull { i ->
+            val window = windows.optJSONObject(i) ?: return@mapNotNull null
+            val fraction = window.optDouble("usedFraction", Double.NaN)
+            if (!fraction.isFinite()) return@mapNotNull null
+            UsageWindow(
+                label = window.str("label") ?: "Usage",
+                usedFraction = fraction.coerceIn(0.0, 1.0).toFloat(),
+                resetsAt = window.str("resetsAt"),
+            )
+        }
     }
 
     fun loginStart(json: Any?): LoginStart? {
