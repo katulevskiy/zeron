@@ -261,6 +261,11 @@ impl WorkflowStore {
         }
     }
 
+    /// The store root this store was opened on (its parent of `workflows/`).
+    pub fn base(&self) -> PathBuf {
+        self.root.parent().map(Path::to_path_buf).unwrap_or_default()
+    }
+
     fn run_dir(&self, run_id: &str) -> Result<PathBuf, StoreError> {
         safe_component("run id", run_id)?;
         Ok(self.root.join(run_id))

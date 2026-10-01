@@ -459,7 +459,7 @@ impl WorkflowService {
             max_concurrency,
             draft_path,
         };
-        self.begin(meta, script, analysis, defaults, store::Replay::default(), 0)
+        self.begin(meta, script, analysis, defaults, store::Replay::default(), 0, false)
             .await?;
         Ok(outcome)
     }
@@ -475,6 +475,7 @@ impl WorkflowService {
         Some(rel)
     }
 
+    #[allow(clippy::too_many_arguments)]
     async fn begin(
         &self,
         meta: RunMeta,
@@ -483,6 +484,7 @@ impl WorkflowService {
         defaults: Defaults,
         replay: store::Replay,
         base_elapsed_ms: u64,
+        user_initiated: bool,
     ) -> Result<(), StartError> {
         let shared = self.shared.clone();
         shared
@@ -516,7 +518,7 @@ impl WorkflowService {
             .sessions
             .last_request(&meta.chat_id)
             .is_some_and(|r| r.auto_approve);
-        if !auto {
+        if !auto && !user_initiated {
             let question = approval_question(&meta, &analysis.graph, &script, &defaults);
             let approver = lock(&shared.approver).clone();
             if let Approval::Denied(reason) = approver.approve(&meta.chat_id, question).await {
@@ -807,10 +809,14 @@ impl WorkflowService {
 
     /// Continue a stopped run from its journal: answers already given are
     /// replayed, not asked again. Returns the new run.
+    ///
+    /// `by_user`: a person asked for it (the command plane) — their click is
+    /// the approval; an agent's resume asks like a start does.
     pub async fn resume(
         &self,
         run_id: &str,
         args: Option<Value>,
+        by_user: bool,
     ) -> Result<StartOutcome, StartError> {
         let store = &self.shared.store;
         let old = store
@@ -877,7 +883,7 @@ impl WorkflowService {
             max_concurrency: meta.options.max_concurrency,
             draft_path: meta.draft_path.clone(),
         };
-        self.begin(meta, script, analysis, defaults, replay, elapsed)
+        self.begin(meta, script, analysis, defaults, replay, elapsed, by_user)
             .await?;
         Ok(outcome)
     }

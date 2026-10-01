@@ -48,6 +48,8 @@ tempfile.workspace = true
 windows-sys = { version = "0.61", features = ["Win32_Foundation", "Win32_Security", "Win32_Storage_FileSystem", "Win32_System_Console", "Win32_System_Pipes", "Win32_System_Threading"] }
 
 [dev-dependencies]
+# Paused-clock tests of backoff and stall notices.
+tokio = { workspace = true, features = ["test-util"] }
 zeron-harness = { workspace = true, features = ["installer-fixture"] }
 zip.workspace = true
 tokio-tungstenite.workspace = true

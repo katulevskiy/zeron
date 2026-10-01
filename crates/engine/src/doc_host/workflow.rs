@@ -98,6 +98,57 @@ impl DocHost {
         .ok()
     }
 
+    /// Execute a workflow control command from the command plane (host-only,
+    /// like every command). The user is the requester, so a resume needs no
+    /// further approval.
+    pub(super) async fn apply_workflow_command(
+        &self,
+        handle: &Arc<ChatDocHandle>,
+        command: &zeron_proto::WorkflowCommand,
+    ) -> CommandOutcome {
+        use zeron_proto::WorkflowCommand as C;
+        let Some(workflows) = self.workflows() else {
+            return Ok((SessionCommandStatus::Rejected, Some("workflows are not available".into())));
+        };
+        let owned = |run_id: &str| {
+            workflows
+                .list(Some(&handle.chat_id))
+                .iter()
+                .any(|r| r.run_id == run_id)
+        };
+        let run_id = match command {
+            C::Stop { run_id, .. } | C::Resume { run_id } | C::Answer { run_id, .. } => run_id,
+        };
+        if !owned(run_id) {
+            return Ok((SessionCommandStatus::Rejected, Some(format!("no such workflow run in this chat: {run_id}"))));
+        }
+        let outcome = match command {
+            C::Stop { run_id, reason } => workflows
+                .stop(run_id, reason.as_deref())
+                .map(|_| ())
+                .map_err(|e| e.to_string()),
+            C::Resume { run_id } => {
+                // Resuming waits for nothing; run it off the command drain.
+                let workflows = workflows.clone();
+                let run_id = run_id.clone();
+                self.spawn_worker(async move {
+                    if let Err(err) = workflows.resume(&run_id, None, true).await {
+                        tracing::warn!(run = %run_id, error = %err, "workflow resume failed");
+                    }
+                });
+                Ok(())
+            }
+            C::Answer { run_id, qid, answer } => workflows
+                .resolve_question(run_id, qid, answer)
+                .await
+                .map_err(|e| e.to_string()),
+        };
+        Ok(match outcome {
+            Ok(()) => (SessionCommandStatus::Applied, None),
+            Err(message) => (SessionCommandStatus::Rejected, Some(message)),
+        })
+    }
+
     /// Ask the goal controller to look again (a workflow it was waiting on
     /// just settled).
     pub async fn goal_nudge(&self, chat_id: &str) {

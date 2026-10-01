@@ -40,7 +40,12 @@ If a chat is `awaitingInput`, answer it with `respond_to_input`.\n\
 `set_goal` makes a chat keep working until an independent verifier chat \
 judges the objective met; `get_goal` reads its progress. A goal can only be \
 completed by its verifier, and you cannot pause or clear the goal verifying \
-your own chat.";
+your own chat.\n\
+\n\
+`start_workflow` runs a Starlark script that orchestrates many agent chats in the \
+background; use it only when the user asks for a workflow or the work truly needs \
+many independent agents, read `workflow_guide` first, and do not poll — the result \
+is delivered to you when it finishes.";
 
 const PARSE_ERROR: i64 = -32700;
 const INVALID_REQUEST: i64 = -32600;

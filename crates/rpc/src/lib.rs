@@ -70,6 +70,29 @@ pub mod methods {
     /// keep waiting for one. Params `{chatId, askId, question?, context?,
     /// questionId?, maxWaitMs?}`; IPC-only.
     pub const ASK_ESCALATE: &str = "AskEscalate";
+    /// Dynamic workflows (`docs/workflows.md`). All are served by the engine
+    /// that hosts the chat; IPC and client RPC alike.
+    ///
+    /// Start a run for a chat: params `{chatId, name?, script?, path?, args?,
+    /// maxConcurrency?, harness?, model?, reasoning?, maxAsks?, maxTokens?,
+    /// maxRuntimeSeconds?}`. Returns once the user approved (or at once under
+    /// auto-approve): `{runId, name, graph, warnings, maxConcurrency,
+    /// draftPath}`. Script problems fail with `path:line:col message` lines.
+    pub const WORKFLOW_START: &str = "WorkflowStart";
+    /// One run: `{runId, include?: ["nodes","reports","result"]}`.
+    pub const WORKFLOW_GET: &str = "WorkflowGet";
+    /// Runs on this device, optionally of one chat: `{chatId?}`.
+    pub const WORKFLOW_LIST: &str = "WorkflowList";
+    /// `{runId, reason?}`.
+    pub const WORKFLOW_STOP: &str = "WorkflowStop";
+    /// `{runId, args?, byUser?}`: continue a stopped run from its journal.
+    pub const WORKFLOW_RESUME: &str = "WorkflowResume";
+    /// Answer an actor's escalation: `{runId, qid, answer}`.
+    pub const WORKFLOW_ANSWER: &str = "WorkflowAnswer";
+    /// Versions of an artifact: `{runId, artifactId}`.
+    pub const WORKFLOW_ARTIFACT_DATA: &str = "WorkflowArtifactData";
+    /// A page of an artifact: `{runId, artifactId, version?, offset?, limit?}`.
+    pub const WORKFLOW_ARTIFACT_READ: &str = "WorkflowArtifactRead";
     pub const WATCH_DOC_MESSAGES: &str = "WatchDocMessages";
     /// Explicit user navigation, `{chatId}`. Prioritizes this device's sync
     /// connection; automatic subscriptions and retries must not call it.

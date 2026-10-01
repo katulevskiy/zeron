@@ -20,6 +20,7 @@ mod ask;
 mod goals;
 mod jsonrpc;
 mod tools;
+mod workflows;
 mod transcript;
 mod zeron;
 

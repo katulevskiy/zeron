@@ -1771,6 +1771,14 @@ impl RpcService for AuthRpc {
 }
 
 #[async_trait]
+impl EngineRpc {
+    fn workflows(&self) -> Result<crate::workflow::WorkflowService, RpcError> {
+        self.doc_host
+            .workflows()
+            .ok_or_else(|| RpcError::Failed("workflows are not available".into()))
+    }
+}
+
 impl RpcService for EngineRpc {
     async fn handle(&self, method: &str, params: serde_json::Value) -> Result<RpcReply, RpcError> {
         // Device-addressed routing: forward calls that target another device over its
@@ -1951,6 +1959,217 @@ impl RpcService for EngineRpc {
                     .and_then(|asks| asks.spec_for(&p.chat_id, &p.ask_id))
                     .ok_or_else(|| RpcError::Failed("no such ask in this chat".into()))?;
                 RpcReply::value(&spec)
+            }
+            methods::WORKFLOW_START => {
+                #[derive(Deserialize)]
+                #[serde(rename_all = "camelCase")]
+                struct Params {
+                    chat_id: String,
+                    #[serde(default)]
+                    name: Option<String>,
+                    #[serde(default)]
+                    script: Option<String>,
+                    #[serde(default)]
+                    path: Option<String>,
+                    #[serde(default)]
+                    args: serde_json::Value,
+                    #[serde(default)]
+                    max_concurrency: Option<u32>,
+                    #[serde(default)]
+                    harness: Option<String>,
+                    #[serde(default)]
+                    model: Option<String>,
+                    #[serde(default)]
+                    reasoning: Option<String>,
+                    #[serde(default)]
+                    max_asks: Option<u32>,
+                    #[serde(default)]
+                    max_tokens: Option<u64>,
+                    #[serde(default)]
+                    max_runtime_seconds: Option<u64>,
+                }
+                let p: Params = parse_params(params)?;
+                let wf = self.workflows()?;
+                let outcome = wf
+                    .start(
+                        &p.chat_id,
+                        crate::workflow::StartRequest {
+                            name: p.name,
+                            script: p.script,
+                            path: p.path,
+                            args: p.args,
+                            max_concurrency: p.max_concurrency,
+                            harness: p.harness,
+                            model: p.model,
+                            reasoning: p.reasoning,
+                            budgets: zeron_proto::WorkflowBudgets {
+                                max_asks: p.max_asks,
+                                max_tokens: p.max_tokens,
+                                max_runtime_seconds: p.max_runtime_seconds,
+                            },
+                        },
+                    )
+                    .await
+                    .map_err(|e| RpcError::Failed(e.to_string()))?;
+                RpcReply::value(&serde_json::json!({
+                    "runId": outcome.run_id,
+                    "name": outcome.name,
+                    "graph": outcome.graph,
+                    "warnings": outcome.warnings.iter().map(ToString::to_string).collect::<Vec<_>>(),
+                    "maxConcurrency": outcome.max_concurrency,
+                    "draftPath": outcome.draft_path,
+                }))
+            }
+            methods::WORKFLOW_GET => {
+                #[derive(Deserialize)]
+                #[serde(rename_all = "camelCase")]
+                struct Params {
+                    run_id: String,
+                    #[serde(default)]
+                    include: Vec<String>,
+                }
+                let p: Params = parse_params(params)?;
+                let view = self
+                    .workflows()?
+                    .get(&p.run_id)
+                    .map_err(|e| RpcError::Failed(e.to_string()))?;
+                let has = |what: &str| p.include.iter().any(|i| i == what);
+                let mut run = serde_json::to_value(&view.run).unwrap_or_default();
+                if let Some(o) = run.as_object_mut() {
+                    // Counts instead of lists unless asked for.
+                    let nodes = o.get("nodes").and_then(|n| n.as_array()).map_or(0, Vec::len);
+                    o.insert("nodeCount".into(), nodes.into());
+                    if !has("nodes") {
+                        o.remove("nodes");
+                    }
+                    o.remove("graph");
+                }
+                let mut out = serde_json::json!({ "run": run });
+                if has("reports") {
+                    out["reportItems"] = serde_json::Value::Array(view.reports);
+                }
+                if has("result") {
+                    out["result"] = view.result.unwrap_or(serde_json::Value::Null);
+                }
+                RpcReply::value(&out)
+            }
+            methods::WORKFLOW_LIST => {
+                #[derive(Deserialize)]
+                #[serde(rename_all = "camelCase")]
+                struct Params {
+                    #[serde(default)]
+                    chat_id: Option<String>,
+                }
+                let p: Params = parse_params(params)?;
+                RpcReply::value(&self.workflows()?.list(p.chat_id.as_deref()))
+            }
+            methods::WORKFLOW_STOP => {
+                #[derive(Deserialize)]
+                #[serde(rename_all = "camelCase")]
+                struct Params {
+                    run_id: String,
+                    #[serde(default)]
+                    reason: Option<String>,
+                }
+                let p: Params = parse_params(params)?;
+                let was_running = self
+                    .workflows()?
+                    .stop(&p.run_id, p.reason.as_deref())
+                    .map_err(|e| RpcError::Failed(e.to_string()))?;
+                RpcReply::value(&serde_json::json!({ "stopped": was_running }))
+            }
+            methods::WORKFLOW_RESUME => {
+                #[derive(Deserialize)]
+                #[serde(rename_all = "camelCase")]
+                struct Params {
+                    run_id: String,
+                    #[serde(default)]
+                    args: Option<serde_json::Value>,
+                    #[serde(default)]
+                    by_user: bool,
+                }
+                let p: Params = parse_params(params)?;
+                let outcome = self
+                    .workflows()?
+                    .resume(&p.run_id, p.args, p.by_user)
+                    .await
+                    .map_err(|e| RpcError::Failed(e.to_string()))?;
+                RpcReply::value(&serde_json::json!({
+                    "runId": outcome.run_id,
+                    "name": outcome.name,
+                    "resumedFrom": p.run_id,
+                }))
+            }
+            methods::WORKFLOW_ANSWER => {
+                #[derive(Deserialize)]
+                #[serde(rename_all = "camelCase")]
+                struct Params {
+                    run_id: String,
+                    qid: String,
+                    answer: String,
+                }
+                let p: Params = parse_params(params)?;
+                self.workflows()?
+                    .resolve_question(&p.run_id, &p.qid, &p.answer)
+                    .await
+                    .map_err(|e| RpcError::Failed(e.to_string()))?;
+                RpcReply::value(&serde_json::json!({ "answered": true }))
+            }
+            methods::WORKFLOW_ARTIFACT_DATA => {
+                #[derive(Deserialize)]
+                #[serde(rename_all = "camelCase")]
+                struct Params {
+                    run_id: String,
+                    artifact_id: String,
+                }
+                let p: Params = parse_params(params)?;
+                let index = self
+                    .workflows()?
+                    .artifact_index(&p.run_id, &p.artifact_id)
+                    .map_err(|e| RpcError::Failed(e.to_string()))?;
+                RpcReply::value(&index)
+            }
+            methods::WORKFLOW_ARTIFACT_READ => {
+                #[derive(Deserialize)]
+                #[serde(rename_all = "camelCase")]
+                struct Params {
+                    run_id: String,
+                    artifact_id: String,
+                    #[serde(default)]
+                    version: Option<u32>,
+                    #[serde(default)]
+                    offset: u64,
+                    #[serde(default)]
+                    limit: Option<u64>,
+                }
+                let p: Params = parse_params(params)?;
+                let chunk = self
+                    .workflows()?
+                    .artifact_read(
+                        &p.run_id,
+                        &p.artifact_id,
+                        p.version,
+                        p.offset,
+                        p.limit.unwrap_or(256 * 1024),
+                    )
+                    .map_err(|e| RpcError::Failed(e.to_string()))?;
+                let (encoding, data) = match String::from_utf8(chunk.bytes.clone()) {
+                    Ok(text) => ("utf8", text),
+                    Err(_) => {
+                        use base64::Engine as _;
+                        (
+                            "base64",
+                            base64::engine::general_purpose::STANDARD.encode(&chunk.bytes),
+                        )
+                    }
+                };
+                RpcReply::value(&serde_json::json!({
+                    "version": chunk.version,
+                    "offset": chunk.offset,
+                    "total": chunk.total,
+                    "encoding": encoding,
+                    "data": data,
+                }))
             }
             methods::ASK_ESCALATE => {
                 #[derive(Deserialize)]

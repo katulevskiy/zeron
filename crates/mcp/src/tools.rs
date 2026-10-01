@@ -217,6 +217,7 @@ pub(crate) fn catalog() -> Vec<ToolDef> {
         });
     }
     tools.extend(crate::goals::catalog());
+    tools.extend(crate::workflows::catalog());
     tools
 }
 
@@ -437,6 +438,13 @@ impl Tools {
             return self.escalate(args).await;
         }
         let result = match name {
+            "workflow_guide" => self.workflow_guide().await,
+            "start_workflow" => self.start_workflow(parse(args)?).await,
+            "get_workflow_run" => self.get_workflow_run(parse(args)?).await,
+            "list_workflow_runs" => self.list_workflow_runs(parse(args)?).await,
+            "stop_workflow_run" => self.stop_workflow_run(parse(args)?).await,
+            "resume_workflow_run" => self.resume_workflow_run(parse(args)?).await,
+            "resolve_workflow_question" => self.resolve_workflow_question(parse(args)?).await,
             "get_goal" => self.get_goal(parse(args)?).await,
             "set_goal" => self.set_goal(parse(args)?).await,
             "pause_goal" => self.pause_goal(parse(args)?).await,

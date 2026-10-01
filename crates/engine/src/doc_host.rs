@@ -5339,6 +5339,9 @@ impl DocHost {
             SessionCommandPayload::Goal { command } => {
                 self.apply_goal_command(handle, command).await
             }
+            SessionCommandPayload::Workflow { command } => {
+                self.apply_workflow_command(handle, command).await
+            }
             SessionCommandPayload::RespondInput {
                 request_id,
                 answers,
