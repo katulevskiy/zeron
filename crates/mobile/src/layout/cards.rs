@@ -106,6 +106,8 @@ pub(crate) struct Btn {
     pub act: Act,
 }
 
+// Items are built once per card and shared; boxing the header only adds a hop.
+#[allow(clippy::large_enum_variant)]
 pub(crate) enum Item {
     Header(Header),
     Line(Line),
@@ -222,7 +224,7 @@ fn action(out: &mut DisplayBuilder, act: &Act, rect: (f32, f32, f32, f32)) {
 
 // MARK: - Items
 
-fn place_header(h: &Header, px: Px, x: f32, y: f32, cw: f32, mut out: Option<&mut DisplayBuilder>) -> f32 {
+fn place_header(h: &Header, px: Px, x: f32, y: f32, cw: f32, out: Option<&mut DisplayBuilder>) -> f32 {
     use geom::*;
     let pad = px.v(PAD_X);
     let icon = px.v(ICON);
@@ -244,7 +246,7 @@ fn place_header(h: &Header, px: Px, x: f32, y: f32, cw: f32, mut out: Option<&mu
     let sub_w = text_w;
     let sub_real = h.sub.as_ref().map_or(0.0, |s| lines_at(s, sub_w, h.sub_lines) as f32 * s.lh);
     let total = row + if sub_real > 0.0 { px.v(2.0) + sub_real } else { 0.0 };
-    let Some(o) = out.as_deref_mut() else { return total };
+    let Some(o) = out else { return total };
 
     if let Some(act) = &h.act {
         // The whole band: comfortable to hit, and under the controls.
@@ -405,7 +407,7 @@ fn place_item(item: &Item, px: Px, x: f32, y: f32, cw: f32, out: Option<&mut Dis
 
 /// Lay a card out at `width` (its column), measuring or painting. Returns
 /// the card's height including its border padding.
-pub(crate) fn place_card(card: &Card, px: Px, x: f32, y: f32, cw: f32, mut out: Option<&mut DisplayBuilder>) -> f32 {
+pub(crate) fn place_card(card: &Card, px: Px, x: f32, y: f32, cw: f32, out: Option<&mut DisplayBuilder>) -> f32 {
     use geom::*;
     let top = px.v(PAD_Y);
     let mut cursor = top;
@@ -413,7 +415,7 @@ pub(crate) fn place_card(card: &Card, px: Px, x: f32, y: f32, cw: f32, mut out: 
         cursor += place_item(item, px, x, y + cursor, cw, None);
     }
     let h = cursor + top;
-    if let Some(o) = out.as_deref_mut() {
+    if let Some(o) = out {
         o.fill(x, y, cw, h, px.v(RADIUS), ColorRole::AgentCard);
         o.hairline(x, y, cw, h, px.v(RADIUS), ColorRole::AgentCardBorder);
         let mut cursor = top;

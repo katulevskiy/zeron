@@ -10,8 +10,6 @@
 //! says, which rows a long list folds to — so it is unit-tested without a
 //! window. The second half is the gpui rendering on [`Composer`].
 
-use std::collections::hash_map::DefaultHasher;
-use std::hash::{Hash, Hasher};
 use std::time::Duration;
 
 use gpui::{

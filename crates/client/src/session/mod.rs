@@ -972,7 +972,7 @@ fn build_snapshot(
         todo: if change.is_none() && previous.revision > 0 {
             previous.todo.clone()
         } else {
-            snapshot::latest_todo(&transcript)
+            snapshot::latest_todo(transcript)
         },
         hydrated: st.hydrated,
         delta: SnapshotDelta::default(),

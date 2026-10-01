@@ -21,7 +21,7 @@ use gpui::{
 
 use zeron_doc::{MessagePart, MessageRole, SessionMessageEntry};
 use zeron_proto::{
-    Goal, GoalCommand, GoalEventKind, GoalLimits, GoalStatus, MessageOrigin, TodoStatus, ToolCall,
+    Goal, GoalCommand, GoalEventKind, GoalStatus, MessageOrigin, TodoStatus, ToolCall,
     VerdictOutcome, WorkflowEventMarker, WorkflowStatus,
 };
 
@@ -970,7 +970,7 @@ pub(crate) fn marker_element(marker: &GoalMarker, theme: &Theme) -> AnyElement {
 #[cfg(test)]
 mod tests {
     use super::*;
-    use zeron_proto::{GoalVerdict, TodoItem};
+    use zeron_proto::{GoalLimits, GoalVerdict, TodoItem};
 
     fn goal() -> Goal {
         Goal::new("g1", "Ship the thing", &GoalLimits::default(), 0).unwrap()
@@ -1274,6 +1274,7 @@ mod tests {
 mod composer_tests {
     use super::*;
     use crate::state::AppState;
+    use zeron_proto::GoalLimits;
 
     fn window(
         cx: &mut gpui::TestAppContext,

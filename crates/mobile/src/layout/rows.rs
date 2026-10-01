@@ -816,7 +816,7 @@ pub(crate) fn place_row(core: &RowCore, gap: Gap, px: Px, width: f32, mut out: O
             }
             let mut out = out;
             let th = place_text(&c.text, x + px.v(24.0), top + px.v(4.0), cw - px.v(24.0), out.as_deref_mut());
-            let dh = c.detail.as_ref().map_or(0.0, |d| place_text(d, x + px.v(24.0), top + px.v(4.0) + th, cw - px.v(24.0), out.as_deref_mut()));
+            let dh = c.detail.as_ref().map_or(0.0, |d| place_text(d, x + px.v(24.0), top + px.v(4.0) + th, cw - px.v(24.0), out));
             h.max(th + dh + px.v(8.0))
         }
         Content::Card(card) => place_card(card, px, x, top, cw, out),
