@@ -66,7 +66,7 @@ class LinkTransitions {
 }
 
 /** Where an event goes when the app is not in front. */
-interface SessionAlerts {
+fun interface SessionAlerts {
     fun alert(chatId: String, event: SessionEvent)
 }
 

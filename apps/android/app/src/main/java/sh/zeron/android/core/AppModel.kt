@@ -21,6 +21,16 @@ import kotlinx.coroutines.flow.StateFlow
 import kotlinx.coroutines.flow.asStateFlow
 import kotlinx.coroutines.launch
 import org.json.JSONObject
+import sh.zeron.android.feedback.AndroidFeedback
+import sh.zeron.android.feedback.AppFeedback
+import sh.zeron.android.feedback.FeedbackStore
+import sh.zeron.android.feedback.LinkTransitions
+import sh.zeron.android.feedback.Phase
+import sh.zeron.android.feedback.SessionFeedbackPolicy
+import sh.zeron.android.feedback.SessionTransitions
+import uniffi.zeron_core.ChatIndicator
+import uniffi.zeron_core.ConnectivityState
+import uniffi.zeron_core.WorkspaceSnapshot as Snapshot
 import uniffi.zeron_core.AuthCallback
 import uniffi.zeron_core.AuthOrg
 import uniffi.zeron_core.ChatConfig
@@ -81,7 +91,7 @@ class AppModel(private val app: Application) {
     private val main = Handler(Looper.getMainLooper())
     val credentials = CredentialStore(app)
     val wallpaper = WallpaperStore(app)
-    val notifier by lazy { Notifier(app) }
+    val notifier by lazy { Notifier(app) { feedback.store.current } }
     val workspaceApi by lazy { sh.zeron.android.tools.WorkspaceApi(this) }
     val downloads by lazy { sh.zeron.android.tools.Downloads(app, this) }
 
@@ -103,6 +113,19 @@ class AppModel(private val app: Application) {
     val signInError = MutableStateFlow<String?>(null)
 
     private val settings = app.getSharedPreferences("settings", 0)
+
+    /** Haptics and sound for the whole app; Compose reaches it through `LocalFeedback`, everything else through [AppFeedback]. */
+    val feedback: AndroidFeedback by lazy { AndroidFeedback(app, FeedbackStore(settings)).also { AppFeedback.current = it } }
+    private var inForeground = false
+    private val sessionTransitions = SessionTransitions()
+    private val linkTransitions = LinkTransitions()
+    private val sessionFeedback by lazy { SessionFeedbackPolicy(feedback, notifier, { inForeground }, android.os.SystemClock::uptimeMillis) }
+
+    /** Routes asked for by a notification tap while the app is already running. */
+    val routeRequests = MutableSharedFlow<String>(extraBufferCapacity = 4)
+
+    /** The user stopped [chatId]: the idle that follows is not a completion. */
+    fun noteInterrupted(chatId: String) = sessionFeedback.interrupted(chatId)
     private val _appearance = MutableStateFlow(
         Appearance(
             runCatching { ThemeMode.valueOf(settings.getString("theme", "System")!!) }.getOrDefault(ThemeMode.System),
@@ -176,7 +199,7 @@ class AppModel(private val app: Application) {
         scope.launch {
             while (true) {
                 delay(30_000)
-                refreshWorkspace()
+                refreshWorkspace(announce = false)
             }
         }
     }
@@ -324,6 +347,8 @@ class AppModel(private val app: Application) {
         _client.value = null
         _workspace.value = null
         _connectivity.value = null
+        sessionTransitions.reset()
+        linkTransitions.reset()
         if (!wasDemo) {
             credentials.clear()
             coreDir.deleteRecursively()
@@ -349,7 +374,10 @@ class AppModel(private val app: Application) {
             is ClientEvent.WorkspaceChanged -> scheduleRefresh()
             is ClientEvent.SessionChanged -> _sessionEvents.tryEmit(event.chatId)
             is ClientEvent.ComposerChanged -> _sessionEvents.tryEmit(event.chatId)
-            is ClientEvent.ConnectivityChanged -> _connectivity.value = event.connectivity
+            is ClientEvent.ConnectivityChanged -> {
+                _connectivity.value = event.connectivity
+                observeLink(event.connectivity)
+            }
             is ClientEvent.AuthRefreshed -> credentials.updateTokens(event.tokens)
             is ClientEvent.AuthExpired -> signOut()
         }
@@ -365,17 +393,54 @@ class AppModel(private val app: Application) {
         }
     }
 
-    fun refreshWorkspace() {
+    /** [announce] false for clock-driven refreshes: a status that merely aged out (staleness gate) is not an event. */
+    fun refreshWorkspace(announce: Boolean = true) {
         val client = _client.value ?: return
-        _workspace.value = client.workspace()
+        val snapshot = client.workspace()
+        _workspace.value = snapshot
+        observeSessions(snapshot, announce)
+    }
+
+    private fun phases(ws: Snapshot): Map<String, Phase> {
+        val out = HashMap<String, Phase>()
+        for (row in ws.projects.flatMap { it.sessions } + ws.projectless) {
+            if (row.parentChatId != null) continue // subagents do not chime
+            out[row.id] = when (row.indicator) {
+                ChatIndicator.WORKING -> Phase.Working
+                ChatIndicator.AWAITING_INPUT -> Phase.AwaitingInput
+                ChatIndicator.ERRORED -> Phase.Errored
+                ChatIndicator.COMPLETED -> Phase.Completed
+                ChatIndicator.IDLE -> Phase.Idle
+            }
+        }
+        return out
+    }
+
+    /** Turn changes of session state into one-shot events: in-app cue in front, notification behind. */
+    private fun observeSessions(ws: Snapshot, announce: Boolean) {
+        val events = sessionTransitions.observe(phases(ws))
+        if (announce) for ((id, event) in events) sessionFeedback.session(id, event)
+    }
+
+    private fun observeLink(c: Connectivity) {
+        val degraded = c.state == ConnectivityState.OFFLINE || c.state == ConnectivityState.RECONNECTING
+        val running = _workspace.value?.let { phases(it).values.any { p -> p == Phase.Working } } == true
+        linkTransitions.observe(degraded, running)?.let(sessionFeedback::link)
     }
 
     fun onForeground() {
+        inForeground = true
+        feedback.setForeground(true)
+        // What happened while away was already announced by a notification: start from what is on screen.
+        sessionTransitions.reset()
+        notifier.clearSessionAlerts()
         _client.value?.onForeground()
         refreshWorkspace()
     }
 
     fun onBackground() {
+        inForeground = false
+        feedback.setForeground(false)
         _client.value?.onBackground()
     }
 

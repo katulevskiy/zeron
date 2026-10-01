@@ -55,6 +55,7 @@ class MainActivity : ComponentActivity() {
     override fun onNewIntent(intent: Intent) {
         super.onNewIntent(intent)
         handleCallback(intent)
+        intent.getStringExtra("route")?.let { model.routeRequests.tryEmit(it) }
     }
 
     private fun handleCallback(intent: Intent?) {

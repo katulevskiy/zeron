@@ -49,6 +49,7 @@ import androidx.navigation.compose.composable
 import androidx.navigation.compose.rememberNavController
 import sh.zeron.android.core.AppModel
 import sh.zeron.android.design.ZeronTheme
+import sh.zeron.android.feedback.ProvideFeedback
 import android.net.Uri
 import androidx.navigation.navArgument
 import sh.zeron.android.tools.BrowserScreen
@@ -61,10 +62,12 @@ import sh.zeron.android.tools.WorkspaceRef
 fun ZeronRoot(model: AppModel) {
     val appearance by model.appearance.collectAsState()
     ZeronTheme(appearance) {
-        Surface(Modifier.fillMaxSize(), color = MaterialTheme.colorScheme.background) {
-            val client by model.client.collectAsState()
-            AnimatedContent(client != null, transitionSpec = { fadeIn() togetherWith fadeOut() }, label = "root") { signedIn ->
-                if (signedIn) MainNav(model) else SignInScreen(model)
+        ProvideFeedback(model.feedback) {
+            Surface(Modifier.fillMaxSize(), color = MaterialTheme.colorScheme.background) {
+                val client by model.client.collectAsState()
+                AnimatedContent(client != null, transitionSpec = { fadeIn() togetherWith fadeOut() }, label = "root") { signedIn ->
+                    if (signedIn) MainNav(model) else SignInScreen(model)
+                }
             }
         }
     }
@@ -99,6 +102,27 @@ object Routes {
 private fun AppModel.refFor(ws: String): WorkspaceRef? =
     if (ws.startsWith("space:")) projectRef(ws.removePrefix("space:")) else workspaceRef(ws)
 
+/** Launch and notification routes: `chat:<id>`, `new`, `search`, `agents`, and the developer-tool routes. */
+private fun NavController.openRoute(route: String) {
+    val nav = this
+    when {
+        route == "new" -> nav.navigate(Routes.NEW)
+        route == "search" -> nav.navigate(Routes.SEARCH)
+        route == "agents" -> nav.navigate(Routes.AGENTS)
+        route.startsWith("chat:") -> nav.navigate(Routes.chat(route.removePrefix("chat:")))
+        // subagents:<chat> opens its panel; subagent:<chat>|<doc> one subagent.
+        route.startsWith("subagents:") -> nav.navigate(Routes.chatSubagents(route.removePrefix("subagents:")))
+        route.startsWith("subagent:") -> route.removePrefix("subagent:").split('|', limit = 2).let {
+            if (it.size == 2) nav.navigate(Routes.subagent(it[0], it[1]))
+        }
+        // Developer tools: files:<chat> / terminal:<chat> / browser:<chat>|<url> / file:<chat>|<path>
+        route.startsWith("files:") -> nav.navigate(Routes.files(route.removePrefix("files:")))
+        route.startsWith("terminal:") -> nav.navigate(Routes.terminal(route.removePrefix("terminal:")))
+        route.startsWith("file:") -> route.removePrefix("file:").split('|', limit = 2).let { nav.navigate(Routes.file(it[0], it.getOrElse(1) { "" })) }
+        route.startsWith("browser:") -> route.removePrefix("browser:").split('|', limit = 2).let { nav.navigate(Routes.browser(it[0], it.getOrNull(1))) }
+    }
+}
+
 @Composable
 private fun MainNav(model: AppModel) {
     val nav = rememberNavController()
@@ -117,25 +141,9 @@ private fun MainNav(model: AppModel) {
         onDispose { nav.removeOnDestinationChangedListener(listener) }
     }
     LaunchedEffect(Unit) {
-        when (val route = model.launch.route) {
-            null -> Unit
-            "new" -> nav.navigate(Routes.NEW)
-            "search" -> nav.navigate(Routes.SEARCH)
-            "agents" -> nav.navigate(Routes.AGENTS)
-            else -> when {
-                route.startsWith("chat:") -> nav.navigate(Routes.chat(route.removePrefix("chat:")))
-                // subagents:<chat> opens its panel; subagent:<chat>|<doc> one subagent.
-                route.startsWith("subagents:") -> nav.navigate(Routes.chatSubagents(route.removePrefix("subagents:")))
-                route.startsWith("subagent:") -> route.removePrefix("subagent:").split('|', limit = 2).let {
-                    if (it.size == 2) nav.navigate(Routes.subagent(it[0], it[1]))
-                }
-                // Developer tools at launch: files:<chat> / terminal:<chat> / browser:<chat>|<url> / file:<chat>|<path>
-                route.startsWith("files:") -> nav.navigate(Routes.files(route.removePrefix("files:")))
-                route.startsWith("terminal:") -> nav.navigate(Routes.terminal(route.removePrefix("terminal:")))
-                route.startsWith("file:") -> route.removePrefix("file:").split('|', limit = 2).let { nav.navigate(Routes.file(it[0], it.getOrElse(1) { "" })) }
-                route.startsWith("browser:") -> route.removePrefix("browser:").split('|', limit = 2).let { nav.navigate(Routes.browser(it[0], it.getOrNull(1))) }
-            }
-        }
+        model.launch.route?.let { nav.openRoute(it) }
+        // A notification tapped while the app is running.
+        model.routeRequests.collect { nav.openRoute(it) }
     }
     NavHost(nav, startDestination = Routes.HOME) {
         composable(Routes.HOME) { Home(model, nav) }
