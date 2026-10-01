@@ -132,7 +132,9 @@ case "$first" in
     read -r resp || exit 1
     case "$resp" in *"\"request_id\":\"$1\""*) ;; *) exit 7 ;; esac
     case "$resp" in
+      *'"behavior":"allow"'*'"mode":"acceptEdits"'*) verdict=allow-setmode-edits ;;
       *'"behavior":"allow"'*'"setMode"'*) verdict=allow-setmode ;;
+      *'"behavior":"deny"'*'present it again'*) verdict=deny-revise ;;
       *'"behavior":"allow"'*) verdict=allow ;;
       *'"behavior":"deny"'*'Plan mode'*) verdict=deny-plan ;;
       *'"behavior":"deny"'*'Auto mode'*) verdict=deny-auto ;;

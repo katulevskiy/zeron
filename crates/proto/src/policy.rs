@@ -49,6 +49,14 @@ impl PermissionMode {
         }
     }
 
+    /// The mode's name where "permissions" would be redundant.
+    pub fn short_label(self) -> &'static str {
+        match self {
+            PermissionMode::Bypass => "Bypass",
+            other => other.label(),
+        }
+    }
+
     pub fn description(self) -> &'static str {
         match self {
             PermissionMode::Bypass => "Runs everything without asking",
@@ -332,6 +340,80 @@ pub fn approval_rule(question_id: &str) -> Option<PolicyRule> {
     serde_json::from_str(rule).ok()
 }
 
+/// Question ids of a plan awaiting its decision start with this (docs/plan-mode.md).
+pub const PLAN_QUESTION_PREFIX: &str = "plan:";
+/// The option that sends the plan back for another pass.
+pub const PLAN_KEEP_PLANNING: &str = "Keep planning";
+/// Approving offers every mode the plan can continue in.
+pub const PLAN_APPROVE_MODES: [PermissionMode; 4] = [
+    PermissionMode::Auto,
+    PermissionMode::AcceptEdits,
+    PermissionMode::Ask,
+    PermissionMode::Bypass,
+];
+
+pub fn plan_question_id(nonce: &str) -> String {
+    format!("{PLAN_QUESTION_PREFIX}{}", nonce.replace(':', "-"))
+}
+
+pub fn is_plan_question(question_id: &str) -> bool {
+    question_id.starts_with(PLAN_QUESTION_PREFIX)
+}
+
+/// The option that approves the plan and continues in `mode`.
+pub fn plan_approve_label(mode: PermissionMode) -> String {
+    format!("Approve · {}", mode.short_label())
+}
+
+/// The options of a plan question, in order.
+pub fn plan_options() -> Vec<String> {
+    PLAN_APPROVE_MODES
+        .iter()
+        .map(|mode| plan_approve_label(*mode))
+        .chain([PLAN_KEEP_PLANNING.to_string()])
+        .collect()
+}
+
+/// The engine's answer to a `submit_plan` call: what the user decided and
+/// what the agent should do next.
+#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
+#[serde(rename_all = "camelCase")]
+pub struct PlanSubmitReply {
+    pub approved: bool,
+    /// The mode the chat continues in, when approved.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub mode: Option<PermissionMode>,
+    pub message: String,
+}
+
+/// What the user decided about a plan.
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub enum PlanVerdict {
+    /// Go ahead, continuing in this mode.
+    Approve(PermissionMode),
+    /// Not yet; the text, when there is some, says what to change.
+    Revise(Option<String>),
+}
+
+/// Read the user's answer to a plan question. Anything that isn't an approve
+/// option is feedback: the option "Keep planning" alone is none, a typed
+/// answer is the feedback itself.
+pub fn plan_verdict(labels: &[String]) -> PlanVerdict {
+    let Some(first) = labels.first().map(|l| l.trim()) else {
+        return PlanVerdict::Revise(None);
+    };
+    if let Some(mode) = PLAN_APPROVE_MODES
+        .iter()
+        .find(|mode| plan_approve_label(**mode) == first)
+    {
+        return PlanVerdict::Approve(*mode);
+    }
+    if first.is_empty() || first == PLAN_KEEP_PLANNING {
+        return PlanVerdict::Revise(None);
+    }
+    PlanVerdict::Revise(Some(labels.join("\n")))
+}
+
 /// Whether a user's answer to an approval question was "Always allow".
 pub fn approval_answer_is_always(labels: &[String]) -> bool {
     labels.first().map(String::as_str) == Some(APPROVAL_ALLOW_ALWAYS)
@@ -340,6 +422,31 @@ pub fn approval_answer_is_always(labels: &[String]) -> bool {
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    #[test]
+    fn plan_answers_read_as_approval_or_feedback() {
+        let id = plan_question_id("a:b");
+        assert!(is_plan_question(&id) && !is_approval_question(&id));
+        assert_eq!(id, "plan:a-b");
+        let options = plan_options();
+        assert_eq!(options.len(), 5);
+        assert_eq!(options.last().map(String::as_str), Some(PLAN_KEEP_PLANNING));
+        for mode in PLAN_APPROVE_MODES {
+            assert_eq!(
+                plan_verdict(&[plan_approve_label(mode)]),
+                PlanVerdict::Approve(mode)
+            );
+        }
+        assert_eq!(plan_verdict(&[]), PlanVerdict::Revise(None));
+        assert_eq!(
+            plan_verdict(&[PLAN_KEEP_PLANNING.into()]),
+            PlanVerdict::Revise(None)
+        );
+        assert_eq!(
+            plan_verdict(&["split step 2 in two".into()]),
+            PlanVerdict::Revise(Some("split step 2 in two".into()))
+        );
+    }
 
     #[test]
     fn an_old_peer_without_a_policy_reads_as_bypass() {

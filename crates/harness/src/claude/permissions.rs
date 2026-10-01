@@ -104,14 +104,21 @@ pub(crate) fn deny_response(message: &str) -> Value {
     json!({ "behavior": "deny", "message": message })
 }
 
-/// Approving `ExitPlanMode`: the CLI leaves plan mode for its `default` mode,
-/// said explicitly so the CLI and the gate (now `Ask`) agree.
-pub(crate) fn exit_plan_allow_response(input: Value) -> Value {
+/// Approving `ExitPlanMode`: the CLI leaves plan mode for the mode the user
+/// picked, said explicitly so the CLI and the gate agree. Only Accept edits
+/// has a mode of its own there; the rest run in `default`, where every tool
+/// call still reaches the gate, which settles it (Bypass allows them all).
+pub(crate) fn exit_plan_allow_response(input: Value, mode: PermissionMode) -> Value {
+    let cli_mode = if mode == PermissionMode::AcceptEdits {
+        "acceptEdits"
+    } else {
+        "default"
+    };
     json!({
         "behavior": "allow",
         "updatedInput": input,
         "updatedPermissions": [
-            { "type": "setMode", "mode": "default", "destination": "session" }
+            { "type": "setMode", "mode": cli_mode, "destination": "session" }
         ],
     })
 }

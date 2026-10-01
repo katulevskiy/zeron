@@ -17,7 +17,7 @@ use std::path::{Component, Path, PathBuf};
 #[cfg(test)]
 use zeron_proto::policy::APPROVAL_QUESTION_PREFIX;
 use zeron_proto::policy::{
-    APPROVAL_ALLOW_ALWAYS, APPROVAL_ALLOW_ONCE, APPROVAL_DENY, approval_question_id,
+    APPROVAL_ALLOW_ALWAYS, APPROVAL_ALLOW_ONCE, APPROVAL_DENY, PlanVerdict, approval_question_id,
 };
 use zeron_proto::{
     ActionKind, AgentPolicy, PermissionMode, PolicyRule, RuleEffect, UserInputAnswer,
@@ -663,6 +663,42 @@ pub fn approval_question(action: &Action) -> UserInputQuestion {
     }
 }
 
+/// The question a plan becomes: the plan as its text, an approve option per
+/// mode to continue in, and "Keep planning" (or a typed answer, which is the
+/// feedback).
+pub fn plan_question(plan: &str) -> UserInputQuestion {
+    UserInputQuestion {
+        id: zeron_proto::policy::plan_question_id(&uuid::Uuid::new_v4().to_string()),
+        header: "Plan".into(),
+        question: plan.trim().to_string(),
+        options: zeron_proto::policy::plan_options(),
+        multi_select: false,
+        prefill: None,
+        multiline: false,
+    }
+}
+
+/// Read the answer to a plan question (no answer sends the plan back).
+pub fn read_plan(question: &UserInputQuestion, answers: &[UserInputAnswer]) -> PlanVerdict {
+    answers
+        .iter()
+        .find(|a| a.question_id == question.id)
+        .map_or(PlanVerdict::Revise(None), |a| {
+            zeron_proto::policy::plan_verdict(&a.labels)
+        })
+}
+
+/// What the agent is told when its plan is sent back.
+pub fn revise_message(feedback: Option<&str>) -> String {
+    match feedback {
+        Some(feedback) => format!(
+            "The user wants changes to the plan before approving it:\n{feedback}\n\
+             Revise the plan and present it again."
+        ),
+        None => "The user wants to keep planning. Revise the plan and present it again.".into(),
+    }
+}
+
 /// The user's verdict on an approval question.
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
 pub enum Verdict {
@@ -724,6 +760,29 @@ impl Gate {
 
     pub fn decide(&self, action: &Action) -> Decision {
         decide(&self.policy, action, &self.workspace)
+    }
+
+    /// Present `plan` through `request_input` (the run's question bridge).
+    /// An approval leaves plan mode: the gate continues in the mode the user
+    /// picked.
+    pub async fn ask_plan(
+        &mut self,
+        plan: &str,
+        request_input: &(
+             dyn Fn(Vec<UserInputQuestion>) -> tokio::sync::oneshot::Receiver<Vec<UserInputAnswer>>
+                 + Send
+                 + Sync
+         ),
+    ) -> PlanVerdict {
+        let question = plan_question(plan);
+        let answers = request_input(vec![question.clone()])
+            .await
+            .unwrap_or_default();
+        let verdict = read_plan(&question, &answers);
+        if let PlanVerdict::Approve(mode) = verdict {
+            self.policy.mode = mode;
+        }
+        verdict
     }
 
     /// Ask the user through `request_input` (the run's question bridge) and

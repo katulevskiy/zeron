@@ -50,6 +50,7 @@ use serde_json::Value;
 use tokio::io::{AsyncBufReadExt, AsyncWriteExt, BufReader};
 use tokio::sync::mpsc;
 
+use zeron_proto::policy::PlanVerdict;
 use zeron_proto::{
     AgentEvent, DoneStatus, HarnessId, Model, PermissionMode, PolicyCaps, ReasoningLevel,
     RunRequest, SlashCommand, SteeringMode, UserInputAnswer, UserInputQuestion,
@@ -1042,19 +1043,27 @@ fn handle_control_request(
         let request_input = Arc::clone(request_input);
         tokio::spawn(async move {
             let mut gate = gate.lock().await;
-            let response = match permissions::verdict(&gate, &action, exit_plan) {
-                Decision::Allow => allow_response(input),
-                Decision::Deny(reason) => permissions::deny_response(&reason),
-                Decision::Ask => {
-                    if !gate.ask(&action, &**request_input).await {
-                        permissions::deny_response(permissions::USER_DENIED)
-                    } else if exit_plan && gate.policy.mode == PermissionMode::Plan {
-                        // Out of plan mode: the CLI goes to `default`, and
-                        // the gate asks before edits and commands from now.
-                        gate.policy.mode = PermissionMode::Ask;
-                        permissions::exit_plan_allow_response(input)
-                    } else {
-                        allow_response(input)
+            let response = if exit_plan && gate.policy.mode == PermissionMode::Plan {
+                // The plan is the user's to approve (docs/plan-mode.md): the
+                // approval says what to continue in, anything else sends it
+                // back to the agent as the tool's refusal.
+                let plan = input.get("plan").and_then(Value::as_str).unwrap_or_default();
+                match gate.ask_plan(plan, &**request_input).await {
+                    PlanVerdict::Approve(mode) => permissions::exit_plan_allow_response(input, mode),
+                    PlanVerdict::Revise(feedback) => permissions::deny_response(
+                        &crate::policy::revise_message(feedback.as_deref()),
+                    ),
+                }
+            } else {
+                match permissions::verdict(&gate, &action, exit_plan) {
+                    Decision::Allow => allow_response(input),
+                    Decision::Deny(reason) => permissions::deny_response(&reason),
+                    Decision::Ask => {
+                        if gate.ask(&action, &**request_input).await {
+                            allow_response(input)
+                        } else {
+                            permissions::deny_response(permissions::USER_DENIED)
+                        }
                     }
                 }
             };

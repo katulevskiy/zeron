@@ -1091,16 +1091,55 @@ async fn plan_mode_is_native_and_refuses_edits() {
 }
 
 #[tokio::test]
-async fn approving_the_plan_leaves_plan_mode_for_ask() {
+async fn the_plan_is_presented_as_a_question_with_a_way_to_continue() {
     use zeron_proto::PermissionMode::Plan;
-    let (text, asked) = gated("scenario:plan-exit", Plan, true, vec!["Allow once"]).await;
+    let (_, asked) = gated("scenario:plan-exit", Plan, true, vec!["Keep planning"]).await;
+    let plan = &asked[0];
+    assert!(zeron_proto::policy::is_plan_question(&plan.id));
+    assert_eq!((plan.header.as_str(), plan.question.as_str()), ("Plan", "1. edit a.rs"));
+    assert_eq!(plan.options, zeron_proto::policy::plan_options());
+}
+
+#[tokio::test]
+async fn approving_the_plan_continues_in_the_chosen_mode() {
+    use zeron_proto::PermissionMode::Plan;
+    // Ask: the edit that follows asks (and is declined here).
+    let (text, asked) = gated(
+        "scenario:plan-exit",
+        Plan,
+        true,
+        vec!["Approve · Ask", "Deny"],
+    )
+    .await;
+    assert_eq!(text, "args:plan:no|cr-1:allow-setmode|cr-2:deny-user");
+    assert_eq!(asked.len(), 2, "the plan, then the edit under Ask: {asked:?}");
+    // Auto: project edits run without asking.
+    let (text, asked) = gated("scenario:plan-exit", Plan, true, vec!["Approve · Auto"]).await;
     assert_eq!(text, "args:plan:no|cr-1:allow-setmode|cr-2:allow");
-    assert_eq!(
-        asked.len(),
-        2,
-        "the plan, then the edit under Ask: {asked:?}"
-    );
-    assert!(asked[0].question.contains("ExitPlanMode"));
+    assert_eq!(asked.len(), 1, "{asked:?}");
+    // Accept edits is the CLI's own mode.
+    let (text, _) = gated(
+        "scenario:plan-exit",
+        Plan,
+        true,
+        vec!["Approve · Accept edits"],
+    )
+    .await;
+    assert_eq!(text, "args:plan:no|cr-1:allow-setmode-edits|cr-2:allow");
+}
+
+#[tokio::test]
+async fn a_plan_sent_back_keeps_the_agent_in_plan_mode() {
+    use zeron_proto::PermissionMode::Plan;
+    for answer in ["Keep planning", "split step 1 in two"] {
+        let (text, asked) = gated("scenario:plan-exit", Plan, true, vec![answer]).await;
+        assert_eq!(
+            text,
+            "args:plan:no|cr-1:deny-revise|cr-2:deny-plan",
+            "{answer}"
+        );
+        assert_eq!(asked.len(), 1, "the edit is refused, not asked: {asked:?}");
+    }
 }
 
 #[test]
