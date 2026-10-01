@@ -24,6 +24,7 @@ import androidx.compose.ui.Alignment
 import androidx.compose.ui.Modifier
 import androidx.compose.ui.unit.dp
 import sh.zeron.android.design.ZIcons
+import sh.zeron.android.feedback.pullFeedback
 
 /**
  * A pushed settings page: round back button, the expressive title (with
@@ -63,7 +64,7 @@ fun SubPage(
             val pull = rememberPullToRefreshState()
             PullToRefreshBox(
                 isRefreshing = refreshing,
-                onRefresh = onRefresh,
+                onRefresh = pullFeedback(pull, onRefresh),
                 state = pull,
                 modifier = Modifier.fillMaxSize(),
                 indicator = {

@@ -1,5 +1,11 @@
 package sh.zeron.android.ui
 
+import sh.zeron.android.feedback.pullFeedback
+import sh.zeron.android.feedback.feedbackAction
+import sh.zeron.android.feedback.OpenCloseFeedback
+import sh.zeron.android.feedback.LocalFeedback
+import sh.zeron.android.feedback.Haptic
+import sh.zeron.android.feedback.Cue
 import androidx.compose.foundation.background
 import androidx.compose.foundation.horizontalScroll
 import androidx.compose.foundation.layout.Arrangement
@@ -54,8 +60,9 @@ import androidx.compose.ui.Alignment
 import androidx.compose.ui.Modifier
 import androidx.compose.ui.draw.clip
 import androidx.compose.ui.graphics.Shape
-import androidx.compose.ui.hapticfeedback.HapticFeedbackType
-import androidx.compose.ui.platform.LocalHapticFeedback
+import androidx.compose.runtime.LaunchedEffect
+import androidx.compose.runtime.snapshotFlow
+import kotlinx.coroutines.flow.distinctUntilChanged
 import androidx.compose.ui.text.style.TextOverflow
 import androidx.compose.ui.unit.dp
 import kotlinx.coroutines.launch
@@ -113,10 +120,13 @@ fun SessionsScreen(model: AppModel, onOpen: (String) -> Unit) {
         else -> model.accountDetail.takeIf { it.isNotEmpty() }
     }
 
+    val fb = LocalFeedback.current
     val archive: (SessionRow) -> Unit = { row ->
+        fb.both(Haptic.Confirm, Cue.Archive)
         model.archive(row.id)
         scope.launch {
             if (snackbar.showSnackbar("Archived", actionLabel = "Undo", withDismissAction = true) == SnackbarResult.ActionPerformed) {
+                fb.both(Haptic.Select, Cue.Undo)
                 model.unarchive(row.id)
             }
         }
@@ -134,7 +144,7 @@ fun SessionsScreen(model: AppModel, onOpen: (String) -> Unit) {
         )
         PullToRefreshBox(
             isRefreshing = refreshing,
-            onRefresh = {
+            onRefresh = pullFeedback(pull) {
                 refreshing = true
                 scope.launch {
                     model.refresh()
@@ -160,7 +170,7 @@ fun SessionsScreen(model: AppModel, onOpen: (String) -> Unit) {
                     ScreenHeader("Sessions", subtitle) {
                         if (connectivity?.state == ConnectivityState.OFFLINE) {
                             TonalCircleButton(
-                                ZIcons.Offline, "Offline", onClick = { scope.launch { model.refresh() } },
+                                ZIcons.Offline, "Offline", onClick = feedbackAction(Haptic.Select, Cue.Refresh) { scope.launch { model.refresh() } },
                                 container = MaterialTheme.colorScheme.errorContainer, content = MaterialTheme.colorScheme.onErrorContainer,
                             )
                         }
@@ -236,7 +246,7 @@ private fun LazyListScope.group(
                 Text("${rows.size}", style = MaterialTheme.typography.titleSmall, color = MaterialTheme.colorScheme.onSurfaceVariant)
                 Spacer(Modifier.weight(1f))
                 if (onToggle != null) {
-                    IconButton(onClick = onToggle, modifier = Modifier.size(32.dp)) {
+                    IconButton(onClick = feedbackAction(Haptic.Select, if (collapsed) Cue.Open else Cue.Close, onToggle), modifier = Modifier.size(32.dp)) {
                         ZIcon(if (collapsed) ZIcons.ChevronDown else ZIcons.ChevronUp, if (collapsed) "Expand" else "Collapse", Modifier.size(18.dp))
                     }
                 }
@@ -265,6 +275,11 @@ private fun SwipeableSessionRow(
 ) {
     val state = rememberSwipeToDismissBoxState()
     val shape = segmentedShapes(index, count).shape
+    // A tick as the swipe crosses the point where letting go archives.
+    val fb = LocalFeedback.current
+    LaunchedEffect(state, fb) {
+        snapshotFlow { state.targetValue }.distinctUntilChanged().collect { if (it == SwipeToDismissBoxValue.EndToStart) fb.haptic(Haptic.Threshold) }
+    }
     SwipeToDismissBox(
         state = state,
         enableDismissFromStartToEnd = false,
@@ -297,12 +312,12 @@ fun SessionItem(
 ) {
     var menu by remember { mutableStateOf(false) }
     var renaming by remember { mutableStateOf(false) }
-    val haptics = LocalHapticFeedback.current
+    val fb = LocalFeedback.current
     Box {
         SegmentedListItem(
             onClick = { onOpen(row.id) },
             onLongClick = {
-                haptics.performHapticFeedback(HapticFeedbackType.LongPress)
+                fb.haptic(Haptic.LongPress)
                 menu = true
             },
             shapes = segmentedShapes(index, count),
@@ -330,9 +345,9 @@ fun SessionItem(
             menu,
             { menu = false },
             listOf(
-                MenuAction(if (row.pinned) "Unpin" else "Pin", ZIcons.Pin) { model.setPinned(row.id, !row.pinned) },
+                MenuAction(if (row.pinned) "Unpin" else "Pin", ZIcons.Pin, haptic = Haptic.Pop, cue = if (row.pinned) Cue.Unstar else Cue.Pin) { model.setPinned(row.id, !row.pinned) },
                 MenuAction("Rename", ZIcons.Rename) { renaming = true },
-                MenuAction("Archive", ZIcons.Archive) { archive(row) },
+                MenuAction("Archive", ZIcons.Archive) { archive(row) }, // archive() answers itself
             ),
         )
     }
@@ -399,9 +414,12 @@ fun RenameDialog(current: String, onDismiss: () -> Unit, onRename: (String) -> U
         onDismissRequest = onDismiss,
         icon = { ZIcon(ZIcons.Rename, null) },
         title = { Text("Rename session") },
-        text = { OutlinedTextField(text, { text = it }, singleLine = true, shape = RoundedCornerShape(16.dp)) },
+        text = {
+            OpenCloseFeedback()
+            OutlinedTextField(text, { text = it }, singleLine = true, shape = RoundedCornerShape(16.dp))
+        },
         confirmButton = {
-            TextButton(onClick = { onRename(text.trim()); onDismiss() }, enabled = text.isNotBlank()) { Text("Rename") }
+            TextButton(onClick = feedbackAction(Haptic.Confirm, Cue.Select) { onRename(text.trim()); onDismiss() }, enabled = text.isNotBlank()) { Text("Rename") }
         },
         dismissButton = { TextButton(onClick = onDismiss) { Text("Cancel") } },
     )

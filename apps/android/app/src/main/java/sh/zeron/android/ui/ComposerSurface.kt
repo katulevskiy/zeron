@@ -1,5 +1,10 @@
 package sh.zeron.android.ui
 
+import sh.zeron.android.feedback.play
+import sh.zeron.android.feedback.OpenCloseFeedback
+import sh.zeron.android.feedback.LocalFeedback
+import sh.zeron.android.feedback.Haptic
+import sh.zeron.android.feedback.Cue
 import androidx.compose.animation.AnimatedContent
 import androidx.compose.animation.AnimatedVisibility
 import androidx.compose.animation.animateContentSize
@@ -65,8 +70,6 @@ import androidx.compose.ui.graphics.graphicsLayer
 import androidx.compose.ui.draw.drawWithContent
 import androidx.compose.foundation.BorderStroke
 import androidx.compose.ui.graphics.SolidColor
-import androidx.compose.ui.hapticfeedback.HapticFeedbackType
-import androidx.compose.ui.platform.LocalHapticFeedback
 import androidx.compose.ui.text.style.TextOverflow
 import androidx.compose.ui.unit.dp
 
@@ -77,7 +80,7 @@ enum class ComposerAction { Send, Queue, Stop }
 @OptIn(ExperimentalMaterial3ExpressiveApi::class)
 @Composable
 internal fun ActionButton(action: ComposerAction, hasText: Boolean, onClick: () -> Unit) {
-    val haptics = LocalHapticFeedback.current
+    val fb = LocalFeedback.current
     AnimatedContent(
         action == ComposerAction.Stop && !hasText,
         transitionSpec = { (scaleIn() + fadeIn()) togetherWith (scaleOut() + fadeOut()) },
@@ -86,7 +89,7 @@ internal fun ActionButton(action: ComposerAction, hasText: Boolean, onClick: () 
         if (stop) {
             FilledTonalIconButton(
                 onClick = {
-                    haptics.performHapticFeedback(HapticFeedbackType.Confirm)
+                    fb.both(Haptic.Confirm, Cue.Close) // stopping a run: the falling cue
                     onClick()
                 },
                 shapes = IconButtonDefaults.shapes(),
@@ -99,7 +102,8 @@ internal fun ActionButton(action: ComposerAction, hasText: Boolean, onClick: () 
         } else {
             FilledIconButton(
                 onClick = {
-                    haptics.performHapticFeedback(HapticFeedbackType.Confirm)
+                    // Send and steer sound the same; queueing behind a running turn is its own cue.
+                    fb.both(Haptic.Confirm, if (action == ComposerAction.Queue) Cue.Queued else Cue.Send)
                     onClick()
                 },
                 enabled = hasText,
@@ -156,18 +160,29 @@ class MenuChoice(
 
 class MenuSection(val title: String?, val choices: List<MenuChoice>)
 
-class MenuAction(val label: String, @androidx.annotation.DrawableRes val icon: Int, val destructive: Boolean = false, val onClick: () -> Unit)
+/** [haptic] / [cue] answer the choice in place of the default tap (null = the default). */
+class MenuAction(
+    val label: String,
+    @androidx.annotation.DrawableRes val icon: Int,
+    val destructive: Boolean = false,
+    val haptic: Haptic? = null,
+    val cue: Cue? = null,
+    val onClick: () -> Unit,
+)
 
 /** An expressive action menu (one segmented group). */
 @OptIn(ExperimentalMaterial3ExpressiveApi::class)
 @Composable
 fun ActionMenu(expanded: Boolean, onDismiss: () -> Unit, actions: List<MenuAction>) {
+    val fb = LocalFeedback.current
     DropdownMenuPopup(expanded = expanded, onDismissRequest = onDismiss) {
+        OpenCloseFeedback()
         DropdownMenuGroup(shapes = MenuDefaults.groupShape(0, 1)) {
             actions.forEachIndexed { i, a ->
                 val tint = if (a.destructive) MaterialTheme.colorScheme.error else MaterialTheme.colorScheme.onSurface
                 DropdownMenuItem(
                     onClick = {
+                        fb.play(a.haptic, a.cue)
                         onDismiss()
                         a.onClick()
                     },

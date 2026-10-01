@@ -25,6 +25,9 @@ class ClaimTracker(private val clock: () -> Long) {
 
     fun cueClaimed(releasedAt: Long): Boolean = cueAt >= releasedAt - WINDOW_BEFORE_MS
 
+    /** Was any cue requested in the last [windowMs]? */
+    fun cueWithin(windowMs: Long): Boolean = clock() - cueAt < windowMs
+
     companion object {
         /** Explicit feedback this far before the release still counts (the click handler runs just ahead of it). */
         const val WINDOW_BEFORE_MS = 100L
@@ -41,4 +44,11 @@ class ClaimTracker(private val clock: () -> Long) {
 interface TapFeedback {
     /** A press was released inside its target: answer with the default tap unless the moment claims it. */
     fun defaultTap(heldMs: Long)
+
+    /**
+     * [cue] unless some cue was requested in the last [windowMs]: a dialog or
+     * menu closing right after the action it hosted already has that
+     * action's sound, and the close would only muddy it.
+     */
+    fun cueUnlessRecent(cue: Cue, windowMs: Long = 250)
 }

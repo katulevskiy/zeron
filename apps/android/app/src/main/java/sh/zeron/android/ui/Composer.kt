@@ -1,5 +1,10 @@
 package sh.zeron.android.ui
 
+import sh.zeron.android.feedback.toggleAction
+import sh.zeron.android.feedback.feedbackAction
+import sh.zeron.android.feedback.LocalFeedback
+import sh.zeron.android.feedback.Haptic
+import sh.zeron.android.feedback.Cue
 import android.net.Uri
 import androidx.browser.customtabs.CustomTabsIntent
 import androidx.compose.animation.AnimatedContent
@@ -121,6 +126,7 @@ fun Composer(
     transcript: TranscriptState,
 ) {
     val draft = remember(c.chatId) { ComposerModel() }
+    val fb = LocalFeedback.current
     val scope = rememberCoroutineScope()
     val focus = remember { FocusRequester() }
     var error by remember { mutableStateOf<String?>(null) }
@@ -207,7 +213,10 @@ fun Composer(
         val body = draft.encoded()
         try {
             val queued = running && delivery == Delivery.Queue
-            if (delivery == Delivery.Interrupt && running) handle.interrupt()
+            if (delivery == Delivery.Interrupt && running) {
+                model.noteInterrupted(c.chatId)
+                handle.interrupt()
+            }
             handle.send(
                 SendRequest(
                     body,
@@ -224,6 +233,7 @@ fun Composer(
             if (queued) transcript.expectQueuedTurn() else transcript.beginOwnTurn()
         } catch (e: Exception) {
             error = "Couldn't send: ${e.message}"
+            fb.both(Haptic.Error, Cue.Error)
         }
     }
 
@@ -253,7 +263,12 @@ fun Composer(
                 running -> ComposerAction.Queue
                 else -> ComposerAction.Send
             },
-            onAction = { if (editingId == null && running && !draft.hasContent) runCatching { handle.interrupt() } else send() },
+            onAction = {
+                if (editingId == null && running && !draft.hasContent) {
+                    model.noteInterrupted(c.chatId)
+                    runCatching { handle.interrupt() }
+                } else send()
+            },
             attach = editingId == null,
             focusRequester = focus,
         ) {
@@ -356,7 +371,7 @@ private fun SessionChips(app: AppModel, client: CoreClient, c: ComposerState, ro
         ContextChip(reasoningLabel(level), leading = { ZIcon(ZIcons.Effort, null, Modifier.size(16.dp)) }, onClick = { open("effort") }) {
             ChoiceMenu(menu == "effort", { menu = null }, listOf(MenuSection("Reasoning effort", levels.map { l ->
                 MenuChoice(reasoningLabel(l), l == level) { setConfig { it.copy(reasoning = l) } }
-            })))
+            })), steps = true)
         }
     }
     val pr = row?.pullRequest
@@ -407,7 +422,7 @@ fun QuestionPanel(input: InputRequest, onSubmit: (List<UserInputAnswer>) -> Unit
                         for (option in q.options) {
                             ToggleButton(
                                 checked = option in selection,
-                                onCheckedChange = { on ->
+                                onCheckedChange = toggleAction { on ->
                                     if (!q.multiSelect) selection.clear()
                                     if (on) selection.add(option) else selection.remove(option)
                                 },
@@ -418,7 +433,7 @@ fun QuestionPanel(input: InputRequest, onSubmit: (List<UserInputAnswer>) -> Unit
             }
             val ready = input.questions.all { picked.getValue(it.id).isNotEmpty() }
             Button(
-                onClick = { onSubmit(input.questions.map { UserInputAnswer(it.id, picked.getValue(it.id).toList()) }) },
+                onClick = feedbackAction(Haptic.Confirm, Cue.Send) { onSubmit(input.questions.map { UserInputAnswer(it.id, picked.getValue(it.id).toList()) }) },
                 enabled = ready,
                 shapes = ButtonDefaults.shapes(),
                 modifier = Modifier.align(Alignment.End),
@@ -465,11 +480,11 @@ fun QueuePanel(queue: List<QueueItem>, handle: SessionHandle, editingId: String?
                             menu,
                             { menu = false },
                             listOfNotNull(
-                                MenuAction("Send now", ZIcons.Send) { scope.launch { runCatching { handle.deliverQueuedNow(item.id) } } },
+                                MenuAction("Send now", ZIcons.Send, haptic = Haptic.Confirm, cue = Cue.Send) { scope.launch { runCatching { handle.deliverQueuedNow(item.id) } } },
                                 if (!editing && item.gate == null) MenuAction("Edit", ZIcons.Rename) { onEdit(item.id) } else null,
                                 if (i > 0) MenuAction("Move up", ZIcons.ChevronUp) { runCatching { handle.moveQueuedBy(item.id, -1) } } else null,
                                 if (i < queue.size - 1) MenuAction("Move down", ZIcons.ChevronDown) { runCatching { handle.moveQueuedBy(item.id, 1) } } else null,
-                                MenuAction("Remove", ZIcons.Delete, destructive = true) { scope.launch { runCatching { handle.removeQueued(item.id) } } },
+                                MenuAction("Remove", ZIcons.Delete, destructive = true, haptic = Haptic.Confirm, cue = Cue.Delete) { scope.launch { runCatching { handle.removeQueued(item.id) } } },
                             ),
                         )
                     }

@@ -48,10 +48,11 @@ class Downloads(private val app: Application, private val model: AppModel) {
     private fun update(id: String, state: State) {
         _jobs.value = _jobs.value.map { if (it.id == id) it.copy(state = state) else it }
         val job = _jobs.value.firstOrNull { it.id == id } ?: return
+        val feedback = sh.zeron.android.feedback.AppFeedback.current
         when (state) {
             is State.Running -> model.notifier.download(id, "Saving ${job.name}", state.detail, state.fraction, done = false)
-            is State.Done -> model.notifier.download(id, "Saved ${job.name}", state.detail, 1f, done = true, open = openIntent(job.name, state.uri))
-            is State.Failed -> model.notifier.download(id, "Couldn't save ${job.name}", state.message, null, done = true)
+            is State.Done -> feedback.both(sh.zeron.android.feedback.Haptic.Success, sh.zeron.android.feedback.Cue.UploadReady).also { model.notifier.download(id, "Saved ${job.name}", state.detail, 1f, done = true, open = openIntent(job.name, state.uri)) }
+            is State.Failed -> feedback.both(sh.zeron.android.feedback.Haptic.Error, sh.zeron.android.feedback.Cue.Error).also { model.notifier.download(id, "Couldn't save ${job.name}", state.message, null, done = true) }
         }
     }
 

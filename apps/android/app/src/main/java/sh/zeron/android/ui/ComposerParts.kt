@@ -1,5 +1,11 @@
 package sh.zeron.android.ui
 
+import sh.zeron.android.feedback.feedbackClickable
+import sh.zeron.android.feedback.feedbackAction
+import sh.zeron.android.feedback.OpenCloseFeedback
+import sh.zeron.android.feedback.LocalFeedback
+import sh.zeron.android.feedback.Haptic
+import sh.zeron.android.feedback.Cue
 import android.net.Uri
 import androidx.activity.compose.rememberLauncherForActivityResult
 import androidx.activity.result.PickVisualMediaRequest
@@ -173,7 +179,7 @@ private fun StagedThumbnails(model: ComposerModel) {
             Box(Modifier.size(72.dp)) {
                 Image(image.thumb, "Attached image", Modifier.fillMaxSize().clip(RoundedCornerShape(16.dp)), contentScale = ContentScale.Crop)
                 Surface(
-                    onClick = { model.images.remove(image) },
+                    onClick = feedbackAction(Haptic.Select, Cue.Close) { model.images.remove(image) },
                     shape = CircleShape,
                     color = MaterialTheme.colorScheme.inverseSurface.copy(alpha = 0.85f),
                     contentColor = MaterialTheme.colorScheme.inverseOnSurface,
@@ -192,9 +198,12 @@ private fun AttachButton(model: ComposerModel, enabled: Boolean) {
     val context = LocalContext.current
     val scope = rememberCoroutineScope()
     var open by remember { mutableStateOf(false) }
+    val fb = LocalFeedback.current
     fun add(uris: List<Uri>) {
         scope.launch {
-            for (uri in uris.take(Staging.MAX_IMAGES - model.images.size)) Staging.stage(context, uri)?.let { model.images.add(it) }
+            var added = false
+            for (uri in uris.take(Staging.MAX_IMAGES - model.images.size)) Staging.stage(context, uri)?.let { model.images.add(it); added = true }
+            if (added) fb.both(Haptic.Select, Cue.Select) // once per batch: the photos landed in the composer
         }
     }
     val photos = rememberLauncherForActivityResult(ActivityResultContracts.PickMultipleVisualMedia(Staging.MAX_IMAGES)) { add(it) }
@@ -246,7 +255,7 @@ fun MentionSuggestions(model: ComposerModel, search: suspend (String) -> List<Fi
                         Modifier
                             .fillMaxWidth()
                             .clip(RoundedCornerShape(18.dp))
-                            .clickable { model.insertMention(file) }
+                            .feedbackClickable(Haptic.Select, Cue.Select) { model.insertMention(file) }
                             .padding(horizontal = 14.dp, vertical = 8.dp),
                         verticalAlignment = Alignment.CenterVertically,
                     ) {
@@ -267,8 +276,10 @@ fun MentionSuggestions(model: ComposerModel, search: suspend (String) -> List<Fi
 
 /** An expressive choice menu: one group, inline section labels, a trailing check on the choice. */
 @Composable
-fun ChoiceMenu(expanded: Boolean, onDismiss: () -> Unit, sections: List<MenuSection>) {
+fun ChoiceMenu(expanded: Boolean, onDismiss: () -> Unit, sections: List<MenuSection>, steps: Boolean = false) {
+    val fb = LocalFeedback.current
     DropdownMenuPopup(expanded = expanded, onDismissRequest = onDismiss) {
+        OpenCloseFeedback()
         val groups = sections.filter { it.choices.isNotEmpty() }
         val all = groups.sumOf { it.choices.size }
         DropdownMenuGroup(shapes = MenuDefaults.groupShape(0, 1)) {
@@ -276,15 +287,20 @@ fun ChoiceMenu(expanded: Boolean, onDismiss: () -> Unit, sections: List<MenuSect
             groups.forEach { section ->
                 section.title?.let { title -> MenuDefaults.Label { Text(title, style = MaterialTheme.typography.labelMedium) } }
                 section.choices.forEach { choice ->
+                    val position = index++
                     DropdownMenuItem(
                         selected = choice.selected,
                         onClick = {
+                            // A new choice is a selection; an ordered ladder (effort) climbs a scale instead.
+                            if (!choice.selected) {
+                                if (steps) fb.both(Haptic.Tick, Cue.Detent, position) else fb.both(Haptic.Select, Cue.Select)
+                            }
                             choice.onClick()
                             onDismiss()
                         },
                         text = { Text(choice.label) },
                         supportingText = choice.supporting?.let { { Text(it) } },
-                        shapes = MenuDefaults.itemShape(index++, all),
+                        shapes = MenuDefaults.itemShape(position, all),
                         leadingIcon = choice.leading,
                         selectedLeadingIcon = choice.leading,
                         trailingIcon = if (choice.selected) {

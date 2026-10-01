@@ -210,7 +210,7 @@ fun TerminalScreen(model: AppModel, ref: WorkspaceRef, onBack: () -> Unit) {
                             overflow,
                             { overflow = false },
                             listOfNotNull(
-                                session?.let { s -> MenuAction("Copy all", ZIcons.Copy) { if (s.isAttached) copy(s.screen.allText()) } },
+                                session?.let { s -> MenuAction("Copy all", ZIcons.Copy, haptic = sh.zeron.android.feedback.Haptic.Confirm, cue = sh.zeron.android.feedback.Cue.Copy) { if (s.isAttached) copy(s.screen.allText()) } },
                                 session?.let { MenuAction("Paste", R.drawable.zi_document_add) { paste() } },
                                 session?.takeIf { it.scrolledBack }?.let { s ->
                                     MenuAction("Scroll to bottom", ZIcons.ArrowDown) { if (s.isAttached) s.screen.scrollToBottom() }

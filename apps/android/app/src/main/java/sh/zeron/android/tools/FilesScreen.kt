@@ -205,8 +205,8 @@ fun FilesScreen(
         if (!e.isDir && FileKind.of(e.path) == FileKind.Html) add(MenuAction("Open in browser", ZIcons.Globe) { onBrowser(Browser.workspaceUrl(ref, e.path)) })
         if (e.isDir) add(MenuAction("Save folder to Downloads", ZIcons.Save) { model.downloads.saveFolder(ref, e.path, includeIgnored) })
         else add(MenuAction("Save to Downloads", ZIcons.Save) { model.downloads.saveFile(ref, e.path) })
-        add(MenuAction("Copy path", ZIcons.Copy) { clipboard.setText(AnnotatedString(ref.absolute(e.path) ?: e.path)) })
-        add(MenuAction("Copy relative path", ZIcons.Copy) { clipboard.setText(AnnotatedString(e.path)) })
+        add(MenuAction("Copy path", ZIcons.Copy, haptic = sh.zeron.android.feedback.Haptic.Confirm, cue = sh.zeron.android.feedback.Cue.Copy) { clipboard.setText(AnnotatedString(ref.absolute(e.path) ?: e.path)) })
+        add(MenuAction("Copy relative path", ZIcons.Copy, haptic = sh.zeron.android.feedback.Haptic.Confirm, cue = sh.zeron.android.feedback.Cue.Copy) { clipboard.setText(AnnotatedString(e.path)) })
     }
 
     Column(Modifier.fillMaxSize().background(MaterialTheme.colorScheme.background)) {
@@ -228,7 +228,7 @@ fun FilesScreen(
                         MenuAction(if (includeIgnored) "Hide ignored files" else "Show ignored files", if (includeIgnored) ZIcons.EyeClosed else ZIcons.Eye) { includeIgnored = !includeIgnored },
                         MenuAction("Collapse all", ZIcons.Collapse) { expanded.clear() },
                         MenuAction("Refresh", ZIcons.Refresh) { reloadLoaded() },
-                        MenuAction("Copy folder path", ZIcons.Copy) { clipboard.setText(AnnotatedString(ref.root ?: "")) },
+                        MenuAction("Copy folder path", ZIcons.Copy, haptic = sh.zeron.android.feedback.Haptic.Confirm, cue = sh.zeron.android.feedback.Cue.Copy) { clipboard.setText(AnnotatedString(ref.root ?: "")) },
                     ),
                 )
             }

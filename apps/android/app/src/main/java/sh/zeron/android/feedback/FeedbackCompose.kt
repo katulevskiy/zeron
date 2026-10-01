@@ -8,7 +8,12 @@ import androidx.compose.foundation.combinedClickable
 import androidx.compose.foundation.interaction.InteractionSource
 import androidx.compose.foundation.interaction.PressInteraction
 import androidx.compose.runtime.Composable
+import androidx.compose.material3.ExperimentalMaterial3Api
+import androidx.compose.material3.pulltorefresh.PullToRefreshState
 import androidx.compose.runtime.CompositionLocalProvider
+import androidx.compose.runtime.LaunchedEffect
+import androidx.compose.runtime.snapshotFlow
+import kotlinx.coroutines.flow.distinctUntilChanged
 import androidx.compose.runtime.DisposableEffect
 import androidx.compose.runtime.remember
 import androidx.compose.runtime.rememberUpdatedState
@@ -146,12 +151,34 @@ fun toggleAction(onChange: (Boolean) -> Unit): (Boolean) -> Unit {
     }
 }
 
-/** For a sheet, dialog or popover: [Cue.Open] as it appears and [Cue.Close] as it leaves. */
+/**
+ * For a sheet, dialog or popover, placed in its content: [Cue.Open] as it
+ * appears and [Cue.Close] as it leaves. The close stays quiet when another
+ * cue just played (the action the dialog hosted has its own sound).
+ */
 @Composable
-fun OpenCloseFeedback(open: Cue = Cue.Open, close: Cue = Cue.Close) {
+fun OpenCloseFeedback(open: Cue? = Cue.Open, close: Cue? = Cue.Close) {
     val fb = LocalFeedback.current
     DisposableEffect(fb) {
-        fb.cue(open)
-        onDispose { fb.cue(close) }
+        open?.let(fb::cue)
+        onDispose {
+            if (close != null) (fb as? TapFeedback)?.cueUnlessRecent(close) ?: fb.cue(close)
+        }
     }
+}
+
+/**
+ * Pull to refresh: a [Haptic.Threshold] as the pull crosses the point where
+ * letting go refreshes, and [Cue.Refresh] when it does. Returns the refresh
+ * callback to hand to the component.
+ */
+@Composable
+@OptIn(ExperimentalMaterial3Api::class)
+fun pullFeedback(state: PullToRefreshState, onRefresh: () -> Unit): () -> Unit {
+    val fb = LocalFeedback.current
+    LaunchedEffect(state, fb) {
+        snapshotFlow { state.distanceFraction >= 1f }.distinctUntilChanged().collect { if (it) fb.haptic(Haptic.Threshold) }
+    }
+    val latest = rememberUpdatedState(onRefresh)
+    return remember(fb) { { fb.both(Haptic.Confirm, Cue.Refresh); latest.value() } }
 }

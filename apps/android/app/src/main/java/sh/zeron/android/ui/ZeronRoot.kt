@@ -49,6 +49,8 @@ import androidx.navigation.compose.composable
 import androidx.navigation.compose.rememberNavController
 import sh.zeron.android.core.AppModel
 import sh.zeron.android.design.ZeronTheme
+import sh.zeron.android.feedback.Cue
+import sh.zeron.android.feedback.LocalFeedback
 import sh.zeron.android.feedback.ProvideFeedback
 import android.net.Uri
 import androidx.navigation.navArgument
@@ -132,10 +134,16 @@ private fun MainNav(model: AppModel) {
     // does its focused text field — the IME only went away once the field was
     // disposed, a second after leaving the chat. Drop focus and the keyboard
     // the moment the destination changes instead.
-    DisposableEffect(nav, focus, keyboard) {
-        val listener = NavController.OnDestinationChangedListener { _, _, _ ->
+    val feedback = LocalFeedback.current
+    DisposableEffect(nav, focus, keyboard, feedback) {
+        var depth = 0
+        val listener = NavController.OnDestinationChangedListener { controller, _, _ ->
             focus.clearFocus(force = true)
             keyboard?.hide()
+            // Going deeper opens, coming back closes: the one place pages announce themselves.
+            val now = controller.currentBackStack.value.count { it.destination !is androidx.navigation.NavGraph }
+            if (depth > 0 && now > depth) feedback.cue(Cue.Open) else if (depth > 0 && now < depth) feedback.cue(Cue.Close)
+            depth = now
         }
         nav.addOnDestinationChangedListener(listener)
         onDispose { nav.removeOnDestinationChangedListener(listener) }

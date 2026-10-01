@@ -1,5 +1,9 @@
 package sh.zeron.android.ui
 
+import sh.zeron.android.feedback.feedbackAction
+import sh.zeron.android.feedback.OpenCloseFeedback
+import sh.zeron.android.feedback.Haptic
+import sh.zeron.android.feedback.Cue
 import android.content.Intent
 import android.graphics.BitmapFactory
 import android.net.Uri
@@ -160,10 +164,10 @@ fun SessionScreen(model: AppModel, chatId: String, onBack: () -> Unit, onNavigat
                                 MenuAction("Open in browser", ZIcons.Globe) { onNavigate(Routes.browser(chatId, sh.zeron.android.tools.Browser.workspaceUrl(ref, target.path))) }
                             } else null,
                             ref?.let { MenuAction("Save to Downloads", ZIcons.Save) { model.downloads.saveFile(it, target.path) } },
-                            MenuAction("Copy path", ZIcons.Copy) { clipboard.setText(AnnotatedString(path)) },
+                            MenuAction("Copy path", ZIcons.Copy, haptic = Haptic.Confirm, cue = Cue.Copy) { clipboard.setText(AnnotatedString(path)) },
                         )
                     }
-                    else -> listOf(MenuAction("Copy path", ZIcons.Copy) { clipboard.setText(AnnotatedString(path)) })
+                    else -> listOf(MenuAction("Copy path", ZIcons.Copy, haptic = Haptic.Confirm, cue = Cue.Copy) { clipboard.setText(AnnotatedString(path)) })
                 }
             },
             openFile = { path ->
@@ -230,9 +234,9 @@ fun SessionScreen(model: AppModel, chatId: String, onBack: () -> Unit, onNavigat
                             if (Subagents.total(subagents) > 0) MenuAction("Subagents", ZIcons.Bot) { subagentsOpen = true } else null,
                             MenuAction("Terminal", ZIcons.Terminal) { onNavigate(Routes.terminal(chatId)) },
                             MenuAction("Browser & previews", ZIcons.Globe) { onNavigate(Routes.browser(chatId, null)) },
-                            MenuAction("Copy transcript", ZIcons.Copy) { transcript.frame?.let { clipboard.setText(AnnotatedString(it.plainText())) } },
-                            row?.let { r -> MenuAction(if (r.pinned) "Unpin" else "Pin", ZIcons.Pin) { model.setPinned(chatId, !r.pinned) } },
-                            row?.let { MenuAction("Archive", ZIcons.Archive) { model.archive(chatId); onBack() } },
+                            MenuAction("Copy transcript", ZIcons.Copy, haptic = Haptic.Confirm, cue = Cue.Copy) { transcript.frame?.let { clipboard.setText(AnnotatedString(it.plainText())) } },
+                            row?.let { r -> MenuAction(if (r.pinned) "Unpin" else "Pin", ZIcons.Pin, haptic = Haptic.Pop, cue = if (r.pinned) Cue.Unstar else Cue.Pin) { model.setPinned(chatId, !r.pinned) } },
+                            row?.let { MenuAction("Archive", ZIcons.Archive, haptic = Haptic.Confirm, cue = Cue.Archive) { model.archive(chatId); onBack() } },
                         ),
                     )
                 }
@@ -248,7 +252,7 @@ fun SessionScreen(model: AppModel, chatId: String, onBack: () -> Unit, onNavigat
                 modifier = Modifier.align(Alignment.BottomCenter).padding(bottom = 12.dp),
             ) {
                 SmallFloatingActionButton(
-                    onClick = { transcript.scrollToBottom() },
+                    onClick = feedbackAction(Haptic.Select, Cue.Select) { transcript.scrollToBottom() },
                     shape = CircleShape,
                     containerColor = MaterialTheme.colorScheme.surfaceContainerHigh,
                     contentColor = MaterialTheme.colorScheme.onSurface,
@@ -275,6 +279,7 @@ fun SessionScreen(model: AppModel, chatId: String, onBack: () -> Unit, onNavigat
 
     sheet?.let { s ->
         ModalBottomSheet(onDismissRequest = { sheet = null }) {
+            OpenCloseFeedback()
             Text(s.title, style = MaterialTheme.typography.titleMedium, modifier = Modifier.padding(horizontal = 24.dp))
             SelectionContainer {
                 Text(
@@ -300,5 +305,6 @@ private fun Banner(c: ComposerState, connectivity: ConnectivityState?, onRetry: 
         !c.room.connected && c.room.retryAtMs != null -> "Reconnecting…"
         else -> null
     } ?: return
-    StatusBanner(text, if (c.sendState == SendState.FAILED) "Retry" to onRetry else null)
+    val retry = feedbackAction(Haptic.Select, Cue.Refresh, onRetry)
+    StatusBanner(text, if (c.sendState == SendState.FAILED) "Retry" to retry else null)
 }

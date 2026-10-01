@@ -163,6 +163,8 @@ fun DownloadsStrip(model: AppModel, modifier: Modifier = Modifier) {
     }
 }
 
-fun toast(context: Context, text: String) {
+/** A short notice. Notices here are refusals and failures, so they answer with the error cue unless [error] is false. */
+fun toast(context: Context, text: String, error: Boolean = true) {
+    if (error) sh.zeron.android.feedback.AppFeedback.current.both(sh.zeron.android.feedback.Haptic.Error, sh.zeron.android.feedback.Cue.Error)
     Toast.makeText(context, text, Toast.LENGTH_SHORT).show()
 }

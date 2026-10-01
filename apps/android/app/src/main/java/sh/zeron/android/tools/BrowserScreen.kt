@@ -244,7 +244,7 @@ fun BrowserScreen(model: AppModel, ref: WorkspaceRef?, initialUrl: String?, onBa
                     { overflow = false },
                     listOfNotNull(
                         if (!Browser.isWorkspace(url) && url.startsWith("http")) MenuAction("Open in another app", ZIcons.Link) { openExternally(context, url) } else null,
-                        MenuAction("Copy link", ZIcons.Copy) { clipboard.setText(AnnotatedString(url)) },
+                        MenuAction("Copy link", ZIcons.Copy, haptic = sh.zeron.android.feedback.Haptic.Confirm, cue = sh.zeron.android.feedback.Cue.Copy) { clipboard.setText(AnnotatedString(url)) },
                         MenuAction("Print or save as PDF", ZIcons.Save) { print(context, web, title ?: Browser.display(url)) },
                         MenuAction("Reload", ZIcons.Refresh) { web.reload() },
                     ),

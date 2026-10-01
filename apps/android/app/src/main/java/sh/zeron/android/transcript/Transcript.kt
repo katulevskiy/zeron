@@ -310,8 +310,8 @@ private fun RowMenu(
             true,
             dismiss,
             listOfNotNull(
-                if (block.isNotEmpty()) sh.zeron.android.ui.MenuAction("Copy", ZIcons.Copy) { clipboard.setText(AnnotatedString(block)) } else null,
-                if (!message.isNullOrEmpty() && message != block) sh.zeron.android.ui.MenuAction("Copy message", ZIcons.Chat) { clipboard.setText(AnnotatedString(message)) } else null,
+                if (block.isNotEmpty()) sh.zeron.android.ui.MenuAction("Copy", ZIcons.Copy, haptic = sh.zeron.android.feedback.Haptic.Confirm, cue = sh.zeron.android.feedback.Cue.Copy) { clipboard.setText(AnnotatedString(block)) } else null,
+                if (!message.isNullOrEmpty() && message != block) sh.zeron.android.ui.MenuAction("Copy message", ZIcons.Chat, haptic = sh.zeron.android.feedback.Haptic.Confirm, cue = sh.zeron.android.feedback.Cue.Copy) { clipboard.setText(AnnotatedString(message)) } else null,
                 if (selectable.isNotEmpty()) sh.zeron.android.ui.MenuAction("Select text", ZIcons.Text) { actions.showText("Select text", selectable, false) } else null,
             ),
         )
