@@ -410,8 +410,9 @@ def main(args):
     assert_eq!(order, ['0', '1', '2', '3'], "script order is run order");
     // The first ask creates the child; every later ask continues it.
     assert!(worker[0].spec.reuse_child.is_none());
-    assert!(worker.iter().skip(1).all(|c| c.spec.reuse_child.as_deref() == Some("fake-child-1")), "{:?}",
-        worker.iter().map(|c| c.spec.reuse_child.clone()).collect::<Vec<_>>());
+    let reused: BTreeSet<_> = worker.iter().skip(1).map(|c| c.spec.reuse_child.clone()).collect();
+    assert_eq!(reused.len(), 1, "one child for every later ask: {reused:?}");
+    assert!(reused.iter().next().unwrap().is_some());
     // Standing instructions and the persona go with the first ask only.
     assert!(worker[0].spec.prompt.contains("subagent inside a dynamic workflow"));
     assert!(worker[0].spec.prompt.contains("Be terse."));
@@ -881,4 +882,40 @@ def main(args):
     let out = rig.svc.start(CHAT, start(evil)).await.unwrap();
     let run = wait_settled(&rig, &out.run_id).await;
     assert_eq!(run.header.status, WorkflowStatus::Errored);
+}
+
+// ── goals ─────────────────────────────────────────────────────────────────
+
+#[tokio::test(flavor = "multi_thread", worker_threads = 4)]
+async fn a_running_workflow_defers_goal_verification() {
+    let rig = rig();
+    let verifier_calls = Arc::new(AtomicUsize::new(0));
+    let vc = verifier_calls.clone();
+    rig.ask.on_call(move |call| {
+        if call.spec.label == "Verifier" {
+            vc.fetch_add(1, Ordering::SeqCst);
+            return Some(FakeReply::Result(json!({"passed": true, "reason": "all done"})));
+        }
+        Some(FakeReply::After(Duration::from_millis(1500), Box::new(text("slow work"))))
+    });
+    let script = "def main(args):\n    phase(\"p\")\n    return agent(\"slow\").ask(\"x\").result().value\n";
+    let out = rig.svc.start(CHAT, start(script)).await.unwrap();
+    assert!(rig.svc.has_running_run(CHAT));
+    rig.env.set_goal(CHAT, "Finish the job");
+    // The goal's first round runs and ends within milliseconds, but the
+    // controller must not judge it while the workflow's agents still work.
+    wait_for(|| rig.env.complete_turns(CHAT) >= 1, "the goal's first round").await;
+    tokio::time::sleep(Duration::from_millis(600)).await;
+    assert_eq!(verifier_calls.load(Ordering::SeqCst), 0, "verification waits for the workflow");
+    assert!(rig.env.goal(CHAT).unwrap().status.is_running());
+    // Once the workflow settles (and its result message has been delivered)
+    // verification proceeds and the goal completes.
+    wait_settled(&rig, &out.run_id).await;
+    wait_for(
+        || rig.env.goal(CHAT).is_some_and(|g| g.status == zeron_proto::GoalStatus::Complete),
+        "the goal to complete after the workflow",
+    )
+    .await;
+    assert_eq!(verifier_calls.load(Ordering::SeqCst), 1);
+    assert!(!rig.svc.has_running_run(CHAT));
 }
