@@ -83,6 +83,10 @@
     // `wrangler secret put APNS_KEY_P8` (the AuthKey_XXXX.p8 file's contents)
     // and `wrangler secret put APNS_KEY_ID`. Unset ⇒ decided and logged on
     // /registry/:org/stats, not sent.
+    // Cloud-box enrollment (docs/cloud.md §6) needs the device-token signing
+    // key: `wrangler secret put ZERON_DEVICE_JWT_KEY` with a private P-256
+    // key as a JWK (JSON) or PKCS8 PEM. Unset ⇒ /cloud/devices and
+    // /auth/device-token answer 501.
     "WORKOS_CLIENT_ID": "client_01KWD0EAKZKD50YCQJNYSRE4BY",
     "AUTH_MODE": "workos"
   },

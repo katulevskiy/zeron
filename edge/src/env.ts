@@ -29,6 +29,10 @@ export interface Env {
   /** Apple team id and the app's bundle id (defaults: the Zeron iOS app). */
   APNS_TEAM_ID?: string;
   APNS_TOPIC?: string;
+  /** Private P-256 key (JWK JSON or PKCS8 PEM, wrangler secret) that signs
+   * device tokens for cloud boxes (docs/cloud.md §6). Unset ⇒ enrollment
+   * and device tokens answer 501. */
+  ZERON_DEVICE_JWT_KEY?: string;
 }
 
 /** APNs settings, when push is set up for this deployment. */
@@ -52,3 +56,8 @@ export const AUTH_USER_HEADER = "x-zeron-auth-user";
  * Worker; the SessionRoom DO sees this and skips its per-chat
  * claim-on-first-join ownership discipline for the room. */
 export const ROOM_KIND_HEADER = "x-zeron-room-kind";
+
+/** Header the Worker stamps when the caller authenticated with a device
+ * token: the token's device id. The DeviceRoom uses it to refuse hosts whose
+ * credential was revoked. Cleared on every forward, like the headers above. */
+export const AUTH_DEVICE_HEADER = "x-zeron-auth-device";
