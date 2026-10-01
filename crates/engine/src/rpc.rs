@@ -1362,6 +1362,11 @@ fn forwardable(method: &str) -> bool {
             | methods::WORKFLOW_ANSWER
             | methods::WORKFLOW_ARTIFACT_DATA
             | methods::WORKFLOW_ARTIFACT_READ
+            | methods::WORKFLOW_SAVED_LIST
+            | methods::WORKFLOW_SAVED_GET
+            | methods::WORKFLOW_SAVED_SAVE
+            | methods::WORKFLOW_SAVED_DELETE
+            | methods::WORKFLOW_SAVED_RUNS
             | methods::LIST_HARNESSES
             | methods::INSTALL_HARNESS
             | methods::CANCEL_INSTALL
@@ -1998,6 +2003,18 @@ impl RpcService for EngineRpc {
                     max_tokens: Option<u64>,
                     #[serde(default)]
                     max_runtime_seconds: Option<u64>,
+                    #[serde(default)]
+                    saved: Option<SavedParams>,
+                    #[serde(default)]
+                    by_user: bool,
+                }
+                #[derive(Deserialize)]
+                struct SavedParams {
+                    name: String,
+                    #[serde(default)]
+                    scope: Option<zeron_proto::SavedScope>,
+                    #[serde(default)]
+                    args: serde_json::Value,
                 }
                 let p: Params = parse_params(params)?;
                 let wf = self.workflows()?;
@@ -2018,6 +2035,12 @@ impl RpcService for EngineRpc {
                                 max_tokens: p.max_tokens,
                                 max_runtime_seconds: p.max_runtime_seconds,
                             },
+                            saved: p.saved.map(|s| crate::workflow::SavedStart {
+                                name: s.name,
+                                scope: s.scope,
+                                args: s.args,
+                            }),
+                            by_user: p.by_user,
                         },
                     )
                     .await
@@ -2059,6 +2082,11 @@ impl RpcService for EngineRpc {
                     o.remove("graph");
                 }
                 let mut out = serde_json::json!({ "run": run });
+                // What a "run again" needs; small by construction (≤ 64 KB).
+                out["args"] = view.args.clone();
+                if let Some(saved) = &view.saved {
+                    out["saved"] = serde_json::to_value(saved).unwrap_or_default();
+                }
                 if has("reports") {
                     out["reportItems"] = serde_json::Value::Array(view.reports);
                 }
@@ -2066,6 +2094,168 @@ impl RpcService for EngineRpc {
                     out["result"] = view.result.unwrap_or(serde_json::Value::Null);
                 }
                 RpcReply::value(&out)
+            }
+            methods::WORKFLOW_SAVED_LIST => {
+                #[derive(Deserialize)]
+                #[serde(rename_all = "camelCase")]
+                struct Params {
+                    #[serde(default)]
+                    chat_id: Option<String>,
+                    #[serde(default)]
+                    space_id: Option<String>,
+                    #[serde(default)]
+                    all: bool,
+                }
+                let p: Params = parse_params(params)?;
+                let list = self
+                    .workflows()?
+                    .saved_list(
+                        &crate::workflow::SavedContext {
+                            chat_id: p.chat_id,
+                            space_id: p.space_id,
+                        },
+                        p.all,
+                    )
+                    .map_err(RpcError::Failed)?;
+                RpcReply::value(&list)
+            }
+            methods::WORKFLOW_SAVED_GET => {
+                #[derive(Deserialize)]
+                #[serde(rename_all = "camelCase")]
+                struct Params {
+                    name: String,
+                    #[serde(default)]
+                    scope: Option<zeron_proto::SavedScope>,
+                    #[serde(default)]
+                    chat_id: Option<String>,
+                    #[serde(default)]
+                    space_id: Option<String>,
+                }
+                let p: Params = parse_params(params)?;
+                let detail = self
+                    .workflows()?
+                    .saved_get(
+                        &crate::workflow::SavedContext {
+                            chat_id: p.chat_id,
+                            space_id: p.space_id,
+                        },
+                        &p.name,
+                        p.scope,
+                    )
+                    .map_err(RpcError::Failed)?;
+                RpcReply::value(&detail)
+            }
+            methods::WORKFLOW_SAVED_SAVE => {
+                #[derive(Deserialize)]
+                #[serde(rename_all = "camelCase")]
+                struct Params {
+                    chat_id: String,
+                    name: String,
+                    description: String,
+                    #[serde(default)]
+                    when_to_use: Option<String>,
+                    #[serde(default)]
+                    args: Option<serde_json::Value>,
+                    scope: zeron_proto::SavedScope,
+                    #[serde(default)]
+                    from_run: Option<String>,
+                    #[serde(default)]
+                    script: Option<String>,
+                    #[serde(default)]
+                    by_user: bool,
+                    #[serde(default)]
+                    overwrite: bool,
+                }
+                let p: Params = parse_params(params)?;
+                let source = match (p.from_run, p.script) {
+                    (Some(run), None) => crate::workflow::SaveSource::FromRun(run),
+                    (None, Some(script)) => crate::workflow::SaveSource::Script(script),
+                    _ => {
+                        return Err(RpcError::Failed(
+                            "pass exactly one of `fromRun` and `script`".into(),
+                        ));
+                    }
+                };
+                let args = match p.args {
+                    Some(v) => Some(
+                        crate::workflow::parse_args_declaration(&v).map_err(RpcError::Failed)?,
+                    ),
+                    None => None,
+                };
+                let out = self
+                    .workflows()?
+                    .saved_save(
+                        &p.chat_id,
+                        crate::workflow::SaveRequest {
+                            name: p.name,
+                            description: p.description,
+                            when_to_use: p.when_to_use,
+                            args,
+                            scope: p.scope,
+                            source,
+                            by_user: p.by_user,
+                            overwrite: p.overwrite,
+                        },
+                    )
+                    .await
+                    .map_err(|e| RpcError::Failed(e.to_string()))?;
+                RpcReply::value(&serde_json::json!({
+                    "workflow": out.summary,
+                    "path": out.path.to_string_lossy(),
+                    "overwrote": out.overwrote,
+                }))
+            }
+            methods::WORKFLOW_SAVED_DELETE => {
+                #[derive(Deserialize)]
+                #[serde(rename_all = "camelCase")]
+                struct Params {
+                    name: String,
+                    scope: zeron_proto::SavedScope,
+                    #[serde(default)]
+                    chat_id: Option<String>,
+                    #[serde(default)]
+                    space_id: Option<String>,
+                }
+                let p: Params = parse_params(params)?;
+                self.workflows()?
+                    .saved_delete(
+                        &crate::workflow::SavedContext {
+                            chat_id: p.chat_id,
+                            space_id: p.space_id,
+                        },
+                        &p.name,
+                        p.scope,
+                    )
+                    .map_err(RpcError::Failed)?;
+                RpcReply::value(&serde_json::json!({ "deleted": true }))
+            }
+            methods::WORKFLOW_SAVED_RUNS => {
+                #[derive(Deserialize)]
+                #[serde(rename_all = "camelCase")]
+                struct Params {
+                    name: String,
+                    scope: zeron_proto::SavedScope,
+                    #[serde(default)]
+                    chat_id: Option<String>,
+                    #[serde(default)]
+                    space_id: Option<String>,
+                    #[serde(default)]
+                    limit: Option<usize>,
+                }
+                let p: Params = parse_params(params)?;
+                let wf = self.workflows()?;
+                let project = wf
+                    .saved_project(&crate::workflow::SavedContext {
+                        chat_id: p.chat_id,
+                        space_id: p.space_id,
+                    })
+                    .map_err(RpcError::Failed)?;
+                RpcReply::value(&wf.saved_runs(
+                    &p.name,
+                    p.scope,
+                    project.as_ref(),
+                    p.limit.unwrap_or(10).clamp(1, 50),
+                ))
             }
             methods::WATCH_WORKFLOW_ACTIVITY => Ok(RpcReply::Stream(watch_stream(
                 self.workflows()?.watch_activity(),
@@ -4166,6 +4356,20 @@ mod tests {
             MutateParams::ChangeSidebarPin { change: zeron_proto::SidebarPinChange::Move { session_id, before, .. } }
                 if session_id == "chat-b" && before.as_deref() == Some("chat-a")
         ));
+    }
+
+    #[test]
+    fn saved_workflow_methods_follow_the_device_that_owns_the_folders() {
+        for method in [
+            methods::WORKFLOW_SAVED_LIST,
+            methods::WORKFLOW_SAVED_GET,
+            methods::WORKFLOW_SAVED_SAVE,
+            methods::WORKFLOW_SAVED_DELETE,
+            methods::WORKFLOW_SAVED_RUNS,
+        ] {
+            assert!(forwardable(method), "{method}");
+            assert!(!is_stream_method(method), "{method}");
+        }
     }
 
     #[test]

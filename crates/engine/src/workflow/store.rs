@@ -101,6 +101,10 @@ pub struct RunMeta {
     pub stop_reason: Option<WorkflowStopReason>,
     #[serde(default)]
     pub resumed_from: Option<String>,
+    /// The saved workflow this run started from (file text pinned by
+    /// `script_hash`; a resume replays the stored copy, not the file).
+    #[serde(default)]
+    pub saved: Option<zeron_proto::SavedRunRef>,
     /// The completion message was queued into the parent chat.
     #[serde(default)]
     pub delivered: bool,

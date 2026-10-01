@@ -89,11 +89,49 @@ pub struct ApprovalFacts<'a> {
     pub script_hash: &'a str,
     pub draft_path: Option<&'a str>,
     pub script: &'a str,
+    /// Started from a saved workflow.
+    pub saved: Option<&'a zeron_proto::SavedRunRef>,
+    /// What `main(args)` receives; shown when the script takes any.
+    pub args: &'a Value,
+}
+
+/// `name = value` lines for approvals: long values are cut, secrets are not
+/// the engine's to guess (the caller chose these).
+pub fn args_lines(args: &Value, indent: &str) -> Vec<String> {
+    let Some(map) = args.as_object() else {
+        return Vec::new();
+    };
+    map.iter()
+        .take(24)
+        .map(|(k, v)| {
+            let text = match v {
+                Value::String(s) => format!("{s:?}"),
+                other => other.to_string(),
+            };
+            let (shown, cut) = clip_chars(&text, 160);
+            format!("{indent}{k} = {shown}{}", if cut { "…" } else { "" })
+        })
+        .collect()
 }
 
 /// The question text a person approves (graph-free clients show exactly this).
 pub fn approval_text(f: &ApprovalFacts<'_>) -> String {
     let mut out = format!("Run workflow \"{}\"?\n\n", f.name);
+    if let Some(saved) = f.saved {
+        out.push_str(&format!(
+            "Saved workflow: {} ({})\n",
+            saved.name,
+            saved.scope.label().to_lowercase()
+        ));
+    }
+    let arg_lines = args_lines(f.args, "  ");
+    if !arg_lines.is_empty() {
+        out.push_str("Arguments:\n");
+        for l in arg_lines {
+            out.push_str(&l);
+            out.push('\n');
+        }
+    }
     if f.graph.phases.is_empty() {
         out.push_str("Phases: none (the script has no phase markers)\n");
     } else {
@@ -179,6 +217,88 @@ pub fn approval_text(f: &ApprovalFacts<'_>) -> String {
             .unwrap_or_default()
     ));
     out.push_str(&excerpt(f.script, 28));
+    out
+}
+
+/// What a person approves when an agent asks to save a workflow.
+pub struct SaveFacts<'a> {
+    pub name: &'a str,
+    pub scope: zeron_proto::SavedScope,
+    pub path: &'a str,
+    pub replaces: bool,
+    pub description: &'a str,
+    pub when_to_use: Option<&'a str>,
+    pub args: &'a [zeron_proto::SavedArg],
+    /// Another scope has this name too: `(hides, scope)` or `(hidden by, scope)`.
+    pub shadow: Option<(bool, zeron_proto::SavedScope)>,
+    pub graph: &'a WorkflowGraph,
+    pub script: &'a str,
+}
+
+pub fn save_text(f: &SaveFacts<'_>) -> String {
+    let where_ = match f.scope {
+        zeron_proto::SavedScope::Project => "this project's workflows",
+        _ => "your global workflows (every project)",
+    };
+    let mut out = format!(
+        "Save workflow \"{}\" to {where_}?\n\nFile: {}\n",
+        f.name, f.path
+    );
+    if f.replaces {
+        out.push_str("This REPLACES the existing file of that name.\n");
+    }
+    match f.shadow {
+        Some((true, s)) => out.push_str(&format!(
+            "It will hide the {} workflow of the same name here.\n",
+            s.label().to_lowercase()
+        )),
+        Some((false, s)) => out.push_str(&format!(
+            "A {} workflow of the same name takes precedence over it here.\n",
+            s.label().to_lowercase()
+        )),
+        None => {}
+    }
+    out.push_str(&format!("Description: {}\n", f.description));
+    if let Some(w) = f.when_to_use {
+        out.push_str(&format!("When to use: {w}\n"));
+    }
+    if f.args.is_empty() {
+        out.push_str("Arguments: none\n");
+    } else {
+        let list: Vec<String> = f
+            .args
+            .iter()
+            .map(|a| {
+                let mut s = format!("{} ({}", a.name, a.ty.as_str());
+                if a.required {
+                    s.push_str(", required");
+                }
+                if let Some(d) = &a.default {
+                    s.push_str(&format!(", default {d}"));
+                }
+                s.push(')');
+                s
+            })
+            .collect();
+        out.push_str(&format!("Arguments: {}\n", list.join(", ")));
+    }
+    let phases = f.graph.phases.len();
+    let cmds: Vec<&str> = f
+        .graph
+        .commands
+        .iter()
+        .map(|c| c.command.as_str())
+        .collect();
+    out.push_str(&format!(
+        "It runs {phases} phase(s) with {} agent(s); commands: {}\n\n",
+        f.graph.actors.len(),
+        if cmds.is_empty() {
+            "none".to_owned()
+        } else {
+            cmds.join(", ")
+        }
+    ));
+    out.push_str(&excerpt(f.script, 24));
     out
 }
 
@@ -448,6 +568,76 @@ mod tests {
     }
 
     #[test]
+    fn the_approval_names_a_saved_workflow_and_its_arguments() {
+        let graph = WorkflowGraph::default();
+        let args =
+            serde_json::json!({"base": "main", "n": 3, "long": "x".repeat(400), "obj": {"a": [1]}});
+        let saved = zeron_proto::SavedRunRef {
+            name: "pr-review".into(),
+            scope: zeron_proto::SavedScope::Global,
+        };
+        let text = approval_text(&ApprovalFacts {
+            name: "pr-review",
+            graph: &graph,
+            max_concurrency: 4,
+            harness: None,
+            model: None,
+            budgets: &WorkflowBudgets::default(),
+            script_hash: "0123456789abcdef",
+            draft_path: None,
+            script: "def main(args):\n    return 1\n",
+            saved: Some(&saved),
+            args: &args,
+        });
+        assert!(
+            text.contains("Saved workflow: pr-review (global)\n"),
+            "{text}"
+        );
+        assert!(text.contains("Arguments:\n  base = \"main\"\n"), "{text}");
+        assert!(
+            text.contains("  n = 3\n") && text.contains("  obj = {\"a\":[1]}\n"),
+            "{text}"
+        );
+        let long = text
+            .lines()
+            .find(|l| l.trim_start().starts_with("long ="))
+            .unwrap();
+        assert!(long.chars().count() < 200 && long.ends_with('…'), "{long}");
+    }
+
+    #[test]
+    fn the_save_question_describes_what_is_written_and_what_it_replaces() {
+        let graph = WorkflowGraph::default();
+        let args = [zeron_proto::SavedArg {
+            name: "depth".into(),
+            ty: zeron_proto::SavedArgType::Int,
+            required: false,
+            default: Some(serde_json::json!(2)),
+            description: None,
+        }];
+        let text = save_text(&SaveFacts {
+            name: "mine",
+            scope: zeron_proto::SavedScope::Global,
+            path: "/home/u/.zeron/workflows/mine.star",
+            replaces: true,
+            description: "Does it",
+            when_to_use: None,
+            args: &args,
+            shadow: Some((false, zeron_proto::SavedScope::Project)),
+            graph: &graph,
+            script: "def main(args):\n    return 1\n",
+        });
+        assert!(
+            text.starts_with("Save workflow \"mine\" to your global workflows (every project)?"),
+            "{text}"
+        );
+        assert!(text.contains("This REPLACES the existing file"));
+        assert!(text.contains("A project workflow of the same name takes precedence"));
+        assert!(text.contains("Arguments: depth (int, default 2)"));
+        assert!(text.contains("It runs 0 phase(s) with 0 agent(s); commands: none"));
+    }
+
+    #[test]
     fn the_approval_text_names_phases_agents_commands_and_limits() {
         let graph = WorkflowGraph {
             phases: vec![GraphPhase {
@@ -483,8 +673,11 @@ mod tests {
             script_hash: "0123456789abcdef",
             draft_path: Some(".zeron/workflow-drafts/x.star"),
             script: "def main(args):\n    return 1\n",
+            saved: None,
+            args: &Value::Null,
         });
         assert!(text.contains("Run workflow \"PR review\"?"));
+        assert!(!text.contains("Arguments:") && !text.contains("Saved workflow"));
         assert!(text.contains("Phases: review (2)"));
         assert!(text.contains("Agents (1): security [codex]"));
         assert!(text.contains("$ cargo test  (may repeat)"));

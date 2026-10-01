@@ -562,6 +562,8 @@ mod tests {
             harness: Some("claude".into()),
             model: None,
             excerpt: "def main(args):\n    phase(\"review\")\n".into(),
+            saved: None,
+            args: serde_json::Value::Null,
         }
     }
 

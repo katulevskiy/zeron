@@ -93,6 +93,26 @@ pub mod methods {
     pub const WORKFLOW_ARTIFACT_DATA: &str = "WorkflowArtifactData";
     /// A page of an artifact: `{runId, artifactId, version?, offset?, limit?}`.
     pub const WORKFLOW_ARTIFACT_READ: &str = "WorkflowArtifactRead";
+    /// Saved workflows (`docs/workflows.md` → "Saved workflows"); capability
+    /// `workflows-saved-v1`. All address the device that owns the folders
+    /// (`targetDeviceId`), like the rest of a chat's surface.
+    ///
+    /// List: `{chatId?, spaceId?, all?}` → `SavedWorkflowList`. `chatId` /
+    /// `spaceId` name the project; `all` lists every project on the device.
+    pub const WORKFLOW_SAVED_LIST: &str = "WorkflowSavedList";
+    /// One workflow with script and analysis: `{name, scope?, chatId?,
+    /// spaceId?}` → `SavedWorkflowDetail`.
+    pub const WORKFLOW_SAVED_GET: &str = "WorkflowSavedGet";
+    /// Write a file: `{chatId, name, description, whenToUse?, args?, scope,
+    /// fromRun? | script, byUser?, overwrite?}` → `{workflow, path, overwrote}`.
+    /// Without `byUser` the chat's user is asked first (a question on its live
+    /// turn).
+    pub const WORKFLOW_SAVED_SAVE: &str = "WorkflowSavedSave";
+    /// `{name, scope, chatId?, spaceId?}` → `{deleted}`.
+    pub const WORKFLOW_SAVED_DELETE: &str = "WorkflowSavedDelete";
+    /// Recent runs of one saved workflow: `{name, scope, chatId?, spaceId?,
+    /// limit?}` → `[WorkflowRunHeader]`, newest first.
+    pub const WORKFLOW_SAVED_RUNS: &str = "WorkflowSavedRuns";
     /// Stream of `WorkflowActivity`: every locally hosted chat's runs as
     /// briefs (header + pending-question count), for the sidebar's run lines.
     pub const WATCH_WORKFLOW_ACTIVITY: &str = "WatchWorkflowActivity";

@@ -384,6 +384,13 @@ pub struct WorkflowRunHeader {
     pub stop_detail: Option<String>,
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub resumed_from: Option<String>,
+    /// The saved workflow this run was started from, and where it lives
+    /// (`docs/workflows.md` → "Saved workflows"). Lets a UI list a workflow's
+    /// recent runs and offer "Run again".
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub saved_name: Option<String>,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub saved_scope: Option<crate::SavedScope>,
     #[serde(default)]
     pub script_hash: String,
     #[serde(default)]
@@ -825,6 +832,9 @@ pub enum WorkflowEventKind {
         graph: Option<WorkflowGraph>,
         #[serde(default)]
         concurrency_ceiling: u32,
+        /// Started from a saved workflow.
+        #[serde(default)]
+        saved: Option<crate::SavedRunRef>,
     },
     /// Approved and executing.
     RunLaunched {
@@ -1122,6 +1132,13 @@ pub struct WorkflowApprovalMeta {
     /// First lines of the script.
     #[serde(default)]
     pub excerpt: String,
+    /// Started from a saved workflow: which one, so the block can say so.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub saved: Option<crate::SavedRunRef>,
+    /// The arguments `main(args)` will receive (defaults filled). Null when
+    /// the script takes none.
+    #[serde(default, skip_serializing_if = "serde_json::Value::is_null")]
+    pub args: serde_json::Value,
 }
 
 #[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize, Default)]
@@ -1309,6 +1326,47 @@ mod tests {
     }
 
     #[test]
+    fn saved_fields_are_additive_on_the_header_and_the_approval_payload() {
+        let header: WorkflowRunHeader =
+            serde_json::from_str(r#"{"runId":"r","name":"n","chatId":"c"}"#).unwrap();
+        assert_eq!((header.saved_name, header.saved_scope), (None, None));
+        let mut header = WorkflowRunHeader::default();
+        header.saved_name = Some("pr-review".into());
+        header.saved_scope = Some(crate::SavedScope::Project);
+        let json = serde_json::to_value(&header).unwrap();
+        assert_eq!(json["savedName"], "pr-review");
+        assert_eq!(json["savedScope"], "project");
+        // Unsaved runs stay as small as before.
+        let plain = serde_json::to_value(WorkflowRunHeader::default()).unwrap();
+        assert!(plain.get("savedName").is_none() && plain.get("savedScope").is_none());
+
+        let old: WorkflowApprovalMeta = serde_json::from_value(serde_json::json!({
+            "runId": "r", "name": "n", "scriptHash": "h", "graph": {"phases": [], "actors": [], "commands": []},
+            "maxConcurrency": 2
+        }))
+        .unwrap();
+        assert!(old.saved.is_none() && old.args.is_null());
+        let with = WorkflowApprovalMeta {
+            saved: Some(crate::SavedRunRef {
+                name: "x".into(),
+                scope: crate::SavedScope::Builtin,
+            }),
+            args: serde_json::json!({"a": 1}),
+            ..old
+        };
+        let json = serde_json::to_value(&with).unwrap();
+        assert_eq!(
+            json["saved"],
+            serde_json::json!({"name": "x", "scope": "builtin"})
+        );
+        assert_eq!(json["args"], serde_json::json!({"a": 1}));
+        assert_eq!(
+            serde_json::from_value::<WorkflowApprovalMeta>(json).unwrap(),
+            with
+        );
+    }
+
+    #[test]
     fn briefs_carry_the_header_and_the_question_count_and_round_trip() {
         let mut r = run("r1");
         r.header.status = WorkflowStatus::Running;
@@ -1434,6 +1492,8 @@ mod tests {
             harness: None,
             model: None,
             excerpt: String::new(),
+            saved: None,
+            args: serde_json::Value::Null,
         };
         let back: WorkflowApprovalMeta =
             serde_json::from_value(serde_json::to_value(&meta).unwrap()).unwrap();

@@ -46,6 +46,7 @@ impl Log {
                 ..Default::default()
             }),
             concurrency_ceiling: 8,
+            saved: None,
         })
     }
 
@@ -643,4 +644,35 @@ fn a_two_hundred_node_run_writes_small_deltas() {
         "200-node run: {} deltas, {total} bytes, largest {largest}",
         deltas.len()
     );
+}
+
+#[test]
+fn a_run_created_from_a_saved_workflow_carries_it_in_the_header_and_old_events_still_load() {
+    let mut log = Log::new("r1");
+    log.push(WorkflowEventKind::RunCreated {
+        name: "pr-review".into(),
+        chat_id: "chat".into(),
+        script_hash: "h".into(),
+        resumed_from: None,
+        graph: None,
+        concurrency_ceiling: 4,
+        saved: Some(zeron_proto::SavedRunRef {
+            name: "pr-review".into(),
+            scope: zeron_proto::SavedScope::Global,
+        }),
+    });
+    let (state, _) = fold(&log.events);
+    let h = &state.runs[0].header;
+    assert_eq!(h.saved_name.as_deref(), Some("pr-review"));
+    assert_eq!(h.saved_scope, Some(zeron_proto::SavedScope::Global));
+
+    // A journal written before saved workflows existed has no such field.
+    let old =
+        r#"{"type":"runCreated","name":"x","chatId":"c","scriptHash":"h","concurrencyCeiling":2}"#;
+    let kind: WorkflowEventKind = serde_json::from_str(old).unwrap();
+    let mut log = Log::new("r2");
+    log.push(kind);
+    let (state, _) = fold(&log.events);
+    assert_eq!(state.runs[0].header.saved_name, None);
+    assert_eq!(state.runs[0].header.saved_scope, None);
 }

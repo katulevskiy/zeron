@@ -23,6 +23,8 @@ mod faults;
 mod governor;
 mod projection;
 mod prompts;
+pub mod saved;
+mod saved_ops;
 pub mod store;
 mod world;
 
@@ -36,9 +38,10 @@ use serde_json::{Value, json};
 use sha2::{Digest, Sha256};
 use tokio::sync::broadcast;
 use zeron_proto::{
-    HarnessId, MessageOrigin, UserInputQuestion, WORKFLOW_APPROVAL_META_KIND, WorkflowApprovalMeta,
-    WorkflowBudgets, WorkflowEvent, WorkflowEventKind, WorkflowEventMarker, WorkflowGraph,
-    WorkflowRun, WorkflowRunHeader, WorkflowRunsState, WorkflowStatus, WorkflowStopReason,
+    HarnessId, MessageOrigin, SavedRunRef, SavedScope, UserInputQuestion,
+    WORKFLOW_APPROVAL_META_KIND, WorkflowApprovalMeta, WorkflowBudgets, WorkflowEvent,
+    WorkflowEventKind, WorkflowEventMarker, WorkflowGraph, WorkflowRun, WorkflowRunHeader,
+    WorkflowRunsState, WorkflowStatus, WorkflowStopReason,
 };
 use zeron_workflow::{Analysis, Diagnostic, Limits, RunError, analyze, run_script};
 
@@ -46,6 +49,9 @@ use self::core::{Defaults, RunCore, StopInfo};
 pub use self::faults::{Fault, backoff, classify};
 pub use self::governor::{Gate, Governor};
 pub use self::projection::{BATCH as PROJECTION_BATCH, Projection, ProjectionStats};
+pub use self::saved_ops::{
+    SaveError, SaveOutcome, SaveRequest, SaveSource, SavedContext, parse_args_declaration,
+};
 use self::store::{ArtifactChunk, ArtifactIndex, RunMeta, RunOptions, StoreError, WorkflowStore};
 use crate::sessions::SessionsEngine;
 use crate::workspace_host::WorkspaceHost;
@@ -61,6 +67,8 @@ pub const DEFAULT_MAX_ASKS: u32 = 500;
 pub const DRAFT_DIR: &str = ".zeron/workflow-drafts";
 /// Answer label that approves a workflow.
 pub const APPROVE_LABEL: &str = "Run workflow";
+/// Answer label that approves saving a workflow file.
+pub const SAVE_LABEL: &str = "Save workflow";
 pub const DENY_LABEL: &str = "Deny";
 
 // ── seams ─────────────────────────────────────────────────────────────────
@@ -94,6 +102,8 @@ pub struct SessionsApprover {
 #[async_trait]
 impl Approver for SessionsApprover {
     async fn approve(&self, chat_id: &str, question: UserInputQuestion) -> Approval {
+        // The first option is the "yes" (`Run workflow`, `Save workflow`).
+        let approve_label = question.options.first().cloned().unwrap_or_default();
         let Some(rx) = self.sessions.request_input(chat_id, vec![question]) else {
             return Approval::Denied(
                 "approval needs the chat's active turn: start the workflow from inside the chat"
@@ -104,7 +114,7 @@ impl Approver for SessionsApprover {
             Ok(Ok(answers))
                 if answers
                     .iter()
-                    .any(|a| a.labels.iter().any(|l| l == APPROVE_LABEL)) =>
+                    .any(|a| a.labels.iter().any(|l| l == &approve_label)) =>
             {
                 Approval::Approved
             }
@@ -114,7 +124,7 @@ impl Approver for SessionsApprover {
                 "the approval was cancelled: the chat's turn was interrupted or ended before the question was answered"
                     .into(),
             ),
-            Ok(Ok(_)) => Approval::Denied("the user denied the workflow".into()),
+            Ok(Ok(_)) => Approval::Denied("the user denied it".into()),
             Ok(Err(_)) => Approval::Denied(
                 "the approval question was lost (the turn ended before it was answered)".into(),
             ),
@@ -183,6 +193,21 @@ pub struct StartRequest {
     pub model: Option<String>,
     pub reasoning: Option<String>,
     pub budgets: WorkflowBudgets,
+    /// Start a saved workflow instead of `script` / `path`.
+    pub saved: Option<SavedStart>,
+    /// A person started it (a launcher click, `/workflow`): the click is the
+    /// approval, since no agent turn exists to carry the question. Honoured
+    /// only together with `saved` — an agent's script is never auto-approved.
+    pub by_user: bool,
+}
+
+/// Which saved workflow to start and with what.
+#[derive(Debug, Clone, Default)]
+pub struct SavedStart {
+    pub name: String,
+    /// Look only in this scope; unset = project, then global, then built-in.
+    pub scope: Option<SavedScope>,
+    pub args: Value,
 }
 
 #[derive(Debug, thiserror::Error)]
@@ -220,6 +245,10 @@ pub enum WorkflowError {
 #[derive(Debug, Clone)]
 pub struct RunView {
     pub run: WorkflowRun,
+    /// The arguments the script received.
+    pub args: Value,
+    /// The saved workflow it came from.
+    pub saved: Option<SavedRunRef>,
     /// The script's full return value, when it finished with one.
     pub result: Option<Value>,
     /// Every `report()` item in full.
@@ -255,6 +284,7 @@ pub(crate) struct Shared {
     pub catalog: Mutex<Arc<dyn Catalog>>,
     pub events_tx: broadcast::Sender<WorkflowEvent>,
     pub tuning: Mutex<Tuning>,
+    pub saved: Mutex<saved::SavedStore>,
 }
 
 #[derive(Clone)]
@@ -334,6 +364,7 @@ impl WorkflowService {
                 })),
                 events_tx,
                 tuning: Mutex::new(Tuning::default()),
+                saved: Mutex::new(saved::SavedStore::new(saved::default_global_dir())),
                 doc_host,
                 sessions,
                 workspace,
@@ -408,34 +439,69 @@ impl WorkflowService {
                     "the chat's project folder is not available on this device".into(),
                 )
             })?;
-        let (script, label) = match (&req.script, &req.path) {
-            (Some(s), None) => (s.clone(), "workflow.star".to_owned()),
-            (None, Some(path)) => {
+        let mut saved_ref: Option<SavedRunRef> = None;
+        let mut saved_args: Option<Value> = None;
+        let mut saved_path: Option<String> = None;
+        let (script, label) = match (&req.script, &req.path, &req.saved) {
+            (Some(s), None, None) => (s.clone(), "workflow.star".to_owned()),
+            (None, Some(path), None) => {
                 let full = store::confine(&root, path).map_err(StartError::Invalid)?;
                 let text = std::fs::read_to_string(&full)
                     .map_err(|e| StartError::Invalid(format!("could not read {path:?}: {e}")))?;
                 (text, path.clone())
             }
+            (None, None, Some(sv)) => {
+                // Resolve, then validate the arguments BEFORE anything is
+                // shown to a person: a call that cannot run is not worth an
+                // approval, and the caller fixes it from the error.
+                let store = lock(&self.shared.saved).clone();
+                let project = saved::ProjectRef {
+                    root: root.clone(),
+                    space_id: None,
+                };
+                let loaded = store
+                    .resolve(&sv.name, sv.scope, Some(&project))
+                    .map_err(|e| StartError::Invalid(e.to_string()))?;
+                let args = zeron_proto::validate_args(&loaded.summary.args, &sv.args)
+                    .map_err(|errors| StartError::Invalid(errors.join("\n")))?;
+                saved_ref = Some(SavedRunRef {
+                    name: loaded.summary.name.clone(),
+                    scope: loaded.summary.scope,
+                });
+                saved_args = Some(args);
+                saved_path = loaded.summary.path.as_deref().map(|p| {
+                    Path::new(p)
+                        .strip_prefix(&root)
+                        .map_or_else(|_| p.to_owned(), |r| r.to_string_lossy().into_owned())
+                });
+                (loaded.text, format!("{}.star", sv.name))
+            }
             _ => {
                 return Err(StartError::Invalid(
-                    "pass exactly one of `script` and `path`".into(),
+                    "pass exactly one of `script`, `path` and `saved`".into(),
                 ));
             }
         };
         let analysis = analyze(&label, &script).map_err(StartError::Diagnostics)?;
-        let args = match req.args.clone() {
-            Value::Null => json!({}),
-            v @ Value::Object(_) => v,
-            _ => return Err(StartError::Invalid("`args` must be an object".into())),
+        let args = match saved_args {
+            Some(args) => args,
+            None => match req.args.clone() {
+                Value::Null => json!({}),
+                v @ Value::Object(_) => v,
+                _ => return Err(StartError::Invalid("`args` must be an object".into())),
+            },
         };
         let name = sanitize_name(
-            req.name.as_deref().unwrap_or(match &req.path {
-                Some(p) => Path::new(p)
-                    .file_stem()
-                    .and_then(|s| s.to_str())
-                    .unwrap_or("workflow"),
-                None => "workflow",
-            }),
+            req.name
+                .as_deref()
+                .or(saved_ref.as_ref().map(|s| s.name.as_str()))
+                .unwrap_or(match &req.path {
+                    Some(p) => Path::new(p)
+                        .file_stem()
+                        .and_then(|s| s.to_str())
+                        .unwrap_or("workflow"),
+                    None => "workflow",
+                }),
         );
         let defaults = defaults_for(&self.shared.workspace, chat_id);
         // Validate what the caller picked up front, with a clear error.
@@ -456,7 +522,13 @@ impl WorkflowService {
         budgets.max_asks.get_or_insert(DEFAULT_MAX_ASKS);
         let script_hash = sha_hex(script.as_bytes());
         let args_hash = sha_hex(serde_json::to_string(&args).unwrap_or_default().as_bytes());
-        let draft_path = self.write_draft(&root, &name, &script_hash, &script);
+        // A saved workflow already is a file the person can open; drafting a
+        // copy would only add a second one to keep in sync.
+        let draft_path = if saved_ref.is_some() {
+            saved_path
+        } else {
+            self.write_draft(&root, &name, &script_hash, &script)
+        };
         let meta = RunMeta {
             run_id: new_id(),
             chat_id: chat_id.to_owned(),
@@ -474,6 +546,7 @@ impl WorkflowService {
             project_root: root.to_string_lossy().into_owned(),
             draft_path: draft_path.clone(),
             created_at: crate::now_ms(),
+            saved: saved_ref.clone(),
             ..RunMeta::default()
         };
         let outcome = StartOutcome {
@@ -491,7 +564,7 @@ impl WorkflowService {
             defaults,
             store::Replay::default(),
             0,
-            false,
+            req.by_user && saved_ref.is_some(),
         )
         .await?;
         Ok(outcome)
@@ -546,6 +619,7 @@ impl WorkflowService {
             resumed_from: meta.resumed_from.clone(),
             graph: Some(analysis.graph.clone()),
             concurrency_ceiling: meta.options.max_concurrency,
+            saved: meta.saved.clone(),
         });
         let auto = shared
             .sessions
@@ -951,6 +1025,8 @@ impl WorkflowService {
                     status: meta.status,
                     stop_reason: meta.stop_reason,
                     resumed_from: meta.resumed_from.clone(),
+                    saved_name: meta.saved.as_ref().map(|s| s.name.clone()),
+                    saved_scope: meta.saved.as_ref().map(|s| s.scope),
                     script_hash: meta.script_hash.clone(),
                     created_at: meta.created_at,
                     ..WorkflowRunHeader::default()
@@ -975,6 +1051,8 @@ impl WorkflowService {
             .ok_or_else(|| WorkflowError::NoRun(run_id.to_owned()))?;
         Ok(RunView {
             run,
+            args: meta.args.clone(),
+            saved: meta.saved.clone(),
             result: replay.result,
             reports: replay
                 .reports
@@ -1117,6 +1195,8 @@ fn approval_question(
         script_hash: &meta.script_hash,
         draft_path: meta.draft_path.as_deref(),
         script,
+        saved: meta.saved.as_ref(),
+        args: &meta.args,
     });
     let approval = WorkflowApprovalMeta {
         run_id: meta.run_id.clone(),
@@ -1129,6 +1209,11 @@ fn approval_question(
         harness,
         model,
         excerpt: prompts::excerpt(script, 40),
+        saved: meta.saved.clone(),
+        args: match &meta.args {
+            Value::Object(o) if !o.is_empty() => meta.args.clone(),
+            _ => Value::Null,
+        },
     };
     let mut meta_json = serde_json::to_value(&approval).unwrap_or(Value::Null);
     if let Some(o) = meta_json.as_object_mut() {

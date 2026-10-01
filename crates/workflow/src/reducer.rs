@@ -226,9 +226,12 @@ fn apply(run: &mut WorkflowRun, event: &WorkflowEvent, t: &mut Touch) {
             resumed_from,
             graph,
             concurrency_ceiling,
+            saved,
         } => {
             let h = &mut run.header;
             h.name = name.clone();
+            h.saved_name = saved.as_ref().map(|s| s.name.clone());
+            h.saved_scope = saved.as_ref().map(|s| s.scope);
             h.chat_id = chat_id.clone();
             h.status = WorkflowStatus::Pending;
             h.script_hash = script_hash.clone();
