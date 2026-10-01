@@ -1327,7 +1327,6 @@ impl RunCore {
         self.emit_usage();
     }
 
-
     pub(super) fn begin_budget_timer(&self) -> Option<tokio::task::JoinHandle<()>> {
         let secs = self.meta().options.budgets.max_runtime_seconds?;
         let me = self.me();

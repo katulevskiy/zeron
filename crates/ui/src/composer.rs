@@ -4994,7 +4994,9 @@ impl Render for ComposerInput {
 pub enum ComposerEvent {
     WorkspaceCommand(WorkspaceCommand),
     /// Open another chat (the goal tray's link to a verifier chat).
-    OpenChat { chat_id: String },
+    OpenChat {
+        chat_id: String,
+    },
     /// Arm the shared-element transition before the draft route is replaced
     /// by the newly-created session. Emitting this before `select_chat` keeps
     /// the first destination frame on the same timeline as the source frame.
@@ -8277,7 +8279,8 @@ impl Composer {
 
         // Optimistic echo (client-minted id doubles as the persisted message id,
         // so the doc frame dedups it away).
-        let echo = SessionMessageEntry { origin: None,
+        let echo = SessionMessageEntry {
+            origin: None,
             id: message_id.clone(),
             role: zeron_doc::MessageRole::User,
             parts: vec![MessagePart::Text {
@@ -10160,10 +10163,10 @@ impl Render for Composer {
         let todo_panel = self.render_todo_panel(has_queue, window, cx);
         // The goal tray tops the stack, one step narrower than each tray below.
         let below = usize::from(has_queue) + usize::from(todo_panel.is_some());
-        let container = container.when_some(
-            self.render_goal_panel(below, window, cx),
-            |el, panel| el.child(motion::fade_quick("composer-goal", div().child(panel))),
-        );
+        let container = container
+            .when_some(self.render_goal_panel(below, window, cx), |el, panel| {
+                el.child(motion::fade_quick("composer-goal", div().child(panel)))
+            });
         let container = container.when_some(todo_panel, |el, panel| {
             el.child(motion::fade_quick("composer-todo", div().child(panel)))
         });
@@ -15043,7 +15046,8 @@ mod tests {
             let mut q = question("editor", &[], false);
             q.prefill = Some("  initial\ntext\n".into());
             q.multiline = true;
-            vec![SessionMessageEntry { origin: None,
+            vec![SessionMessageEntry {
+                origin: None,
                 id: "assistant".into(),
                 role: MessageRole::Assistant,
                 parts: vec![MessagePart::Input {
@@ -15114,7 +15118,8 @@ mod tests {
             questions: vec![question("q", &["a"], false)],
             resolved: false,
         };
-        let entry = |status: Option<MessageStatus>, parts: Vec<MessagePart>| SessionMessageEntry { origin: None,
+        let entry = |status: Option<MessageStatus>, parts: Vec<MessagePart>| SessionMessageEntry {
+            origin: None,
             id: "m".into(),
             role: MessageRole::Assistant,
             parts,
@@ -15148,7 +15153,8 @@ mod tests {
         // A NEWER assistant entry supersedes an unanswered question.
         let t = vec![
             entry(Some(MessageStatus::Aborted), vec![input_part.clone()]),
-            SessionMessageEntry { origin: None,
+            SessionMessageEntry {
+                origin: None,
                 id: "m2".into(),
                 role: MessageRole::Assistant,
                 parts: vec![MessagePart::Text {
@@ -15181,7 +15187,8 @@ mod tests {
         // AFTER the streaming assistant entry — the question must still be
         // found (a last-entry-only read vanished the panel exactly when the
         // user typed, bricking the answer flow).
-        let user_echo = SessionMessageEntry { origin: None,
+        let user_echo = SessionMessageEntry {
+            origin: None,
             id: "u2".into(),
             role: MessageRole::User,
             parts: vec![MessagePart::Text {

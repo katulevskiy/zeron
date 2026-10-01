@@ -20,8 +20,8 @@ mod ask;
 mod goals;
 mod jsonrpc;
 mod tools;
-mod workflows;
 mod transcript;
+mod workflows;
 mod zeron;
 
 pub use jsonrpc::serve_stdio;
