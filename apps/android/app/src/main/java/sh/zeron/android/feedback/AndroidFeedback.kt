@@ -1,13 +1,10 @@
 package sh.zeron.android.feedback
 
-import android.app.NotificationManager
 import android.content.BroadcastReceiver
 import android.content.Context
 import android.content.Intent
 import android.content.IntentFilter
 import android.content.pm.ApplicationInfo
-import android.database.ContentObserver
-import android.media.AudioManager
 import android.os.Build
 import android.os.Handler
 import android.os.Looper
@@ -17,7 +14,6 @@ import android.os.VibrationAttributes
 import android.os.VibrationEffect
 import android.os.Vibrator
 import android.os.VibratorManager
-import android.provider.Settings
 import android.util.Log
 import android.view.View
 import androidx.core.content.ContextCompat
@@ -29,95 +25,49 @@ object AppFeedback {
     var current: Feedback = NoFeedback
 }
 
-/** One read of everything the system says about feedback; cached by [SystemEnvironment]. */
-private class SystemSnapshot(
-    val interactive: Boolean,
-    val touchHaptics: Boolean,
-    val touchSounds: Boolean,
-    val ringerNormal: Boolean,
-    val dnd: Boolean,
-    val streamAudible: Boolean,
-)
-
 /**
- * The real [FeedbackEnvironment]: the activity lifecycle plus the system's sound, vibration and DND state.
+ * The real [FeedbackEnvironment]: the activity lifecycle plus whether the screen is interactive.
  *
- * The system state costs several binder calls and settings reads, which would sit on the tap-to-sound path
- * if made per event. It is read into one snapshot that lives [TTL_MS] and is dropped at once when the system
- * says it changed (ringer, volume, interruption filter, screen, the two touch settings; see [watch]).
+ * Nothing about the phone's sound, touch-feedback, ringer or Do Not Disturb settings is read any more: the in-app
+ * switches decide (see [FeedbackGate]). What is left, `PowerManager.isInteractive`, is one binder call, so it is
+ * cached for [TTL_MS] and dropped at once by the screen on / off broadcasts (registered only while foregrounded).
  */
 class SystemEnvironment(private val context: Context, val vibrator: Vibrator?, clock: () -> Long = SystemClock::uptimeMillis) : FeedbackEnvironment {
-    private val audio = context.getSystemService(AudioManager::class.java)
     private val power = context.getSystemService(PowerManager::class.java)
-    private val notifications = context.getSystemService(NotificationManager::class.java)
-    private val main = Handler(Looper.getMainLooper())
 
     @Volatile
     var foreground = false
 
-    private val snapshot = TtlValue(TTL_MS, clock) { read() }
+    private val interactive = TtlValue(TTL_MS, clock) { power?.isInteractive != false }
     private val motor: Boolean by lazy { vibrator?.hasVibrator() == true }
 
-    private fun read() = SystemSnapshot(
-        interactive = power?.isInteractive != false,
-        touchHaptics = Settings.System.getInt(context.contentResolver, Settings.System.HAPTIC_FEEDBACK_ENABLED, 1) != 0,
-        touchSounds = Settings.System.getInt(context.contentResolver, Settings.System.SOUND_EFFECTS_ENABLED, 1) != 0,
-        ringerNormal = audio?.ringerMode.let { it != AudioManager.RINGER_MODE_SILENT && it != AudioManager.RINGER_MODE_VIBRATE },
-        dnd = when (notifications?.currentInterruptionFilter) {
-            NotificationManager.INTERRUPTION_FILTER_NONE, NotificationManager.INTERRUPTION_FILTER_ALARMS -> true
-            else -> false
-        },
-        streamAudible = audio == null || audio.getStreamVolume(AudioManager.STREAM_SYSTEM) > 0,
-    )
-
-    override val active: Boolean get() = foreground && snapshot.get().interactive
-    override val systemTouchHaptics: Boolean get() = snapshot.get().touchHaptics
-    override val systemTouchSounds: Boolean get() = snapshot.get().touchSounds
-    override val ringerNormal: Boolean get() = snapshot.get().ringerNormal
-    override val silencedByDnd: Boolean get() = snapshot.get().dnd
+    override val active: Boolean get() = foreground && interactive.get()
     override val hasVibrator: Boolean get() = motor
-    override val streamAudible: Boolean get() = snapshot.get().streamAudible
-
-    /** Drop the cache: the Settings page reads the truth, and coming back to the foreground starts fresh. */
-    fun refresh() = snapshot.invalidate()
 
     private val receiver = object : BroadcastReceiver() {
-        override fun onReceive(context: Context?, intent: Intent?) = snapshot.invalidate()
-    }
-    private val observer = object : ContentObserver(main) {
-        override fun onChange(selfChange: Boolean) = snapshot.invalidate()
+        override fun onReceive(context: Context?, intent: Intent?) = interactive.invalidate()
     }
     private var watching = false
 
-    /** Keep the snapshot exact while the app is in the foreground; costs nothing in the background. */
+    /** Keep the screen state exact while the app is in the foreground; costs nothing in the background. */
     fun watch(on: Boolean) {
         if (on == watching) return
         watching = on
         if (on) {
             val filter = IntentFilter().apply {
-                addAction(AudioManager.RINGER_MODE_CHANGED_ACTION)
-                addAction(VOLUME_CHANGED_ACTION)
-                addAction(NotificationManager.ACTION_INTERRUPTION_FILTER_CHANGED)
                 addAction(Intent.ACTION_SCREEN_ON)
                 addAction(Intent.ACTION_SCREEN_OFF)
             }
             ContextCompat.registerReceiver(context, receiver, filter, ContextCompat.RECEIVER_NOT_EXPORTED)
-            for (name in listOf(Settings.System.HAPTIC_FEEDBACK_ENABLED, Settings.System.SOUND_EFFECTS_ENABLED)) {
-                context.contentResolver.registerContentObserver(Settings.System.getUriFor(name), false, observer)
-            }
-            snapshot.invalidate()
+            interactive.invalidate()
         } else {
             runCatching { context.unregisterReceiver(receiver) }
-            context.contentResolver.unregisterContentObserver(observer)
         }
     }
 
     companion object {
         /** Safety net behind the broadcasts: nothing stays stale longer than this. */
         const val TTL_MS = 2_000L
-
-        /** `AudioManager.VOLUME_CHANGED_ACTION` is hidden; the string is stable. */
-        private const val VOLUME_CHANGED_ACTION = "android.media.VOLUME_CHANGED_ACTION"
     }
 }
 
@@ -202,7 +152,7 @@ class AndroidFeedback(
      * running by the time the click that sounds arrives; see [WarmPolicy].
      */
     fun onTouchDown() {
-        if (!env.foreground || !store.current.sounds) return
+        if (!env.foreground || !store.current.soundsOn) return
         warm.touch()
         if (!warming) {
             warming = bank.keepWarm(true)
@@ -259,12 +209,6 @@ class AndroidFeedback(
     fun preview(haptic: Haptic?, cue: Cue?, step: Int = 0) {
         cue?.let { claims.claimCue(); play(it, step, preview = true) }
         haptic?.let { claims.claimHaptic(); play(it, preview = true) }
-    }
-
-    /** What the system is doing to this app's feedback right now, for the Settings page (empty when nothing). Reads fresh. */
-    fun systemNotes(): List<SystemNote> {
-        env.refresh()
-        return SystemNotes.build(env, store.current)
     }
 
     /** How richly this vibration motor renders haptics, for the Settings page. */

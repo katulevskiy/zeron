@@ -27,7 +27,7 @@ class CueTableTest {
     }
 
     @Test fun sessionCuesAreTheDesktopChimes() {
-        // In-app copies of the desktop chimes (mono, trimmed, boosted); the notification channels keep fx_done & co.
+        // In-app copies of the desktop chimes (mono, trimmed, mastered); the notification channels play the same files.
         assertEquals("fx_chime_done", CueTable.spec(Cue.Done).resource)
         assertEquals("fx_chime_request", CueTable.spec(Cue.Request).resource)
         assertEquals("fx_chime_attention", CueTable.spec(Cue.Attention).resource)
