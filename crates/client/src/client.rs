@@ -170,8 +170,7 @@ impl ClientInner {
             &send_states,
             &chip_subagents,
             synced,
-        )
-        {
+        ) {
             self.events.workspace(revision);
             // Host presence / live status feed every open session's snapshot
             // (working flag) and composer; `refresh` is O(1) when no doc

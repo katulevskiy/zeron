@@ -234,12 +234,14 @@ impl Rig {
     }
 }
 
-
 /// What the phone's Sessions list would draw for the chat right now.
 fn seen(phone: &Client) -> (String, u32) {
-    phone.workspace().session(CHAT).map_or(("none".into(), 0), |s| {
-        (format!("{:?}", s.indicator), s.running_subagents)
-    })
+    phone
+        .workspace()
+        .session(CHAT)
+        .map_or(("none".into(), 0), |s| {
+            (format!("{:?}", s.indicator), s.running_subagents)
+        })
 }
 
 async fn phone_sees(phone: &Client, what: &str, indicator: &str, count: u32) {
@@ -269,7 +271,13 @@ async fn count_follows_children_through_wake_turns_and_respawns() {
     let rig = Rig::start().await;
     let phone = rig.phone();
     rig.dispatch().await;
-    for ev in [spawn("a"), chatter("a"), spawn("b"), chatter("b"), parent_done()] {
+    for ev in [
+        spawn("a"),
+        chatter("a"),
+        spawn("b"),
+        chatter("b"),
+        parent_done(),
+    ] {
         rig.feed.send(ev).await;
     }
     phone_sees(&phone, "two children, main parked", "Completed", 2).await;
@@ -317,7 +325,13 @@ async fn count_follows_children_through_wake_turns_and_respawns() {
 async fn quiet_children_keep_the_row_fresh_past_the_staleness_window() {
     let rig = Rig::start().await;
     rig.dispatch().await;
-    for ev in [spawn("a"), spawn("b"), chatter("a"), chatter("b"), parent_done()] {
+    for ev in [
+        spawn("a"),
+        spawn("b"),
+        chatter("a"),
+        chatter("b"),
+        parent_done(),
+    ] {
         rig.feed.send(ev).await;
     }
     wait_for("host counts two", || {

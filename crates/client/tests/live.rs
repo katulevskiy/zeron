@@ -1106,7 +1106,10 @@ fn host_transcript_with_chips(
         .push_message(&SessionMessageEntry {
             id: "parent-turn".into(),
             role: MessageRole::Assistant,
-            parts: chips.iter().map(|(id, status)| spawn(id, *status)).collect(),
+            parts: chips
+                .iter()
+                .map(|(id, status)| spawn(id, *status))
+                .collect(),
             created_at: zeron_client_now(),
             device_id: HOST.into(),
             status: Some(zeron_doc::MessageStatus::Complete),
@@ -1115,7 +1118,11 @@ fn host_transcript_with_chips(
         })
         .unwrap();
     host_doc.commit();
-    edge.inject(chat, HOST, host_doc.export(ExportMode::all_updates()).unwrap());
+    edge.inject(
+        chat,
+        HOST,
+        host_doc.export(ExportMode::all_updates()).unwrap(),
+    );
     (host_doc, session)
 }
 
@@ -1145,18 +1152,29 @@ async fn legacy_host_rows_take_their_subagent_count_from_a_warm_chats_chips() {
 
     let edge = MockEdge::start().await;
     let host = HostRegistry::start(&edge).await;
-    host.doc.lock().unwrap().upsert_session(&legacy_idle_row(CHAT)).unwrap();
+    host.doc
+        .lock()
+        .unwrap()
+        .upsert_session(&legacy_idle_row(CHAT))
+        .unwrap();
     host.client.nudge();
     let (host_doc, session) = host_transcript_with_chips(
         &edge,
         CHAT,
-        &[("a", Some(Running)), ("b", Some(Running)), ("c", Some(Done))],
+        &[
+            ("a", Some(Running)),
+            ("b", Some(Running)),
+            ("c", Some(Done)),
+        ],
     );
 
     let dir = tempfile::tempdir().unwrap();
     let client = phone(&edge, dir.path());
     let counted = |client: &Client, chat: &str| {
-        client.workspace().session(chat).map(|row| row.running_subagents)
+        client
+            .workspace()
+            .session(chat)
+            .map(|row| row.running_subagents)
     };
     tokio::task::spawn_blocking({
         let client = client.clone();
@@ -1177,9 +1195,17 @@ async fn legacy_host_rows_take_their_subagent_count_from_a_warm_chats_chips() {
 
     // One settles, in the room; the badge follows without anyone opening the chat.
     let before = host_doc.oplog_vv();
-    assert!(session.update_subagent_chip("a", None, Some("done"), None).unwrap());
+    assert!(
+        session
+            .update_subagent_chip("a", None, Some("done"), None)
+            .unwrap()
+    );
     host_doc.commit();
-    edge.inject(CHAT, HOST, host_doc.export(ExportMode::updates(&before)).unwrap());
+    edge.inject(
+        CHAT,
+        HOST,
+        host_doc.export(ExportMode::updates(&before)).unwrap(),
+    );
     tokio::task::spawn_blocking({
         let client = client.clone();
         move || {

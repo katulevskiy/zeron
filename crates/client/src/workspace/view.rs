@@ -857,11 +857,20 @@ mod tests {
         let cx = context(&chips, &presence, now);
         // A legacy host publishes nothing (or no row at all): chips decide.
         assert_eq!(running_subagents("c", None, true, &cx), 2);
-        assert_eq!(running_subagents("c", Some(&row("c", 0, now)), true, &cx), 2);
+        assert_eq!(
+            running_subagents("c", Some(&row("c", 0, now)), true, &cx),
+            2
+        );
         // A newer engine that counts more than the synced chips yet wins.
-        assert_eq!(running_subagents("c", Some(&row("c", 3, now)), true, &cx), 3);
+        assert_eq!(
+            running_subagents("c", Some(&row("c", 3, now)), true, &cx),
+            3
+        );
         // A chat nobody holds warm has no chips to add.
-        assert_eq!(running_subagents("other", Some(&row("other", 1, now)), true, &cx), 1);
+        assert_eq!(
+            running_subagents("other", Some(&row("other", 1, now)), true, &cx),
+            1
+        );
         assert_eq!(running_subagents("other", None, true, &cx), 0);
     }
 
@@ -875,8 +884,14 @@ mod tests {
         assert_eq!(running_subagents("c", None, false, &cx), 0);
         // A published count on a row older than the staleness window is dead.
         let stale = now - chrono::Duration::milliseconds(zeron_proto::view::SESSION_STALE_MS + 1);
-        assert_eq!(running_subagents("c", Some(&row("c", 5, stale)), false, &cx), 0);
-        assert_eq!(running_subagents("c", Some(&row("c", 5, stale)), true, &cx), 2);
+        assert_eq!(
+            running_subagents("c", Some(&row("c", 5, stale)), false, &cx),
+            0
+        );
+        assert_eq!(
+            running_subagents("c", Some(&row("c", 5, stale)), true, &cx),
+            2
+        );
     }
 
     #[test]

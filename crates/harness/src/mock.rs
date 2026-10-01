@@ -74,7 +74,9 @@ fn parse_timeline(text: &str) -> Result<Vec<TimelineStep>, HarnessError> {
             }
         };
         let events = match command {
-            "text" => vec![AgentEvent::TextDelta { text: format!("{arg} ") }],
+            "text" => vec![AgentEvent::TextDelta {
+                text: format!("{arg} "),
+            }],
             "done" => vec![AgentEvent::Done {
                 status: DoneStatus::Completed,
                 result: None,
@@ -211,7 +213,10 @@ impl Harness for MockHarness {
         // cannot hold for longer than a scripted burst.
         if let Some(path) = std::env::var_os("ZERON_MOCK_TIMELINE") {
             let text = std::fs::read_to_string(&path).map_err(|e| {
-                HarnessError::Protocol(format!("ZERON_MOCK_TIMELINE {}: {e}", path.to_string_lossy()))
+                HarnessError::Protocol(format!(
+                    "ZERON_MOCK_TIMELINE {}: {e}",
+                    path.to_string_lossy()
+                ))
             })?;
             let steps = parse_timeline(&text)?;
             let interrupt = controls.interrupt.clone();
@@ -748,8 +753,10 @@ mod timeline_tests {
             [AgentEvent::ToolCall { id, .. }, AgentEvent::Subagent { parent_tool_use_id, .. }]
                 if id == "a" && parent_tool_use_id == "a"
         ));
-        assert!(matches!(&steps[4].1[..], [AgentEvent::Subagent { event, .. }]
-            if matches!(**event, AgentEvent::Done { .. })));
+        assert!(
+            matches!(&steps[4].1[..], [AgentEvent::Subagent { event, .. }]
+            if matches!(**event, AgentEvent::Done { .. }))
+        );
     }
 
     #[test]
