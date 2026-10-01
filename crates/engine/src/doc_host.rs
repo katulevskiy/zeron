@@ -843,6 +843,7 @@ impl ChatDocHandle {
             status: Some(MessageStatus::Aborted),
             continuation_of: None,
             duration_ms: None,
+            origin: None,
         })?;
         self.publish_messages();
         Ok(())

@@ -476,10 +476,14 @@ impl SessionsEngine {
             .map_err(EngineError::Other)?;
         // A mode the harness can't honour is refused, never silently run
         // looser. The refusal lands in the transcript so the sender sees why.
-        if let Err(reason) = self
-            .inner
-            .registry
-            .check_policy(harness_id, request.policy.mode)
+        // An unattended run (a goal's verifier, a child ask) has no person to
+        // pick another mode: it runs as the harness can, its read-only intent
+        // carried by its prompt and restricted tools (docs/goal-mode.md).
+        if !request.policy.unattended
+            && let Err(reason) = self
+                .inner
+                .registry
+                .check_policy(harness_id, request.policy.mode)
         {
             self.refuse_run(chat_id, message_id.as_deref(), &request.prompt, &reason);
             return Err(EngineError::Other(reason));

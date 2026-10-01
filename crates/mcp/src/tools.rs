@@ -1589,7 +1589,7 @@ mod tests {
             world.clone(),
             Origin {
                 chat_id: Some("chat-alpha-1".into()),
-                device_id: None,
+                ..Default::default()
             },
         );
         // Asking for Bypass under an Ask spawner yields Ask.
