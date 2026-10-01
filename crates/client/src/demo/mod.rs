@@ -415,7 +415,7 @@ impl DemoHost {
                     );
                 }
                 // The demo host has no goal controller.
-                SessionCommandPayload::Goal { .. } => {}
+                SessionCommandPayload::Goal { .. } | SessionCommandPayload::Workflow { .. } => {}
             }
         }
         if !lock(&self.turns).contains_key(chat_id) {

@@ -735,10 +735,13 @@ impl WorkflowService {
             m.stop_reason = stop_reason;
         });
         self.shared.projection.flush(&core.chat_id);
-        lock(&self.shared.runs).remove(&core.run_id);
+        // Queue the result BEFORE the run stops counting as running: a goal
+        // controller watching this chat must never see a gap (no workflow, no
+        // queued message) in which it could verify.
         if let Some(run) = self.shared.projection.run(&core.chat_id, &core.run_id) {
             self.deliver(&core.run_id, &core.chat_id, &run, result.as_ref());
         }
+        lock(&self.shared.runs).remove(&core.run_id);
         self.shared.doc_host.goal_nudge(&core.chat_id).await;
     }
 
