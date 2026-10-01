@@ -4,8 +4,18 @@ on:
   pull_request:
     paths:
       - 'web/**'
+      - 'edge/**'
+      - 'crates/sync/**'
+      - 'crates/harness/**'
       - 'crates/engine/**'
       - 'crates/proto/**'
+      - 'crates/doc/**'
+      - 'crates/theme/**'
+      - 'crates/update/**'
+      - 'crates/wiregen/**'
+      - 'crates/ui/assets/icons/**'
+      - 'crates/ui/assets/file-icons/**'
+      - 'crates/ui/src/file-icons.json'
       - 'crates/rpc/**'
       - 'Cargo.toml'
       - 'Cargo.lock'
@@ -14,8 +24,18 @@ on:
     branches: [main]
     paths:
       - 'web/**'
+      - 'edge/**'
+      - 'crates/sync/**'
+      - 'crates/harness/**'
       - 'crates/engine/**'
       - 'crates/proto/**'
+      - 'crates/doc/**'
+      - 'crates/theme/**'
+      - 'crates/update/**'
+      - 'crates/wiregen/**'
+      - 'crates/ui/assets/icons/**'
+      - 'crates/ui/assets/file-icons/**'
+      - 'crates/ui/src/file-icons.json'
       - 'crates/rpc/**'
       - 'Cargo.toml'
       - 'Cargo.lock'
@@ -33,34 +53,114 @@ jobs:
   build-and-tests:
     name: Typecheck, build, and unit tests
     runs-on: ubuntu-24.04
-    timeout-minutes: 15
+    timeout-minutes: 35
+    env:
+      CARGO_BUILD_JOBS: '2'
+      WRANGLER_SEND_METRICS: 'false'
     defaults:
       run:
         working-directory: web
     steps:
       - uses: actions/checkout@v4
       - uses: pnpm/action-setup@v4
+        with:
+          package_json_file: web/package.json
+          standalone: true
       - uses: actions/setup-node@v4
         with:
           node-version: '24'
           cache: pnpm
           cache-dependency-path: web/pnpm-lock.yaml
+      - name: Rust toolchain for app live-project regressions
+        run: rustup show active-toolchain || rustup toolchain install
+      - uses: Swatinem/rust-cache@v2
+      - name: Install real-backend fixture dependencies
+        run: npm ci --prefix ../edge --ignore-scripts --no-audit --no-fund
       - name: Install
         run: pnpm install --frozen-lockfile
       - name: Typecheck and build every package
-        run: pnpm -r build
+        run: pnpm typecheck && pnpm -r build
       - name: Engine-client unit tests
         run: pnpm -C packages/engine-client vitest run --project unit
       - name: App test suite
-        run: pnpm -C packages/app vitest run
+        run: pnpm -C packages/app exec vitest run --maxWorkers=2 --minWorkers=1
 
-  engine-conformance:
-    name: Remote listener + live-engine conformance
+  generated-artifacts:
+    name: Wire, theme, and icon freshness
     runs-on: ubuntu-24.04
     timeout-minutes: 40
     steps:
       - uses: actions/checkout@v4
+      - uses: actions/setup-node@v4
+        with:
+          node-version: '24'
+      - name: Rust toolchain
+        run: rustup show active-toolchain || rustup toolchain install
+      - uses: Swatinem/rust-cache@v2
+      - name: Wire contract freshness
+        run: cargo run --locked -p wiregen -- --check
+      - name: Wire models and generator tests
+        run: cargo test --locked -p wiregen -p zeron-proto -p zeron-doc -p zeron-update
+      - name: Theme freshness
+        run: cargo run --locked -p zeron-theme --bin zeron-theme-export -- --check
+      - name: Theme exporter tests
+        run: cargo test --locked -p zeron-theme
+      - name: Icon generator tests
+        run: node --test web/packages/icons/scripts/generation.test.mjs
+      - name: Control icon freshness
+        run: node web/packages/icons/scripts/generate.mjs --check
+      - name: File icon freshness
+        run: node web/packages/icons/scripts/generate-file-icons.mjs --check
+
+  browser-backend:
+    name: Browser auth, ownership, sessions, and serving
+    runs-on: ubuntu-24.04
+    timeout-minutes: 20
+    env:
+      WRANGLER_SEND_METRICS: 'false'
+    steps:
+      - uses: actions/checkout@v4
       - uses: pnpm/action-setup@v4
+        with:
+          package_json_file: web/package.json
+          standalone: true
+      - uses: actions/setup-node@v4
+        with:
+          node-version: '24'
+          cache: npm
+          cache-dependency-path: edge/package-lock.json
+      - name: Install frontend and backend
+        run: |
+          pnpm -C web install --frozen-lockfile
+          npm ci --prefix edge --ignore-scripts --no-audit --no-fund
+      - name: Build real browser assets
+        run: pnpm -C web/packages/app build
+      - name: Backend and workerd test typechecks
+        working-directory: edge
+        run: npm run typecheck && npm run typecheck:workerd
+      - name: Signed-provider and real Durable Object tests
+        working-directory: edge
+        run: npm test
+      - name: Actual local candidate serving and session contract
+        working-directory: edge
+        run: npm run test:browser-candidate
+      - name: Candidate deployment bundle (dry run only)
+        working-directory: edge
+        run: npx wrangler deploy --dry-run -c wrangler.browser-candidate.jsonc --outdir dist/browser-candidate
+
+  engine-conformance:
+    name: Cookie relay, native retirement, and real browser flows
+    runs-on: ubuntu-24.04
+    timeout-minutes: 45
+    env:
+      WRANGLER_SEND_METRICS: 'false'
+      CARGO_BUILD_JOBS: '2'
+    steps:
+      - uses: actions/checkout@v4
+      - uses: pnpm/action-setup@v4
+        with:
+          package_json_file: web/package.json
+          standalone: true
       - uses: actions/setup-node@v4
         with:
           node-version: '24'
@@ -69,21 +169,35 @@ jobs:
       - name: Rust toolchain
         run: rustup show active-toolchain || rustup toolchain install
       - uses: Swatinem/rust-cache@v2
-      - name: Install
-        working-directory: web
-        run: pnpm install --frozen-lockfile
-      # Build the app first so the engine's rust-embed staging picks up the
-      # real bundle (build.rs falls back to placeholder pages in debug).
-      - name: Build the web bundle
-        working-directory: web
-        run: pnpm -C packages/app exec vite build
-      - name: Remote listener tests (WorkOS gate, web routes, dev bearer)
-        run: cargo test --locked -p zeron-engine --test remote_listener
-      # The conformance and smoke suites spawn the web_conformance /
-      # web_smoke examples (the real listener in dev-auth mode) and drive
-      # the full sign-in, watch, and send flow over the wire.
-      - name: Build the engine examples
-        run: cargo build --locked -p zeron-engine --examples
-      - name: Live-engine conformance and smoke suites
+      - name: Install browser and backend dependencies
+        run: |
+          pnpm -C web install --frozen-lockfile
+          npm ci --prefix edge --ignore-scripts --no-audit --no-fund
+      - name: Provision pinned Chromium
+        run: pnpm -C web/packages/app exec playwright install --with-deps chromium
+      - name: Build actual browser assets
+        run: pnpm -C web/packages/app build
+      - name: No direct listener, native IPC remains usable
+        run: cargo test --locked -p zeron-engine --test native_access
+      - name: Native engine and supported fixture compile
+        run: cargo check --locked -p zeron-engine --all-targets
+      - name: Build the real host-relay fixture
+        run: cargo build --locked -p zeron-engine --example browser_relay
+      - name: Cookie-relay conformance and prompt/response smoke
         working-directory: web/packages/engine-client
-        run: pnpm vitest run --project conformance --project smoke
+        run: pnpm exec vitest run --project conformance --project smoke --maxWorkers=2 --minWorkers=1
+      - name: Upstream core wire contracts over the real cookie relay
+        working-directory: web/packages/engine-client
+        run: pnpm exec vitest run --config wire-contract.config.ts
+      - name: Real cookie relay ownership and engine lifecycle
+        working-directory: web/packages/engine-client
+        run: pnpm test:relay
+      - name: Desktop/phone chat, reconnect, identity and offline recovery
+        working-directory: web/packages/engine-client
+        run: pnpm exec vitest run --config tests/chat-relay.config.ts
+      - name: Selected-engine projects and desktop/phone browser flow
+        run: pnpm -C web/packages/app test:projects
+      - name: Real two-engine sidebar intents and reconnect
+        run: pnpm -C web/packages/engine-client test:sidebar
+      - name: Desktop/phone sidebar actions and asset serving
+        run: pnpm -C web/packages/engine-client test:sidebar-browser

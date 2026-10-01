@@ -10,7 +10,7 @@
     "build": "pnpm -r build",
     "typecheck": "pnpm -r --if-present typecheck",
     "test": "pnpm -r --if-present test",
-    "codegen": "cargo run -p wiregen",
-    "codegen:check": "cargo run -p wiregen -- --check"
+    "codegen": "cargo run --locked -p wiregen",
+    "codegen:check": "cargo run --locked -p wiregen -- --check"
   }
 }
