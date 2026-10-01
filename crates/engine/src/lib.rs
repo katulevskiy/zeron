@@ -24,6 +24,7 @@ mod chat_persistence;
 pub mod diff_sync;
 pub mod doc_host;
 pub mod goal;
+pub mod workflow;
 pub mod harness_updates;
 mod http_error;
 pub mod instance_lock;
