@@ -106,6 +106,7 @@ object Routes {
     const val AGENTS = "agents"
     const val TRANSFERS = "transfers"
     const val SOUNDS = "settings/sounds"
+    const val BADGES = "badges/{mode}"
     const val FILES = "files/{ws}"
     const val FILE = "file/{ws}?path={path}"
     const val TERMINAL = "terminal/{ws}"
@@ -159,6 +160,8 @@ private fun NavController.openRoute(route: String) {
         route == "engine" -> nav.open(Routes.ENGINE)
         route == "transfers" -> { AppFeedback.current.cue(Cue.Open); NavCues.announced = true; nav.navigate(Routes.TRANSFERS) { launchSingleTop = true } }
         route == "sounds" -> nav.open(Routes.SOUNDS)
+        // Debug builds only (the route is not registered otherwise): the badge contact sheets.
+        (route == "badges" || route.startsWith("badges:")) && nav.graph.findNode(Routes.BADGES) != null -> nav.open("badges/" + route.substringAfter(':', "grid"))
         route.startsWith("chat:") -> nav.open(Routes.chat(route.removePrefix("chat:")))
         // subagents:<chat> opens its panel; subagent:<chat>|<doc> one subagent.
         route.startsWith("subagents:") -> nav.open(Routes.chatSubagents(route.removePrefix("subagents:")))
@@ -271,6 +274,9 @@ private fun MainNav(model: AppModel) {
         composable(Routes.AGENTS) { AgentsScreen(model, onBack = { nav.back() }) }
         composable(Routes.TRANSFERS) { TransfersScreen(model, onBack = { nav.back() }) }
         composable(Routes.SOUNDS) { SoundsScreen(model, onBack = { nav.back() }) }
+        if (model.isDebuggable) composable(Routes.BADGES) { entry ->
+            BadgePreviewScreen(model, entry.arguments?.getString("mode").orEmpty(), onBack = { nav.back() })
+        }
     }
 }
 
@@ -346,7 +352,8 @@ private fun HomeChrome(model: AppModel, nav: NavHostController, tab: MutableStat
     ) {
         if (tab.value == Tab.Sessions) {
             val workspace by model.workspace.collectAsState()
-            val summary = remember(workspace) { workspace?.let { liveSummary(it) } }
+            val live by model.liveSubagents.collectAsState()
+            val summary = remember(workspace, live) { workspace?.let { liveSummary(it, live) } }
             NewSessionBar(summary, onClick = { nav.open(Routes.NEW) })
         }
         FloatingNavBar(

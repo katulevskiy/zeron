@@ -80,8 +80,8 @@ import uniffi.zeron_core.WorkspaceSnapshot
 private enum class Filter(val label: String) { All("All"), NeedsYou("Needs you"), Working("Working"), Pinned("Pinned") }
 
 /** "1 needs you" / "2 working" — the live summary beside New session. */
-fun liveSummary(ws: WorkspaceSnapshot): String? {
-    val (working, awaiting) = liveCounts(ws)
+fun liveSummary(ws: WorkspaceSnapshot, live: Map<String, Int> = emptyMap()): String? {
+    val (working, awaiting) = liveCounts(ws, live)
     return when {
         awaiting > 0 -> "$awaiting needs you"
         working > 0 -> "$working working"
@@ -89,15 +89,17 @@ fun liveSummary(ws: WorkspaceSnapshot): String? {
     }
 }
 
-private fun frontRows(ws: WorkspaceSnapshot): List<SessionRow> {
+private fun frontRows(ws: WorkspaceSnapshot, live: Map<String, Int> = emptyMap()): List<SessionRow> {
     val seen = HashSet<String>()
-    return (ws.front.pinned + ws.front.sections.flatMap { it.sessions } + ws.front.recent).filter { seen.add(it.id) }
+    return SessionActivity.merged((ws.front.pinned + ws.front.sections.flatMap { it.sessions } + ws.front.recent).filter { seen.add(it.id) }, live)
 }
 
-internal fun workingRows(ws: WorkspaceSnapshot): List<SessionRow> = frontRows(ws).filter(SessionActivity::isWorking)
+/** Working = the main turn, running subagents (published or seen by an open chat) or confirmed callbacks. */
+internal fun workingRows(ws: WorkspaceSnapshot, live: Map<String, Int> = emptyMap()): List<SessionRow> =
+    frontRows(ws, live).filter(SessionActivity::isWorking)
 
-internal fun liveCounts(ws: WorkspaceSnapshot): Pair<Int, Int> {
-    val rows = frontRows(ws)
+internal fun liveCounts(ws: WorkspaceSnapshot, live: Map<String, Int> = emptyMap()): Pair<Int, Int> {
+    val rows = frontRows(ws, live)
     return rows.count(SessionActivity::isWorking) to rows.count { it.indicator == ChatIndicator.AWAITING_INPUT }
 }
 
@@ -109,13 +111,15 @@ fun SessionsScreen(model: AppModel, onOpen: (String) -> Unit) {
     val connectivity = model.connectivity.collectAsStateWhile()
     val engine = model.phone.state.collectAsStateWhile()
     val client = model.client.collectAsStateWhile()
+    // Counts the open chat shows beat a lower (or missing) published count: see SessionActivity.mergedSubagents.
+    val live = model.liveSubagents.collectAsStateWhile()
     var filter by rememberSaveable { mutableStateOf(Filter.All) }
     val snackbar = remember { SnackbarHostState() }
     val scope = rememberCoroutineScope()
     var refreshing by remember { mutableStateOf(false) }
     val pull = rememberPullToRefreshState()
     val ws = workspace
-    val counts = remember(ws) { ws?.let { liveCounts(it) } ?: (0 to 0) }
+    val counts = remember(ws, live) { ws?.let { liveCounts(it, live) } ?: (0 to 0) }
 
     val subtitle = when {
         connectivity?.state == ConnectivityState.OFFLINE -> "Offline"
@@ -215,17 +219,17 @@ fun SessionsScreen(model: AppModel, onOpen: (String) -> Unit) {
                 val front = ws.front
                 when (filter) {
                     Filter.All -> {
-                        if (front.pinned.isNotEmpty()) group("pinned", "Pinned", front.pinned, model, onOpen, archive)
+                        if (front.pinned.isNotEmpty()) group("pinned", "Pinned", SessionActivity.merged(front.pinned, live), model, onOpen, archive)
                         for (section in front.sections) {
-                            group(section.id, section.name, section.sessions, model, onOpen, archive, collapsed = section.collapsed) {
+                            group(section.id, section.name, SessionActivity.merged(section.sessions, live), model, onOpen, archive, collapsed = section.collapsed) {
                                 model.setSectionCollapsed(section.id, !section.collapsed)
                             }
                         }
-                        if (front.recent.isNotEmpty()) group("recent", "Recent", front.recent, model, onOpen, archive)
+                        if (front.recent.isNotEmpty()) group("recent", "Recent", SessionActivity.merged(front.recent, live), model, onOpen, archive)
                     }
-                    Filter.NeedsYou -> group("f", null, frontRows(ws).filter { it.indicator == ChatIndicator.AWAITING_INPUT }, model, onOpen, archive)
-                    Filter.Working -> group("f", null, workingRows(ws), model, onOpen, archive)
-                    Filter.Pinned -> group("f", null, front.pinned, model, onOpen, archive)
+                    Filter.NeedsYou -> group("f", null, frontRows(ws, live).filter { it.indicator == ChatIndicator.AWAITING_INPUT }, model, onOpen, archive)
+                    Filter.Working -> group("f", null, workingRows(ws, live), model, onOpen, archive)
+                    Filter.Pinned -> group("f", null, SessionActivity.merged(front.pinned, live), model, onOpen, archive)
                 }
                 val empty = when (filter) {
                     Filter.All -> front.pinned.isEmpty() && front.sections.isEmpty() && front.recent.isEmpty()

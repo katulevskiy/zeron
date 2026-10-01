@@ -145,7 +145,7 @@ private object SpinnerQueue {
  */
 @OptIn(ExperimentalMaterial3ExpressiveApi::class)
 @Composable
-private fun WorkingSpinner(shape: SessionActivity.Shape) {
+fun WorkingSpinner(shape: SessionActivity.Shape) {
     val tone = sessionActivityColor(shape)
     val motion = LocalMotionActive.current
     var spinning by remember { mutableStateOf(false) }

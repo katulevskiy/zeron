@@ -133,6 +133,37 @@ class AppModel(private val app: Application) {
     private val _connectivity = MutableStateFlow<Connectivity?>(null)
     val connectivity: StateFlow<Connectivity?> = _connectivity.asStateFlow()
 
+    /**
+     * Running-subagent counts this app knows from the chats it has open, merged
+     * into the session rows' published counts ([SessionActivity.merged]).
+     */
+    private val liveSubagentCounts = LiveSubagents()
+    private val _liveSubagents = MutableStateFlow<Map<String, Int>>(emptyMap())
+    val liveSubagents: StateFlow<Map<String, Int>> = _liveSubagents.asStateFlow()
+    private var liveSubagentsTick: Job? = null
+
+    /** The open chat [chatId] shows [count] running subagents. */
+    fun reportLiveSubagents(chatId: String, count: Int) {
+        if (liveSubagentCounts.report(chatId, count, System.currentTimeMillis())) _liveSubagents.value = liveSubagentCounts.snapshot()
+        scheduleLiveSubagentsExpiry()
+    }
+
+    /** [chatId] was closed: its count stays for a short grace, then yields to the engine's row. */
+    fun releaseLiveSubagents(chatId: String) {
+        liveSubagentCounts.release(chatId, System.currentTimeMillis())
+        scheduleLiveSubagentsExpiry()
+    }
+
+    private fun scheduleLiveSubagentsExpiry() {
+        val due = liveSubagentCounts.nextExpiry() ?: return
+        liveSubagentsTick?.cancel()
+        liveSubagentsTick = scope.launch {
+            delay((due - System.currentTimeMillis()).coerceAtLeast(0) + 50)
+            if (liveSubagentCounts.expire(System.currentTimeMillis())) _liveSubagents.value = liveSubagentCounts.snapshot()
+            scheduleLiveSubagentsExpiry()
+        }
+    }
+
     /** Chat ids whose session or composer changed. */
     private val _sessionEvents = MutableSharedFlow<String>(extraBufferCapacity = 256)
     val sessionEvents: SharedFlow<String> = _sessionEvents

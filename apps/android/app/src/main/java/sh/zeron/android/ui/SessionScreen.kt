@@ -59,6 +59,8 @@ import androidx.compose.material3.TopAppBar
 import androidx.compose.material3.TopAppBarDefaults
 import androidx.compose.runtime.Composable
 import androidx.compose.runtime.DisposableEffect
+import sh.zeron.android.core.SessionActivity
+import uniffi.zeron_core.ChatIndicator
 import androidx.compose.runtime.LaunchedEffect
 import androidx.compose.runtime.collectAsState
 import androidx.compose.runtime.derivedStateOf
@@ -134,6 +136,18 @@ fun SessionScreen(model: AppModel, chatId: String, onBack: () -> Unit, onNavigat
     // Upload rings on pending thumbnails follow the escort.
     LaunchedEffect(composer.transferProgress) { transcript.uploadProgress = composer.transferProgress }
     val row = remember(workspace, chatId) { model.row(chatId) }
+    // The one count rule (SessionActivity.mergedSubagents): what the engine published on the chat's row, or what this chat's
+    // own subagent chips show, whichever is larger. The chips are told to the model so the Sessions list says the same.
+    val liveRunning = subagents.running.toInt()
+    val running = SessionActivity.mergedSubagents(row?.runningSubagents ?: 0u, liveRunning).toInt()
+    LaunchedEffect(chatId, liveRunning) { model.reportLiveSubagents(chatId, liveRunning) }
+    DisposableEffect(chatId) { onDispose { model.releaseLiveSubagents(chatId) } }
+    val turnRunning = composer.live.turnRunning
+    val activity = SessionActivity.shape(
+        if (turnRunning) ChatIndicator.WORKING else row?.indicator ?: ChatIndicator.IDLE,
+        running.toUInt(),
+        row?.pendingCallbacks ?: 0u,
+    )
 
     val context = LocalContext.current
     var sheet by remember { mutableStateOf<TextSheet?>(null) }
@@ -215,9 +229,11 @@ fun SessionScreen(model: AppModel, chatId: String, onBack: () -> Unit, onNavigat
                     Text(composer.title, maxLines = 1, overflow = TextOverflow.Ellipsis, style = MaterialTheme.typography.titleMediumEmphasized)
                     Text(subtitle, maxLines = 1, overflow = TextOverflow.Ellipsis, style = MaterialTheme.typography.bodySmall, color = MaterialTheme.colorScheme.onSurfaceVariant)
                 }
-                // Running count comes from the transcript when it has them,
-                // else from the row (a count published before the chips synced).
-                val running = maxOf(subagents.running.toInt(), row?.runningSubagents?.toInt() ?: 0)
+                // The same activity shape the Sessions row draws: purple while the turn runs, yellow when only subagents do.
+                if (activity != null) {
+                    WorkingSpinner(activity)
+                    Spacer(Modifier.width(4.dp))
+                }
                 if (running > 0 || Subagents.total(subagents) > 0) {
                     SubagentsButton(running, onClick = { subagentsOpen = true })
                     Spacer(Modifier.width(8.dp))
