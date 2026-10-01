@@ -26,7 +26,10 @@ import androidx.compose.runtime.Composable
 import androidx.compose.runtime.DisposableEffect
 import androidx.compose.runtime.LaunchedEffect
 import androidx.compose.runtime.collectAsState
+import androidx.compose.runtime.MutableState
+import androidx.compose.runtime.snapshotFlow
 import androidx.compose.runtime.withFrameNanos
+import kotlinx.coroutines.flow.collectLatest
 import kotlinx.coroutines.delay
 import androidx.compose.runtime.getValue
 import androidx.compose.runtime.mutableStateOf
@@ -274,58 +277,72 @@ private fun Home(model: AppModel, nav: NavHostController) {
 
 @Composable
 private fun HomeTabs(model: AppModel, nav: NavHostController) {
-    var tab by rememberSaveable { mutableStateOf(model.tabRequest.value.toTab() ?: if (model.launch.route == "settings") Tab.Settings else Tab.Sessions) }
+    // `tab` is read only inside layer / effect / child scopes below, never in this body: a switch recomposes the
+    // two pages' wrappers and the chrome, not the whole home page.
+    val tab = rememberSaveable { mutableStateOf(model.tabRequest.value.toTab() ?: if (model.launch.route == "settings") Tab.Settings else Tab.Sessions) }
     // Debug builds: `--es kind tab --es tab sessions|settings` flips the tab (scripts/android/measure-tab-switch.sh).
     val tabRequest by model.tabRequest.collectAsState()
     LaunchedEffect(tabRequest) {
-        tabRequest?.toTab()?.let { tab = it }
+        tabRequest?.toTab()?.let { tab.value = it }
         model.tabRequest.value = null
     }
     sh.zeron.android.core.PerfFrame(tab)
-    // Both tabs stay composed once they have been, so switching is a re-placement rather than a composition.
+    // Both tabs stay composed once they have been, so switching is a property change rather than a composition.
     // The one shown first composes at once; the other idles in after the first frames (never in the way of the
     // launch or the return from a chat). A tab asked for before that shows a wireframe for the frame it takes.
-    var sessionsReady by remember { mutableStateOf(tab == Tab.Sessions) }
-    var settingsReady by remember { mutableStateOf(tab == Tab.Settings) }
-    LaunchedEffect(tab) {
-        withFrameNanos { }
-        if (tab == Tab.Sessions) sessionsReady = true else settingsReady = true
-        delay(350)
-        withFrameNanos { }
-        sessionsReady = true
-        settingsReady = true
+    val sessionsReady = remember { mutableStateOf(tab.value == Tab.Sessions) }
+    val settingsReady = remember { mutableStateOf(tab.value == Tab.Settings) }
+    LaunchedEffect(Unit) {
+        snapshotFlow { tab.value }.collectLatest { shown ->
+            withFrameNanos { }
+            if (shown == Tab.Sessions) sessionsReady.value = true else settingsReady.value = true
+            delay(350)
+            withFrameNanos { }
+            sessionsReady.value = true
+            settingsReady.value = true
+        }
     }
     val retain by model.retainTabs.collectAsState()
-    val workspace = model.workspace.collectAsStateWhile(tab == Tab.Sessions)
-    val summary = remember(workspace) { workspace?.let { liveSummary(it) } }
     Box(Modifier.fillMaxSize().background(MaterialTheme.colorScheme.background)) {
-        TabPage(active = tab == Tab.Sessions, ready = if (retain) sessionsReady else tab == Tab.Sessions, skeleton = { SessionsSkeleton() }) {
-            SessionsScreen(model, onOpen = { nav.open(Routes.chat(it)) }, active = tab == Tab.Sessions)
+        TabPage(
+            active = { tab.value == Tab.Sessions },
+            ready = { if (retain) sessionsReady.value else tab.value == Tab.Sessions },
+            skeleton = { SessionsSkeleton() },
+        ) { SessionsScreen(model, onOpen = { nav.open(Routes.chat(it)) }) }
+        TabPage(
+            active = { tab.value == Tab.Settings },
+            ready = { if (retain) settingsReady.value else tab.value == Tab.Settings },
+            skeleton = { SettingsSkeleton() },
+        ) { SettingsScreen(model, onOpen = { nav.open(it) }) }
+        HomeChrome(model, nav, tab, Modifier.align(Alignment.BottomCenter))
+    }
+}
+
+/** Floating chrome over a soft scrim: new session, then the nav capsule. */
+@Composable
+private fun HomeChrome(model: AppModel, nav: NavHostController, tab: MutableState<Tab>, modifier: Modifier) {
+    Column(
+        modifier
+            .fillMaxWidth()
+            .background(Brush.verticalGradient(0f to Color.Transparent, 0.25f to MaterialTheme.colorScheme.background.copy(alpha = 0.94f), 0.6f to MaterialTheme.colorScheme.background))
+            .navigationBarsPadding()
+            .padding(top = 28.dp, bottom = 8.dp),
+        verticalArrangement = Arrangement.spacedBy(10.dp),
+    ) {
+        if (tab.value == Tab.Sessions) {
+            val workspace by model.workspace.collectAsState()
+            val summary = remember(workspace) { workspace?.let { liveSummary(it) } }
+            NewSessionBar(summary, onClick = { nav.open(Routes.NEW) })
         }
-        TabPage(active = tab == Tab.Settings, ready = if (retain) settingsReady else tab == Tab.Settings, skeleton = { SettingsSkeleton() }) {
-            SettingsScreen(model, onOpen = { nav.open(it) }, active = tab == Tab.Settings)
-        }
-        // Floating chrome over a soft scrim: new session, then the nav capsule.
-        Column(
-            Modifier
-                .align(Alignment.BottomCenter)
-                .fillMaxWidth()
-                .background(Brush.verticalGradient(0f to Color.Transparent, 0.25f to MaterialTheme.colorScheme.background.copy(alpha = 0.94f), 0.6f to MaterialTheme.colorScheme.background))
-                .navigationBarsPadding()
-                .padding(top = 28.dp, bottom = 8.dp),
-            verticalArrangement = Arrangement.spacedBy(10.dp),
-        ) {
-            if (tab == Tab.Sessions) NewSessionBar(summary, onClick = { nav.open(Routes.NEW) })
-            FloatingNavBar(
-                listOf(
-                    NavItem("Sessions", ZIcons.TabSessions, tab == Tab.Sessions) { sh.zeron.android.core.Perf.begin("tab->sessions"); tab = Tab.Sessions },
-                    NavItem("Settings", ZIcons.TabSettings, tab == Tab.Settings) { sh.zeron.android.core.Perf.begin("tab->settings"); tab = Tab.Settings },
-                ),
-                trailing = {
-                    TonalCircleButton(ZIcons.Search, "Search", onClick = { nav.open(Routes.SEARCH) }, size = 72.dp)
-                },
-            )
-        }
+        FloatingNavBar(
+            listOf(
+                NavItem("Sessions", ZIcons.TabSessions, tab.value == Tab.Sessions) { sh.zeron.android.core.Perf.begin("tab->sessions"); tab.value = Tab.Sessions },
+                NavItem("Settings", ZIcons.TabSettings, tab.value == Tab.Settings) { sh.zeron.android.core.Perf.begin("tab->settings"); tab.value = Tab.Settings },
+            ),
+            trailing = {
+                TonalCircleButton(ZIcons.Search, "Search", onClick = { nav.open(Routes.SEARCH) }, size = 72.dp)
+            },
+        )
     }
 }
 

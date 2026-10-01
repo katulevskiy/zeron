@@ -4,6 +4,8 @@ import android.os.SystemClock
 import android.util.Log
 import androidx.compose.runtime.Composable
 import androidx.compose.runtime.LaunchedEffect
+import androidx.compose.runtime.State
+import androidx.compose.runtime.snapshotFlow
 import androidx.compose.runtime.withFrameNanos
 
 /**
@@ -21,6 +23,7 @@ object Perf {
 
     /** Debug builds: sample the main thread's stack while an interaction is timed and log where the time went. */
     @Volatile var sampling = false
+    @Volatile var tailMs = 250L
     private var sampler: Thread? = null
     private val inclusive = HashMap<String, Int>()
     private val self = HashMap<String, Int>()
@@ -122,17 +125,19 @@ object Perf {
         val from = tMono
         label = ""
         handler.postDelayed({ summarize(what, from) }, 500)
-        if (sampling) handler.postDelayed({ report() }, 250)  // keep sampling through the frames that follow the switch
+        if (sampling) handler.postDelayed({ report() }, tailMs)  // keep sampling through the frames that follow the switch
     }
 }
 
-/** Reports the first frame after [key] changed (and was composed) to [Perf]. */
+/** Reports the first frame after [state] changed (and the change was composed) to [Perf]. */
 @Composable
-fun PerfFrame(key: Any?) {
-    LaunchedEffect(key) {
-        if (Perf.elapsedMs() < 0) return@LaunchedEffect
-        Perf.mark("composed")
-        withFrameNanos { }
-        Perf.finish("first frame after composition")
+fun PerfFrame(state: State<*>) {
+    LaunchedEffect(Unit) {
+        snapshotFlow { state.value }.collect {
+            if (Perf.elapsedMs() < 0) return@collect
+            Perf.mark("composed")
+            withFrameNanos { }
+            Perf.finish("first frame after composition")
+        }
     }
 }

@@ -103,12 +103,12 @@ private fun liveCounts(ws: WorkspaceSnapshot): Pair<Int, Int> {
 
 @OptIn(ExperimentalMaterial3Api::class, ExperimentalMaterial3ExpressiveApi::class)
 @Composable
-fun SessionsScreen(model: AppModel, onOpen: (String) -> Unit, active: Boolean = true) {
+fun SessionsScreen(model: AppModel, onOpen: (String) -> Unit) {
     // Kept composed behind the Settings tab: while hidden it listens to nothing (see TabPage).
-    val workspace = model.workspace.collectAsStateWhile(active)
-    val connectivity = model.connectivity.collectAsStateWhile(active)
-    val engine = model.phone.state.collectAsStateWhile(active)
-    val client = model.client.collectAsStateWhile(active)
+    val workspace = model.workspace.collectAsStateWhile()
+    val connectivity = model.connectivity.collectAsStateWhile()
+    val engine = model.phone.state.collectAsStateWhile()
+    val client = model.client.collectAsStateWhile()
     var filter by rememberSaveable { mutableStateOf(Filter.All) }
     val snackbar = remember { SnackbarHostState() }
     val scope = rememberCoroutineScope()

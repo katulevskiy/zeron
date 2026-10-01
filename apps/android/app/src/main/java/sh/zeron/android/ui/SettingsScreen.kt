@@ -69,16 +69,16 @@ import kotlinx.coroutines.launch
 
 @OptIn(ExperimentalMaterial3ExpressiveApi::class)
 @Composable
-fun SettingsScreen(model: AppModel, onOpen: (String) -> Unit, active: Boolean = true) {
+fun SettingsScreen(model: AppModel, onOpen: (String) -> Unit) {
     val appearance by model.appearance.collectAsState()
     val account by model.account.collectAsState()
     val signIn by model.signIn.collectAsState()
     // Kept composed behind the Sessions tab: while hidden it listens to nothing (see TabPage).
-    val engine = model.phone.state.collectAsStateWhile(active)
+    val engine = model.phone.state.collectAsStateWhile()
     val developer by model.developer.collectAsState()
-    val client = model.client.collectAsStateWhile(active)
+    val client = model.client.collectAsStateWhile()
     val demo = client?.isDemo() == true
-    val workspace = model.workspace.collectAsStateWhile(active)
+    val workspace = model.workspace.collectAsStateWhile()
     // This phone first, like the desktop's device list.
     val devices = workspace?.devices.orEmpty().sortedByDescending { it.isSelf }
     val context = LocalContext.current
@@ -161,7 +161,7 @@ fun SettingsScreen(model: AppModel, onOpen: (String) -> Unit, active: Boolean = 
             section("Files")
             item {
                 // Transfers go through this phone's engine (docs/android.md § File transfers).
-                val transfers = model.transfers.list.collectAsStateWhile(active)
+                val transfers = model.transfers.list.collectAsStateWhile()
                 val live = transfers.count { it.state.live }
                 Column(Modifier.padding(horizontal = 16.dp)) {
                     SegmentedListItem(

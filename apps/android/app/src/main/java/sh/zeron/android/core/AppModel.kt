@@ -315,8 +315,9 @@ class AppModel(private val app: Application) {
                     "tab" -> {
                         val tab = intent.getStringExtra("tab").orEmpty()
                         Perf.sampling = intent.getBooleanExtra("sample", false)
+                        Perf.tailMs = intent.getIntExtra("tail", 250).toLong()
                         if (intent.hasExtra("retain")) retainTabs.value = intent.getBooleanExtra("retain", true)
-                        Perf.begin("tab->$tab")
+                        Perf.begin("tab->$tab" + (if (retainTabs.value) "" else " [rebuild]") + (if (intent.getBooleanExtra("cold", false)) " [cold]" else "") + (if (intent.getBooleanExtra("warm", false)) " [warm-up]" else ""))
                         tabRequest.value = tab
                         if (intent.getBooleanExtra("cold", false)) homeEpoch.value++
                         return
