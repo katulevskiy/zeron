@@ -1112,8 +1112,8 @@ mod tests {
     fn an_empty_object_decodes_to_the_default_state() {
         let state: WorkflowRunsState = serde_json::from_str("{}").unwrap();
         assert_eq!(state, WorkflowRunsState::default());
-        let run: WorkflowRun = serde_json::from_str(r#"{"runId":"x","name":"n","chatId":"c"}"#)
-            .unwrap();
+        let run: WorkflowRun =
+            serde_json::from_str(r#"{"runId":"x","name":"n","chatId":"c"}"#).unwrap();
         assert_eq!(run.header.status, WorkflowStatus::Pending);
         assert!(run.nodes.is_empty());
     }
@@ -1195,8 +1195,12 @@ mod tests {
     #[test]
     fn merging_deltas_keeps_the_last_write_per_key() {
         let mut first = WorkflowRunDelta::for_run("r");
-        first.upserts.push(WorkflowEntry::Node(node("a", 0, NodePhase::Queued)));
-        first.upserts.push(WorkflowEntry::Node(node("b", 0, NodePhase::Queued)));
+        first
+            .upserts
+            .push(WorkflowEntry::Node(node("a", 0, NodePhase::Queued)));
+        first
+            .upserts
+            .push(WorkflowEntry::Node(node("b", 0, NodePhase::Queued)));
         let mut second = WorkflowRunDelta::for_run("r");
         second
             .upserts
@@ -1211,7 +1215,9 @@ mod tests {
         assert_eq!(first.removed, vec!["n:b#0".to_string()]);
         // …and an upsert after a removal revives the key.
         let mut third = WorkflowRunDelta::for_run("r");
-        third.upserts.push(WorkflowEntry::Node(node("b", 0, NodePhase::Queued)));
+        third
+            .upserts
+            .push(WorkflowEntry::Node(node("b", 0, NodePhase::Queued)));
         first.merge(third);
         assert!(first.removed.is_empty());
         assert_eq!(first.upserts.len(), 2);
