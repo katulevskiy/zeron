@@ -135,17 +135,7 @@ fun ModelPickerPopover(
     onRetry: (String) -> Unit = {},
 ) {
     val feedback = LocalFeedback.current
-    var wasOpen by remember { mutableStateOf(false) }
-    LaunchedEffect(expanded) {
-        if (expanded) {
-            feedback.cue(Cue.Open)
-            feedback.haptic(Haptic.Tick)
-        } else if (wasOpen) {
-            feedback.cue(Cue.Close)
-            feedback.haptic(Haptic.Tick)
-        }
-        wasOpen = expanded
-    }
+    // Open / Close feedback comes from AnchoredPopover itself (ExpandedFeedback).
     AnchoredPopover(expanded, onDismiss, width = CardWidth, maxHeight = 560.dp) {
         var view by remember { mutableStateOf<PickerView>(if (current == null) PickerView.Models else PickerView.Settings) }
         val spatial = MaterialTheme.motionScheme.defaultSpatialSpec<IntOffset>()
