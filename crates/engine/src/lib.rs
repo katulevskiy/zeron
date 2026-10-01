@@ -49,7 +49,7 @@ pub use agent_accounts::{
     AgentAccounts, AgentAccountsConfig, HandedLogin, LOGIN_HANDOFF_VERSION, LoginHandoff,
     LoginImport,
 };
-pub use auth::{Auth, AuthConfig, AuthState, AuthUser, OrgMembership};
+pub use auth::{Auth, AuthConfig, AuthState, AuthUser, DeviceCredential, OrgMembership};
 pub use change_requests::{ChangeRequestCacheKey, CheckoutChangeRequests};
 pub use diff_sync::{
     CheckoutDiffSync, DiffFileTextPair, DiffSidecar, DiffSnapshot, TurnSnapshot,
@@ -130,6 +130,10 @@ pub struct EngineConfig {
     /// than `user[@org]` (a `zeron local-edge`, see [`Self::with_local_edge`]).
     /// `None` = the bearer names the user, as a dev edge parses it.
     pub dev_user_id: Option<String>,
+    /// A cloud box's enrollment (`ZERON_DEVICE_ID` + `ZERON_DEVICE_CREDENTIAL`,
+    /// docs/cloud.md §6): pins the device id and signs in with device tokens
+    /// in the `Synced` scope of the owning user, never interactively.
+    pub device_credential: Option<DeviceCredential>,
 }
 
 /// The fixed user and org of a runtime joined to a local edge
@@ -153,6 +157,12 @@ impl EngineConfig {
         self.dev_user_id = Some(LOCAL_EDGE_IDENTITY.into());
         self.org_id = Some(LOCAL_EDGE_IDENTITY.into());
         self.workos_client_id = None;
+        self
+    }
+
+    /// Run as an enrolled cloud box (see [`Self::device_credential`]).
+    pub fn with_device_credential(mut self, credential: DeviceCredential) -> Self {
+        self.device_credential = Some(credential);
         self
     }
 }
@@ -729,12 +739,16 @@ impl Engine {
                 None => auth_config.dev_user_id = token.clone(),
             }
         }
+        auth_config.device = config.device_credential.clone();
         Auth::new(auth_config)
     }
 
     /// Capture the workspace boundary once, before refresh or sign-in can mutate auth.
     pub fn initial_workspace_scope(auth: &Auth) -> WorkspaceScope {
-        if !auth.workos_enabled() {
+        if auth.device_mode() {
+            // A cloud box always belongs to its owner's synced workspace.
+            WorkspaceScope::Synced
+        } else if !auth.workos_enabled() {
             WorkspaceScope::Development
         } else if auth.loaded_workos_session() {
             WorkspaceScope::Synced
@@ -798,7 +812,7 @@ impl Engine {
     ) -> Result<EngineInfo, EngineError> {
         std::fs::create_dir_all(&config.data_dir)?;
         Ok(EngineInfo {
-            device_id: load_or_create_device_id(&config.data_dir)?,
+            device_id: device_id_for(config, &config.data_dir)?,
             workspace_scope,
             cursor_sdk_version: Some(zeron_harness::CursorHarness::sdk_version().into()),
             capabilities: zeron_proto::capabilities::current(),
@@ -865,7 +879,7 @@ impl Engine {
             // burning attempts. No-op on platforms without a monitor.
             zeron_sync::net_path::spawn_path_monitor();
         }
-        let device_id = load_or_create_device_id(profile.device_root())?;
+        let device_id = device_id_for(config, profile.device_root())?;
         let edge = edge_enabled.then(|| {
             EdgeConfig::new(config.edge_url.clone(), Arc::new(auth.clone())).with_device(device_id)
         });
@@ -967,6 +981,12 @@ impl Engine {
 
         std::fs::create_dir_all(&config.data_dir)?;
         let auth = Self::build_auth(&config).await;
+        if let Some(device) = &config.device_credential {
+            // The box's identity is fixed before anything reads `device-id`.
+            pin_device_id(&config.data_dir, &device.device_id)?;
+            tracing::info!(device_id = %device.device_id, "engine: signing in with a device credential");
+            auth.wait_for_device_identity().await;
+        }
         let mut auth_state = auth.watch_state();
         let workspace_scope = Self::initial_workspace_scope(&auth);
         let mut profile = Self::resolve_profile(&config, &auth, workspace_scope)?;
@@ -974,7 +994,13 @@ impl Engine {
 
         // A captured cloud session without an organization must finish onboarding
         // before its profile can open. A clean signed-out install is local and never
-        // enters the terminal sign-in flow.
+        // enters the terminal sign-in flow — and neither does a cloud box.
+        if workspace_scope == WorkspaceScope::Synced && profile.is_none() && auth.device_mode() {
+            return Err(EngineError::Other(
+                "the device token names no organization; re-enrol the box from a workspace".into(),
+            )
+            .into());
+        }
         if workspace_scope == WorkspaceScope::Synced && profile.is_none() {
             terminal_sign_in(&auth).await?;
             profile = Self::resolve_profile(&config, &auth, workspace_scope)?;
@@ -1416,6 +1442,56 @@ fn env_or(key: &str, default: &str) -> String {
         .map(|s| s.trim().to_string())
         .filter(|s| !s.is_empty())
         .unwrap_or_else(|| default.to_string())
+}
+
+/// The device id for `data_dir`: an enrolled cloud box's fixed id (pinned
+/// first), else the installation's own.
+fn device_id_for(config: &EngineConfig, data_dir: &Path) -> Result<String, EngineError> {
+    match &config.device_credential {
+        Some(device) => {
+            pin_device_id(data_dir, &device.device_id)?;
+            Ok(device.device_id.clone())
+        }
+        None => load_or_create_device_id(data_dir),
+    }
+}
+
+/// Make `{data_dir}/device-id` hold `device_id` (a cloud box's enrolled id),
+/// replacing any other identity. Must run before any store opens: rows the
+/// engine writes are attributed to whatever this file says.
+pub fn pin_device_id(data_dir: &Path, device_id: &str) -> Result<(), EngineError> {
+    std::fs::create_dir_all(data_dir)?;
+    let _identity_lock = DeviceIdentityLock::acquire(data_dir)?;
+    let path = data_dir.join("device-id");
+    match std::fs::read_to_string(&path) {
+        Ok(existing) if existing.trim() == device_id => return Ok(()),
+        Ok(existing) if !existing.trim().is_empty() => {
+            tracing::warn!(previous = %existing.trim(), device_id,
+                "engine: replacing the device id with the enrolled one");
+        }
+        Ok(_) => {}
+        Err(err) if err.kind() == std::io::ErrorKind::NotFound => {}
+        Err(err) => return Err(err.into()),
+    }
+    let temp_path = data_dir.join(format!(
+        ".device-id.tmp-{}-{}",
+        std::process::id(),
+        new_id()
+    ));
+    let written = (|| -> Result<(), EngineError> {
+        let mut temp = std::fs::OpenOptions::new()
+            .write(true)
+            .create_new(true)
+            .open(&temp_path)?;
+        temp.write_all(device_id.as_bytes())?;
+        temp.sync_all()?;
+        std::fs::rename(&temp_path, &path)?;
+        Ok(())
+    })();
+    if written.is_err() {
+        let _ = std::fs::remove_file(&temp_path);
+    }
+    written
 }
 
 /// Stable per-installation device id, persisted at `{data_dir}/device-id`.

@@ -29,6 +29,7 @@ fn config(
         org_id: None,
         workos_client_id: workos_client_id.map(str::to_string),
         dev_user_id: None,
+        device_credential: None,
     }
 }
 

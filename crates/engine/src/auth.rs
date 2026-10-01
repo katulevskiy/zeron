@@ -17,6 +17,12 @@
 //!   so the device-room relay and room clients always dial with a live `?token=`, even
 //!   on the first redial after a laptop wakes from sleep. Org onboarding: an org-less session is `NeedsOrganization`; `SelectOrg`
 //!   runs an org-scoped refresh and the state follows the returned token's `org_id`.
+//! - **Device credential** (a cloud box, docs/cloud.md §6): `ZERON_DEVICE_ID` +
+//!   `ZERON_DEVICE_CREDENTIAL` are traded at `/auth/device-token` for a 30-minute
+//!   edge-signed bearer, renewed 5 minutes before expiry with backoff. The owner's
+//!   user and org come from the token's claims (cached in `device-session.json`
+//!   so a restart opens its profile offline); there is never an interactive
+//!   sign-in, and a rejected credential is logged and retried, not signed out.
 
 use std::collections::HashMap;
 use std::path::PathBuf;
@@ -39,6 +45,12 @@ const HTTP_TIMEOUT: Duration = Duration::from_secs(15);
 const REFRESH_RETRY_BASE: Duration = Duration::from_secs(1);
 /// DNS can recover without an OS path event. Keep polling even at the cap.
 const REFRESH_RETRY_CAP: Duration = Duration::from_secs(5);
+/// Device mode renews its token this long before expiry.
+const DEVICE_RENEW_BEFORE: Duration = Duration::from_secs(5 * 60);
+/// Device-mode retry ceiling: the edge locks a device out after repeated
+/// failures, so a rejected credential must not be hammered.
+const DEVICE_RETRY_CAP: Duration = Duration::from_secs(60);
+const DEVICE_SESSION_FILE: &str = "device-session.json";
 
 type RefreshFlight =
     futures::future::Shared<futures::future::BoxFuture<'static, Result<Option<String>, String>>>;
@@ -152,6 +164,83 @@ impl Serialize for AuthState {
 // Config + construction
 // ---------------------------------------------------------------------------
 
+/// A cloud box's enrollment: its fixed device id and the long-lived
+/// credential it trades for edge tokens (docs/cloud.md §6).
+#[derive(Clone, PartialEq, Eq)]
+pub struct DeviceCredential {
+    pub device_id: String,
+    pub credential: String,
+}
+
+impl std::fmt::Debug for DeviceCredential {
+    fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
+        f.debug_struct("DeviceCredential")
+            .field("device_id", &self.device_id)
+            .field("credential", &"<redacted>")
+            .finish()
+    }
+}
+
+pub const DEVICE_ID_ENV: &str = "ZERON_DEVICE_ID";
+pub const DEVICE_CREDENTIAL_ENV: &str = "ZERON_DEVICE_CREDENTIAL";
+
+impl DeviceCredential {
+    /// Validate a device id (the edge's `[A-Za-z0-9_-]{1,128}`) and a
+    /// non-empty credential.
+    pub fn new(
+        device_id: impl Into<String>,
+        credential: impl Into<String>,
+    ) -> Result<Self, EngineError> {
+        let device_id = device_id.into().trim().to_string();
+        let credential = credential.into().trim().to_string();
+        let valid_id = (1..=128).contains(&device_id.len())
+            && device_id
+                .bytes()
+                .all(|b| b.is_ascii_alphanumeric() || b == b'-' || b == b'_');
+        if !valid_id {
+            return Err(EngineError::Other(format!(
+                "{DEVICE_ID_ENV} must be 1-128 letters, digits, '-' or '_'"
+            )));
+        }
+        if credential.is_empty() {
+            return Err(EngineError::Other(format!(
+                "{DEVICE_CREDENTIAL_ENV} is empty"
+            )));
+        }
+        Ok(Self {
+            device_id,
+            credential,
+        })
+    }
+
+    /// `ZERON_DEVICE_ID` + `ZERON_DEVICE_CREDENTIAL`: `None` when neither is
+    /// set, an error when only one is.
+    pub fn from_env() -> Result<Option<Self>, EngineError> {
+        let read = |key: &str| std::env::var(key).ok().filter(|v| !v.trim().is_empty());
+        match (read(DEVICE_ID_ENV), read(DEVICE_CREDENTIAL_ENV)) {
+            (None, None) => Ok(None),
+            (Some(id), Some(credential)) => Self::new(id, credential).map(Some),
+            _ => Err(EngineError::Other(format!(
+                "set both {DEVICE_ID_ENV} and {DEVICE_CREDENTIAL_ENV}, or neither"
+            ))),
+        }
+    }
+
+    /// [`Self::from_env`], then remove `ZERON_DEVICE_CREDENTIAL` from the
+    /// process environment so agents, terminals and every other child the
+    /// engine spawns never inherit the box's long-lived secret.
+    ///
+    /// # Safety
+    /// No other thread may read or write the environment concurrently: call
+    /// this at the top of `main`, before any runtime or thread starts.
+    pub unsafe fn take_from_env() -> Result<Option<Self>, EngineError> {
+        let credential = Self::from_env()?;
+        // SAFETY: the caller guarantees the process is still single-threaded.
+        unsafe { std::env::remove_var(DEVICE_CREDENTIAL_ENV) };
+        Ok(credential)
+    }
+}
+
 #[derive(Debug, Clone)]
 pub struct AuthConfig {
     /// Edge base URL (`/auth/*` routes).
@@ -170,6 +259,9 @@ pub struct AuthConfig {
     pub dev_bearer: Option<String>,
     /// Loopback callback port; `None` = ephemeral.
     pub callback_port: Option<u16>,
+    /// Cloud-box device credential; `Some` = device mode (overrides WorkOS
+    /// and dev bearers).
+    pub device: Option<DeviceCredential>,
 }
 
 impl AuthConfig {
@@ -182,6 +274,7 @@ impl AuthConfig {
             dev_user_id: "dev-user".into(),
             dev_bearer: None,
             callback_port: None,
+            device: None,
         }
     }
 }
@@ -241,8 +334,12 @@ impl AccessEntry {
 
 struct AuthInner {
     config: AuthConfig,
-    /// `Some(client_id)` = WorkOS mode; `None` = dev mode.
+    /// `Some(client_id)` = WorkOS mode; `None` = dev mode (or device mode).
     workos: Option<String>,
+    /// `Some` = device mode: a cloud box with an enrolled credential.
+    device: Option<DeviceCredential>,
+    /// Device mode: the edge's last `Retry-After`, applied to the next cooldown.
+    retry_hint: Mutex<Option<Duration>>,
     /// Whether construction loaded a parseable WorkOS session. This is an
     /// immutable startup fact: refresh or sign-out must not rewrite it.
     loaded_workos_session: bool,
@@ -281,10 +378,12 @@ pub struct Auth {
 impl Auth {
     /// Build from config: dev mode unless a WorkOS client id is configured.
     pub fn new(config: AuthConfig) -> Self {
+        let device = config.device.clone();
         let workos = config
             .workos_client_id
             .clone()
-            .filter(|s| !s.trim().is_empty());
+            .filter(|s| !s.trim().is_empty())
+            .filter(|_| device.is_none());
         let session_file = config.data_dir.join("session.json");
         let stored: Option<StoredSession> = if workos.is_some() {
             std::fs::read_to_string(&session_file)
@@ -294,6 +393,12 @@ impl Auth {
             None
         };
         let initial = match (&workos, &stored) {
+            _ if device.is_some() => device
+                .as_ref()
+                .and_then(|device| load_device_session(&config.data_dir, &device.device_id))
+                .map_or(AuthState::SignedOut, |session| {
+                    device_state(session.user_id, session.org_id)
+                }),
             (None, _) => AuthState::SignedIn {
                 user: AuthUser {
                     id: config.dev_user_id.clone(),
@@ -317,6 +422,8 @@ impl Auth {
             inner: Arc::new(AuthInner {
                 config,
                 workos,
+                device,
+                retry_hint: Mutex::new(None),
                 loaded_workos_session,
                 http,
                 state_tx,
@@ -368,6 +475,58 @@ impl Auth {
         self.inner.workos.is_some()
     }
 
+    /// True for a cloud box signing in with a device credential.
+    pub fn device_mode(&self) -> bool {
+        self.inner.device.is_some()
+    }
+
+    /// The enrolled device id (device mode only).
+    pub fn device_id(&self) -> Option<&str> {
+        self.inner.device.as_ref().map(|d| d.device_id.as_str())
+    }
+
+    /// Device mode: return once the owner's identity is known — from the
+    /// cached `device-session.json`, or from the first token the edge issues.
+    /// A rejected credential or an unreachable edge is logged and retried with
+    /// backoff; this never asks for an interactive sign-in. Returns at once in
+    /// other modes.
+    pub async fn wait_for_device_identity(&self) {
+        if self.inner.device.is_none() {
+            return;
+        }
+        let mut retry_rx = self.inner.retry_tx.subscribe();
+        let mut online = zeron_sync::wake::subscribe_online();
+        loop {
+            if self.state().is_signed_in() {
+                return;
+            }
+            match self.refresh(None).await {
+                Ok(_) if self.state().is_signed_in() => return,
+                Ok(_) => {}
+                Err(err) => tracing::error!(error = %err, "auth: device sign-in failed; retrying"),
+            }
+            let wait = lock(&self.inner.refresh_retry)
+                .failure
+                .as_ref()
+                .map(RefreshFailure::remaining)
+                .unwrap_or(REFRESH_RETRY_BASE);
+            tokio::select! {
+                _ = tokio::time::sleep(wait) => {}
+                _ = online.recv() => { self.retry_refresh(); }
+                _ = retry_rx.changed() => {}
+            }
+        }
+    }
+
+    /// How much life a cached token must have left before it is renewed.
+    fn renew_slack(&self, entry: &AccessEntry) -> Duration {
+        if self.inner.device.is_some() {
+            device_renew_slack(entry.ttl)
+        } else {
+            TOKEN_SLACK
+        }
+    }
+
     /// True when construction loaded a parseable persisted WorkOS session.
     /// The value stays true even if a later refresh revokes that session.
     pub fn loaded_workos_session(&self) -> bool {
@@ -388,6 +547,9 @@ impl Auth {
     /// Dev mode mirrors the edge's dev-bearer parsing (`user@org` → `user`,
     /// a bare token IS the user id). `None` = signed out (WorkOS only).
     pub fn user_id(&self) -> Option<String> {
+        if self.inner.device.is_some() {
+            return self.state().user().map(|u| u.id.clone());
+        }
         if self.inner.workos.is_none() {
             let dev = &self.inner.config.dev_user_id;
             return Some(dev.split('@').next().unwrap_or(dev).to_string());
@@ -400,6 +562,9 @@ impl Auth {
     /// Dev mode: the configured bearer (by default the user id). WorkOS: cached
     /// access token, refreshed when it has under 30s left.
     pub async fn access_token(&self) -> Result<String, TokenError> {
+        if self.inner.device.is_some() {
+            return self.device_access_token().await;
+        }
         if self.inner.workos.is_none() {
             let config = &self.inner.config;
             return Ok(config
@@ -432,6 +597,25 @@ impl Auth {
             })
     }
 
+    async fn device_access_token(&self) -> Result<String, TokenError> {
+        let cached = || {
+            lock(&self.inner.access)
+                .as_ref()
+                .filter(|entry| entry.remaining() > TOKEN_SLACK)
+                .map(|entry| entry.token.clone())
+        };
+        if let Some(token) = cached() {
+            return Ok(token);
+        }
+        let result = self.refresh(None).await;
+        if let Some(token) = cached() {
+            return Ok(token);
+        }
+        result
+            .map_err(|e| TokenError::TemporarilyUnavailable(e.to_string()))?
+            .ok_or_else(|| TokenError::TemporarilyUnavailable("no device token yet; retry".into()))
+    }
+
     /// Allow one fresh attempt after a connectivity hint or an explicit Retry.
     /// Consumers still serialize on the refresh gate and share its outcome.
     pub fn retry_refresh(&self) {
@@ -447,7 +631,8 @@ impl Auth {
     pub fn spawn_refresh_loop(&self) -> tokio::task::JoinHandle<()> {
         let auth = self.clone();
         tokio::spawn(async move {
-            if auth.inner.workos.is_none() {
+            let device = auth.inner.device.is_some();
+            if auth.inner.workos.is_none() && !device {
                 return;
             }
             let mut state_rx = auth.watch_state();
@@ -455,17 +640,16 @@ impl Auth {
             let mut online = zeron_sync::wake::subscribe_online();
             let mut retry_rx = auth.inner.retry_tx.subscribe();
             loop {
-                if !state_rx.borrow().is_signed_in() {
+                if !device && !state_rx.borrow().is_signed_in() {
                     if state_rx.changed().await.is_err() {
                         return;
                     }
                     continue;
                 }
-                let remaining = lock(&auth.inner.access)
+                let wait = lock(&auth.inner.access)
                     .as_ref()
-                    .map(AccessEntry::remaining)
+                    .map(|entry| entry.remaining().saturating_sub(auth.renew_slack(entry)))
                     .unwrap_or(Duration::ZERO);
-                let wait = remaining.saturating_sub(TOKEN_SLACK);
                 if wait > Duration::ZERO {
                     // Re-evaluate at least once a minute rather than parking
                     // on one long timer: tokio timers ride the monotonic
@@ -512,6 +696,9 @@ impl Auth {
     /// Begin a headed sign-in: returns the AuthKit authorize URL redirecting to our
     /// loopback callback server (bound lazily on an ephemeral port).
     pub async fn start_sign_in(&self) -> Result<String, EngineError> {
+        if self.inner.device.is_some() {
+            return Err(device_mode_error());
+        }
         if self.inner.workos.is_none() {
             return Ok(String::new()); // dev mode: nothing to do (TS parity)
         }
@@ -522,6 +709,10 @@ impl Auth {
     /// Begin a headless sign-in: the redirect is the edge's hosted paste-code page —
     /// nothing ever redirects to this machine, so the browser can be anywhere.
     pub fn start_headless_sign_in(&self) -> String {
+        if self.inner.device.is_some() {
+            tracing::warn!("auth: interactive sign-in requested on a device-credential engine");
+            return String::new();
+        }
         if self.inner.workos.is_none() {
             return String::new();
         }
@@ -532,6 +723,9 @@ impl Auth {
     /// Finish a headless sign-in with the pasted `state.code` string. The state half
     /// must match a sign-in started HERE (same CSRF discipline as the loopback flow).
     pub async fn complete_sign_in(&self, pasted: &str) -> Result<(), EngineError> {
+        if self.inner.device.is_some() {
+            return Err(device_mode_error());
+        }
         if self.inner.workos.is_none() {
             return Ok(());
         }
@@ -554,6 +748,12 @@ impl Auth {
     }
 
     pub fn sign_out(&self) {
+        if self.inner.device.is_some() {
+            // The credential IS this box's identity; signing out would strand
+            // it until restart. Revoking the device (owner) is the way out.
+            tracing::warn!("auth: sign-out ignored on a device-credential engine; revoke the device instead");
+            return;
+        }
         let mut sign_in = lock(&self.inner.sign_in);
         self.clear_session(&mut sign_in);
     }
@@ -590,6 +790,9 @@ impl Auth {
 
     /// Create an org (the edge makes us its first admin member) and scope to it.
     pub async fn create_org(&self, name: &str) -> Result<(), EngineError> {
+        if self.inner.device.is_some() {
+            return Err(device_mode_error());
+        }
         if self.inner.workos.is_none() {
             return Ok(());
         }
@@ -611,6 +814,9 @@ impl Auth {
     /// Scope the session to an org: one refresh with `organizationId`; the state follows
     /// the returned token's `org_id` claim.
     pub async fn select_org(&self, organization_id: &str) -> Result<(), EngineError> {
+        if self.inner.device.is_some() {
+            return Err(device_mode_error());
+        }
         if self.inner.workos.is_none() {
             return Ok(());
         }
@@ -801,7 +1007,7 @@ impl Auth {
         // Re-check under the gate: the refresh we queued behind may have done the work.
         if organization_id.is_none()
             && let Some(entry) = &*lock(&self.inner.access)
-            && entry.remaining() > TOKEN_SLACK
+            && entry.remaining() > self.renew_slack(entry)
         {
             return Ok(Some(entry.token.clone()));
         }
@@ -827,7 +1033,12 @@ impl Auth {
                         REFRESH_RETRY_BASE.saturating_mul(1 << (retry.failures - 1).min(8));
                     let jitter =
                         Duration::from_millis(u64::from(uuid::Uuid::new_v4().as_bytes()[0]));
-                    let delay = (backoff + jitter).min(REFRESH_RETRY_CAP);
+                    let delay = if self.inner.device.is_some() {
+                        let hint = lock(&self.inner.retry_hint).take().unwrap_or_default();
+                        (backoff + jitter).min(DEVICE_RETRY_CAP).max(hint)
+                    } else {
+                        (backoff + jitter).min(REFRESH_RETRY_CAP)
+                    };
                     tracing::warn!(error = %err, retry_ms = delay.as_millis() as u64,
                         "auth: refresh failed; cooling down");
                     retry.failure = Some(RefreshFailure {
@@ -852,6 +1063,9 @@ impl Auth {
         &self,
         organization_id: Option<&str>,
     ) -> Result<Option<String>, EngineError> {
+        if let Some(device) = &self.inner.device {
+            return self.device_token_locked(device).await.map(Some);
+        }
         let (generation, refresh_token) = {
             let sign_in = lock(&self.inner.sign_in);
             let Some(refresh_token) = lock(&self.inner.stored)
@@ -966,6 +1180,114 @@ impl Auth {
         Ok(Some(tokens.access_token))
     }
 
+    /// `POST /auth/device-token`: trade the credential for a bearer and adopt
+    /// the owner identity it carries. Called only under the refresh gate.
+    async fn device_token_locked(&self, device: &DeviceCredential) -> Result<String, EngineError> {
+        #[derive(Deserialize)]
+        struct Issued {
+            token: String,
+        }
+        #[derive(Deserialize, Default)]
+        struct Rejected {
+            #[serde(default)]
+            error: String,
+        }
+        let url = format!(
+            "{}/auth/device-token",
+            self.inner.config.edge_url.trim_end_matches('/')
+        );
+        let res = self
+            .inner
+            .http
+            .post(&url)
+            .json(&serde_json::json!({
+                "deviceId": device.device_id,
+                "credential": device.credential,
+            }))
+            .send()
+            .await
+            .map_err(|err| {
+                EngineError::Other(format!(
+                    "could not reach the edge for a device token: {}",
+                    describe_http_error(err)
+                ))
+            })?;
+        let status = res.status().as_u16();
+        if status == 429 {
+            let retry_after = res
+                .headers()
+                .get(reqwest::header::RETRY_AFTER)
+                .and_then(|v| v.to_str().ok())
+                .and_then(|v| v.trim().parse::<u64>().ok())
+                .map(Duration::from_secs)
+                .unwrap_or(DEVICE_RETRY_CAP);
+            *lock(&self.inner.retry_hint) = Some(retry_after);
+            return Err(EngineError::Other(format!(
+                "the edge is rate-limiting this device's credential; retrying in {}s",
+                retry_after.as_secs()
+            )));
+        }
+        if status == 401 || status == 403 {
+            let code = res.json::<Rejected>().await.unwrap_or_default().error;
+            let why = match code.as_str() {
+                "revoked" => "it was revoked",
+                "invalid_credential" => "the credential is wrong or the device is not enrolled",
+                _ => "it was refused",
+            };
+            return Err(EngineError::Other(format!(
+                "the edge rejected device {}'s credential ({status} {code}): {why}; \
+                 re-enrol the box to give it a new credential",
+                device.device_id
+            )));
+        }
+        if !res.status().is_success() {
+            return Err(EngineError::Other(format!("device token request failed ({status})")));
+        }
+        let issued: Issued = res.json().await.map_err(|e| {
+            EngineError::Other(format!(
+                "malformed device token response: {}",
+                describe_http_error(e)
+            ))
+        })?;
+        let claims = jwt_claims(&issued.token).unwrap_or_default();
+        let (Some(user_id), Some(org_id)) = (claims.sub.clone(), claims.org_id.clone()) else {
+            return Err(EngineError::Other(
+                "the edge issued a device token without a user or organization".into(),
+            ));
+        };
+        if claims.did.as_deref() != Some(device.device_id.as_str()) {
+            return Err(EngineError::Other(
+                "the edge issued a device token for a different device".into(),
+            ));
+        }
+        let entry = AccessEntry::fresh(issued.token.clone());
+        tracing::info!(ttl_s = entry.ttl.as_secs(), "auth: device token issued");
+        *lock(&self.inner.access) = Some(entry);
+        let next = device_state(user_id.clone(), org_id.clone());
+        if *self.inner.state_tx.borrow() != next {
+            let session = DeviceSession {
+                device_id: device.device_id.clone(),
+                user_id,
+                org_id,
+            };
+            match serde_json::to_vec(&session) {
+                Ok(bytes) => {
+                    if let Err(err) =
+                        write_private(&self.inner.config.data_dir.join(DEVICE_SESSION_FILE), &bytes)
+                    {
+                        tracing::warn!(error = %err, "auth: failed to persist device session");
+                    }
+                }
+                Err(err) => tracing::warn!(error = %err, "auth: failed to encode device session"),
+            }
+            self.inner.state_tx.send_replace(next);
+        }
+        self.inner
+            .token_tx
+            .send_modify(|epoch| *epoch = epoch.wrapping_add(1));
+        Ok(issued.token)
+    }
+
     fn session_file(&self) -> PathBuf {
         self.inner.config.data_dir.join("session.json")
     }
@@ -1051,6 +1373,48 @@ struct SignInResult {
     refresh_token: String,
 }
 
+/// The owner identity a device-credential engine last received, so a restart
+/// opens its profile without waiting for the edge.
+#[derive(Debug, Clone, Serialize, Deserialize)]
+#[serde(rename_all = "camelCase")]
+struct DeviceSession {
+    device_id: String,
+    user_id: String,
+    org_id: String,
+}
+
+fn load_device_session(data_dir: &std::path::Path, device_id: &str) -> Option<DeviceSession> {
+    let raw = std::fs::read_to_string(data_dir.join(DEVICE_SESSION_FILE)).ok()?;
+    serde_json::from_str::<DeviceSession>(&raw)
+        .ok()
+        .filter(|session| session.device_id == device_id)
+}
+
+/// Device tokens carry no email; the user id stands in for it.
+fn device_state(user_id: String, org_id: String) -> AuthState {
+    AuthState::SignedIn {
+        user: AuthUser {
+            email: String::new(),
+            id: user_id,
+            name: None,
+        },
+        org_id: Some(org_id),
+    }
+}
+
+/// Renew 5 minutes before expiry — or at half-life for a token too short for
+/// that, so a short-lived token can never make the loop renew back to back.
+fn device_renew_slack(ttl: Duration) -> Duration {
+    DEVICE_RENEW_BEFORE.min(ttl / 2)
+}
+
+fn device_mode_error() -> EngineError {
+    EngineError::Other(
+        "this engine signs in with its device credential; interactive sign-in is unavailable"
+            .into(),
+    )
+}
+
 fn state_for(user: AuthUser, org_id: Option<String>) -> AuthState {
     // Every user must belong to an organization before the product opens up; an org-less
     // session is `NeedsOrganization`, which the UI gates on.
@@ -1068,6 +1432,9 @@ fn state_for(user: AuthUser, org_id: Option<String>) -> AuthState {
 #[async_trait::async_trait]
 impl zeron_rpc::TokenSource for Auth {
     async fn token(&self) -> Result<String, TokenError> {
+        if self.inner.device.is_some() {
+            return self.access_token().await;
+        }
         if self.inner.workos.is_some() && !self.state().is_signed_in() {
             return Err(TokenError::SignedOut);
         }
@@ -1192,6 +1559,11 @@ struct JwtClaims {
     iat: Option<i64>,
     #[serde(default)]
     org_id: Option<String>,
+    #[serde(default)]
+    sub: Option<String>,
+    /// Device tokens: the device id the token was issued to.
+    #[serde(default)]
+    did: Option<String>,
 }
 
 /// Decode (without verifying — the edge verifies) the JWT payload claims. Total: a
@@ -1367,6 +1739,319 @@ mod tests {
             panic!("dev mode is signed in: {:?}", auth.state());
         };
         assert_eq!(user.id, "local");
+    }
+
+    // -- device-credential mode (docs/cloud.md §6) -------------------------
+
+    /// What the fake edge answers on `/auth/device-token`.
+    #[derive(Clone)]
+    enum Answer {
+        Issue { ttl_s: i64 },
+        Reject(u16, &'static str),
+        RateLimit(u64),
+    }
+
+    struct FakeEdge {
+        url: String,
+        answer: Arc<Mutex<Answer>>,
+        calls: Arc<std::sync::atomic::AtomicUsize>,
+        bodies: Arc<Mutex<Vec<serde_json::Value>>>,
+    }
+
+    fn fake_token(claims: serde_json::Value) -> String {
+        use base64::Engine as _;
+        let b64 = |v: &[u8]| base64::engine::general_purpose::URL_SAFE_NO_PAD.encode(v);
+        format!(
+            "{}.{}.sig",
+            b64(br#"{"alg":"ES256"}"#),
+            b64(claims.to_string().as_bytes())
+        )
+    }
+
+    /// A minimal edge serving `POST /auth/device-token` only.
+    async fn fake_edge(answer: Answer) -> FakeEdge {
+        use std::sync::atomic::Ordering;
+        let listener = tokio::net::TcpListener::bind("127.0.0.1:0").await.unwrap();
+        let url = format!("http://{}", listener.local_addr().unwrap());
+        let answer = Arc::new(Mutex::new(answer));
+        let calls = Arc::new(std::sync::atomic::AtomicUsize::new(0));
+        let bodies = Arc::new(Mutex::new(Vec::new()));
+        let (a, c, b) = (answer.clone(), calls.clone(), bodies.clone());
+        tokio::spawn(async move {
+            loop {
+                let Ok((mut stream, _)) = listener.accept().await else {
+                    return;
+                };
+                let (answer, calls, bodies) = (a.clone(), c.clone(), b.clone());
+                tokio::spawn(async move {
+                    let mut buf = Vec::new();
+                    let mut chunk = [0u8; 4096];
+                    let (head_end, length) = loop {
+                        let n = stream.read(&mut chunk).await.unwrap_or(0);
+                        if n == 0 {
+                            return;
+                        }
+                        buf.extend_from_slice(&chunk[..n]);
+                        if let Some(end) = buf.windows(4).position(|w| w == b"\r\n\r\n") {
+                            let head = String::from_utf8_lossy(&buf[..end]).to_lowercase();
+                            let length = head
+                                .lines()
+                                .find_map(|l| l.strip_prefix("content-length:"))
+                                .and_then(|v| v.trim().parse::<usize>().ok())
+                                .unwrap_or(0);
+                            break (end + 4, length);
+                        }
+                    };
+                    while buf.len() < head_end + length {
+                        let n = stream.read(&mut chunk).await.unwrap_or(0);
+                        if n == 0 {
+                            return;
+                        }
+                        buf.extend_from_slice(&chunk[..n]);
+                    }
+                    let request_line = String::from_utf8_lossy(&buf[..head_end]).into_owned();
+                    let body: serde_json::Value =
+                        serde_json::from_slice(&buf[head_end..head_end + length])
+                            .unwrap_or_default();
+                    let n = calls.fetch_add(1, Ordering::SeqCst) + 1;
+                    let (status, extra, payload) =
+                        if !request_line.starts_with("POST /auth/device-token ") {
+                            ("404 Not Found", String::new(), r#"{"error":"not_found"}"#.to_string())
+                        } else {
+                            let did = body["deviceId"].as_str().unwrap_or_default().to_string();
+                            lock(&bodies).push(body);
+                            match lock(&answer).clone() {
+                                Answer::Issue { ttl_s } => {
+                                    let iat = chrono::Utc::now().timestamp();
+                                    let token = fake_token(serde_json::json!({
+                                        "iss": "zeron-edge", "sub": "user_1", "org_id": "org_1",
+                                        "did": did, "kind": "cloud", "iat": iat,
+                                        "exp": iat + ttl_s, "n": n,
+                                    }));
+                                    (
+                                        "200 OK",
+                                        String::new(),
+                                        serde_json::json!({ "token": token, "expiresAt": (iat + ttl_s) * 1000 })
+                                            .to_string(),
+                                    )
+                                }
+                                Answer::Reject(401, code) => (
+                                    "401 Unauthorized",
+                                    String::new(),
+                                    serde_json::json!({ "error": code }).to_string(),
+                                ),
+                                Answer::Reject(_, code) => (
+                                    "403 Forbidden",
+                                    String::new(),
+                                    serde_json::json!({ "error": code }).to_string(),
+                                ),
+                                Answer::RateLimit(secs) => (
+                                    "429 Too Many Requests",
+                                    format!("retry-after: {secs}\r\n"),
+                                    r#"{"error":"rate_limited"}"#.to_string(),
+                                ),
+                            }
+                        };
+                    let response = format!(
+                        "HTTP/1.1 {status}\r\ncontent-type: application/json\r\n{extra}content-length: {}\r\nconnection: close\r\n\r\n{payload}",
+                        payload.len()
+                    );
+                    let _ = stream.write_all(response.as_bytes()).await;
+                    let _ = stream.shutdown().await;
+                });
+            }
+        });
+        FakeEdge {
+            url,
+            answer,
+            calls,
+            bodies,
+        }
+    }
+
+    fn device_config(edge: &str, dir: &std::path::Path) -> AuthConfig {
+        let mut config = AuthConfig::new(edge, dir);
+        // A configured WorkOS client and dev bearer must both be ignored.
+        config.workos_client_id = Some("client_test".into());
+        config.dev_bearer = Some("shared-secret-0123456789".into());
+        config.device = Some(DeviceCredential::new("box-1", "credential-secret").unwrap());
+        config
+    }
+
+    async fn within<T>(future: impl std::future::Future<Output = T>) -> T {
+        tokio::time::timeout(Duration::from_secs(15), future)
+            .await
+            .expect("finished in time")
+    }
+
+    #[tokio::test]
+    async fn device_mode_signs_in_from_the_token_and_never_interactively() {
+        use std::sync::atomic::Ordering;
+        let edge = fake_edge(Answer::Issue { ttl_s: 1800 }).await;
+        let dir = tempfile::tempdir().unwrap();
+        let auth = Auth::new(device_config(&edge.url, dir.path()));
+        assert!(auth.device_mode());
+        assert!(!auth.workos_enabled());
+        assert_eq!(auth.device_id(), Some("box-1"));
+        assert_eq!(auth.state(), AuthState::SignedOut);
+        assert_eq!(
+            crate::Engine::initial_workspace_scope(&auth),
+            crate::WorkspaceScope::Synced
+        );
+
+        within(auth.wait_for_device_identity()).await;
+        let AuthState::SignedIn { user, org_id } = auth.state() else {
+            panic!("signed in from the token: {:?}", auth.state());
+        };
+        assert_eq!(user.id, "user_1");
+        assert_eq!(org_id.as_deref(), Some("org_1"));
+        assert_eq!(auth.user_id().as_deref(), Some("user_1"));
+        let token = auth.access_token().await.unwrap();
+        assert!(jwt_claims(&token).unwrap().did.as_deref() == Some("box-1"));
+        assert_eq!(
+            zeron_rpc::TokenSource::token(&auth).await.unwrap(),
+            token,
+            "relays dial with the cached device token"
+        );
+        assert_eq!(edge.calls.load(Ordering::SeqCst), 1);
+        assert_eq!(
+            lock(&edge.bodies)[0],
+            serde_json::json!({ "deviceId": "box-1", "credential": "credential-secret" })
+        );
+
+        // The synced profile is the owner's, chosen without WorkOS.
+        let config = crate::EngineConfig {
+            data_dir: dir.path().to_path_buf(),
+            edge_url: edge.url.clone(),
+            edge_token: None,
+            ipc_port: 0,
+            default_harness: crate::HarnessId::ClaudeCode,
+            org_id: None,
+            workos_client_id: Some("client_test".into()),
+            dev_user_id: None,
+            device_credential: Some(DeviceCredential::new("box-1", "credential-secret").unwrap()),
+        };
+        let profile = crate::Engine::resolve_profile(&config, &auth, crate::WorkspaceScope::Synced)
+            .unwrap()
+            .expect("profile");
+        assert_eq!(profile.org_id(), "org_1");
+        assert_eq!(profile.user_id(), "user_1");
+
+        // Nothing interactive, and sign-out cannot strand the box.
+        assert!(auth.start_sign_in().await.is_err());
+        assert!(auth.start_headless_sign_in().is_empty());
+        assert!(auth.complete_sign_in("state.code").await.is_err());
+        assert!(auth.select_org("org_2").await.is_err());
+        assert!(auth.create_org("New").await.is_err());
+        assert!(auth.list_orgs().await.unwrap().is_empty());
+        auth.sign_out();
+        assert!(auth.state().is_signed_in());
+
+        // A restart opens the same profile before the edge answers.
+        let offline = Auth::new(device_config("http://127.0.0.1:9", dir.path()));
+        assert!(offline.state().is_signed_in());
+        assert_eq!(offline.user_id().as_deref(), Some("user_1"));
+        // ...but not another device's cached identity.
+        let mut other = device_config("http://127.0.0.1:9", dir.path());
+        other.device = Some(DeviceCredential::new("box-2", "x").unwrap());
+        assert_eq!(Auth::new(other).state(), AuthState::SignedOut);
+    }
+
+    #[tokio::test]
+    async fn device_tokens_renew_five_minutes_before_expiry() {
+        use std::sync::atomic::Ordering;
+        assert_eq!(
+            device_renew_slack(Duration::from_secs(30 * 60)),
+            Duration::from_secs(5 * 60)
+        );
+        assert_eq!(
+            device_renew_slack(Duration::from_secs(4)),
+            Duration::from_secs(2)
+        );
+        // 4 s of life: the renewal point (half-life) is 2 s away.
+        let edge = fake_edge(Answer::Issue { ttl_s: 4 }).await;
+        let dir = tempfile::tempdir().unwrap();
+        let auth = Auth::new(device_config(&edge.url, dir.path()));
+        within(auth.wait_for_device_identity()).await;
+        let first = lock(&auth.inner.access).as_ref().unwrap().token.clone();
+        let mut epochs = zeron_rpc::TokenSource::subscribe(&auth).unwrap();
+        epochs.borrow_and_update();
+        let _loop = auth.spawn_refresh_loop();
+        within(async {
+            while edge.calls.load(Ordering::SeqCst) < 2 {
+                tokio::time::sleep(Duration::from_millis(50)).await;
+            }
+        })
+        .await;
+        within(epochs.changed()).await.unwrap();
+        let renewed = lock(&auth.inner.access).as_ref().unwrap().token.clone();
+        assert_ne!(renewed, first);
+        // Renewed tokens are long-lived again: no request storm.
+        *lock(&edge.answer) = Answer::Issue { ttl_s: 1800 };
+        tokio::time::sleep(Duration::from_millis(300)).await;
+        assert!(edge.calls.load(Ordering::SeqCst) <= 3);
+    }
+
+    #[tokio::test]
+    async fn a_rejected_credential_is_reported_clearly_and_retried() {
+        use std::sync::atomic::Ordering;
+        let edge = fake_edge(Answer::Reject(401, "invalid_credential")).await;
+        let dir = tempfile::tempdir().unwrap();
+        let auth = Auth::new(device_config(&edge.url, dir.path()));
+        let Err(TokenError::TemporarilyUnavailable(reason)) = auth.access_token().await else {
+            panic!("a rejected credential is a retryable error");
+        };
+        assert!(reason.contains("rejected device box-1"), "{reason}");
+        assert!(reason.contains("invalid_credential"), "{reason}");
+        assert!(reason.contains("re-enrol"), "{reason}");
+        assert!(!reason.contains("credential-secret"), "{reason}");
+        // The cooldown is shared: an immediate retry does not hit the edge.
+        let _ = auth.access_token().await;
+        assert_eq!(edge.calls.load(Ordering::SeqCst), 1);
+
+        let waiting = tokio::spawn({
+            let auth = auth.clone();
+            async move { auth.wait_for_device_identity().await }
+        });
+        *lock(&edge.answer) = Answer::RateLimit(1);
+        auth.retry_refresh();
+        within(async {
+            while edge.calls.load(Ordering::SeqCst) < 2 {
+                tokio::time::sleep(Duration::from_millis(20)).await;
+            }
+        })
+        .await;
+        let Err(TokenError::TemporarilyUnavailable(reason)) = auth.access_token().await else {
+            panic!("rate limited");
+        };
+        assert!(reason.contains("rate-limiting"), "{reason}");
+        assert!(!waiting.is_finished());
+        *lock(&edge.answer) = Answer::Issue { ttl_s: 1800 };
+        within(waiting).await.unwrap();
+        assert!(auth.state().is_signed_in());
+        assert!(auth.access_token().await.is_ok());
+    }
+
+    #[test]
+    fn device_credentials_validate_and_never_print_the_secret() {
+        let credential = DeviceCredential::new(" box-1 ", "s3cret").unwrap();
+        assert_eq!(credential.device_id, "box-1");
+        assert!(!format!("{credential:?}").contains("s3cret"));
+        assert!(DeviceCredential::new("../etc", "x").is_err());
+        assert!(DeviceCredential::new("box", " ").is_err());
+    }
+
+    #[test]
+    fn the_enrolled_device_id_replaces_the_installation_id() {
+        let dir = tempfile::tempdir().unwrap();
+        let original = crate::load_or_create_device_id(dir.path()).unwrap();
+        assert_ne!(original, "box-1");
+        crate::pin_device_id(dir.path(), "box-1").unwrap();
+        assert_eq!(crate::load_or_create_device_id(dir.path()).unwrap(), "box-1");
+        crate::pin_device_id(dir.path(), "box-1").unwrap();
+        let fresh = tempfile::tempdir().unwrap();
+        crate::pin_device_id(fresh.path(), "box-2").unwrap();
+        assert_eq!(crate::load_or_create_device_id(fresh.path()).unwrap(), "box-2");
     }
 
     #[test]

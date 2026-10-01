@@ -170,6 +170,16 @@ fn main() -> anyhow::Result<()> {
     #[cfg(windows)]
     attach_parent_console();
     let cli = Cli::parse();
+    // A cloud box's credential (docs/cloud.md §6) is read and scrubbed from the
+    // environment first, while the process is still single-threaded, so no
+    // agent or terminal the engine spawns inherits it.
+    let device_credential = if matches!(&cli.command, Some(Command::Headless)) {
+        // SAFETY: nothing has spawned a thread yet (logging, the malloc
+        // trimmer and the runtime all start below).
+        unsafe { zeron_engine::DeviceCredential::take_from_env() }?
+    } else {
+        None
+    };
     #[cfg(windows)]
     if let Some(pid) = cli.wait_for_exit {
         zeron_update::windows::wait_for_exit(pid)?;
@@ -257,7 +267,9 @@ fn main() -> anyhow::Result<()> {
         Some(Command::Headless) => {
             let runtime = tokio::runtime::Runtime::new()?;
             runtime.block_on(async {
-                let engine = zeron_engine::Engine::new(engine_config_from_env());
+                let mut config = engine_config_from_env();
+                config.device_credential = device_credential;
+                let engine = zeron_engine::Engine::new(config);
                 engine.run().await
             })
         }
@@ -401,6 +413,8 @@ fn engine_config_from_env() -> zeron_engine::EngineConfig {
             .map(|user| user.trim().to_string())
             .filter(|user| !user.is_empty()),
         edge_token,
+        // Set by `zeron headless` alone, from the environment (see `main`).
+        device_credential: None,
     }
 }
 

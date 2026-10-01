@@ -29,6 +29,7 @@ async fn start_engine(dir: &Path, edge_url: &str) -> EngineRuntime {
         org_id: None,
         workos_client_id: None,
         dev_user_id: None,
+        device_credential: None,
     }
     .with_local_edge(edge_url, TOKEN);
     let auth = Engine::build_auth(&config).await;

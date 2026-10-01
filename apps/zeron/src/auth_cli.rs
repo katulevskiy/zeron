@@ -238,6 +238,7 @@ mod tests {
             org_id: None,
             workos_client_id: Some("client_test".into()),
             dev_user_id: None,
+            device_credential: None,
         }
     }
 

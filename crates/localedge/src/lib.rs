@@ -19,6 +19,10 @@
 //!   token holder, so owner claims and `orgId`/`userId` room partitioning
 //!   collapse; `/auth/*` answers like a Worker without WorkOS configured.
 //!   Engines join as user/org `local` (`EngineConfig::with_local_edge`).
+//! - Cloud-box enrollment ([`cloud`], docs/cloud.md §6) mirrors the Worker:
+//!   the shared-secret holder mints device credentials, a box trades its
+//!   credential for a short-lived device token, and device tokens reach only
+//!   the routes a box engine uses.
 //!
 //! The listener binds 127.0.0.1 unless [`LocalEdgeConfig::bind`] says
 //! otherwise (`zeron local-edge --bind 0.0.0.0` lets other machines join).
@@ -28,6 +32,7 @@
 #![allow(clippy::result_large_err)]
 
 mod chat;
+mod cloud;
 mod device;
 mod http;
 mod preview;
@@ -207,18 +212,33 @@ impl Edge {
         Peer::new(self.next_peer.fetch_add(1, Ordering::Relaxed))
     }
 
-    /// `Authorization: Bearer` first, then `?token=` (sockets can't always
-    /// set headers) — the Worker's `bearerFromRequest`.
-    fn authorized(&self, request: &Request<Incoming>) -> bool {
+    /// Who is calling: the shared secret (the owner) or a cloud box's device
+    /// token. `Authorization: Bearer` first, then `?token=` (sockets can't
+    /// always set headers) — the Worker's `bearerFromRequest`.
+    fn caller(&self, request: &Request<Incoming>) -> Option<Caller> {
         let header = http::header(request, "authorization").and_then(|value| {
             let (scheme, token) = value.split_at_checked(7)?;
             scheme
                 .eq_ignore_ascii_case("bearer ")
                 .then(|| token.trim().to_owned())
         });
-        let presented = header.or_else(|| http::query(request).remove("token"));
-        presented.is_some_and(|token| bool::from(token.as_bytes().ct_eq(self.token.as_bytes())))
+        let presented = header.or_else(|| http::query(request).remove("token"))?;
+        if cloud::names_issuer(&presented) {
+            return self
+                .with_state(|state| cloud::verify_token(&state.db, &presented))
+                .map(Caller::Device);
+        }
+        bool::from(presented.as_bytes().ct_eq(self.token.as_bytes())).then_some(Caller::Owner)
     }
+}
+
+/// An authenticated caller.
+#[derive(Debug, Clone, PartialEq, Eq)]
+enum Caller {
+    /// The shared-secret holder — the single tenant.
+    Owner,
+    /// A cloud box's device token, for this device id.
+    Device(String),
 }
 
 async fn accept_loop(listener: TcpListener, edge: Arc<Edge>) {
@@ -313,11 +333,29 @@ async fn route(edge: Arc<Edge>, request: Request<Incoming>) -> Reply {
         return releases(&parts[1..], &method);
     }
 
-    if !edge.authorized(&request) {
+    // ── cloud-box enrollment: the public half (docs/cloud.md §6) ───────────
+    if path == "/.well-known/zeron-device-jwks.json" && method == "GET" {
+        // HS256 under a private key: nothing to publish.
+        return http::json(&json!({ "keys": [] }), 200);
+    }
+    if path == "/auth/device-token" && method == "POST" {
+        return cloud::device_token(&edge, request).await;
+    }
+
+    let Some(caller) = edge.caller(&request) else {
         return http::error(401, "unauthenticated");
+    };
+    if let Caller::Device(did) = &caller
+        && !cloud::scope_allows(did, &method, &parts, &http::query(&request))
+    {
+        return http::json(&json!({ "error": "forbidden", "reason": "device token" }), 403);
     }
 
     match parts.as_slice() {
+        ["cloud", "devices", rest @ ..] => match caller {
+            Caller::Owner => cloud::devices(&edge, rest, request).await,
+            Caller::Device(_) => http::error(403, "forbidden"),
+        },
         // A Worker without WorkOS configured: exchange/refresh/orgs are 501.
         ["auth", ..] => http::error(501, "workos not configured"),
         ["preview", org, "ws"] if valid_id(org) => {
