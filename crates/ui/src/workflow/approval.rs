@@ -12,9 +12,7 @@ use gpui::{
     AnyElement, InteractiveElement as _, IntoElement, ParentElement as _, SharedString,
     StatefulInteractiveElement as _, Styled as _, Window, div, prelude::*, px,
 };
-use zeron_proto::{
-    GraphActor, WORKFLOW_APPROVAL_META_KIND, WorkflowApprovalMeta, WorkflowBudgets,
-};
+use zeron_proto::{GraphActor, WORKFLOW_APPROVAL_META_KIND, WorkflowApprovalMeta, WorkflowBudgets};
 use zeron_syntax::HighlightedDocument;
 
 use super::model::format_tokens;
@@ -99,7 +97,11 @@ pub fn caps(max_concurrency: u32, budgets: &WorkflowBudgets) -> Vec<String> {
     if max_concurrency > 0 {
         out.push(format!(
             "{max_concurrency} {} at once",
-            if max_concurrency == 1 { "agent" } else { "agents" }
+            if max_concurrency == 1 {
+                "agent"
+            } else {
+                "agents"
+            }
         ));
     }
     if let Some(n) = budgets.max_asks {
@@ -249,41 +251,38 @@ pub fn approval_block(
         }),
     );
 
-    let agents = div().flex().flex_row().flex_wrap().gap(px(6.0)).children(
-        model.agents.iter().map(|a| {
-            div()
-                .h(px(22.0))
-                .px(px(8.0))
-                .rounded(px(11.0))
-                .bg(crate::theme::ink(0.06))
-                .flex()
-                .items_center()
-                .gap(px(5.0))
-                .child(
-                    icon(icons::BOT)
-                        .size(px(11.0))
-                        .text_color(theme.text_muted),
-                )
-                .child(
-                    div()
-                        .text_size(ui_rems(11.5))
-                        .text_color(theme.text)
-                        .child(SharedString::from(if a.many {
+    let agents =
+        div()
+            .flex()
+            .flex_row()
+            .flex_wrap()
+            .gap(px(6.0))
+            .children(model.agents.iter().map(|a| {
+                div()
+                    .h(px(22.0))
+                    .px(px(8.0))
+                    .rounded(px(11.0))
+                    .bg(crate::theme::ink(0.06))
+                    .flex()
+                    .items_center()
+                    .gap(px(5.0))
+                    .child(icon(icons::BOT).size(px(11.0)).text_color(theme.text_muted))
+                    .child(div().text_size(ui_rems(11.5)).text_color(theme.text).child(
+                        SharedString::from(if a.many {
                             format!("{} ×n", a.name)
                         } else {
                             a.name.clone()
-                        })),
-                )
-                .when_some(a.model.clone(), |el, m| {
-                    el.child(
-                        div()
-                            .text_size(ui_rems(11.0))
-                            .text_color(theme.text_faint)
-                            .child(SharedString::from(m)),
-                    )
-                })
-        }),
-    );
+                        }),
+                    ))
+                    .when_some(a.model.clone(), |el, m| {
+                        el.child(
+                            div()
+                                .text_size(ui_rems(11.0))
+                                .text_color(theme.text_faint)
+                                .child(SharedString::from(m)),
+                        )
+                    })
+            }));
 
     let commands = div().flex().flex_col().gap(px(2.0)).children(
         model
@@ -340,7 +339,11 @@ pub fn approval_block(
             .size(px(11.0))
             .text_color(theme.text_muted),
         )
-        .child(if script_open { "Hide script" } else { "Show script" });
+        .child(if script_open {
+            "Hide script"
+        } else {
+            "Show script"
+        });
 
     let script = script_open.then(|| {
         let opts = RenderOptions {

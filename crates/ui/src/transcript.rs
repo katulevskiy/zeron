@@ -9089,12 +9089,18 @@ impl Transcript {
     fn workflow_sink(&self, cx: &mut Context<Self>) -> crate::workflow::ActionSink {
         let this = cx.entity().downgrade();
         std::rc::Rc::new(move |action, _window, cx| {
-            this.update(cx, |transcript, cx| transcript.on_workflow_action(action, cx))
-                .ok();
+            this.update(cx, |transcript, cx| {
+                transcript.on_workflow_action(action, cx)
+            })
+            .ok();
         })
     }
 
-    fn on_workflow_action(&mut self, action: crate::workflow::WorkflowAction, cx: &mut Context<Self>) {
+    fn on_workflow_action(
+        &mut self,
+        action: crate::workflow::WorkflowAction,
+        cx: &mut Context<Self>,
+    ) {
         use crate::workflow::WorkflowAction as A;
         let Some(chat_id) = self.chat_id.clone() else {
             return;
@@ -14654,7 +14660,11 @@ mod tests {
                         _ => "other",
                     })
                     .collect();
-                assert_eq!(kinds, ["card", "result"], "the end marker is part of the card");
+                assert_eq!(
+                    kinds,
+                    ["card", "result"],
+                    "the end marker is part of the card"
+                );
             });
         });
     }

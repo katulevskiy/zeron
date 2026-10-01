@@ -4770,7 +4770,7 @@ impl Shell {
                 let element = if strip > 0.0 {
                     let shell = cx.entity().downgrade();
                     let chat_id = chat.id.clone();
-                    let open: std::rc::Rc<dyn Fn(String, &mut Window, &mut gpui::App)> =
+                    let open: crate::workflow::sidebar::OpenRun =
                         std::rc::Rc::new(move |run_id, _, cx| {
                             shell
                                 .update(cx, |this, cx| {

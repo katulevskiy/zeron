@@ -9,18 +9,20 @@ determinism and a pure-Rust, C-free build), actors that are persistent child cha
 harness (a workflow may mix Claude Code and Codex), and that approval, results and questions ride
 the machinery the app already has.
 
-This PR is the **engine**: the interpreter, the run model, the journal, the scheduler, the MCP
-tools and the authoring guide. The workflow card, the run pane and the approval dialog (PR4),
-mobile (PR5) and saved workflows (PR6) consume the state and RPCs described here.
+This page is the **engine**: the interpreter, the run model, the journal, the scheduler, the MCP
+tools and the authoring guide. The desktop card, run pane, approval block, sidebar lines and result
+row are described in [`workflows-ui.md`](workflows-ui.md); mobile (PR5) and saved workflows (PR6)
+consume the same state and RPCs.
 
 Screenshots (live app, mock harness with `ZERON_MOCK_WORKFLOW=1`; see "Demo" below). The approval
-is the ordinary question panel — graph-free clients show exactly this text; PR4 renders
-`UserInputQuestion.meta`:
+is the ordinary question panel — graph-free clients show exactly this text; the desktop renders
+`UserInputQuestion.meta` as a structured block ([`workflows-ui.md`](workflows-ui.md)):
 
 ![The approval question: phases, agents, literal commands, limits, script excerpt](screenshots/workflows-engine/approval.png)
 
-Lifecycle marker rows in the parent chat (PR4 replaces them with the card): started, then a run that
-completed, with the machine message delivered to the agent as a compact row —
+Lifecycle marker rows in the parent chat (the desktop now draws the live card instead — see
+`workflows-ui.md`; these are what a client without it shows): started, then a run that completed,
+with the machine message delivered to the agent as a compact row —
 
 ![A workflow started](screenshots/workflows-engine/running.png)
 ![A workflow completed and its result sent to the agent](screenshots/workflows-engine/completed.png)
@@ -214,8 +216,7 @@ was verified versus judged, what was not covered"). Result and report text is un
 sits in escaped `<workflow_result>` / `<workflow_reports>` tags. The message goes through the normal
 queue, so it wakes an idle parent and never interrupts a running turn. Lifecycle **marker rows**
 (`MessageOrigin::WorkflowEvent`: started, resumed, completed, errored, stopped, denied) are
-system-role transcript entries; the desktop shows them as compact rows (PR4 replaces them with the
-card). A **goal** in the same chat treats a running workflow as background work and defers
+system-role transcript entries; the desktop folds them into the run's card. A **goal** in the same chat treats a running workflow as background work and defers
 verification until it settles.
 
 ## State, events and sync
@@ -315,7 +316,8 @@ agent asks for it; from the command plane (a person clicking Resume) the click i
 
 Tools and trust rules: `docs/mcp.md`. RPC methods (`zeron_rpc::methods`): `WorkflowStart`,
 `WorkflowGet`, `WorkflowList`, `WorkflowStop`, `WorkflowResume`, `WorkflowAnswer`,
-`WorkflowArtifactData`, `WorkflowArtifactRead`; ask side `AskEscalate`. Command plane:
+`WorkflowArtifactData`, `WorkflowArtifactRead`, and the stream `WatchWorkflowActivity` (every
+hosted chat's runs as `WorkflowRunBrief`s, for the sidebar); ask side `AskEscalate`. Command plane:
 `SessionCommandPayload::Workflow { command: WorkflowCommand::{Stop, Resume, Answer} }`, executed
 by the chat's host (older hosts skip the unknown payload). Capability: `workflows-v1`.
 
@@ -398,8 +400,8 @@ so it is still running when the question is raised.
 
 ## Follow-ups
 
-* PR4: the workflow card, run pane, approval dialog (render `UserInputQuestion.meta`), sidebar
-  activity, completion row — all consume `WorkflowRunsState`/`WorkflowsUpdate` and the RPCs above.
+* Done in PR4 (`workflows-ui.md`): the workflow card, run pane, approval block, sidebar activity,
+  result row.
 * Per-actor worktree isolation; charts/boards; a `Retry-After` header from the harness (today it is
   parsed from the error text); per-run permission narrowing for agents.
 * A resumed run's actors start fresh chats; carrying a stopped actor's chat forward is possible

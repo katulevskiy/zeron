@@ -2598,7 +2598,20 @@ impl Shell {
                 },
                 None => (None, None),
             };
+            // `run:actor` also opens the first agent's chat beside the pane.
+            let first_actor = spec.ends_with(":actor").then(|| {
+                state.read(cx).workflows.runs.last().and_then(|run| {
+                    run.actors
+                        .iter()
+                        .find_map(|a| a.child_chat_id.clone().map(|c| (c, a.name.clone())))
+                })
+            });
             self.add_workflow_surface(run_id, landing, artifact, cx);
+            if let Some(Some((child, name))) = first_actor
+                && let Some(chat) = state.read(cx).selected_chat.clone()
+            {
+                self.add_subagent_surface(chat, child, name, false, cx);
+            }
         }
         // Capture knob: the add-space palette needs only the device registry.
         if self.debug_dialog.as_deref() == Some("add-space") && !state.read(cx).devices.is_empty() {
@@ -3993,7 +4006,12 @@ impl Shell {
     }
 
     /// A sidebar run line: open its chat and that run's pane.
-    pub(crate) fn open_chat_run(&mut self, chat_id: String, run_id: String, cx: &mut Context<Self>) {
+    pub(crate) fn open_chat_run(
+        &mut self,
+        chat_id: String,
+        run_id: String,
+        cx: &mut Context<Self>,
+    ) {
         self.open_chat(chat_id, cx);
         self.add_workflow_surface(run_id, None, None, cx);
     }

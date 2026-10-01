@@ -166,7 +166,11 @@ pub enum Content {
 }
 
 /// Decode a page of artifact bytes for its kind.
-pub fn decode(kind: ArtifactKind, content_type: &str, text: Option<&str>) -> Result<Content, String> {
+pub fn decode(
+    kind: ArtifactKind,
+    content_type: &str,
+    text: Option<&str>,
+) -> Result<Content, String> {
     match (kind, text) {
         (ArtifactKind::Markdown, Some(t)) => Ok(Content::Markdown(Arc::new(parse_full(t)))),
         (ArtifactKind::Table, Some(t)) => Ok(Content::Table {
@@ -285,7 +289,8 @@ impl ArtifactView {
             return;
         };
         self.load = Load::Loading;
-        let (run_id, artifact_id, kind) = (self.run_id.clone(), self.artifact_id.clone(), self.kind);
+        let (run_id, artifact_id, kind) =
+            (self.run_id.clone(), self.artifact_id.clone(), self.kind);
         self.task = Some(cx.spawn(async move |this, cx| {
             let index = engine
                 .client()
@@ -424,7 +429,9 @@ impl Render for ArtifactView {
                     div()
                         .text_size(ui_rems(12.5))
                         .text_color(theme.danger)
-                        .child(SharedString::from(format!("Could not load this artifact: {err}"))),
+                        .child(SharedString::from(format!(
+                            "Could not load this artifact: {err}"
+                        ))),
                 )
                 .child(
                     div()
@@ -452,7 +459,11 @@ impl Render for ArtifactView {
                         .child("Try again"),
                 )
                 .into_any_element(),
-            Load::Ready { content, total, shown } => {
+            Load::Ready {
+                content,
+                total,
+                shown,
+            } => {
                 let note = (shown < total).then(|| {
                     div()
                         .pt(px(8.0))
@@ -775,7 +786,9 @@ fn text_block(lines: &[SharedString], cut: bool, theme: &Theme) -> AnyElement {
                     .px(px(10.0))
                     .pt(px(6.0))
                     .text_color(theme.text_faint)
-                    .child(SharedString::from(format!("… cut at {FILE_MAX_LINES} lines"))),
+                    .child(SharedString::from(format!(
+                        "… cut at {FILE_MAX_LINES} lines"
+                    ))),
             )
         })
         .into_any_element()

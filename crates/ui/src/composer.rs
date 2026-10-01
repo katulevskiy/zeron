@@ -9092,7 +9092,9 @@ impl Composer {
         let approval_meta = crate::workflow::approval::parse_meta(question.meta.as_ref());
         match (&approval_meta, &self.workflow_approval) {
             (Some(meta), current)
-                if current.as_ref().is_none_or(|a| a.request_id != wizard.request_id) =>
+                if current
+                    .as_ref()
+                    .is_none_or(|a| a.request_id != wizard.request_id) =>
             {
                 let model = crate::workflow::approval::ApprovalModel::from_meta(meta);
                 let highlight = crate::workflow::approval::highlight_excerpt(&model.excerpt);

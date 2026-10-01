@@ -120,7 +120,9 @@ impl DemoWorkflowAsk {
     pub fn new(workspace: WorkspaceHost, doc_host: DocHost) -> Arc<Self> {
         let fake = FakeAsk::new();
         let pace = pace();
-        fake.on_call(move |call| Some(script_for(&call.spec.label, &call.spec.result_schema, pace)));
+        fake.on_call(move |call| {
+            Some(script_for(&call.spec.label, &call.spec.result_schema, pace))
+        });
         Arc::new(Self {
             fake,
             workspace,
@@ -152,7 +154,10 @@ impl DemoWorkflowAsk {
                 Some(parent.to_owned()),
             )
             .ok()?;
-        let _ = self.workspace.rename_chat(&id, &spec.title.clone().unwrap_or_else(|| spec.label.clone()));
+        let _ = self.workspace.rename_chat(
+            &id,
+            &spec.title.clone().unwrap_or_else(|| spec.label.clone()),
+        );
         let _ = self.workspace.set_chat_archived(&id, true);
         if let (Ok(handle), Some(tag)) = (self.doc_host.open(&id), &spec.workflow_actor) {
             let _ = handle.doc().set_workflow_actor(tag);
@@ -213,7 +218,9 @@ impl AskBackend for DemoWorkflowAsk {
     }
 
     async fn answer_escalation(&self, child_chat_id: &str, qid: &str, answer: String) -> bool {
-        self.fake.answer_escalation(child_chat_id, qid, answer).await
+        self.fake
+            .answer_escalation(child_chat_id, qid, answer)
+            .await
     }
 }
 

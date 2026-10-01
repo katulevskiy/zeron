@@ -1309,6 +1309,44 @@ mod tests {
     }
 
     #[test]
+    fn briefs_carry_the_header_and_the_question_count_and_round_trip() {
+        let mut r = run("r1");
+        r.header.status = WorkflowStatus::Running;
+        r.pending_questions.push(WorkflowQuestion {
+            qid: "q".into(),
+            actor_site_id: "s".into(),
+            actor_ordinal: 0,
+            actor_name: "a".into(),
+            question: "?".into(),
+            context: String::new(),
+            asked_at: 1,
+        });
+        let state = WorkflowRunsState {
+            revision: 3,
+            runs: vec![r],
+        };
+        let briefs = state.briefs();
+        assert_eq!(briefs[0].pending_questions, 1);
+        assert_eq!(briefs[0].header.run_id, "r1");
+        let activity = WorkflowActivity {
+            chats: [("c".to_string(), briefs)].into(),
+        };
+        let json = serde_json::to_value(&activity).unwrap();
+        assert_eq!(
+            json["chats"]["c"][0]["runId"], "r1",
+            "the header is flattened"
+        );
+        assert_eq!(json["chats"]["c"][0]["pendingQuestions"], 1);
+        assert_eq!(
+            serde_json::from_value::<WorkflowActivity>(json).unwrap(),
+            activity
+        );
+        // an old or empty frame decodes to nothing rather than failing
+        let empty: WorkflowActivity = serde_json::from_str("{}").unwrap();
+        assert!(empty.chats.is_empty());
+    }
+
+    #[test]
     fn marker_text_reads_in_words() {
         assert_eq!(
             workflow_marker_text(WorkflowEventMarker::Completed, "Review", ""),

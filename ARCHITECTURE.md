@@ -152,6 +152,7 @@ zeron/
                                  # the run-state reducer (`docs/workflows.md`). Only the engine
                                  # (and tests) depend on it: clients and mobile consume the
                                  # wire/state types in zeron-proto and never link an interpreter
+                                 # (desktop UI for it: `crates/ui/src/workflow/`, `docs/workflows-ui.md`)
     rpc/          zeron-rpc      # UiRpc/ControlRpc: typed req/resp/stream over WS (tokio-
                                  # tungstenite) + in-memory transport; device-room virtual
                                  # sockets ({s,k,to,from} frames)

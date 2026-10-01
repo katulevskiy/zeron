@@ -1601,13 +1601,13 @@ impl AppState {
             "command": { "kind": "workflow", "command": command },
         });
         cx.spawn(async move |this, cx| {
-            if let Err(err) = engine
-                .client()
-                .call(methods::QUEUE_COMMAND, params)
-                .await
-            {
+            if let Err(err) = engine.client().call(methods::QUEUE_COMMAND, params).await {
                 this.update(cx, |state, cx| {
-                    state.fail_workflow_command(run_id, format!("Workflow command failed: {err}"), cx)
+                    state.fail_workflow_command(
+                        run_id,
+                        format!("Workflow command failed: {err}"),
+                        cx,
+                    )
                 })
                 .ok();
             }
@@ -3930,7 +3930,7 @@ mod tests {
 
     #[test]
     fn workflow_frames_replace_apply_and_clear_the_selected_chats_runs() {
-        use zeron_proto::{WorkflowsUpdate, WorkflowStatus};
+        use zeron_proto::{WorkflowStatus, WorkflowsUpdate};
         let mut state = AppState::new();
         let r0 = state.workflows_revision;
         // the opening frame carries the whole state
@@ -3952,7 +3952,10 @@ mod tests {
             .diff(&wf_state(2, WorkflowStatus::Completed))
             .unwrap();
         assert!(state.apply_workflows(Some(WorkflowsUpdate::Delta(delta.clone())), false));
-        assert_eq!(state.workflows.runs[0].header.status, WorkflowStatus::Completed);
+        assert_eq!(
+            state.workflows.runs[0].header.status,
+            WorkflowStatus::Completed
+        );
         let rev = state.workflows_revision;
         state.apply_workflows(Some(WorkflowsUpdate::Delta(delta)), false);
         assert_eq!(state.workflows_revision, rev, "an old delta is ignored");
@@ -3966,7 +3969,7 @@ mod tests {
 
     #[test]
     fn a_workflow_failure_message_clears_when_the_state_moves() {
-        use zeron_proto::{WorkflowsUpdate, WorkflowStatus};
+        use zeron_proto::{WorkflowStatus, WorkflowsUpdate};
         let mut state = AppState::new();
         state.apply_workflows(
             Some(WorkflowsUpdate::Full(wf_state(1, WorkflowStatus::Running))),
@@ -3974,7 +3977,10 @@ mod tests {
         );
         state.workflow_failure = Some(("r1".into(), "Workflow command failed".into()));
         state.apply_workflows(
-            Some(WorkflowsUpdate::Full(wf_state(2, WorkflowStatus::Completed))),
+            Some(WorkflowsUpdate::Full(wf_state(
+                2,
+                WorkflowStatus::Completed,
+            ))),
             true,
         );
         assert!(state.workflow_failure.is_none());
@@ -3985,10 +3991,9 @@ mod tests {
         let mut state = AppState::new();
         let mut activity = zeron_proto::WorkflowActivity::default();
         assert!(!state.apply_workflow_activity(activity.clone()));
-        activity.chats.insert(
-            "c".into(),
-            vec![zeron_proto::WorkflowRunBrief::default()],
-        );
+        activity
+            .chats
+            .insert("c".into(), vec![zeron_proto::WorkflowRunBrief::default()]);
         assert!(state.apply_workflow_activity(activity.clone()));
         assert!(!state.apply_workflow_activity(activity));
     }

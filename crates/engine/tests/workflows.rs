@@ -1262,3 +1262,41 @@ async fn a_running_workflow_defers_goal_verification() {
     );
     assert!(!rig.svc.has_running_run(CHAT));
 }
+
+// ── the sidebar's feed ────────────────────────────────────────────────────
+
+#[cfg(unix)]
+#[tokio::test(flavor = "multi_thread", worker_threads = 4)]
+async fn the_activity_feed_lists_every_chats_runs_as_briefs_and_only_pushes_changes() {
+    let rig = rig();
+    review_handler(&rig);
+    let mut feed = rig.svc.watch_activity();
+    assert!(
+        feed.borrow().chats.is_empty(),
+        "nothing ran yet: an empty feed"
+    );
+    let out = rig.svc.start(CHAT, start(REVIEW)).await.expect("starts");
+    let run = wait_settled(&rig, &out.run_id).await;
+    wait_delivered(&rig, &out.run_id).await;
+    // the feed saw the run, settled, with the same header the doc holds
+    wait_real(
+        rig.paused,
+        || {
+            feed.borrow()
+                .chats
+                .get(CHAT)
+                .and_then(|runs| runs.first())
+                .is_some_and(|b| b.header.status == WorkflowStatus::Completed)
+        },
+        "the feed to show the settled run",
+    )
+    .await;
+    let briefs = feed.borrow_and_update().chats.get(CHAT).cloned().unwrap();
+    assert_eq!(briefs.len(), 1);
+    assert_eq!(briefs[0].header.run_id, out.run_id);
+    assert_eq!(briefs[0].header.phases, run.header.phases);
+    assert_eq!(briefs[0].pending_questions, 0);
+    // a second flush with nothing new does not wake a watcher
+    rig.svc.flush();
+    assert!(!feed.has_changed().unwrap_or(true), "no change, no push");
+}

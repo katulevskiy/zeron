@@ -19,6 +19,9 @@ use crate::theme::Theme;
 use crate::typography::ui_rems;
 use zeron_proto::WorkflowStatus;
 
+/// What a clicked run line asks for: open that run (its id).
+pub type OpenRun = Rc<dyn Fn(String, &mut Window, &mut gpui::App)>;
+
 pub const LINE_HEIGHT: f32 = 17.0;
 const TOP_PAD: f32 = 2.0;
 
@@ -60,7 +63,7 @@ pub fn run_lines(
     lines: &[RunLine],
     overflow: u32,
     theme: &Theme,
-    on_open: Rc<dyn Fn(String, &mut Window, &mut gpui::App)>,
+    on_open: OpenRun,
 ) -> AnyElement {
     let n = lines.len();
     div()

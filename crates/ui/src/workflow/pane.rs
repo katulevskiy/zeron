@@ -6,12 +6,12 @@
 //! run works. Long lists are paged ("show more") rather than all laid out;
 //! nothing here owns a timer.
 
-use std::collections::{HashMap, HashSet};
 use gpui::{
     AnyElement, Context, Entity, EventEmitter, InteractiveElement as _, IntoElement,
     ParentElement as _, Render, SharedString, StatefulInteractiveElement as _, Styled as _,
     Subscription, Task, Window, div, prelude::*, px,
 };
+use std::collections::{HashMap, HashSet};
 use zeron_proto::{WorkflowCommand, WorkflowRun, WorkflowStatus};
 
 use super::artifact::ArtifactView;
@@ -32,7 +32,10 @@ use crate::typography::ui_rems;
 #[derive(Debug, Clone)]
 pub enum PaneEvent {
     /// Open an agent's chat (a read-only tab).
-    OpenActor { child_chat_id: String, title: String },
+    OpenActor {
+        child_chat_id: String,
+        title: String,
+    },
 }
 
 impl EventEmitter<PaneEvent> for WorkflowRunPane {}
@@ -138,7 +141,11 @@ impl WorkflowRunPane {
             Some(a) => (a.kind, a.title.clone()),
             None => return,
         };
-        let (state, run_id, id) = (self.state.clone(), self.run_id.clone(), artifact_id.to_owned());
+        let (state, run_id, id) = (
+            self.state.clone(),
+            self.run_id.clone(),
+            artifact_id.to_owned(),
+        );
         let view = cx.new(|cx| ArtifactView::new(state, run_id, id, kind, title, cx));
         self.view = View::Artifact(view);
         cx.notify();
@@ -262,8 +269,9 @@ impl WorkflowRunPane {
 
     fn command(&mut self, command: WorkflowCommand, cx: &mut Context<Self>) {
         let chat_id = self.chat_id.clone();
-        self.state
-            .update(cx, |state, cx| state.send_workflow_command(&chat_id, command, cx));
+        self.state.update(cx, |state, cx| {
+            state.send_workflow_command(&chat_id, command, cx)
+        });
     }
 }
 
@@ -320,6 +328,9 @@ fn link_button(
         .child(label.into())
         .into_any_element()
 }
+
+/// A phase chip's click: what it does to the pane.
+type ChipClick = Box<dyn Fn(&mut WorkflowRunPane, &mut Context<WorkflowRunPane>)>;
 
 impl Render for WorkflowRunPane {
     fn render(&mut self, window: &mut Window, cx: &mut Context<Self>) -> impl IntoElement {
@@ -488,21 +499,16 @@ impl WorkflowRunPane {
                     .flex()
                     .items_center()
                     .gap(px(8.0))
-                    .child(
-                        div()
-                            .flex_none()
-                            .w(px(14.0))
-                            .flex()
-                            .justify_center()
-                            .child(status_glyph(
-                                card.status,
-                                card.tone,
-                                "pane-status".into(),
-                                theme,
-                                view,
-                                cx,
-                            )),
-                    )
+                    .child(div().flex_none().w(px(14.0)).flex().justify_center().child(
+                        status_glyph(
+                            card.status,
+                            card.tone,
+                            "pane-status".into(),
+                            theme,
+                            view,
+                            cx,
+                        ),
+                    ))
                     .child(
                         div()
                             .flex_none()
@@ -603,15 +609,11 @@ impl WorkflowRunPane {
         cx: &mut Context<Self>,
     ) -> AnyElement {
         let warning = theme.warning;
-        let mut col = div()
-            .flex()
-            .flex_col()
-            .gap(px(8.0))
-            .child(section_title(
-                "Waiting for you",
-                Some(model.questions.len().to_string()),
-                theme,
-            ));
+        let mut col = div().flex().flex_col().gap(px(8.0)).child(section_title(
+            "Waiting for you",
+            Some(model.questions.len().to_string()),
+            theme,
+        ));
         for q in &model.questions {
             let input = self.answer_input(&q.qid, cx);
             let sent = self.sent.contains(&q.qid);
@@ -693,8 +695,16 @@ impl WorkflowRunPane {
                                     .items_center()
                                     .text_size(ui_rems(12.5))
                                     .font_weight(gpui::FontWeight::MEDIUM)
-                                    .bg(if sent { theme.element_hover } else { theme.solid })
-                                    .text_color(if sent { theme.text_muted } else { theme.on_solid })
+                                    .bg(if sent {
+                                        theme.element_hover
+                                    } else {
+                                        theme.solid
+                                    })
+                                    .text_color(if sent {
+                                        theme.text_muted
+                                    } else {
+                                        theme.on_solid
+                                    })
                                     .when(!sent, |el| {
                                         el.cursor_pointer().tab_index(0).on_click(cx.listener(
                                             move |this, _, _, cx| this.send_answer(&qid, cx),
@@ -708,14 +718,19 @@ impl WorkflowRunPane {
         col.into_any_element()
     }
 
-    fn render_rail(&mut self, model: &PaneModel, theme: &Theme, cx: &mut Context<Self>) -> AnyElement {
+    fn render_rail(
+        &mut self,
+        model: &PaneModel,
+        theme: &Theme,
+        cx: &mut Context<Self>,
+    ) -> AnyElement {
         let selected = self.phase_filter.clone();
         let all_selected = selected.is_none();
         let chip = |id: SharedString,
                     label: SharedString,
                     on: bool,
                     base: Option<&StationBase>,
-                    click: Box<dyn Fn(&mut Self, &mut Context<Self>)>| {
+                    click: ChipClick| {
             let accent = theme.accent;
             div()
                 .id(id)
@@ -740,9 +755,7 @@ impl WorkflowRunPane {
                 .hover(|s| s.bg(crate::theme::ink(0.05)))
                 .focus_visible(move |s| s.border_color(accent))
                 .on_click(cx.listener(move |this, _, _, cx| click(this, cx)))
-                .when_some(base, |el, base| {
-                    el.child(lamp(base.light, 7.0, theme))
-                })
+                .when_some(base, |el, base| el.child(lamp(base.light, 7.0, theme)))
                 .child(
                     div()
                         .max_w(px(160.0))
@@ -795,7 +808,12 @@ impl WorkflowRunPane {
             .into_any_element()
     }
 
-    fn render_actors(&mut self, model: &PaneModel, theme: &Theme, cx: &mut Context<Self>) -> AnyElement {
+    fn render_actors(
+        &mut self,
+        model: &PaneModel,
+        theme: &Theme,
+        cx: &mut Context<Self>,
+    ) -> AnyElement {
         let view = cx.entity_id();
         let mut col = div().flex().flex_col().child(section_title(
             "Agents",
@@ -848,7 +866,10 @@ impl WorkflowRunPane {
             PillState::Done | PillState::Cancelled => theme.text_muted,
             _ => theme.text,
         };
-        let open = actor.child_chat_id.clone().map(|child| (child, actor.name.clone()));
+        let open = actor
+            .child_chat_id
+            .clone()
+            .map(|child| (child, actor.name.clone()));
         let accent = theme.accent;
         let row = div()
             .id(SharedString::from(format!("pane-actor-{ix}")))
@@ -919,10 +940,18 @@ impl WorkflowRunPane {
         }
     }
 
-    fn render_steps(&mut self, model: &PaneModel, theme: &Theme, cx: &mut Context<Self>) -> AnyElement {
+    fn render_steps(
+        &mut self,
+        model: &PaneModel,
+        theme: &Theme,
+        cx: &mut Context<Self>,
+    ) -> AnyElement {
         let view = cx.entity_id();
         let filter = self.phase_filter.clone();
-        let mut col = div().flex().flex_col().child(section_title("Steps", None, theme));
+        let mut col = div()
+            .flex()
+            .flex_col()
+            .child(section_title("Steps", None, theme));
         let mut any = false;
         for (gix, group) in model.groups.iter().enumerate() {
             if filter.as_deref().is_some_and(|f| f != group.base.name) {
@@ -954,38 +983,34 @@ impl WorkflowRunPane {
         cx: &mut Context<Self>,
     ) -> AnyElement {
         let name = group.base.name.clone();
-        let mut col = div()
-            .flex()
-            .flex_col()
-            .pb(px(10.0))
-            .child(
-                div()
-                    .h(px(24.0))
-                    .px(px(8.0))
-                    .flex()
-                    .items_center()
-                    .gap(px(7.0))
-                    .child(lamp(group.base.light, 7.0, theme))
-                    .child(
+        let mut col = div().flex().flex_col().pb(px(10.0)).child(
+            div()
+                .h(px(24.0))
+                .px(px(8.0))
+                .flex()
+                .items_center()
+                .gap(px(7.0))
+                .child(lamp(group.base.light, 7.0, theme))
+                .child(
+                    div()
+                        .text_size(ui_rems(12.5))
+                        .font_weight(gpui::FontWeight::MEDIUM)
+                        .text_color(match group.base.light {
+                            Light::Pending => theme.text_faint,
+                            _ => theme.text,
+                        })
+                        .child(SharedString::from(group.base.name.clone())),
+                )
+                .when_some(group.base.fraction(), |el, f| {
+                    el.child(
                         div()
-                            .text_size(ui_rems(12.5))
-                            .font_weight(gpui::FontWeight::MEDIUM)
-                            .text_color(match group.base.light {
-                                Light::Pending => theme.text_faint,
-                                _ => theme.text,
-                            })
-                            .child(SharedString::from(group.base.name.clone())),
+                            .text_size(ui_rems(11.5))
+                            .text_color(theme.text_faint)
+                            .child(SharedString::from(f)),
                     )
-                    .when_some(group.base.fraction(), |el, f| {
-                        el.child(
-                            div()
-                                .text_size(ui_rems(11.5))
-                                .text_color(theme.text_faint)
-                                .child(SharedString::from(f)),
-                        )
-                    })
-                    .child(div().flex_1()),
-            );
+                })
+                .child(div().flex_1()),
+        );
         for (rix, row) in group.rows.iter().enumerate() {
             col = col.child(self.node_row(gix, rix, row, theme, view, cx));
         }
@@ -993,7 +1018,10 @@ impl WorkflowRunPane {
             let more = (group.total as usize - group.rows.len()).min(PANE_NODES_PER_PAGE);
             col = col.child(link_button(
                 SharedString::from(format!("pane-nodes-more-{gix}")),
-                format!("Show {more} more of {}", group.total - group.rows.len() as u32),
+                format!(
+                    "Show {more} more of {}",
+                    group.total - group.rows.len() as u32
+                ),
                 theme,
                 cx.listener(move |this, _, _, cx| {
                     *this.node_pages.entry(name.clone()).or_insert(1) += 1;
@@ -1124,7 +1152,12 @@ impl WorkflowRunPane {
         }
     }
 
-    fn render_reports(&mut self, model: &PaneModel, theme: &Theme, cx: &mut Context<Self>) -> AnyElement {
+    fn render_reports(
+        &mut self,
+        model: &PaneModel,
+        theme: &Theme,
+        cx: &mut Context<Self>,
+    ) -> AnyElement {
         let mut col = div().flex().flex_col().gap(px(6.0)).child(section_title(
             "Reports",
             Some(model.reports.len().to_string()),
@@ -1147,21 +1180,24 @@ impl WorkflowRunPane {
                             .child(SharedString::from(super::one_line(&report.text))),
                     )
                     .when_some(artifact, |el, id| {
-                        el.child(
-                            div().child(link_button(
-                                SharedString::from(format!("pane-report-{}", report.index)),
-                                format!("Open {id}"),
-                                theme,
-                                cx.listener(move |this, _, _, cx| this.open_artifact(&id, cx)),
-                            )),
-                        )
+                        el.child(div().child(link_button(
+                            SharedString::from(format!("pane-report-{}", report.index)),
+                            format!("Open {id}"),
+                            theme,
+                            cx.listener(move |this, _, _, cx| this.open_artifact(&id, cx)),
+                        )))
                     }),
             );
         }
         col.into_any_element()
     }
 
-    fn render_artifacts(&mut self, model: &PaneModel, theme: &Theme, cx: &mut Context<Self>) -> AnyElement {
+    fn render_artifacts(
+        &mut self,
+        model: &PaneModel,
+        theme: &Theme,
+        cx: &mut Context<Self>,
+    ) -> AnyElement {
         let mut col = div().flex().flex_col().child(section_title(
             "Artifacts",
             Some(model.artifacts.len().to_string()),
@@ -1172,10 +1208,14 @@ impl WorkflowRunPane {
             let accent = theme.accent;
             let mut meta = vec![kind_word(art.chip.kind).to_owned()];
             if art.items > 0 {
-                meta.push(format!("{} {}", art.items, match art.chip.kind {
-                    zeron_proto::ArtifactKind::Table => "rows",
-                    _ => "items",
-                }));
+                meta.push(format!(
+                    "{} {}",
+                    art.items,
+                    match art.chip.kind {
+                        zeron_proto::ArtifactKind::Table => "rows",
+                        _ => "items",
+                    }
+                ));
             }
             if art.bytes > 0 {
                 meta.push(format_bytes(art.bytes));
@@ -1187,7 +1227,10 @@ impl WorkflowRunPane {
                 div()
                     .id(SharedString::from(format!("pane-artifact-{ix}")))
                     .role(gpui::Role::Button)
-                    .aria_label(SharedString::from(format!("Open artifact {}", art.chip.title)))
+                    .aria_label(SharedString::from(format!(
+                        "Open artifact {}",
+                        art.chip.title
+                    )))
                     .w_full()
                     .px(px(8.0))
                     .py(px(6.0))
@@ -1226,7 +1269,12 @@ impl WorkflowRunPane {
         col.into_any_element()
     }
 
-    fn render_result(&mut self, model: &PaneModel, theme: &Theme, cx: &mut Context<Self>) -> AnyElement {
+    fn render_result(
+        &mut self,
+        model: &PaneModel,
+        theme: &Theme,
+        cx: &mut Context<Self>,
+    ) -> AnyElement {
         let text = model.result_preview.clone().unwrap_or_default();
         let open = self.result_open;
         let long = text.chars().count() > 280 || text.lines().count() > 4;
@@ -1267,7 +1315,12 @@ impl WorkflowRunPane {
             .into_any_element()
     }
 
-    fn render_details(&mut self, run: &WorkflowRun, model: &PaneModel, theme: &Theme) -> AnyElement {
+    fn render_details(
+        &mut self,
+        run: &WorkflowRun,
+        model: &PaneModel,
+        theme: &Theme,
+    ) -> AnyElement {
         let h = &run.header;
         let mut rows: Vec<(String, String)> = Vec::new();
         if let Some(c) = &model.concurrency {
@@ -1315,5 +1368,234 @@ impl WorkflowRunPane {
                     )
             }))
             .into_any_element()
+    }
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+    use gpui::TestAppContext;
+    use zeron_proto::*;
+
+    fn run_with_question() -> WorkflowRun {
+        let mut run = WorkflowRun {
+            header: WorkflowRunHeader {
+                run_id: "r1".into(),
+                name: "Review".into(),
+                chat_id: "chat".into(),
+                status: WorkflowStatus::Running,
+                ..Default::default()
+            },
+            ..Default::default()
+        };
+        run.pending_questions.push(WorkflowQuestion {
+            qid: "q1".into(),
+            actor_site_id: "s".into(),
+            actor_ordinal: 0,
+            actor_name: "architect".into(),
+            question: "keep or drop?".into(),
+            context: String::new(),
+            asked_at: 0,
+        });
+        run.artifacts.push(ArtifactSummary {
+            id: "doc".into(),
+            kind: ArtifactKind::Markdown,
+            title: "Doc".into(),
+            version: 1,
+            content_type: "text/markdown".into(),
+            bytes: 3,
+            item_count: 0,
+            primary: false,
+        });
+        run
+    }
+
+    fn pane_in(
+        cx: &mut TestAppContext,
+        run: impl FnOnce(Entity<AppState>, Entity<WorkflowRunPane>, &mut gpui::App),
+    ) {
+        let dir = tempfile::tempdir().unwrap();
+        cx.update(|cx| {
+            gpui_base::init(cx);
+            cx.set_global(Theme::dark());
+            crate::settings::init(crate::settings::UiSettings::default(), dir.path(), cx);
+            let state = cx.new(|_| AppState::new());
+            state.update(cx, |s, _| {
+                s.selected_chat = Some("chat".into());
+                s.workflows.runs.push(run_with_question());
+            });
+            let pane =
+                cx.new(|cx| WorkflowRunPane::new(state.clone(), "chat".into(), "r1".into(), cx));
+            run(state, pane, cx);
+        });
+    }
+
+    #[gpui::test]
+    fn the_tab_title_and_liveness_follow_the_run(cx: &mut TestAppContext) {
+        pane_in(cx, |state, pane, cx| {
+            assert_eq!(pane.read(cx).title(cx), "Review");
+            assert!(pane.read(cx).is_live(cx));
+            state.update(cx, |s, _| {
+                s.workflows.runs[0].header.status = WorkflowStatus::Completed
+            });
+            assert!(!pane.read(cx).is_live(cx));
+            state.update(cx, |s, _| s.workflows.runs.clear());
+            assert_eq!(pane.read(cx).title(cx), "Workflow", "no run, no name");
+        });
+    }
+
+    #[gpui::test]
+    fn landing_on_a_phase_narrows_the_steps_and_artifacts_open_a_viewer(cx: &mut TestAppContext) {
+        pane_in(cx, |_, pane, cx| {
+            pane.update(cx, |p, cx| {
+                p.land_on(Some("fix".into()), cx);
+                assert_eq!(p.phase_filter.as_deref(), Some("fix"));
+                assert!(matches!(p.view, View::Overview));
+                p.open_artifact("doc", cx);
+                assert!(matches!(p.view, View::Artifact(_)));
+                // an artifact the run does not have opens nothing
+                p.view = View::Overview;
+                p.open_artifact("ghost", cx);
+                assert!(matches!(p.view, View::Overview));
+            });
+        });
+    }
+
+    #[gpui::test]
+    fn an_answer_is_sent_once_and_clears_when_the_question_goes(cx: &mut TestAppContext) {
+        pane_in(cx, |state, pane, cx| {
+            pane.update(cx, |p, cx| {
+                let input = p.answer_input("q1", cx);
+                input.update(cx, |i, cx| i.set_text("drop it", cx));
+                p.send_answer("q1", cx);
+                assert!(p.sent.contains("q1"), "marked sent at once");
+                // no engine in the test: the command fails loudly, on that run
+            });
+            let failure = state.read(cx).workflow_failure.clone();
+            assert_eq!(failure.map(|(run, _)| run).as_deref(), Some("r1"));
+            // a second press does not send again
+            pane.update(cx, |p, cx| {
+                p.send_answer("q1", cx);
+            });
+            // an empty answer is never sent
+            pane.update(cx, |p, cx| {
+                let input = p.answer_input("q2", cx);
+                input.update(cx, |i, cx| i.set_text("   ", cx));
+                p.send_answer("q2", cx);
+                assert!(!p.sent.contains("q2"));
+            });
+            // once the host answers, the question leaves the state and the pane forgets it
+            state.update(cx, |s, _| s.workflows.runs[0].pending_questions.clear());
+            pane.update(cx, |p, cx| p.on_state(cx));
+            pane.read_with(cx, |p, _| {
+                assert!(p.sent.is_empty() && p.answers.is_empty());
+            });
+        });
+    }
+
+    #[gpui::test]
+    fn a_missing_run_asks_the_engine_once(cx: &mut TestAppContext) {
+        pane_in(cx, |state, pane, cx| {
+            state.update(cx, |s, _| {
+                s.workflows.runs.clear();
+                s.transcript_replayed = true;
+            });
+            pane.update(cx, |p, cx| p.on_state(cx));
+            // no engine in the test, so nothing is in flight and nothing failed
+            pane.read_with(cx, |p, _| {
+                assert!(p.fetched.is_none() && p.fetching.is_none());
+            });
+        });
+    }
+
+    #[gpui::test]
+    fn the_whole_pane_draws_for_a_busy_run(cx: &mut TestAppContext) {
+        let dir = tempfile::tempdir().unwrap();
+        let (pane, cx) = cx.add_window_view(|window, cx| {
+            let _ = window;
+            gpui_base::init(cx);
+            cx.set_global(Theme::dark());
+            crate::settings::init(crate::settings::UiSettings::default(), dir.path(), cx);
+            let state = cx.new(|_| AppState::new());
+            let mut run = run_with_question();
+            run.header.phase_names = vec!["a".into(), "b".into()];
+            run.header.concurrency = WorkflowConcurrency {
+                cap: 4,
+                ceiling: 8,
+                in_flight: 2,
+                queued: 3,
+                throttled: true,
+            };
+            run.header.error = Some("boom".into());
+            run.header.stalled = true;
+            for i in 0..40u32 {
+                run.actors.push(WorkflowActor {
+                    order: i,
+                    site_id: format!("s{i}"),
+                    ordinal: 0,
+                    name: format!("w{i}"),
+                    child_chat_id: Some(format!("c{i}")),
+                    status: ActorStatus::Running,
+                    phase_name: Some("a".into()),
+                    harness: Some("claude".into()),
+                    model: Some("sonnet".into()),
+                    asks: 2,
+                    failed_asks: 1,
+                });
+                run.nodes.push(WorkflowNode {
+                    order: i,
+                    site_id: format!("n{i}"),
+                    ordinal: 0,
+                    kind: NodeKind::Ask,
+                    phase: if i % 3 == 0 {
+                        NodePhase::Executing
+                    } else {
+                        NodePhase::Settled
+                    },
+                    outcome: (i % 3 != 0).then_some(if i % 5 == 0 {
+                        NodeOutcome::Failed
+                    } else {
+                        NodeOutcome::Ok
+                    }),
+                    cached: i % 7 == 0,
+                    actor_site_id: Some(format!("s{i}")),
+                    actor_ordinal: 0,
+                    phase_name: Some("a".into()),
+                    instructions_head: "look at it".into(),
+                    turn: 1,
+                    tool_calls: 3,
+                    last_tool: Some("Read".into()),
+                    tokens: 1200,
+                    started_at: None,
+                    ended_at: None,
+                    error: (i % 5 == 0).then(|| "no result".into()),
+                    result_preview: Some("fine".into()),
+                });
+            }
+            run.reports.push(WorkflowReport {
+                index: 0,
+                text: "found something".into(),
+                truncated: false,
+                artifact_id: Some("doc".into()),
+                at: 0,
+            });
+            run.header.result_preview = Some("{\"ok\": true}".into());
+            state.update(cx, |s, _| {
+                s.selected_chat = Some("chat".into());
+                s.workflows.runs.push(run);
+            });
+            WorkflowRunPane::new(state, "chat".into(), "r1".into(), cx)
+        });
+        cx.update(|window, cx| window.draw(cx).clear());
+        // page through the lists and open an artifact: all of it must draw
+        pane.update(cx, |p, cx| {
+            p.actor_pages = 2;
+            p.node_pages.insert("a".into(), 2);
+            p.result_open = true;
+            p.land_on(Some("a".into()), cx);
+        });
+        cx.update(|window, cx| window.draw(cx).clear());
+        pane.update(cx, |p, cx| p.open_artifact("doc", cx));
+        cx.update(|window, cx| window.draw(cx).clear());
     }
 }

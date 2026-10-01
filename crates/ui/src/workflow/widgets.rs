@@ -103,22 +103,49 @@ pub(crate) fn pill_mark(
     view: gpui::EntityId,
     cx: &mut gpui::App,
 ) -> AnyElement {
-    let slot = div().flex_none().size(px(12.0)).flex().items_center().justify_center();
+    let slot = div()
+        .flex_none()
+        .size(px(12.0))
+        .flex()
+        .items_center()
+        .justify_center();
     match state {
         PillState::Running => slot
-            .child(crate::loaders::mini_glyph_spinner(key, 2.0, theme.glyph, view, cx))
+            .child(crate::loaders::mini_glyph_spinner(
+                key,
+                2.0,
+                theme.glyph,
+                view,
+                cx,
+            ))
             .into_any_element(),
         PillState::Asking => slot
-            .child(icon(icons::CHAT_ROUND_LINE).size(px(12.0)).text_color(theme.warning))
+            .child(
+                icon(icons::CHAT_ROUND_LINE)
+                    .size(px(12.0))
+                    .text_color(theme.warning),
+            )
             .into_any_element(),
         PillState::Done => slot
-            .child(icon(icons::CHECK).size(px(12.0)).text_color(theme.text_muted))
+            .child(
+                icon(icons::CHECK)
+                    .size(px(12.0))
+                    .text_color(theme.text_muted),
+            )
             .into_any_element(),
         PillState::Failed => slot
-            .child(icon(icons::CLOSE_CIRCLE).size(px(12.0)).text_color(theme.danger))
+            .child(
+                icon(icons::CLOSE_CIRCLE)
+                    .size(px(12.0))
+                    .text_color(theme.danger),
+            )
             .into_any_element(),
         PillState::Cancelled => slot
-            .child(icon(icons::PAUSE).size(px(11.0)).text_color(theme.text_faint))
+            .child(
+                icon(icons::PAUSE)
+                    .size(px(11.0))
+                    .text_color(theme.text_faint),
+            )
             .into_any_element(),
         PillState::Pending => slot
             .child(

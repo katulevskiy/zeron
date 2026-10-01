@@ -113,7 +113,9 @@ pub fn phase_rail(header: &WorkflowRunHeader, graph: Option<&WorkflowGraph>) -> 
             let (observed, settled) = progress.map_or((0, 0), |p| (p.observed, p.settled));
             let is_current = current_ix == Some(ix);
             let in_flight = observed > settled;
-            let light = if live && (in_flight || (is_current && header.status == WorkflowStatus::Running)) {
+            let light = if live
+                && (in_flight || (is_current && header.status == WorkflowStatus::Running))
+            {
                 Light::Running
             } else if !live && is_current && header.status != WorkflowStatus::Completed {
                 // The run ended while control flow was here: that is where it
@@ -498,7 +500,9 @@ pub fn meta_line(header: &WorkflowRunHeader) -> String {
     let u = &header.usage;
     let mut parts = Vec::new();
     if u.elapsed_ms >= 1000 {
-        parts.push(crate::transcript::format_elapsed((u.elapsed_ms / 1000) as i64));
+        parts.push(crate::transcript::format_elapsed(
+            (u.elapsed_ms / 1000) as i64,
+        ));
     }
     if u.total_tokens() > 0 {
         parts.push(format!("{} tokens", format_tokens(u.total_tokens())));
@@ -506,7 +510,11 @@ pub fn meta_line(header: &WorkflowRunHeader) -> String {
     let asks = u.nodes_used + u.nodes_cached;
     if asks > 0 {
         parts.push(if u.nodes_cached > 0 {
-            format!("{} ({} cached)", plural(asks, "step", "steps"), u.nodes_cached)
+            format!(
+                "{} ({} cached)",
+                plural(asks, "step", "steps"),
+                u.nodes_cached
+            )
         } else {
             plural(asks, "step", "steps")
         });
@@ -576,7 +584,12 @@ impl CardModel {
                     _ => Light::Failed,
                 },
                 settled: h.phases.iter().map(|p| p.settled).sum::<u32>().max(settled),
-                observed: h.phases.iter().map(|p| p.observed).sum::<u32>().max(observed),
+                observed: h
+                    .phases
+                    .iter()
+                    .map(|p| p.observed)
+                    .sum::<u32>()
+                    .max(observed),
                 current: live,
                 parallel_with_prev: false,
             });
@@ -651,7 +664,10 @@ impl CardModel {
                 text: if what.is_empty() {
                     "Older runs and steps were trimmed from this view.".into()
                 } else {
-                    format!("{} not listed (the run is larger than the view keeps).", what.join(" and "))
+                    format!(
+                        "{} not listed (the run is larger than the view keeps).",
+                        what.join(" and ")
+                    )
                 },
             });
         }
@@ -1130,7 +1146,9 @@ pub struct ResultParts {
 }
 
 fn unescape(text: &str) -> String {
-    text.replace("&lt;", "<").replace("&gt;", ">").replace("&amp;", "&")
+    text.replace("&lt;", "<")
+        .replace("&gt;", ">")
+        .replace("&amp;", "&")
 }
 
 /// Parse a `[Workflow completed] name (run id)` message body.
@@ -1143,7 +1161,10 @@ pub fn parse_result_message(text: &str) -> ResultParts {
     let mut result = String::new();
     let mut in_artifacts = false;
     for line in text.lines().skip(2) {
-        if let Some(reason) = line.strip_prefix("Reason: ").or_else(|| line.strip_prefix("Error: ")) {
+        if let Some(reason) = line
+            .strip_prefix("Reason: ")
+            .or_else(|| line.strip_prefix("Error: "))
+        {
             parts.reason.get_or_insert_with(|| unescape(reason));
         }
         match line {
@@ -1471,7 +1492,13 @@ mod tests {
         }
     }
 
-    fn node(site: &str, actor_site: &str, phase: &str, np: NodePhase, out: Option<NodeOutcome>) -> WorkflowNode {
+    fn node(
+        site: &str,
+        actor_site: &str,
+        phase: &str,
+        np: NodePhase,
+        out: Option<NodeOutcome>,
+    ) -> WorkflowNode {
         WorkflowNode {
             order: 0,
             site_id: site.into(),
@@ -1556,7 +1583,11 @@ mod tests {
         assert_eq!(l[1], Light::Stopped);
         h.status = WorkflowStatus::Completed;
         h.stop_reason = None;
-        h.phases = vec![progress("scan", 2, 2), progress("fix", 2, 2), progress("verify", 1, 1)];
+        h.phases = vec![
+            progress("scan", 2, 2),
+            progress("fix", 2, 2),
+            progress("verify", 1, 1),
+        ];
         let l: Vec<_> = phase_rail(&h, Some(&g)).iter().map(|s| s.light).collect();
         assert_eq!(l, [Light::Done, Light::Done, Light::Done]);
     }
@@ -1575,18 +1606,30 @@ mod tests {
         let mut h = header(WorkflowStatus::Running);
         h.current_phase = Some("review".into());
         let mut run = run_with(h, &["scan", "review"]);
-        run.actors = vec![actor("a", 0, "scout", "scan"), actor("b", 1, "judge", "review")];
+        run.actors = vec![
+            actor("a", 0, "scout", "scan"),
+            actor("b", 1, "judge", "review"),
+        ];
         run.nodes = vec![
             node("n1", "a", "scan", NodePhase::Settled, Some(NodeOutcome::Ok)),
             // the same agent works in two phases: one pill in each
             node("n2", "a", "review", NodePhase::Executing, None),
-            node("n3", "b", "review", NodePhase::Settled, Some(NodeOutcome::Failed)),
+            node(
+                "n3",
+                "b",
+                "review",
+                NodePhase::Settled,
+                Some(NodeOutcome::Failed),
+            ),
             node("n4", "b", "review", NodePhase::Waiting, None),
         ];
         let card = CardModel::build(&run, true);
         let scan = &card.stations[0];
         assert_eq!(scan.pills.len(), 1);
-        assert_eq!((scan.pills[0].name.as_str(), scan.pills[0].state), ("scout", PillState::Done));
+        assert_eq!(
+            (scan.pills[0].name.as_str(), scan.pills[0].state),
+            ("scout", PillState::Done)
+        );
         let review = &card.stations[1];
         assert_eq!(review.pills.len(), 2);
         assert_eq!(review.pills[0].state, PillState::Running);
@@ -1604,7 +1647,10 @@ mod tests {
         assert_eq!(collapsed.stations.len(), 2);
         assert!(collapsed.stations.iter().all(|s| s.pills.is_empty()));
         assert_eq!(collapsed.stations[0].total_pills, 1);
-        assert_ne!(collapsed.fingerprint(false), CardModel::build(&run, true).fingerprint(true));
+        assert_ne!(
+            collapsed.fingerprint(false),
+            CardModel::build(&run, true).fingerprint(true)
+        );
     }
 
     #[test]
@@ -1613,7 +1659,11 @@ mod tests {
         run.actors = (0..4)
             .map(|i| {
                 let mut a = actor(&format!("s{i}"), i, &format!("w{i}"), "a");
-                a.status = if i < 2 { ActorStatus::Running } else { ActorStatus::Waiting };
+                a.status = if i < 2 {
+                    ActorStatus::Running
+                } else {
+                    ActorStatus::Waiting
+                };
                 a
             })
             .collect();
@@ -1623,8 +1673,14 @@ mod tests {
         run.header.status = WorkflowStatus::Completed;
         let done = CardModel::build(&run, true);
         assert_eq!(done.kind_word, "Workflow completed");
-        assert_eq!(done.counts, "3 phases · 4 agents", "no 'working' once it ended");
-        assert_eq!(done.summary(), "Workflow completed · Review · 3 phases · 4 agents");
+        assert_eq!(
+            done.counts, "3 phases · 4 agents",
+            "no 'working' once it ended"
+        );
+        assert_eq!(
+            done.summary(),
+            "Workflow completed · Review · 3 phases · 4 agents"
+        );
         // singulars
         let mut one = run_with(header(WorkflowStatus::Completed), &["only"]);
         one.actors = vec![actor("s", 0, "solo", "only")];
@@ -1661,7 +1717,12 @@ mod tests {
             n
         };
         run.nodes = vec![
-            mk("g1", "/usr/bin/cargo test", NodePhase::Settled, Some(NodeOutcome::Ok)),
+            mk(
+                "g1",
+                "/usr/bin/cargo test",
+                NodePhase::Settled,
+                Some(NodeOutcome::Ok),
+            ),
             mk("g2", "cargo clippy", NodePhase::Executing, None),
         ];
         let card = CardModel::build(&run, true);
@@ -1711,15 +1772,33 @@ mod tests {
         h.phases = vec![progress("p", 200, 150)];
         h.current_phase = Some("p".into());
         let mut run = run_with(h, &["p"]);
-        run.actors = (0..20).map(|i| actor(&format!("s{i}"), i, &format!("w{i}"), "p")).collect();
+        run.actors = (0..20)
+            .map(|i| actor(&format!("s{i}"), i, &format!("w{i}"), "p"))
+            .collect();
         run.nodes = (0..50)
-            .map(|i| node(&format!("n{i}"), &format!("s{}", i % 20), "p", NodePhase::Settled, Some(NodeOutcome::Ok)))
+            .map(|i| {
+                node(
+                    &format!("n{i}"),
+                    &format!("s{}", i % 20),
+                    "p",
+                    NodePhase::Settled,
+                    Some(NodeOutcome::Ok),
+                )
+            })
             .collect();
         let card = CardModel::build(&run, true);
         let st = &card.stations[0];
-        assert_eq!(st.base.fraction().as_deref(), Some("150/200"), "header totals beat the listed nodes");
+        assert_eq!(
+            st.base.fraction().as_deref(),
+            Some("150/200"),
+            "header totals beat the listed nodes"
+        );
         assert_eq!((st.pills.len(), st.hidden, st.total_pills), (6, 14, 20));
-        assert!(card.notices.iter().any(|n| n.text.contains("150 finished steps")));
+        assert!(
+            card.notices
+                .iter()
+                .any(|n| n.text.contains("150 finished steps"))
+        );
     }
 
     #[test]
@@ -1748,10 +1827,16 @@ mod tests {
         assert_eq!(card.chips[0].id, "b");
         assert_eq!(card.chips[0].label, "Quarterly revenue by re…");
         assert_eq!(card.chips[0].label.chars().count(), CHIP_TITLE_CHARS);
-        assert_eq!(card.chips[0].title, "Quarterly revenue by region and segment");
+        assert_eq!(
+            card.chips[0].title,
+            "Quarterly revenue by region and segment"
+        );
         assert_eq!(card.chips[1].id, "a", "then by id within a kind");
         assert_eq!(truncate_title("short", 24), "short");
-        assert_eq!(truncate_title("日本語のとても長いタイトルがここにあります", 8), "日本語のとても…");
+        assert_eq!(
+            truncate_title("日本語のとても長いタイトルがここにあります", 8),
+            "日本語のとても…"
+        );
     }
 
     #[test]
@@ -1893,7 +1978,11 @@ mod tests {
         let many: Vec<String> = (0..SEEN_RUNS_MAX + 10).map(|i| format!("r{i}")).collect();
         assert!(mark_seen(&mut seen, &many));
         assert_eq!(seen.len(), SEEN_RUNS_MAX);
-        assert_eq!(seen.last().unwrap(), &format!("r{}", SEEN_RUNS_MAX + 9), "newest kept");
+        assert_eq!(
+            seen.last().unwrap(),
+            &format!("r{}", SEEN_RUNS_MAX + 9),
+            "newest kept"
+        );
         assert!(!seen.contains(&"a".to_string()), "oldest dropped");
     }
 
@@ -1902,7 +1991,10 @@ mod tests {
     #[test]
     fn the_result_message_is_taken_apart_for_the_row() {
         let parts = parse_result_message(MESSAGE);
-        assert_eq!(parts.summary, "completed · 6 agents · 21 asks · 48.2k tokens");
+        assert_eq!(
+            parts.summary,
+            "completed · 6 agents · 21 asks · 48.2k tokens"
+        );
         assert_eq!(
             parts.result.as_deref(),
             Some("{\"findings\": [\"a <b>\"]}\nsecond line"),
@@ -1911,7 +2003,14 @@ mod tests {
         assert!(parts.result_cut);
         assert_eq!(parts.reason.as_deref(), Some("none & done"));
         assert_eq!(parts.artifacts.len(), 3);
-        assert_eq!(parts.artifacts[1], ("scores".into(), ArtifactKind::Table, "Scores by reviewer".into()));
+        assert_eq!(
+            parts.artifacts[1],
+            (
+                "scores".into(),
+                ArtifactKind::Table,
+                "Scores by reviewer".into()
+            )
+        );
         assert_eq!(parts.artifacts[2].1, ArtifactKind::File);
         // a bare message degrades to nothing, never panics
         let bare = parse_result_message("[Workflow failed] x (run y)");
@@ -1921,7 +2020,8 @@ mod tests {
     #[test]
     fn the_result_row_uses_live_state_when_it_has_it() {
         let parts = parse_result_message(MESSAGE);
-        let evicted = ResultModel::build("r-1", "PR review", WorkflowStatus::Completed, &parts, None);
+        let evicted =
+            ResultModel::build("r-1", "PR review", WorkflowStatus::Completed, &parts, None);
         assert!(!evicted.can_open);
         assert_eq!(evicted.chips.len(), 3, "chips come from the text");
         assert_eq!(evicted.headline, "Result of workflow PR review (completed)");
@@ -1938,12 +2038,24 @@ mod tests {
             item_count: 0,
             primary: true,
         }];
-        let live = ResultModel::build("r-1", "PR review", WorkflowStatus::Completed, &parts, Some(&run));
+        let live = ResultModel::build(
+            "r-1",
+            "PR review",
+            WorkflowStatus::Completed,
+            &parts,
+            Some(&run),
+        );
         assert!(live.can_open);
         assert_eq!(live.chips.len(), 1);
         assert_eq!(live.chips[0].version, 2);
         assert_ne!(live.fingerprint(true), live.fingerprint(false));
-        let failed = ResultModel::build("r", "x", WorkflowStatus::Errored, &ResultParts::default(), None);
+        let failed = ResultModel::build(
+            "r",
+            "x",
+            WorkflowStatus::Errored,
+            &ResultParts::default(),
+            None,
+        );
         assert_eq!(failed.tone, Tone::Danger);
         assert_eq!(failed.headline, "Result of workflow x (failed)");
     }

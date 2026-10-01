@@ -33,10 +33,20 @@ pub enum WorkflowAction {
         landing: Option<String>,
     },
     /// Open an agent's chat read-only.
-    OpenActor { child_chat_id: String, title: String },
-    OpenArtifact { run_id: String, artifact_id: String },
-    Stop { run_id: String },
-    Resume { run_id: String },
+    OpenActor {
+        child_chat_id: String,
+        title: String,
+    },
+    OpenArtifact {
+        run_id: String,
+        artifact_id: String,
+    },
+    Stop {
+        run_id: String,
+    },
+    Resume {
+        run_id: String,
+    },
 }
 
 pub type ActionSink = Rc<dyn Fn(WorkflowAction, &mut Window, &mut App)>;

@@ -8,10 +8,6 @@
 
 use std::time::Duration;
 
-use gpui::{
-    AnyElement, InteractiveElement as _, IntoElement, ParentElement as _, SharedString,
-    StatefulInteractiveElement as _, Styled as _, div, prelude::*, px,
-};
 use super::model::{CardModel, Chip, Notice, Pill, PillState, Station};
 use super::widgets::{
     icon_button, kind_icon, lamp, light_color, pill_mark, status_glyph, tone_color,
@@ -20,6 +16,10 @@ use super::{ActionSink, WorkflowAction};
 use crate::icons::{self, icon};
 use crate::theme::Theme;
 use crate::typography::ui_rems;
+use gpui::{
+    AnyElement, InteractiveElement as _, IntoElement, ParentElement as _, SharedString,
+    StatefulInteractiveElement as _, Styled as _, div, prelude::*, px,
+};
 
 const COLUMN_BASIS: f32 = 120.0;
 const COLUMN_MAX: f32 = 220.0;
@@ -30,7 +30,9 @@ fn swallow(el: gpui::Stateful<gpui::Div>) -> gpui::Stateful<gpui::Div> {
     el.on_mouse_down(gpui::MouseButton::Left, |_, _, cx| cx.stop_propagation())
 }
 
-fn tip(label: impl Into<SharedString>) -> impl Fn(&mut gpui::Window, &mut gpui::App) -> gpui::AnyView {
+fn tip(
+    label: impl Into<SharedString>,
+) -> impl Fn(&mut gpui::Window, &mut gpui::App) -> gpui::AnyView {
     crate::settings::widgets::text_tooltip(label)
 }
 
@@ -206,9 +208,15 @@ fn header_row(
                         cx,
                     );
                 })
-                .tooltip(tip("An agent is waiting for an answer. Open the run to reply."))
+                .tooltip(tip(
+                    "An agent is waiting for an answer. Open the run to reply.",
+                ))
                 .tooltip_show_delay(Duration::from_millis(350))
-                .child(icon(icons::CHAT_ROUND_LINE).size(px(11.0)).text_color(warning))
+                .child(
+                    icon(icons::CHAT_ROUND_LINE)
+                        .size(px(11.0))
+                        .text_color(warning),
+                )
                 .child(SharedString::from(label)),
         ));
     }
@@ -252,9 +260,15 @@ fn header_row(
                     cx.stop_propagation();
                     sink(WorkflowAction::Resume { run_id: id.clone() }, window, cx)
                 })
-                .tooltip(tip("Continue from the journal; finished steps are not repeated"))
+                .tooltip(tip(
+                    "Continue from the journal; finished steps are not repeated",
+                ))
                 .tooltip_show_delay(Duration::from_millis(350))
-                .child(icon(icons::RESTART).size(px(12.0)).text_color(theme.text_muted))
+                .child(
+                    icon(icons::RESTART)
+                        .size(px(12.0))
+                        .text_color(theme.text_muted),
+                )
                 .child("Resume"),
         ));
     }
@@ -307,11 +321,7 @@ fn rail(
         .stations
         .iter()
         .enumerate()
-        .map(|(ix, station)| {
-            column(
-                ix, station, model, expanded, row_id, theme, sink, view, cx,
-            )
-        })
+        .map(|(ix, station)| column(ix, station, model, expanded, row_id, theme, sink, view, cx))
         .collect();
     Some(
         div()
@@ -342,7 +352,11 @@ fn column(
     let base = &station.base;
     let color = light_color(base.light, theme);
     let pending = matches!(base.light, super::model::Light::Pending);
-    let name_color = if pending { theme.text_faint } else { theme.text };
+    let name_color = if pending {
+        theme.text_faint
+    } else {
+        theme.text
+    };
     let fraction = base.fraction();
     let live_fraction = matches!(base.light, super::model::Light::Running);
     let title = if base.parallel_with_prev {
@@ -361,17 +375,11 @@ fn column(
         .gap(px(4.0))
         // The rail itself: a segment per phase, lit by its state. Parallel
         // phases share the accent so they read as one band.
-        .child(
-            div()
-                .h(px(2.0))
-                .w_full()
-                .rounded_full()
-                .bg(if pending {
-                    theme.border
-                } else {
-                    color.opacity(if live_fraction { 0.95 } else { 0.55 })
-                }),
-        )
+        .child(div().h(px(2.0)).w_full().rounded_full().bg(if pending {
+            theme.border
+        } else {
+            color.opacity(if live_fraction { 0.95 } else { 0.55 })
+        }))
         .child(
             div()
                 .w_full()
@@ -428,7 +436,10 @@ fn column(
                 let run_id = model.run_id.clone();
                 let landing = base.name.clone();
                 let label = if station.hidden_active > 0 {
-                    format!("+{} more · {} working", station.hidden, station.hidden_active)
+                    format!(
+                        "+{} more · {} working",
+                        station.hidden, station.hidden_active
+                    )
                 } else {
                     format!("+{} more", station.hidden)
                 };
