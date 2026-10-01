@@ -295,13 +295,14 @@ private fun HomeTabs(model: AppModel, nav: NavHostController) {
         sessionsReady = true
         settingsReady = true
     }
+    val retain by model.retainTabs.collectAsState()
     val workspace = model.workspace.collectAsStateWhile(tab == Tab.Sessions)
     val summary = remember(workspace) { workspace?.let { liveSummary(it) } }
     Box(Modifier.fillMaxSize().background(MaterialTheme.colorScheme.background)) {
-        TabPage(active = tab == Tab.Sessions, ready = sessionsReady, skeleton = { SessionsSkeleton() }) {
+        TabPage(active = tab == Tab.Sessions, ready = if (retain) sessionsReady else tab == Tab.Sessions, skeleton = { SessionsSkeleton() }) {
             SessionsScreen(model, onOpen = { nav.open(Routes.chat(it)) }, active = tab == Tab.Sessions)
         }
-        TabPage(active = tab == Tab.Settings, ready = settingsReady, skeleton = { SettingsSkeleton() }) {
+        TabPage(active = tab == Tab.Settings, ready = if (retain) settingsReady else tab == Tab.Settings, skeleton = { SettingsSkeleton() }) {
             SettingsScreen(model, onOpen = { nav.open(it) }, active = tab == Tab.Settings)
         }
         // Floating chrome over a soft scrim: new session, then the nav capsule.

@@ -23,7 +23,7 @@ import androidx.compose.runtime.CompositionLocalProvider
 import androidx.compose.runtime.LaunchedEffect
 import androidx.compose.runtime.mutableStateOf
 import androidx.compose.runtime.setValue
-import androidx.compose.runtime.staticCompositionLocalOf
+import androidx.compose.runtime.compositionLocalOf
 import androidx.compose.runtime.withFrameNanos
 import androidx.compose.runtime.collectAsState
 import androidx.compose.runtime.getValue
@@ -32,7 +32,9 @@ import androidx.compose.ui.Alignment
 import androidx.compose.ui.Modifier
 import androidx.compose.ui.draw.clip
 import androidx.compose.ui.graphics.Color
-import androidx.compose.ui.layout.layout
+import androidx.compose.ui.graphics.graphicsLayer
+import androidx.compose.ui.input.pointer.pointerInput
+import androidx.compose.ui.zIndex
 import androidx.compose.ui.semantics.hideFromAccessibility
 import androidx.compose.ui.semantics.semantics
 import androidx.compose.ui.unit.Dp
@@ -57,31 +59,36 @@ fun <T> StateFlow<T>.collectAsStateWhile(active: Boolean): T {
 }
 
 /**
- * One page of a tab host: measured whenever it is composed, but painted, hit-tested and announced only while
- * [active]. Showing it again is then a re-placement, not a composition (the 150-250 ms the Sessions and Settings
- * tabs used to cost on every switch). Until [ready] it is not composed at all and a [skeleton] stands in.
+ * One page of a tab host: composed and laid out whenever it is [ready], but painted, touched and announced only
+ * while [active]. Showing it again is then a property change, not a composition (the 150-250 ms the Sessions and
+ * Settings tabs used to cost on every switch). Until [ready] it is not composed at all and a [skeleton] stands in.
  */
 @Composable
 fun TabPage(active: Boolean, ready: Boolean, skeleton: @Composable () -> Unit, content: @Composable () -> Unit) {
     // Looping animations (spinners, breathing dots) run only while the page is shown, and start one frame after it
     // appears: a hidden page must not keep the display awake, and the switch itself should not pay for them.
-    var settled by remember { mutableStateOf(false) }
+    var settled by remember { mutableStateOf(active) }
     LaunchedEffect(active) {
-        settled = false
         if (active) {
-            withFrameNanos { }
+            if (!settled) withFrameNanos { }
             settled = true
+        } else {
+            // Not in the frame that hides the page: the switch has enough to do.
+            withFrameNanos { }
+            withFrameNanos { }
+            settled = false
         }
     }
     CompositionLocalProvider(LocalMotionActive provides (active && settled)) {
         Box(
-        Modifier
-            .fillMaxSize()
-            .layout { measurable, constraints ->
-                val placeable = measurable.measure(constraints)
-                layout(placeable.width, placeable.height) { if (active) placeable.place(0, 0) }
-            }
-            .semantics { if (!active) hideFromAccessibility() },
+            Modifier
+                .fillMaxSize()
+                // The shown page sits on top (and swallows touches in its blank areas, below); a hidden one keeps its
+                // recorded display lists and just stops being drawn: showing it is a property change, no recomposition.
+                .zIndex(if (active) 1f else 0f)
+                .graphicsLayer { alpha = if (active) 1f else 0f }
+                .semantics { if (!active) hideFromAccessibility() }
+                .then(if (active) Modifier.pointerInput(Unit) {} else Modifier),
         ) {
             if (ready) content() else if (active) skeleton()
         }
@@ -89,7 +96,7 @@ fun TabPage(active: Boolean, ready: Boolean, skeleton: @Composable () -> Unit, c
 }
 
 /** False for a page that is hidden or has only just appeared; looping animations hold still until it is true. */
-val LocalMotionActive = staticCompositionLocalOf { true }
+val LocalMotionActive = compositionLocalOf { true }
 
 /** The wireframe tone: a quiet wash of the text colour, no animation (nothing here should cost a frame). */
 @Composable

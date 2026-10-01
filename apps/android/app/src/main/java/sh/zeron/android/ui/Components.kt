@@ -2,6 +2,13 @@ package sh.zeron.android.ui
 
 import androidx.compose.foundation.background
 import androidx.compose.foundation.layout.Box
+import androidx.compose.foundation.layout.fillMaxSize
+import androidx.compose.runtime.LaunchedEffect
+import androidx.compose.runtime.getValue
+import androidx.compose.runtime.mutableStateOf
+import androidx.compose.runtime.remember
+import androidx.compose.runtime.setValue
+import kotlinx.coroutines.sync.withLock
 import androidx.compose.foundation.layout.Column
 import androidx.compose.foundation.layout.PaddingValues
 import androidx.compose.foundation.layout.Spacer
@@ -122,6 +129,36 @@ fun SessionRow.colorIndex(): Int = (project?.colorIndex ?: projectColorIndex("ho
 @Composable
 fun successColor(): Color = if (LocalDarkTheme.current) Color(0xFF34D399) else Color(0xFF15803D)
 
+/** Hands out frames one at a time: each spinner waiting its turn composes in a frame of its own. */
+private object SpinnerQueue {
+    private val turn = kotlinx.coroutines.sync.Mutex()
+    suspend fun next() = turn.withLock { androidx.compose.runtime.withFrameNanos { } }
+}
+
+/**
+ * The working indicator of a row. Its shape-morph tables are the costliest thing in a row (a third of a cold
+ * list's composition), so the row paints with a still dot, and the spinner takes over a frame later, one spinner per
+ * frame. A page that is hidden (see [LocalMotionActive]) drops it again: nothing should animate unseen.
+ */
+@OptIn(ExperimentalMaterial3ExpressiveApi::class)
+@Composable
+private fun WorkingSpinner() {
+    val motion = LocalMotionActive.current
+    var spinning by remember { mutableStateOf(false) }
+    LaunchedEffect(motion) {
+        if (motion) {
+            SpinnerQueue.next()
+            spinning = true
+        } else {
+            spinning = false
+        }
+    }
+    Box(Modifier.size(26.dp), contentAlignment = Alignment.Center) {
+        if (spinning) LoadingIndicator(Modifier.fillMaxSize())
+        else Box(Modifier.size(8.dp).clip(CircleShape).background(MaterialTheme.colorScheme.primary))
+    }
+}
+
 /** Live status at the trailing edge of a session row (desktop wording). */
 @OptIn(ExperimentalMaterial3ExpressiveApi::class)
 @Composable
@@ -139,10 +176,7 @@ fun StatusLabel(row: SessionRow) {
         }
     }
     when (row.indicator) {
-        // A hidden page (or one that has only just appeared) shows the indicator still, see LocalMotionActive.
-        ChatIndicator.WORKING ->
-            if (LocalMotionActive.current) LoadingIndicator(Modifier.size(26.dp))
-            else LoadingIndicator(progress = { 0f }, Modifier.size(26.dp))
+        ChatIndicator.WORKING -> WorkingSpinner()
         ChatIndicator.AWAITING_INPUT -> label("Input", MaterialTheme.colorScheme.primary, dot = true)
         ChatIndicator.ERRORED -> label("Failed", MaterialTheme.colorScheme.error, dot = true)
         ChatIndicator.COMPLETED -> label("Done", successColor(), dot = false)

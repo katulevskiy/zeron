@@ -121,6 +121,9 @@ class AppModel(private val app: Application) {
     /** Debug builds: bumped to rebuild the home page from scratch, the way coming back from a chat does. */
     val homeEpoch = MutableStateFlow(0)
 
+    /** Debug builds: false rebuilds a tab on every switch (the old behaviour), for A/B timing in the same session. */
+    val retainTabs = MutableStateFlow(true)
+
     private val _client = MutableStateFlow<CoreClient?>(null)
     val client: StateFlow<CoreClient?> = _client.asStateFlow()
 
@@ -312,6 +315,7 @@ class AppModel(private val app: Application) {
                     "tab" -> {
                         val tab = intent.getStringExtra("tab").orEmpty()
                         Perf.sampling = intent.getBooleanExtra("sample", false)
+                        if (intent.hasExtra("retain")) retainTabs.value = intent.getBooleanExtra("retain", true)
                         Perf.begin("tab->$tab")
                         tabRequest.value = tab
                         if (intent.getBooleanExtra("cold", false)) homeEpoch.value++

@@ -46,6 +46,7 @@ class MainActivity : ComponentActivity() {
         // (or the share sheet) still has to honour a notification's route.
         if (savedInstanceState == null) extras?.getString("route")?.let { model.pendingRoute.value = it }
         handleCallback(intent)
+        if (model.isDebuggable) sh.zeron.android.core.Perf.attach(window)
         setContent { ZeronRoot(model) }
     }
 

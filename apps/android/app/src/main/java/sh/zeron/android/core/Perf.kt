@@ -26,8 +26,47 @@ object Perf {
     private val self = HashMap<String, Int>()
     private var samples = 0
 
+    /** One frame as the platform measured it: the main thread's own work, then the wait for the render thread. */
+    private class Frame(val vsync: Long, val ui: Double, val sync: Double, val total: Double, val parts: String)
+
+    private val frames = ArrayList<Frame>()
+    private val handler by lazy { android.os.Handler(android.os.HandlerThread("ZeronPerfFrames").also { it.start() }.looper) }
+    private var tMono = 0L
+
+    /** Debug builds: keep per-frame metrics (UI-thread time = input + animation/recomposition + measure/layout + draw). */
+    fun attach(window: android.view.Window) {
+        window.addOnFrameMetricsAvailableListener({ _, m, _ ->
+            fun ms(i: Int) = m.getMetric(i) / 1e6
+            val ui = ms(android.view.FrameMetrics.INPUT_HANDLING_DURATION) + ms(android.view.FrameMetrics.ANIMATION_DURATION) +
+                ms(android.view.FrameMetrics.LAYOUT_MEASURE_DURATION) + ms(android.view.FrameMetrics.DRAW_DURATION)
+            synchronized(frames) {
+                frames += Frame(m.getMetric(android.view.FrameMetrics.INTENDED_VSYNC_TIMESTAMP), ui, ms(android.view.FrameMetrics.SYNC_DURATION), ms(android.view.FrameMetrics.TOTAL_DURATION),
+                    "anim %.0f layout %.0f draw %.0f".format(ms(android.view.FrameMetrics.ANIMATION_DURATION), ms(android.view.FrameMetrics.LAYOUT_MEASURE_DURATION), ms(android.view.FrameMetrics.DRAW_DURATION)))
+                if (frames.size > 600) frames.subList(0, 300).clear()
+            }
+        }, handler)
+    }
+
+    private fun summarize(what: String, from: Long) {
+        val run = synchronized(frames) {
+            val out = ArrayList<Frame>()  // the switch itself: its frames, until the screen goes quiet or six have passed
+            for (f in frames) {
+                if (f.vsync < from - 20_000_000) continue
+                if (out.size >= 6 || out.isNotEmpty() && f.vsync - out.last().vsync > 150_000_000) break
+                out += f
+            }
+            out
+        }
+        if (run.isEmpty()) return
+        val shown = run.joinToString(" | ") { "%.1f".format(it.ui) }
+        Log.d(TAG, "%s: frames=%d main-thread ms per frame [%s] worst=%.1f sum=%.1f (render-thread sync wait worst=%.1f)".format(
+            what, run.size, shown, run.maxOf { it.ui }, run.sumOf { it.ui }, run.maxOf { it.sync }))
+        Log.d(TAG, "%s: first frame = %s".format(what, run.first().parts))
+    }
+
     fun begin(what: String) {
         label = what
+        tMono = System.nanoTime()
         t0 = SystemClock.elapsedRealtimeNanos()
         cpu0 = android.os.Debug.threadCpuTimeNanos()
         if (sampling) startSampler()
@@ -79,8 +118,11 @@ object Perf {
     fun finish(step: String) {
         if (label.isEmpty()) return
         Log.d(TAG, "%s: %s +%.1f ms wall, %.1f ms main-thread cpu (done)".format(label, step, elapsedMs(), (android.os.Debug.threadCpuTimeNanos() - cpu0) / 1e6))
+        val what = label
+        val from = tMono
         label = ""
-        if (sampling) report()
+        handler.postDelayed({ summarize(what, from) }, 500)
+        if (sampling) handler.postDelayed({ report() }, 250)  // keep sampling through the frames that follow the switch
     }
 }
 
