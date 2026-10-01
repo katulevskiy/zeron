@@ -302,6 +302,14 @@ test("rendered relay identity mismatch fails closed before any durable send", as
 
 
 test("new chat safely blocks when the real fixture offers only a disabled Mock harness", async () => {
+  // This scenario deliberately disables the fixture-only ClaudeCode provider;
+  // Mock remains the real registry's non-offered negative control.
+  await fixture!.stop();
+  fixture = await startBrowserRelayFixture({
+    assetsDirectory: resolve(repository, "web/packages/app/dist"),
+    mockDelayMs: 700,
+    scriptedClaude: false,
+  });
   const context = await browser!.newContext({ viewport: { width: 1440, height: 960 } });
   await context.addCookies(fixture!.session.browserCookies());
   const page = await context.newPage();

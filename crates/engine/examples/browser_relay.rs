@@ -3,13 +3,92 @@
 //! stdin controls: disconnect, reconnect, shutdown. No local RPC/IPC listener.
 use std::{future::Future, path::PathBuf, sync::Arc};
 
+use futures::stream::BoxStream;
 use tokio::io::{AsyncBufReadExt, BufReader};
 use zeron_engine::{
     Auth, AuthConfig, EdgeConfig, EngineCore, EngineProfile, HarnessId, HarnessRegistry,
 };
 use zeron_harness::mock::MockHarness;
-use zeron_proto::{AgentEvent, DoneStatus};
+use zeron_harness::{Harness, HarnessError, RunControls};
+use zeron_proto::{AgentEvent, DoneStatus, Model, ReasoningLevel, RunRequest, SteeringMode};
 use zeron_rpc::{LinkCache, LinkCacheConfig, RpcService};
+
+/**
+ * Fixture-only provider: it deliberately owns the ordinary ClaudeCode id so
+ * the real registry reports it installed and enabled. Its event stream remains
+ * scripted; it never claims to be a locally installed Claude CLI.
+ */
+struct ScriptedClaudeHarness {
+    inner: MockHarness,
+}
+
+#[async_trait::async_trait]
+impl Harness for ScriptedClaudeHarness {
+    fn id(&self) -> HarnessId {
+        HarnessId::ClaudeCode
+    }
+
+    fn display_name(&self) -> &str {
+        "Claude Code (scripted fixture)"
+    }
+
+    fn supports_steering(&self) -> bool {
+        self.inner.supports_steering()
+    }
+
+    fn steering_mode(&self) -> SteeringMode {
+        self.inner.steering_mode()
+    }
+
+    fn reasoning_levels(&self) -> &[ReasoningLevel] {
+        self.inner.reasoning_levels()
+    }
+
+    fn installed(&self) -> bool {
+        true
+    }
+
+    fn deterministic_turn_end(&self) -> bool {
+        true
+    }
+
+    async fn models(&self) -> Result<Vec<Model>, HarnessError> {
+        self.inner.models().await
+    }
+
+    async fn run(
+        &self,
+        request: RunRequest,
+        controls: RunControls,
+    ) -> Result<BoxStream<'static, Result<AgentEvent, HarnessError>>, HarnessError> {
+        self.inner.run(request, controls).await
+    }
+}
+
+fn scripted_events(label: &str, harness: HarnessId, cwd: &std::path::Path) -> Vec<AgentEvent> {
+    vec![
+        AgentEvent::SessionStarted {
+            harness,
+            model: "mock-1".into(),
+            tools: vec![],
+            cwd: cwd.to_string_lossy().into_owned(),
+            session_id: format!("{label}-session"),
+            assistant_message_id: format!("{label}-assistant"),
+        },
+        AgentEvent::TextDelta {
+            text: format!("Reply from {label}. "),
+        },
+        AgentEvent::TextDelta {
+            text: "Deterministic fixture response.".into(),
+        },
+        AgentEvent::Done {
+            status: DoneStatus::Completed,
+            result: None,
+            error: None,
+            session_id: Some(format!("{label}-session")),
+        },
+    ]
+}
 
 #[tokio::main(flavor = "multi_thread", worker_threads = 2)]
 async fn main() -> anyhow::Result<()> {
@@ -53,30 +132,26 @@ async fn main() -> anyhow::Result<()> {
         )?;
     }
     let registry = Arc::new(HarnessRegistry::new());
+    let scripted_claude = std::env::var("ZERON_BROWSER_RELAY_SCRIPTED_CLAUDE")
+        .map(|value| value != "0")
+        .unwrap_or(true);
+    // Keep Mock registered for explicit wire-contract and no-agent tests. The
+    // native registry intentionally excludes it from automatic enablement.
     registry.register(Arc::new(MockHarness {
-        script: vec![
-            AgentEvent::SessionStarted {
-                harness: HarnessId::Mock,
-                model: "mock-1".into(),
-                tools: vec![],
-                cwd: project_root.to_string_lossy().into_owned(),
-                session_id: format!("{label}-session"),
-                assistant_message_id: format!("{label}-assistant"),
-            },
-            AgentEvent::TextDelta {
-                text: format!("Reply from {label}. "),
-            },
-            AgentEvent::TextDelta {
-                text: "Deterministic fixture response.".into(),
-            },
-            AgentEvent::Done {
-                status: DoneStatus::Completed,
-                result: None,
-                error: None,
-                session_id: Some(format!("{label}-session")),
-            },
-        ],
+        script: scripted_events(&label, HarnessId::Mock, &project_root),
     }));
+    if scripted_claude {
+        registry.register(Arc::new(ScriptedClaudeHarness {
+            inner: MockHarness {
+                script: scripted_events(&label, HarnessId::ClaudeCode, &project_root),
+            },
+        }));
+    }
+    let default_harness = if scripted_claude {
+        HarnessId::ClaudeCode
+    } else {
+        HarnessId::Mock
+    };
     let mut auth_config = AuthConfig::new(&edge_url, &data_dir);
     auth_config.dev_user_id = format!("{owner}@{org}");
     let auth = Auth::new(auth_config);
@@ -84,7 +159,7 @@ async fn main() -> anyhow::Result<()> {
     let core = EngineCore::assemble_with_profile(
         EngineProfile::development(&data_dir, &org, &owner),
         registry,
-        HarnessId::Mock,
+        default_harness,
         Some(edge),
     )?;
     core.set_auth(auth.clone());

@@ -1,6 +1,6 @@
 # Real browser relay fixture
 
-`startBrowserRelayFixture` in `browser-relay.ts` launches the **actual edge Worker through Wrangler/workerd**, its real BrowserSessionStore/DeviceRoom/registry/session Durable Objects, and two genuine EngineCore processes using the supported outbound host relay. There is no direct engine listener, fake dispatcher, fake relay, or fake session store. Only the existing MockHarness is scripted.
+`startBrowserRelayFixture` in `browser-relay.ts` launches the **actual edge Worker through Wrangler/workerd**, its real BrowserSessionStore/DeviceRoom/registry/session Durable Objects, and two genuine EngineCore processes using the supported outbound host relay. There is no direct engine listener, fake dispatcher, fake relay, or fake session store. Only external provider execution is scripted: an installed/enabled fixture-only ClaudeCode-ID harness delegates to MockHarness. This is not evidence of a live Claude installation or provider call. The disabled Mock harness remains registered for explicit wire and no-agent checks.
 
 ## Public interface for tickets 08–11
 
@@ -11,6 +11,7 @@ import { startBrowserRelayFixture } from "./helpers/browser-relay";
 const fixture = await startBrowserRelayFixture({
   engineLabels: ["engine-a", "engine-b"], // default
   mockDelayMs: 80, // per-event pacing in the existing MockHarness
+  // scriptedClaude: false, // opt out of the enabled fixture provider for no-agent checks
   // assetsDirectory: "/absolute/path/to/web/packages/app/dist",
 });
 try {

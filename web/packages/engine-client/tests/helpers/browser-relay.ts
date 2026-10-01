@@ -153,6 +153,8 @@ export interface BrowserRelayOptions {
   organizationId?: string;
   engineLabels?: string[];
   mockDelayMs?: number;
+  /** Register the enabled ClaudeCode-id scripted provider (default true). */
+  scriptedClaude?: boolean;
   /** Optional actual built web app for rendered end-to-end consumers. */
   assetsDirectory?: string;
 }
@@ -269,6 +271,7 @@ export async function startBrowserRelayFixture(options: BrowserRelayOptions = {}
         ...globalThis.process.env,
         ZERON_MOCK_DELAY_MS: String(engineOptions.mockDelayMs ?? options.mockDelayMs ?? 80),
         ZERON_MOCK_QUESTION: "0",
+        ZERON_BROWSER_RELAY_SCRIPTED_CLAUDE: options.scriptedClaude === false ? "0" : "1",
       }, true);
       processes.push(process);
       try {
