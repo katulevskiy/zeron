@@ -25,6 +25,8 @@ struct PolicyHarness {
     caps: PolicyCaps,
     seen: Arc<Mutex<Vec<RunRequest>>>,
     ask: Option<Vec<UserInputQuestion>>,
+    /// Puts `instructions` in its own system prompt (like Claude and Codex).
+    delivers_instructions: bool,
 }
 
 #[async_trait::async_trait]
@@ -46,6 +48,9 @@ impl Harness for PolicyHarness {
     }
     fn policy_caps(&self) -> PolicyCaps {
         self.caps.clone()
+    }
+    fn delivers_instructions(&self) -> bool {
+        self.delivers_instructions
     }
     async fn models(&self) -> Result<Vec<Model>, HarnessError> {
         Ok(vec![])
@@ -75,6 +80,7 @@ impl Harness for PolicyHarness {
 
 fn request(cwd: &str, mode: PermissionMode) -> RunRequest {
     RunRequest {
+        instructions: None,
         policy: AgentPolicy::with_mode(mode),
         mcp: None,
         prompt: "go".into(),
@@ -98,12 +104,21 @@ struct Rig {
 }
 
 fn rig(caps: PolicyCaps, ask: Option<Vec<UserInputQuestion>>) -> Rig {
+    rig_delivering(caps, ask, false)
+}
+
+fn rig_delivering(
+    caps: PolicyCaps,
+    ask: Option<Vec<UserInputQuestion>>,
+    delivers_instructions: bool,
+) -> Rig {
     let seen = Arc::new(Mutex::new(Vec::new()));
     let registry = HarnessRegistry::new();
     registry.register(Arc::new(PolicyHarness {
         caps,
         seen: seen.clone(),
         ask,
+        delivers_instructions,
     }));
     let dir = tempfile::tempdir().unwrap();
     let core =
@@ -312,6 +327,73 @@ async fn always_allow_answers_become_standing_rules() {
     rig.core.sessions.shutdown().await;
 }
 
+/// Run one turn of a chat that started from a preset with `instructions`
+/// and give back the request the harness received.
+async fn request_for_preset_chat(
+    delivers: bool,
+    resume: Option<String>,
+) -> RunRequest {
+    let rig = rig_delivering(PolicyCaps::all_modes(), None, delivers);
+    let chat = "chat-preset";
+    rig.core
+        .workspace
+        .create_chat(chat, None, Some(&rig.core.device_id), None, None)
+        .unwrap();
+    rig.core
+        .workspace
+        .set_chat_config(
+            chat,
+            &ChatConfig {
+                preset: Some(zeron_proto::PresetRef {
+                    id: "reviewer".into(),
+                    name: "Reviewer".into(),
+                    digest: "0123456789abcdef".into(),
+                    instructions: Some("Only report; never edit.".into()),
+                    may_spawn: true,
+                    tools: Default::default(),
+                }),
+                policy: AgentPolicy::with_mode(PermissionMode::Ask),
+                harness: HarnessId::Mock,
+                model: None,
+                reasoning: None,
+                model_options: Default::default(),
+                sandbox: SandboxLevel::WorkspaceWrite,
+            },
+        )
+        .unwrap();
+    let mut req = request("/tmp", PermissionMode::Ask);
+    req.resume = resume;
+    rig.core
+        .sessions
+        .dispatch(chat, HarnessId::Mock, req, None)
+        .await
+        .unwrap();
+    until(|| !rig.seen.lock().unwrap().is_empty()).await;
+    let seen = rig.seen.lock().unwrap()[0].clone();
+    rig.core.sessions.shutdown().await;
+    seen
+}
+
+#[tokio::test]
+async fn a_presets_instructions_reach_every_run_of_its_chat() {
+    // A harness without a system prompt of its own gets them ahead of the
+    // session's first prompt.
+    let request = request_for_preset_chat(false, None).await;
+    assert_eq!(request.instructions.as_deref(), Some("Only report; never edit."));
+    assert_eq!(
+        request.prompt,
+        "Standing instructions for this chat:\nOnly report; never edit.\n\ngo"
+    );
+    // One that has its own keeps the prompt as the user wrote it.
+    let request = request_for_preset_chat(true, None).await;
+    assert_eq!(request.instructions.as_deref(), Some("Only report; never edit."));
+    assert_eq!(request.prompt, "go");
+    // A resumed session already heard them.
+    let request = request_for_preset_chat(false, Some("session-1".into())).await;
+    assert_eq!(request.instructions.as_deref(), Some("Only report; never edit."));
+    assert_eq!(request.prompt, "go");
+}
+
 #[tokio::test]
 async fn an_always_answer_to_a_question_the_harness_never_asked_is_ignored() {
     let rig = rig(PolicyCaps::all_modes(), None);
@@ -349,6 +431,7 @@ async fn a_rebuilt_request_carries_the_chats_policy() {
         reasoning: None,
         model_options: Default::default(),
         sandbox: SandboxLevel::WorkspaceWrite,
+        preset: None,
         policy: AgentPolicy::with_mode(PermissionMode::Plan),
     };
     rig.core.workspace.set_chat_config(chat, &config).unwrap();

@@ -92,6 +92,12 @@ pub trait Harness: Send + Sync {
     fn policy_caps(&self) -> zeron_proto::PolicyCaps {
         zeron_proto::PolicyCaps::bypass_only()
     }
+    /// Whether the harness puts `RunRequest.instructions` in the agent's own
+    /// system prompt. When it doesn't, the host prepends them to the first
+    /// prompt of a session instead.
+    fn delivers_instructions(&self) -> bool {
+        false
+    }
     /// Whether the agent's own CLI is present on this device — the settings
     /// gate for enabling the harness. Version probes are cached by executable identity.
     /// Defaults to true for harnesses without a CLI to check (mock).

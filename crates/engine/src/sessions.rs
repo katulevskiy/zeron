@@ -199,6 +199,7 @@ struct Inner {
     /// Standing permission rules merged into every fresh run (absent in bare
     /// tests: runs keep only the rules their request carries).
     policy_rules: OnceLock<crate::policy_rules::PolicyRules>,
+    presets: OnceLock<crate::presets::Presets>,
 }
 
 /// Turn-start hook: called with `(chat_id, cwd)`.
@@ -237,11 +238,20 @@ impl SessionsEngine {
                 generated_images: OnceLock::new(),
                 turn_listener: OnceLock::new(),
                 policy_rules: OnceLock::new(),
+                presets: OnceLock::new(),
             }),
         }
     }
 
     /// Wire the standing-rules store (engine assembly; first set wins).
+    pub fn set_presets(&self, presets: crate::presets::Presets) {
+        let _ = self.inner.presets.set(presets);
+    }
+
+    pub fn presets(&self) -> Option<&crate::presets::Presets> {
+        self.inner.presets.get()
+    }
+
     pub fn set_policy_rules(&self, rules: crate::policy_rules::PolicyRules) {
         let _ = self.inner.policy_rules.set(rules);
     }
@@ -696,6 +706,16 @@ impl SessionsEngine {
             request.policy.rules =
                 rules.merged(std::path::Path::new(&request.cwd), &request.policy.rules);
         }
+        // The chat's preset instructions ride every run of the chat, as they
+        // were when it started (an edited preset never changes a running chat).
+        if request.instructions.is_none() {
+            request.instructions = self
+                .inner
+                .workspace()
+                .and_then(|ws| ws.chat_config(chat_id))
+                .and_then(|config| config.preset)
+                .and_then(|preset| preset.instructions);
+        }
 
         tokio::spawn(drive_run(
             self.inner.clone(),
@@ -1047,6 +1067,7 @@ impl SessionsEngine {
                     .or_else(|| {
                         let (_, cwd) = sessions.inner.journal_harness_session(&chat_id)?;
                         Some(RunRequest {
+                            instructions: None,
                             policy: Default::default(),
                             mcp: None,
                             prompt: String::new(),
@@ -1958,7 +1979,37 @@ async fn drive_run(
     // The host stamps its own MCP server onto every run it drives, so the
     // agent can spawn and talk to side chats through the engine it runs in.
     if request.mcp.is_none() {
-        request.mcp = inner.zeron_mcp(&chat_id);
+        // A preset's limits on what its agent may do through Zeron's tools.
+        let limits = inner
+            .workspace()
+            .and_then(|ws| ws.chat_config(&chat_id))
+            .and_then(|config| config.preset);
+        let mut env: Vec<(&str, String)> = Vec::new();
+        if let Some(preset) = &limits {
+            if !preset.may_spawn {
+                env.push(("ZERON_NO_SPAWN", "1".into()));
+            }
+            if !preset.tools.allow.is_empty() {
+                env.push(("ZERON_TOOLS_ALLOW", preset.tools.allow.join(",")));
+            }
+            if !preset.tools.deny.is_empty() {
+                env.push(("ZERON_TOOLS_DENY", preset.tools.deny.join(",")));
+            }
+        }
+        let env: Vec<(&str, &str)> = env.iter().map(|(k, v)| (*k, v.as_str())).collect();
+        request.mcp = inner.zeron_mcp_with(&chat_id, &env);
+    }
+    // Instructions go in the agent's system prompt where it has one; for the
+    // rest they open the session's first prompt, once.
+    if let Some(instructions) = request.instructions.as_deref()
+        && !harness.delivers_instructions()
+        && request.resume.is_none()
+    {
+        request.prompt = format!(
+            "Standing instructions for this chat:\n{}\n\n{}",
+            instructions.trim(),
+            request.prompt
+        );
     }
     // Kept whole for the startup-crash retry (same user entry; dispatch
     // re-injects the stored resume id). Option so the retry branch (inside
@@ -3232,6 +3283,7 @@ mod tests {
 
     fn request() -> RunRequest {
         RunRequest {
+            instructions: None,
             policy: Default::default(),
             mcp: None,
             prompt: "first".into(),

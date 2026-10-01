@@ -207,7 +207,7 @@ case "$turnline" in
     has "$turnline" "$want" || { fail_turn "$tid" "turn param missing: $want"; exit 0; }
   done
   for want in '"approvalPolicy":"never"' '"sandbox":"danger-full-access"' '"cwd":"/tmp"' \
-    '"serviceTier":"fast"'; do
+    '"serviceTier":"fast"' '"developerInstructions":"Keep diffs small."'; do
     has "$thread_line" "$want" || { fail_turn "$tid" "thread param missing: $want"; exit 0; }
   done
   emit "{\"id\":$tid,\"result\":{\"turn\":{\"id\":\"t-1\"}}}"

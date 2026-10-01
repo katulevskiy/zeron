@@ -41,6 +41,7 @@ fn fixture_path() -> PathBuf {
 
 fn request(prompt: &str) -> RunRequest {
     RunRequest {
+        instructions: None,
         policy: Default::default(),
         mcp: None,
         prompt: prompt.into(),

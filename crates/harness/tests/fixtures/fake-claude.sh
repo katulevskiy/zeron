@@ -113,6 +113,20 @@ case "$first" in
   esac
   ;;
 
+*scenario:sysprompt*)
+  # Report the value of --append-system-prompt (or "none").
+  prompt=none
+  while [ "$#" -gt 0 ]; do
+    case "$1" in
+      --append-system-prompt) shift; prompt="$1" ;;
+    esac
+    shift
+  done
+  emit '{"type":"system","subtype":"init","model":"claude-fable-5","tools":[],"cwd":"/tmp","session_id":"sess-sys"}'
+  emit "{\"type\":\"stream_event\",\"event\":{\"type\":\"content_block_delta\",\"delta\":{\"type\":\"text_delta\",\"text\":\"sys:$prompt\"}}}"
+  emit '{"type":"result","subtype":"success","result":"ok","errors":[],"usage":{"input_tokens":1,"output_tokens":1},"session_id":"sess-sys"}'
+  ;;
+
 *scenario:gate*|*scenario:plan-exit*)
   # Permission modes: report the launch flags, then send can_use_tool
   # requests one at a time and report each verdict as text.

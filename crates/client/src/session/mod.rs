@@ -1050,6 +1050,9 @@ impl SessionHandle {
                     // Older harness drivers read only this flag: keep it in
                     // step with the policy instead of forcing it on.
                     auto_approve: policy.mode == zeron_proto::PermissionMode::Bypass,
+                    instructions: config
+                        .and_then(|c| c.preset.as_ref())
+                        .and_then(|p| p.instructions.clone()),
                     policy,
                     prompt: content,
                     harness: config.map(|c| c.harness),

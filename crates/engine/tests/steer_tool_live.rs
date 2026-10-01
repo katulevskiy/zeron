@@ -112,6 +112,7 @@ async fn steering_never_aborts_a_running_tool() {
         .set_chat_config(
             CHAT,
             &ChatConfig {
+                preset: None,
                 policy: Default::default(),
                 harness: id,
                 model: model.clone(),
@@ -136,6 +137,7 @@ async fn steering_never_aborts_a_running_tool() {
             SessionCommandPayload::Run {
                 message_id: "call".into(),
                 request: RunRequest {
+                    instructions: None,
                     policy: Default::default(),
                     mcp: Some(McpServer {
                         name: "slow".into(),

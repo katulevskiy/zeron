@@ -1359,6 +1359,9 @@ fn forwardable(method: &str) -> bool {
             | methods::SET_TITLE_SETTINGS
             | methods::GET_POLICY_SETTINGS
             | methods::SET_POLICY_SETTINGS
+            | methods::LIST_PRESETS
+            | methods::UPSERT_PRESET
+            | methods::DELETE_PRESET
             | methods::SET_HARNESS_ENABLED
             | methods::LIST_MODELS
             | methods::LIST_SKILLS
@@ -1783,6 +1786,45 @@ impl RpcService for EngineRpc {
                 let p: crate::registry::PolicySettings = parse_params(params)?;
                 self.registry.set_policy_settings(p);
                 RpcReply::value(&self.registry.policy_settings())
+            }
+            methods::LIST_PRESETS => {
+                #[derive(Deserialize)]
+                struct ListParams {
+                    #[serde(default)]
+                    path: Option<String>,
+                }
+                let p: ListParams = parse_params(params)?;
+                let sessions = self.sessions.clone();
+                let store = sessions
+                    .presets()
+                    .ok_or_else(|| RpcError::Failed("presets are not available".into()))?;
+                let workspace = p.path.as_deref().filter(|p| !p.is_empty());
+                RpcReply::value(&serde_json::json!({
+                    "presets": store.list(workspace.map(std::path::Path::new)),
+                }))
+            }
+            methods::UPSERT_PRESET | methods::DELETE_PRESET => {
+                let sessions = self.sessions.clone();
+                let store = sessions
+                    .presets()
+                    .ok_or_else(|| RpcError::Failed("presets are not available".into()))?;
+                if method == methods::UPSERT_PRESET {
+                    #[derive(Deserialize)]
+                    struct UpsertParams {
+                        preset: zeron_proto::AgentPreset,
+                    }
+                    let p: UpsertParams = parse_params(params)?;
+                    let preset = store.upsert(p.preset).map_err(RpcError::Failed)?;
+                    RpcReply::value(&serde_json::json!({ "preset": preset }))
+                } else {
+                    #[derive(Deserialize)]
+                    struct DeleteParams {
+                        id: String,
+                    }
+                    let p: DeleteParams = parse_params(params)?;
+                    let deleted = store.delete(&p.id).map_err(RpcError::Failed)?;
+                    RpcReply::value(&serde_json::json!({ "deleted": deleted }))
+                }
             }
             methods::SET_HARNESS_ENABLED => {
                 let p: SetHarnessEnabledParams = parse_params(params)?;

@@ -817,6 +817,7 @@ impl TryFrom<ChatConfig> for zc::ChatConfig {
 
     fn try_from(c: ChatConfig) -> CoreResult<Self> {
         Ok(zc::ChatConfig {
+            preset: None,
             policy: zeron_proto::AgentPolicy::with_mode(
                 c.permission_mode
                     .as_deref()

@@ -38,6 +38,7 @@ fn harness() -> ClaudeHarness {
 
 fn request(prompt: &str) -> RunRequest {
     RunRequest {
+        instructions: None,
         policy: Default::default(),
         mcp: None,
         prompt: prompt.into(),
@@ -1007,6 +1008,27 @@ async fn gated(
         .collect();
     let asked = asked.lock().unwrap().clone();
     (text, asked)
+}
+
+#[tokio::test]
+async fn a_presets_instructions_go_in_the_system_prompt() {
+    for (instructions, want) in [
+        (Some("Only report; never edit."), "sys:Only report; never edit."),
+        (None, "sys:none"),
+    ] {
+        let (controls, _steer, _token) = controls("Yes");
+        let mut req = request("scenario:sysprompt");
+        req.instructions = instructions.map(str::to_owned);
+        let events = run_to_end(&harness(), req, controls).await;
+        let text: String = events
+            .iter()
+            .filter_map(|e| match e {
+                AgentEvent::TextDelta { text } => Some(text.as_str()),
+                _ => None,
+            })
+            .collect();
+        assert_eq!(text, want);
+    }
 }
 
 #[tokio::test]

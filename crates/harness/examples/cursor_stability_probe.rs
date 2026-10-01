@@ -30,6 +30,7 @@ async fn turn(
         }),
     };
     let request = RunRequest {
+        instructions: None,
         policy: Default::default(),
         mcp: None,
         prompt,
@@ -150,6 +151,7 @@ async fn parked(harness: &CursorHarness, count: usize) {
         }),
     };
     let request = RunRequest {
+        instructions: None,
         policy: Default::default(),
         mcp: None,
         prompt: format!(
@@ -262,6 +264,7 @@ async fn burst(harness: &CursorHarness, count: usize, cancel: bool) {
         }),
     };
     let request = RunRequest {
+        instructions: None,
         policy: Default::default(),
         mcp: None,
         prompt: if cancel {
@@ -400,6 +403,7 @@ async fn history(harness: &CursorHarness, count: usize) {
         }),
     };
     let request = RunRequest {
+        instructions: None,
         policy: Default::default(),
         mcp: None,
         prompt: format!(

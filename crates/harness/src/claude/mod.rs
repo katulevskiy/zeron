@@ -207,6 +207,9 @@ impl ClaudeHarness {
                 model.clone()
             });
         }
+        if let Some(instructions) = request.instructions.as_deref() {
+            cmd.args(["--append-system-prompt", instructions]);
+        }
         if let Some(effort) = to_effort(request.reasoning, request.model.as_deref()) {
             cmd.args(["--effort", effort]);
         }
@@ -397,6 +400,9 @@ impl Harness for ClaudeHarness {
     /// Every mode: the CLI asks before acting (`--permission-prompt-tool
     /// stdio`) and has a native plan mode. A mode change restarts the run
     /// (see [`permissions`]). No sandbox until Zeron's OS sandbox lands.
+    fn delivers_instructions(&self) -> bool {
+        true
+    }
     fn policy_caps(&self) -> PolicyCaps {
         PolicyCaps {
             native_plan: true,

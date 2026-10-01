@@ -77,6 +77,7 @@ fn host_rows(now: chrono::DateTime<Utc>) -> (Device, Space, Chat) {
             observed_at: now,
         }),
         config: Some(ChatConfig {
+            preset: None,
             policy: Default::default(),
             harness: HarnessId::ClaudeCode,
             model: Some("claude-opus-5".into()),

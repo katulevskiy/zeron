@@ -93,6 +93,7 @@ async fn execution_lease_outlives_dropped_run_and_title_streams_until_child_is_r
 
 fn request(prompt: &str) -> RunRequest {
     RunRequest {
+        instructions: None,
         policy: Default::default(),
         mcp: None,
         prompt: prompt.into(),
@@ -178,6 +179,8 @@ async fn happy_path_maps_deltas_items_usage_and_done() {
     let (controls, _steer, _token) = controls("Yes");
     let mut req = request("scenario:happy");
     req.cwd = "/tmp".into();
+    // A preset's instructions ride thread/start as the developer instructions.
+    req.instructions = Some("Keep diffs small.".into());
     req.model_options.insert(
         "serviceTier".into(),
         serde_json::Value::String("fast".into()),

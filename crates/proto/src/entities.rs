@@ -161,6 +161,9 @@ pub struct ChatConfig {
     /// The chat's permission mode and sandbox (absent = `Bypass`).
     #[serde(default)]
     pub policy: crate::AgentPolicy,
+    /// The preset the chat started from, as it was then (absent = none).
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub preset: Option<crate::PresetRef>,
 }
 
 /// Immutable-at-run-start repository context owned by one conversation.

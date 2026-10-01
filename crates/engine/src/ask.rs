@@ -556,6 +556,7 @@ impl AskService {
                 )
             })?;
         let config = ChatConfig {
+            preset: None,
             policy: policy.clone(),
             harness,
             model: model.clone(),
@@ -597,6 +598,7 @@ impl AskService {
         lock(&self.live).insert(child_id.clone(), state.clone());
 
         let request = RunRequest {
+            instructions: None,
             policy,
             prompt: String::new(),
             harness: Some(harness),

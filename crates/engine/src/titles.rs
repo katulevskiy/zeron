@@ -200,6 +200,7 @@ impl TitleGenerator {
         );
         for attempt in 0..=RETRY_DELAYS_MS.len() {
             let request = RunRequest {
+                instructions: None,
                 policy: Default::default(),
                 mcp: None,
                 prompt: title_prompt.clone(),
@@ -369,6 +370,7 @@ mod tests {
             ],
         };
         let request = RunRequest {
+            instructions: None,
             policy: Default::default(),
             mcp: None,
             prompt: "Title only".into(),

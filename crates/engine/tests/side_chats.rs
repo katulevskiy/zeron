@@ -159,6 +159,7 @@ async fn fork_is_frozen_durable_idempotent_and_has_an_independent_provider_sessi
             "side",
             HarnessId::Mock,
             RunRequest {
+                instructions: None,
                 policy: Default::default(),
                 mcp: None,
                 prompt: "What did I ask you to remember?".into(),
@@ -409,6 +410,7 @@ async fn side_turn(
             chat,
             HarnessId::Mock,
             RunRequest {
+                instructions: None,
                 policy: Default::default(),
                 mcp: None,
                 prompt: prompt.into(),
@@ -618,6 +620,7 @@ async fn warm_side_chat_sends_owed_fork_history_once() {
         .await
         .unwrap();
     let request = |prompt: &str| RunRequest {
+        instructions: None,
         policy: Default::default(),
         mcp: None,
         prompt: prompt.into(),
@@ -804,6 +807,7 @@ async fn orphaned_history_steer_still_owes_the_history() {
         .await
         .unwrap();
     let request = |prompt: &str| RunRequest {
+        instructions: None,
         policy: Default::default(),
         mcp: None,
         prompt: prompt.into(),

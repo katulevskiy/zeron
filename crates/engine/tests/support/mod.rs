@@ -149,6 +149,7 @@ impl Env {
                 Some(&space),
                 None,
                 Some(ChatConfig {
+                    preset: None,
                     policy: Default::default(),
                     harness: HarnessId::Mock,
                     model: None,

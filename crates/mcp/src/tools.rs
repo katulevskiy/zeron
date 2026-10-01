@@ -36,8 +36,47 @@ pub struct ToolDef {
     pub input_schema: Value,
 }
 
+/// What a preset lets its agent do through Zeron's tools (set by the engine
+/// in the server's environment).
+#[derive(Debug, Clone, Default)]
+pub struct ToolLimits {
+    pub no_spawn: bool,
+    pub allow: Vec<String>,
+    pub deny: Vec<String>,
+}
+
+impl ToolLimits {
+    pub fn from_env() -> Self {
+        let list = |key: &str| {
+            std::env::var(key)
+                .map(|v| {
+                    v.split(',')
+                        .map(|t| t.trim().to_owned())
+                        .filter(|t| !t.is_empty())
+                        .collect()
+                })
+                .unwrap_or_default()
+        };
+        Self {
+            no_spawn: std::env::var_os("ZERON_NO_SPAWN").is_some_and(|v| v == "1"),
+            allow: list("ZERON_TOOLS_ALLOW"),
+            deny: list("ZERON_TOOLS_DENY"),
+        }
+    }
+
+    /// Whether the tool is offered. Deny wins; an allow list, when there is
+    /// one, is the whole set; a preset that may not spawn loses the tools
+    /// that create chats.
+    pub fn permits(&self, tool: &str) -> bool {
+        !(self.no_spawn && matches!(tool, "create_chat" | "create_chats"))
+            && !self.deny.iter().any(|t| t == tool)
+            && (self.allow.is_empty() || self.allow.iter().any(|t| t == tool))
+    }
+}
+
 pub struct Tools {
     pub(crate) zeron: Arc<Zeron>,
+    limits: ToolLimits,
     /// The advertised `submit_result` (ask servers only), fetched once.
     pub(crate) ask_tool: tokio::sync::OnceCell<crate::ask::AskTool>,
 }
@@ -118,6 +157,7 @@ pub(crate) fn catalog() -> Vec<ToolDef> {
                     "project": { "type": "string", "description": "Project id, path, or name. Required unless device is given." },
                     "device": { "type": "string", "description": "Host device (id or name) for a project-less chat; defaults to this device." },
                     "parent": { "type": "string", "description": "Parent chat to record (id, prefix, or title). Defaults to the chat you are speaking from." },
+                    "agent": { "type": "string", "description": "Agent preset to start as (id or name, see list_agents). It sets the harness, model, reasoning, permission mode and standing instructions; harness, model, reasoning and mode given here override it. A chat you create is never more permissive than yours." },
                     "harness": { "type": "string", "description": "Harness id (see list_harnesses). Defaults to claude-code when available." },
                     "model": { "type": "string", "description": "Model id from list_models. Omit for the harness default." },
                     "reasoning": { "type": "string", "description": "Reasoning level the model supports (e.g. low, medium, high, max)." },
@@ -129,6 +169,17 @@ pub(crate) fn catalog() -> Vec<ToolDef> {
                     "prompt": { "type": "string", "description": "First message to send right away." },
                     "wait": { "type": "boolean", "default": false, "description": "With prompt: block until the first turn finishes and return the reply." },
                     "timeout_secs": { "type": "integer", "minimum": 1, "maximum": 3600, "default": 600 }
+                }
+            }),
+        },
+        ToolDef {
+            name: "list_agents",
+            description: "Agent presets you can start a chat as: each is a named agent with a harness, model, permission mode and standing instructions. Pass an id or name as create_chat's `agent`. The description says when to use it.",
+            input_schema: json!({
+                "type": "object",
+                "properties": {
+                    "project": { "type": "string", "description": "Project id, path, or name: includes that project's own presets (.zeron/agents)." },
+                    "device": { "type": "string", "description": "Device whose presets to list; defaults to this device." }
                 }
             }),
         },
@@ -250,6 +301,7 @@ struct ListChatsArgs {
 
 #[derive(Deserialize, Default)]
 struct CreateChatArgs {
+    agent: Option<String>,
     project: Option<String>,
     device: Option<String>,
     parent: Option<String>,
@@ -265,6 +317,12 @@ struct CreateChatArgs {
     #[serde(default)]
     wait: bool,
     timeout_secs: Option<u64>,
+}
+
+#[derive(Deserialize)]
+struct ListAgentsArgs {
+    project: Option<String>,
+    device: Option<String>,
 }
 
 #[derive(Deserialize)]
@@ -342,12 +400,12 @@ fn chat_policy(chat: &Chat) -> AgentPolicy {
 /// The policy of a chat created in `mode` under `ceilings` (its spawner and
 /// parent): never more permissive than any of them.
 fn spawned_policy<'a>(
-    mode: PermissionMode,
+    base: AgentPolicy,
     ceilings: impl IntoIterator<Item = &'a AgentPolicy>,
 ) -> AgentPolicy {
     ceilings
         .into_iter()
-        .fold(AgentPolicy::with_mode(mode), |policy, ceiling| {
+        .fold(base, |policy, ceiling| {
             let mut capped = policy.capped_by(ceiling);
             // The spawner's standing rules are its own; the host merges the
             // user's and the project's into every run anyway.
@@ -422,7 +480,14 @@ impl Tools {
         Self {
             zeron,
             ask_tool: tokio::sync::OnceCell::new(),
+            limits: ToolLimits::from_env(),
         }
+    }
+
+    /// Apply a preset's tool limits.
+    pub fn with_limits(mut self, limits: ToolLimits) -> Self {
+        self.limits = limits;
+        self
     }
 
     /// The tools this server exposes: the full catalog normally; inside a
@@ -438,13 +503,16 @@ impl Tools {
             return defs;
         }
         catalog()
+            .into_iter()
+            .filter(|t| self.limits.permits(t.name))
+            .collect()
     }
 
     pub fn has(&self, name: &str) -> bool {
         if self.zeron.origin().ask_id.is_some() {
             return name == crate::ask::SUBMIT_RESULT || crate::ask::ASK_READ_TOOLS.contains(&name);
         }
-        catalog().iter().any(|t| t.name == name)
+        self.limits.permits(name) && catalog().iter().any(|t| t.name == name)
     }
 
     /// `Ok` is the tool's structured result; `Err` is a message the model
@@ -466,6 +534,7 @@ impl Tools {
             "list_devices" => self.list_devices().await,
             "list_projects" => self.list_projects().await,
             "list_harnesses" => self.list_harnesses().await,
+            "list_agents" => self.list_agents(parse(args)?).await,
             "list_models" => self.list_models(parse(args)?).await,
             "list_chats" => self.list_chats(parse(args)?).await,
             "get_chat" => self.get_chat(parse(args)?).await,
@@ -589,6 +658,35 @@ impl Tools {
         }))
     }
 
+    async fn list_agents(&self, args: ListAgentsArgs) -> anyhow::Result<Value> {
+        let (space, device_id) = match args.project.as_deref() {
+            Some(project) => {
+                let space = self.zeron.resolve_space(project).await?;
+                let device_id = space.device_id.clone();
+                (Some(space), device_id)
+            }
+            None => (None, self.zeron.resolve_device_id(args.device.as_deref()).await?),
+        };
+        let presets = self
+            .zeron
+            .presets(&device_id, space.as_ref().map(|s| s.path.as_str()))
+            .await?;
+        Ok(json!({
+            "agents": presets.iter().map(|p| json!({
+                "id": p.id,
+                "name": p.name,
+                "description": p.description,
+                "source": p.source,
+                "harness": p.harness,
+                "model": p.model,
+                "reasoning": p.reasoning,
+                "mode": p.policy.mode,
+                "sandbox": p.policy.sandbox,
+                "mayCreateChats": p.may_spawn,
+            })).collect::<Vec<_>>()
+        }))
+    }
+
     async fn list_models(&self, args: ListModelsArgs) -> anyhow::Result<Value> {
         let harness: HarnessId =
             parse_enum("harness", &args.harness).map_err(anyhow::Error::msg)?;
@@ -680,6 +778,52 @@ impl Tools {
         };
         // The host's catalog: what's installed and what it can honour there.
         let harnesses = self.zeron.harnesses_on(&device_id).await?;
+        // An agent preset supplies the defaults the arguments override.
+        let preset = match args.agent.as_deref().map(str::trim).filter(|a| !a.is_empty()) {
+            Some(key) => {
+                let path = space
+                    .as_ref()
+                    .map(|s| s.path.as_str())
+                    .or(args.cwd.as_deref());
+                let all = self.zeron.presets(&device_id, path).await?;
+                let found = all
+                    .iter()
+                    .find(|p| p.id == key)
+                    .or_else(|| all.iter().find(|p| p.name.eq_ignore_ascii_case(key)))
+                    .cloned();
+                Some(found.ok_or_else(|| {
+                    anyhow::anyhow!(
+                        "no agent {key:?} (see list_agents; available: {})",
+                        all.iter().map(|p| p.id.as_str()).collect::<Vec<_>>().join(", ")
+                    )
+                })?)
+            }
+            None => None,
+        };
+        // The preset's harness, or the first fallback this device can run.
+        let (preset_harness, preset_model) = match &preset {
+            Some(p) => {
+                let usable = |id: HarnessId| {
+                    harnesses
+                        .iter()
+                        .find(|h| h.id == id)
+                        .is_some_and(|h| h.available())
+                };
+                let chosen = std::iter::once((p.harness, p.model.clone()))
+                    .chain(p.fallbacks.iter().map(|f| (f.harness, f.model.clone())))
+                    .find(|(id, _)| usable(*id));
+                match chosen {
+                    Some((id, model)) => (Some(id), model),
+                    None => anyhow::bail!(
+                        "agent {:?} needs {:?}, which isn't available on this device (see list_harnesses){}",
+                        p.id,
+                        p.harness,
+                        if p.fallbacks.is_empty() { "" } else { ", and neither are its fallbacks" }
+                    ),
+                }
+            }
+            None => (None, None),
+        };
         let harness = match args.harness.as_deref() {
             Some(raw) => {
                 let id: HarnessId = parse_enum("harness", raw).map_err(anyhow::Error::msg)?;
@@ -692,9 +836,17 @@ impl Tools {
                 }
                 id
             }
-            None => default_harness(&harnesses)?,
+            None => match preset_harness {
+                Some(id) => id,
+                None => default_harness(&harnesses)?,
+            },
         };
-        if let Some(model) = args.model.as_deref()
+        // The preset's model belongs to its harness; with another harness
+        // picked explicitly it no longer applies.
+        let model = args.model.clone().or_else(|| {
+            preset_model.filter(|_| args.harness.is_none() || preset_harness == Some(harness))
+        });
+        if let Some(model) = model.as_deref()
             && let Ok(models) = self.zeron.models(harness).await
             && !models.is_empty()
             && !models.iter().any(|m| m.id == model)
@@ -710,7 +862,7 @@ impl Tools {
         }
         let reasoning: Option<ReasoningLevel> = match args.reasoning.as_deref() {
             Some(raw) => Some(parse_enum("reasoning level", raw).map_err(anyhow::Error::msg)?),
-            None => None,
+            None => preset.as_ref().and_then(|p| p.reasoning),
         };
         let sandbox: SandboxLevel = match args.sandbox.as_deref() {
             Some(raw) => parse_enum("sandbox", raw).map_err(anyhow::Error::msg)?,
@@ -746,11 +898,23 @@ impl Tools {
         {
             ceilings.push((chat.id.clone(), chat_policy(&chat)));
         }
-        let mode = match requested_mode {
-            Some(mode) => mode,
-            None => self.zeron.default_mode(&device_id).await,
+        let mode = match (requested_mode, &preset) {
+            (Some(mode), _) => mode,
+            (None, Some(preset)) => preset.policy.mode,
+            (None, None) => self.zeron.default_mode(&device_id).await,
         };
-        let policy = spawned_policy(mode, ceilings.iter().map(|(_, p)| p));
+        let base = match &preset {
+            Some(preset) => AgentPolicy {
+                mode,
+                ..preset.policy.clone()
+            },
+            None => AgentPolicy::with_mode(mode),
+        };
+        let mut policy = spawned_policy(base, ceilings.iter().map(|(_, p)| p));
+        // A preset's own rules are part of what it is (the spawner's aren't).
+        if let Some(preset) = &preset {
+            policy.rules = preset.policy.rules.clone();
+        }
         if let Some(info) = harnesses.iter().find(|h| h.id == harness)
             && let Some(refusal) = info.policy.refusal(&info.name, policy.mode)
         {
@@ -764,11 +928,15 @@ impl Tools {
             anyhow::bail!(refusal);
         }
         let config = ChatConfig {
+            preset: preset.as_ref().map(|p| p.reference()),
             policy: policy.clone(),
             harness,
-            model: args.model.clone(),
+            model: model.clone(),
             reasoning,
-            model_options: Default::default(),
+            model_options: preset
+                .as_ref()
+                .map(|p| p.model_options.clone())
+                .unwrap_or_default(),
             sandbox,
         };
         let chat_id = uuid::Uuid::new_v4().to_string();
@@ -812,7 +980,8 @@ impl Tools {
             "deviceId": device_id,
             "project": space.as_ref().map(|s| json!({ "id": s.id, "name": s.display_name(), "path": s.path })),
             "harness": harness,
-            "model": args.model,
+            "model": model,
+            "agent": preset.as_ref().map(|p| &p.id),
             "reasoning": reasoning,
             "mode": policy.mode,
             "title": args.title,
@@ -1069,6 +1238,7 @@ impl Tools {
                     .or_else(|| space.map(|s| s.path.clone()))
                     .unwrap_or_else(|| "~".into());
                 let request = RunRequest {
+                    instructions: None,
                     policy: config.as_ref().map(|c| c.policy.clone()).unwrap_or_default(),
                     mcp: None,
                     prompt: text,
@@ -1259,6 +1429,15 @@ mod tests {
                     { "id": "codex", "name": "Codex", "supportsSteering": true,
                       "steeringMode": "turn-boundary", "reasoningLevels": [], "installed": false, "enabled": true }
                 ])),
+                methods::LIST_PRESETS => RpcReply::Value(json!({ "presets": [
+                    { "id": "reviewer", "name": "Reviewer", "description": "Reviews a diff; never edits.",
+                      "harness": "claude-code", "model": "opus", "reasoning": "high",
+                      "policy": { "mode": "ask" }, "instructions": "Only report what you find.",
+                      "tools": { "deny": ["create_chat"] }, "maySpawn": false, "source": "project" },
+                    { "id": "portable", "name": "Portable", "harness": "codex", "model": "gpt-5",
+                      "fallbacks": [{ "harness": "claude-code", "model": "sonnet" }], "source": "user" },
+                    { "id": "codex-only", "name": "Codex only", "harness": "codex", "source": "user" }
+                ]})),
                 methods::LIST_MODELS => RpcReply::Value(json!([
                     { "id": "opus", "label": "Opus" }, { "id": "sonnet", "label": "Sonnet" }
                 ])),
@@ -1533,6 +1712,110 @@ mod tests {
         // A catalog row without caps (an old engine) can only bypass.
         assert_eq!(rows[1]["id"], "cursor");
         assert_eq!(rows[1]["modes"], json!(["bypass"]));
+    }
+
+    #[tokio::test]
+    async fn list_agents_describes_each_preset() {
+        let tools = tools(Arc::new(World::default()), Origin::default());
+        let listed = tools
+            .call("list_agents", json!({ "project": "/repo/comet" }))
+            .await
+            .unwrap();
+        let agents = listed["agents"].as_array().unwrap();
+        assert_eq!(agents.len(), 3);
+        assert_eq!(agents[0]["id"], "reviewer");
+        assert_eq!(agents[0]["description"], "Reviews a diff; never edits.");
+        assert_eq!(agents[0]["mode"], "ask");
+        assert_eq!(agents[0]["source"], "project");
+        assert_eq!(agents[0]["mayCreateChats"], false);
+    }
+
+    #[tokio::test]
+    async fn create_chat_as_an_agent_takes_its_settings_and_arguments_override_them() {
+        let world = Arc::new(World::default());
+        let tools = tools(world.clone(), Origin::default());
+        let created = tools
+            .call(
+                "create_chat",
+                json!({ "project": "/repo/comet", "agent": "Reviewer" }),
+            )
+            .await
+            .unwrap();
+        assert_eq!(created["agent"], "reviewer");
+        assert_eq!((created["harness"].as_str(), created["model"].as_str()), (Some("claude-code"), Some("opus")));
+        assert_eq!(created["mode"], "ask");
+        let config = last_config(&world);
+        assert_eq!(config["reasoning"], "high");
+        assert_eq!(config["policy"]["mode"], "ask");
+        // The chat keeps what the agent needs to go on being itself.
+        assert_eq!(config["preset"]["id"], "reviewer");
+        assert_eq!(config["preset"]["instructions"], "Only report what you find.");
+        assert_eq!(config["preset"]["maySpawn"], false);
+        assert_eq!(config["preset"]["tools"]["deny"], json!(["create_chat"]));
+        assert_eq!(config["preset"]["digest"].as_str().map(str::len), Some(16));
+        // Arguments win over the preset.
+        tools
+            .call(
+                "create_chat",
+                json!({ "project": "/repo/comet", "agent": "reviewer", "mode": "plan", "model": "sonnet" }),
+            )
+            .await
+            .unwrap();
+        let config = last_config(&world);
+        assert_eq!(config["policy"]["mode"], "plan");
+        assert_eq!(config["model"], "sonnet");
+    }
+
+    #[tokio::test]
+    async fn an_agent_falls_back_when_its_harness_is_missing_and_unknown_ones_are_refused() {
+        let world = Arc::new(World::default());
+        let tools = tools(world.clone(), Origin::default());
+        // Codex isn't installed in this world: the fallback (and its model) serves.
+        let created = tools
+            .call(
+                "create_chat",
+                json!({ "project": "/repo/comet", "agent": "portable" }),
+            )
+            .await
+            .unwrap();
+        assert_eq!((created["harness"].as_str(), created["model"].as_str()), (Some("claude-code"), Some("sonnet")));
+        let error = tools
+            .call("create_chat", json!({ "project": "/repo/comet", "agent": "codex-only" }))
+            .await
+            .unwrap_err();
+        assert!(error.contains("isn't available"), "{error}");
+        let error = tools
+            .call("create_chat", json!({ "project": "/repo/comet", "agent": "nobody" }))
+            .await
+            .unwrap_err();
+        assert!(error.contains("list_agents") && error.contains("reviewer"), "{error}");
+    }
+
+    #[tokio::test]
+    async fn a_presets_tool_limits_hide_the_tools_it_may_not_use() {
+        use super::ToolLimits;
+        let origin = Origin {
+            chat_id: Some("alpha".into()),
+            ..Default::default()
+        };
+        let world = Arc::new(World::default());
+        let open = tools(world.clone(), origin.clone());
+        assert!(open.has("create_chat") && open.has("create_chats") && open.has("read_chat"));
+        let no_spawn = tools(world.clone(), origin.clone()).with_limits(ToolLimits {
+            no_spawn: true,
+            ..Default::default()
+        });
+        assert!(!no_spawn.has("create_chat") && !no_spawn.has("create_chats"));
+        assert!(no_spawn.has("send_message"));
+        assert!(no_spawn.list().await.iter().all(|d| !d.name.starts_with("create_chat")));
+        assert!(no_spawn.call("create_chat", json!({})).await.unwrap_err().contains("unknown tool"));
+        let read_only = tools(world, origin).with_limits(ToolLimits {
+            allow: vec!["read_chat".into(), "get_chat".into()],
+            deny: vec!["get_chat".into()],
+            ..Default::default()
+        });
+        let names: Vec<_> = read_only.list().await.iter().map(|d| d.name).collect();
+        assert_eq!(names, ["read_chat"]);
     }
 
     #[tokio::test]

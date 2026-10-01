@@ -587,6 +587,9 @@ impl Harness for CodexHarness {
     /// Every mode, through Codex's own approval policy, and every sandbox,
     /// natively. Plan is emulated (read-only sandbox + gate); a mode change
     /// restarts the run (see [`permissions`]).
+    fn delivers_instructions(&self) -> bool {
+        true
+    }
     fn policy_caps(&self) -> PolicyCaps {
         PolicyCaps {
             sandboxes: vec![
@@ -1054,6 +1057,12 @@ async fn run_session(session: Session) {
         }
         if let Some(tier) = &service_tier {
             p.insert("serviceTier".into(), Value::String(tier.clone()));
+        }
+        if let Some(instructions) = request.instructions.as_deref().filter(|_| !title_only) {
+            p.insert(
+                "developerInstructions".into(),
+                Value::String(instructions.to_owned()),
+            );
         }
         p
     };

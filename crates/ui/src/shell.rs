@@ -16037,6 +16037,16 @@ impl Shell {
             self.close_settings(cx);
         }
     }
+    /// Screenshot fixtures: open Settings → General.
+    pub fn fixture_open_general_settings(&mut self, cx: &mut Context<Self>) {
+        self.open_settings(SettingsSection::General, cx);
+    }
+    /// Screenshot fixtures: Settings → General with the preset editor open.
+    pub fn fixture_open_preset_editor(&mut self, cx: &mut Context<Self>) {
+        if let Some(page) = self.shortcuts_page.clone() {
+            page.update(cx, |page, cx| page.fixture_open_preset_editor(cx));
+        }
+    }
     pub fn fixture_appshots_composer(&self) -> Entity<Composer> {
         self.composer.clone()
     }

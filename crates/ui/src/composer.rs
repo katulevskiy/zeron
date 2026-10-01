@@ -8252,6 +8252,13 @@ impl Composer {
                     .is_some();
                 let command = SessionCommandPayload::Run {
                     request: RunRequest {
+                        // A new chat's first turn carries its preset's
+                        // instructions: the chat row may not have reached the
+                        // host yet to supply them.
+                        instructions: resolved
+                            .preset
+                            .as_ref()
+                            .and_then(|preset| preset.instructions.clone()),
                         policy: resolved.policy.clone(),
                         mcp: None,
                         prompt: content.clone(),

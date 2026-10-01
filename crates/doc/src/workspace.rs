@@ -851,6 +851,7 @@ mod tests {
             checkout_id: None,
             source_context: None,
             config: Some(ChatConfig {
+                preset: None,
                 policy: Default::default(),
                 harness: HarnessId::Mock,
                 model: Some("mock-1".into()),
@@ -917,6 +918,7 @@ mod tests {
             serde_json::Value::String("1m".into()),
         );
         let config = ChatConfig {
+            preset: None,
             policy: Default::default(),
             harness: HarnessId::ClaudeCode,
             model: Some("claude-fable-5".into()),

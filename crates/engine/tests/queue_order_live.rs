@@ -99,6 +99,7 @@ impl Rig {
             .set_chat_config(
                 CHAT,
                 &ChatConfig {
+                    preset: None,
                     policy: Default::default(),
                     harness: id,
                     model: model.clone(),
@@ -120,6 +121,7 @@ impl Rig {
 
     fn request(&self, prompt: String) -> RunRequest {
         RunRequest {
+            instructions: None,
             policy: Default::default(),
             mcp: None,
             prompt,

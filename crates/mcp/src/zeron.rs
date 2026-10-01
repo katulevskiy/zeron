@@ -285,6 +285,23 @@ impl Zeron {
         .unwrap_or_default()
     }
 
+    /// The presets offered for `path` (a project folder) on `device`: the
+    /// project's, its imported subagents and the user's.
+    pub async fn presets(
+        &self,
+        device: &str,
+        path: Option<&str>,
+    ) -> anyhow::Result<Vec<zeron_proto::AgentPreset>> {
+        let value = self
+            .call(
+                methods::LIST_PRESETS,
+                json!({ "targetDeviceId": device, "path": path }),
+            )
+            .await?;
+        serde_json::from_value(value.get("presets").cloned().unwrap_or_default())
+            .context("ListPresets: unexpected shape")
+    }
+
     pub async fn models(&self, harness: HarnessId) -> anyhow::Result<Vec<Model>> {
         let value = self
             .call(methods::LIST_MODELS, json!({ "harness": harness }))

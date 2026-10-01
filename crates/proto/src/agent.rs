@@ -231,6 +231,10 @@ pub struct RunRequest {
     /// old sender = `Bypass`, which is what every run did before policies.
     #[serde(default)]
     pub policy: crate::AgentPolicy,
+    /// What the agent should always bear in mind (a preset's instructions):
+    /// the harness's system prompt where it has one, else the first prompt.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub instructions: Option<String>,
     /// Harness-native session id to resume, if any.
     pub resume: Option<String>,
     /// Absolute paths of image attachments already staged on the run device

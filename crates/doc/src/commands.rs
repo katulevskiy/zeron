@@ -356,6 +356,7 @@ mod tests {
 
     fn run_request() -> RunRequest {
         RunRequest {
+            instructions: None,
             policy: Default::default(),
             mcp: None,
             prompt: "hello".into(),

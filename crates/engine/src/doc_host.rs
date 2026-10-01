@@ -5305,6 +5305,7 @@ impl DocHost {
                     && ws.chat_config(chat_id).is_none()
                 {
                     let config = zeron_proto::ChatConfig {
+                        preset: None,
                         policy: request.policy.clone(),
                         harness,
                         model: request.model.clone(),
@@ -5766,6 +5767,7 @@ impl DocHost {
         };
         let config = chat.config;
         Some(zeron_proto::RunRequest {
+            instructions: None,
             policy: config
                 .as_ref()
                 .map(|c| c.policy.clone())

@@ -22,7 +22,7 @@ use gpui::{
 
 use zeron_engine::registry::{HarnessDescriptor, TitleSettings};
 use zeron_proto::{
-    AgentPolicy, ChatConfig, FolderListing, HarnessId, Model, PermissionMode, PolicyCaps,
+    AgentPolicy, AgentPreset, PresetRef, ChatConfig, FolderListing, HarnessId, Model, PermissionMode, PolicyCaps,
     ReasoningLevel, RepoRef, SandboxLevel, Space,
 };
 use zeron_rpc::methods;
@@ -104,6 +104,8 @@ pub struct DraftConfig {
     /// The permission mode picked on the new-chat canvas (`None` = the
     /// device default).
     pub mode: Option<PermissionMode>,
+    /// The agent preset picked on the new-chat canvas (docs/agent-presets.md).
+    pub preset: Option<AgentPreset>,
 }
 
 /// Where a new session runs (t3code's env-mode: `local | worktree`). "Current
@@ -145,12 +147,15 @@ pub struct ResolvedRunConfig {
     pub model_options: serde_json::Map<String, serde_json::Value>,
     /// The chat's permission policy (mode picked in the composer).
     pub policy: AgentPolicy,
+    /// The preset the chat starts from, as it is now.
+    pub preset: Option<PresetRef>,
 }
 
 impl ResolvedRunConfig {
     /// The `ChatConfig` recorded on `Mutate createChat` (needs a known harness).
     pub fn chat_config(&self) -> Option<ChatConfig> {
         Some(ChatConfig {
+            preset: self.preset.clone(),
             policy: self.policy.clone(),
             harness: self.harness?,
             model: self.model.clone(),
@@ -418,6 +423,8 @@ fn mark_ambiguous(rows: &mut [ModelRowData]) {
 /// Which picker popover is open.
 #[derive(Debug, Clone, Copy, PartialEq, Eq, Hash)]
 pub enum PickerKind {
+    /// New-session canvas only: the agent preset the session starts from.
+    Preset,
     Branch,
     /// The checkout-kind dropdown in the composer footer (Current
     /// checkout/worktree | New worktree).
@@ -612,6 +619,11 @@ pub struct Pickers {
     _mode_observe: Subscription,
     /// The one-shot load of the device's default permission mode.
     mode_default_task: Option<Task<()>>,
+    /// The presets offered for the draft's project and device, and the
+    /// (project folder, device) they were loaded for.
+    presets: Loadable<Vec<AgentPreset>>,
+    presets_key: Option<(Option<String>, Option<String>)>,
+    presets_task: Option<Task<()>>,
 }
 
 impl Pickers {
@@ -694,6 +706,7 @@ impl Pickers {
                 this.config.model = None;
                 this.config.reasoning = None;
                 this.config.mode = None;
+                this.config.preset = None;
                 this.switch_error = None;
             }
             // A space switch invalidates the branch draft + cache — the folder
@@ -744,6 +757,7 @@ impl Pickers {
             Some("project") => Some(PickerKind::Space),
             Some("device") => Some(PickerKind::Device),
             Some("mode") => Some(PickerKind::Mode),
+            Some("preset") => Some(PickerKind::Preset),
             _ => None,
         };
         let mut open = popover::Popup::default();
@@ -819,6 +833,9 @@ impl Pickers {
             _catalog_observe: catalog_observe,
             _mode_observe: mode_observe,
             mode_default_task: None,
+            presets: Loadable::Idle,
+            presets_key: None,
+            presets_task: None,
         }
     }
 
@@ -1068,6 +1085,7 @@ impl Pickers {
             reasoning: self.effective_reasoning(cx),
             model_options: self.explicit_options(cx),
             policy: self.effective_policy(cx),
+            preset: self.config.preset.as_ref().map(AgentPreset::reference),
         }
     }
 
@@ -1107,6 +1125,13 @@ impl Pickers {
             .and_then(|c| c.config.as_ref())
             .map(|c| c.policy.clone())
             .unwrap_or_default();
+        if let Some(preset) = &self.config.preset
+            && self.state.read(cx).selected_chat.is_none()
+        {
+            // A new chat from a preset carries the preset's sandbox, network
+            // and rules; the mode is still the user's to change after.
+            policy = preset.policy.clone();
+        }
         policy.mode = self.effective_mode(cx);
         policy
     }
@@ -1197,6 +1222,245 @@ impl Pickers {
         }));
     }
 
+    // ---- agent presets ----
+
+    /// Load the presets offered for the draft's project and device (again
+    /// when either changes, or `force`).
+    fn ensure_presets(&mut self, force: bool, cx: &mut Context<Self>) {
+        if self.title.is_some() || self.state.read(cx).selected_chat.is_some() {
+            return;
+        }
+        let path = self
+            .state
+            .read(cx)
+            .selected_space_row()
+            .map(|s| s.path.clone());
+        let device = self.space_target(cx);
+        let key = (path.clone(), device.clone());
+        if !force && self.presets_key.as_ref() == Some(&key) {
+            return;
+        }
+        let Some(engine) = self.engine(cx) else {
+            return;
+        };
+        self.presets_key = Some(key.clone());
+        if !matches!(self.presets, Loadable::Ready(_)) {
+            self.presets = Loadable::Loading;
+        }
+        self.presets_task = Some(cx.spawn(async move |this, cx| {
+            let mut params = serde_json::Map::new();
+            if let Some(device) = &device {
+                params.insert("targetDeviceId".into(), device.clone().into());
+            }
+            if let Some(path) = &path {
+                params.insert("path".into(), path.clone().into());
+            }
+            let result = engine
+                .client()
+                .call(methods::LIST_PRESETS, serde_json::Value::Object(params))
+                .await
+                .map_err(|e| e.to_string())
+                .and_then(|v| {
+                    serde_json::from_value::<Vec<AgentPreset>>(
+                        v.get("presets").cloned().unwrap_or_default(),
+                    )
+                    .map_err(|e| e.to_string())
+                });
+            this.update(cx, |pickers, cx| {
+                if pickers.presets_key.as_ref() != Some(&key) {
+                    return;
+                }
+                pickers.presets = match result {
+                    Ok(list) => {
+                        // A pick the new list no longer has stops applying.
+                        if let Some(picked) = &pickers.config.preset
+                            && !list.iter().any(|p| p.id == picked.id)
+                        {
+                            pickers.config.preset = None;
+                        }
+                        Loadable::Ready(list)
+                    }
+                    // An engine predating presets: none offered, no error.
+                    Err(_) => Loadable::Ready(Vec::new()),
+                };
+                cx.notify();
+            })
+            .ok();
+        }));
+    }
+
+    /// The rows of the preset menu: "no preset", then each preset.
+    fn preset_rows(&self) -> Vec<Option<AgentPreset>> {
+        let mut rows = vec![None];
+        if let Some(list) = self.presets.ready() {
+            rows.extend(list.iter().cloned().map(Some));
+        }
+        rows
+    }
+
+    /// The harnesses the draft's device offers right now.
+    fn offered_harness_ids(&self) -> Vec<HarnessId> {
+        self.harnesses
+            .ready()
+            .map(|list| self.offered(list).iter().map(|d| d.id).collect())
+            .unwrap_or_default()
+    }
+
+    /// Start the new chat from `preset` (or from none): its harness (or the
+    /// first usable fallback), model, reasoning and mode become the picks,
+    /// and a worktree preset switches the checkout. Presets only apply to
+    /// new chats; a chat keeps the preset it started from.
+    fn pick_preset(&mut self, preset: Option<AgentPreset>, cx: &mut Context<Self>) {
+        if self.title.is_some() || self.state.read(cx).selected_chat.is_some() {
+            return;
+        }
+        if let Some(preset) = &preset {
+            let Some((harness, model)) =
+                crate::agent_preset::usable(preset, &self.offered_harness_ids())
+            else {
+                return;
+            };
+            self.config.harness = Some(harness);
+            self.config.model = model;
+            self.config.reasoning = preset.reasoning;
+            self.config.mode = Some(preset.policy.mode);
+            if preset.worktree
+                && self
+                    .state
+                    .read(cx)
+                    .selected_space_row()
+                    .is_some_and(|space| space.git_detected)
+            {
+                self.config.checkout = CheckoutKind::NewWorktree;
+            }
+            self.ensure_models(harness, false, cx);
+        }
+        self.config.preset = preset;
+        self.animate_close(cx);
+        cx.notify();
+    }
+
+    fn render_preset_popover(&mut self, cx: &mut Context<Self>) -> AnyElement {
+        let theme = Theme::of(cx).for_popup();
+        let offered = self.offered_harness_ids();
+        let rows = self.preset_rows();
+        let picked = self.config.preset.as_ref().map(|p| p.id.clone());
+        let active = self.active;
+        let loading = matches!(self.presets, Loadable::Loading);
+        div()
+            .flex()
+            .flex_col()
+            .gap(px(2.0))
+            .child(popover::menu_heading(&theme, "Agent"))
+            .children(rows.into_iter().enumerate().map(|(ix, row)| {
+                let selected = row.as_ref().map(|p| p.id.clone()) == picked;
+                let unavailable = row
+                    .as_ref()
+                    .and_then(|p| crate::agent_preset::unavailable(p, &offered));
+                let (title, detail) = match &row {
+                    None => (
+                        "Default agent".to_string(),
+                        "The harness, model and mode picked below".to_string(),
+                    ),
+                    Some(p) => (
+                        p.name.clone(),
+                        unavailable.clone().unwrap_or_else(|| {
+                            if p.description.is_empty() {
+                                format!("{:?} · {}", p.harness, p.policy.mode.label())
+                            } else {
+                                p.description.clone()
+                            }
+                        }),
+                    ),
+                };
+                let badge = row
+                    .as_ref()
+                    .and_then(|p| crate::agent_preset::source_label(p.source));
+                let mut el = popover::menu_row_nav(
+                    &theme,
+                    selected,
+                    ix == active,
+                    format!("preset-row-{ix}-{}", cx.entity_id()),
+                )
+                .id(("preset-row", ix))
+                .items_start()
+                .child(
+                    crate::icons::icon(crate::icons::MAGIC_STICK_3)
+                        .mt(px(2.0))
+                        .size(px(14.0))
+                        .flex_none()
+                        .text_color(theme.text_muted),
+                )
+                .child(
+                    div()
+                        .flex_1()
+                        .min_w_0()
+                        .flex()
+                        .flex_col()
+                        .child(
+                            div()
+                                .flex()
+                                .flex_row()
+                                .items_center()
+                                .gap(px(6.0))
+                                .child(SharedString::from(title))
+                                .when_some(badge, |el, badge| {
+                                    el.child(
+                                        div()
+                                            .px(px(6.0))
+                                            .rounded_full()
+                                            .bg(crate::theme::ink(0.07))
+                                            .text_size(crate::typography::ui_rems(10.0))
+                                            .text_color(theme.text_muted)
+                                            .child(badge),
+                                    )
+                                }),
+                        )
+                        .child(
+                            div()
+                                .text_size(crate::typography::ui_rems(11.5))
+                                .text_color(theme.text_muted)
+                                .child(SharedString::from(detail)),
+                        ),
+                )
+                .child(div().w(px(16.0)).flex_none().when(selected, |slot| {
+                    slot.child(
+                        crate::icons::icon(crate::icons::CHECK)
+                            .size(px(14.0))
+                            .text_color(theme.accent),
+                    )
+                }));
+                if unavailable.is_none() {
+                    el = el.on_click(
+                        cx.listener(move |this, _, _, cx| this.pick_preset(row.clone(), cx)),
+                    );
+                } else {
+                    el = el.opacity(0.45).cursor_default();
+                }
+                el
+            }))
+            .when(loading, |el| {
+                el.child(
+                    div()
+                        .px(px(8.0))
+                        .py(px(4.0))
+                        .text_size(crate::typography::ui_rems(11.5))
+                        .text_color(theme.text_muted)
+                        .child("Loading presets…"),
+                )
+            })
+            .child(
+                div()
+                    .px(px(8.0))
+                    .pt(px(4.0))
+                    .pb(px(2.0))
+                    .text_size(crate::typography::ui_rems(11.0))
+                    .text_color(theme.text_muted)
+                    .child("Manage presets in Settings → Agent presets"),
+            )
+            .into_any_element()
+    }
+
     // ---- open/close ----
 
     /// The picker that's open AND interactive — `None` while one animates out.
@@ -1271,6 +1535,22 @@ impl Pickers {
         if self.is_open() {
             self.animate_close(cx);
         }
+    }
+
+    /// Screenshot fixtures: open the agent preset menu.
+    pub fn fixture_open_preset_menu(&mut self, window: &mut Window, cx: &mut Context<Self>) {
+        if self.open_kind() != Some(PickerKind::Preset) {
+            self.toggle(PickerKind::Preset, window, cx);
+        }
+    }
+
+    /// Screenshot fixtures: pick a preset by id.
+    pub fn fixture_pick_preset(&mut self, id: &str, cx: &mut Context<Self>) {
+        let preset = self
+            .presets
+            .ready()
+            .and_then(|list| list.iter().find(|p| p.id == id).cloned());
+        self.pick_preset(preset, cx);
     }
 
     /// Screenshot fixtures: open the permissions menu.
@@ -1353,6 +1633,11 @@ impl Pickers {
                 .iter()
                 .position(|m| *m == self.effective_mode(cx))
                 .unwrap_or(0),
+            PickerKind::Preset => self
+                .preset_rows()
+                .iter()
+                .position(|row| row.as_ref().map(|p| &p.id) == self.config.preset.as_ref().map(|p| &p.id))
+                .unwrap_or(0),
         };
         if kind == PickerKind::HarnessModel {
             // scroll_to_item below may land anywhere; the first note of the
@@ -1416,6 +1701,7 @@ impl Pickers {
             // The harness catalog (caps) is the model picker's; the device
             // default loads once.
             PickerKind::Mode => self.ensure_default_mode(cx),
+            PickerKind::Preset => self.ensure_presets(true, cx),
         }
         cx.notify();
     }
@@ -2752,6 +3038,7 @@ impl Pickers {
                     Some(PickerKind::Space) => self.filtered_space_rows(cx).len() + 1,
                     Some(PickerKind::Device) => self.filtered_device_rows(cx).len(),
                     Some(PickerKind::Mode) => PermissionMode::ALL.len(),
+                    Some(PickerKind::Preset) => self.preset_rows().len(),
                     None => 0,
                 };
                 let current = (self.active != NO_ACTIVE_ROW).then_some(self.active);
@@ -2772,6 +3059,10 @@ impl Pickers {
             MenuKey::Enter | MenuKey::ModEnter => {
                 if self.open_kind() == Some(PickerKind::HarnessModel) {
                     self.activate_model_row(cx);
+                } else if self.open_kind() == Some(PickerKind::Preset) {
+                    if let Some(row) = self.preset_rows().get(self.active).cloned() {
+                        self.pick_preset(row, cx);
+                    }
                 } else if self.open_kind() == Some(PickerKind::Mode) {
                     if let Some(mode) = PermissionMode::ALL.get(self.active) {
                         self.pick_mode(*mode, cx);
@@ -2882,6 +3173,7 @@ impl Pickers {
             PickerKind::Space => "picker-space",
             PickerKind::Device => "picker-device",
             PickerKind::Mode => "picker-mode",
+            PickerKind::Preset => "picker-preset",
         };
         // Hover state is keyed globally: two composers on screen (main +
         // side chat) must not light each other's chips, so the key carries
@@ -3090,8 +3382,13 @@ impl Pickers {
                 let content = self.render_device_popover(cx);
                 Some((PickerKind::Device, self.popover_frame(224.0, content, cx)))
             }
+            Some(PickerKind::Preset) => {
+                let content = self.render_preset_popover(cx);
+                Some((PickerKind::Preset, self.popover_frame(300.0, content, cx)))
+            }
             _ => None,
         };
+        self.ensure_presets(false, cx);
         let (device_label, project_label, offline) = {
             let state = self.state.read(cx);
             let device_id = state.effective_device_id();
@@ -3129,12 +3426,27 @@ impl Pickers {
             &theme,
             cx,
         );
+        let agent_chip = self.footer_chip(
+            PickerKind::Preset,
+            "picker-agent",
+            crate::icons::MAGIC_STICK_3,
+            SharedString::from(crate::agent_preset::chip_label(self.config.preset.as_ref())),
+            &theme,
+            cx,
+        );
         div()
             .flex_none()
             .flex()
             .flex_row()
             .items_center()
             .gap(px(4.0))
+            .child(attach_overlay_end(
+                agent_chip,
+                &mut overlay,
+                PickerKind::Preset,
+                "agent-popover",
+                closing,
+            ))
             .child(attach_overlay_end(
                 device_chip,
                 &mut overlay,
@@ -3506,6 +3818,7 @@ impl Pickers {
                         }
                         // Projects/devices load nothing; no retry surface exists.
                         PickerKind::Space | PickerKind::Device | PickerKind::Mode => {}
+                        PickerKind::Preset => this.ensure_presets(true, cx),
                     }))
                     .child(SharedString::from("Retry")),
             )
@@ -5743,7 +6056,8 @@ impl Render for Pickers {
             Some(PickerKind::Branch)
             | Some(PickerKind::Checkout)
             | Some(PickerKind::Space)
-            | Some(PickerKind::Device) => None,
+            | Some(PickerKind::Device)
+            | Some(PickerKind::Preset) => None,
             Some(PickerKind::Mode) => {
                 let content = self.render_mode_popover(cx);
                 Some((PickerKind::Mode, self.popover_frame(300.0, content, cx)))
@@ -7600,6 +7914,69 @@ mod tests {
             pickers.cycle_mode(cx);
             assert_eq!(pickers.effective_mode(cx), PermissionMode::Bypass);
             assert_eq!(pickers.mode_refusal(cx), None);
+        });
+    }
+
+    #[gpui::test]
+    fn a_preset_sets_the_harness_model_and_mode_and_the_chat_records_it(
+        cx: &mut gpui::TestAppContext,
+    ) {
+        use zeron_proto::PresetFallback;
+        cx.update(|cx| cx.set_global(Theme::dark()));
+        let state = cx.new(|_| AppState::new());
+        let pickers = cx.new(|cx| Pickers::new(state, cx));
+        pickers.update(cx, |pickers, cx| {
+            let mut claude = descriptor(HarnessId::ClaudeCode, "Claude Code");
+            claude.policy = PolicyCaps::all_modes();
+            let cursor = descriptor(HarnessId::Cursor, "Cursor");
+            pickers.harnesses = Loadable::Ready(vec![claude, cursor]);
+
+            let mut reviewer = AgentPreset::new("Reviewer", HarnessId::ClaudeCode);
+            reviewer.model = Some("opus".into());
+            reviewer.reasoning = Some(ReasoningLevel::High);
+            reviewer.policy.mode = PermissionMode::Ask;
+            reviewer.instructions = Some("Only report.".into());
+            // Codex isn't offered here: its fallback serves.
+            let mut portable = AgentPreset::new("Portable", HarnessId::Codex);
+            portable.model = Some("gpt-5".into());
+            portable.fallbacks = vec![PresetFallback {
+                harness: HarnessId::Cursor,
+                model: Some("auto".into()),
+            }];
+            let codex_only = AgentPreset::new("Codex only", HarnessId::Codex);
+            pickers.presets = Loadable::Ready(vec![reviewer.clone(), portable.clone(), codex_only.clone()]);
+            assert_eq!(pickers.preset_rows().len(), 4, "no preset, then each");
+
+            pickers.pick_preset(Some(reviewer.clone()), cx);
+            let resolved = pickers.resolved(cx);
+            assert_eq!(resolved.harness, Some(HarnessId::ClaudeCode));
+            assert_eq!(resolved.model.as_deref(), Some("opus"));
+            assert_eq!(resolved.reasoning, Some(ReasoningLevel::High));
+            assert_eq!(resolved.policy.mode, PermissionMode::Ask);
+            let config = resolved.chat_config().unwrap();
+            let kept = config.preset.expect("the chat records its preset");
+            assert_eq!(kept.id, "reviewer");
+            assert_eq!(kept.instructions.as_deref(), Some("Only report."));
+            assert_eq!(kept.digest, reviewer.digest());
+
+            // The mode is still the user's to change afterwards.
+            pickers.pick_mode(PermissionMode::Auto, cx);
+            assert_eq!(pickers.resolved(cx).policy.mode, PermissionMode::Auto);
+
+            // A harness this device doesn't offer: the first usable fallback.
+            pickers.pick_preset(Some(portable), cx);
+            let resolved = pickers.resolved(cx);
+            assert_eq!(resolved.harness, Some(HarnessId::Cursor));
+            assert_eq!(resolved.model.as_deref(), Some("auto"));
+            assert_eq!(resolved.preset.as_ref().map(|p| p.id.as_str()), Some("portable"));
+
+            // One with no usable harness can't be picked: nothing changes.
+            pickers.pick_preset(Some(codex_only), cx);
+            assert_eq!(pickers.resolved(cx).preset.as_ref().map(|p| p.id.as_str()), Some("portable"));
+
+            // "Default agent" stops applying the preset.
+            pickers.pick_preset(None, cx);
+            assert_eq!(pickers.resolved(cx).preset, None);
         });
     }
 

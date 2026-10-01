@@ -63,6 +63,7 @@ struct Outcome {
 async fn run(exe: &Path, mode: PermissionMode, calls: Value, answers: &[&str]) -> Outcome {
     let harness = AcpHarness::devin().with_executable(exe);
     let request = RunRequest {
+        instructions: None,
         policy: AgentPolicy::with_mode(mode),
         mcp: None,
         prompt: calls.to_string(),

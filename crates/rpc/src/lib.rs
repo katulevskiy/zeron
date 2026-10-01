@@ -45,6 +45,13 @@ pub mod methods {
     /// chats start in. Set replies with the stored settings.
     pub const GET_POLICY_SETTINGS: &str = "GetPolicySettings";
     pub const SET_POLICY_SETTINGS: &str = "SetPolicySettings";
+    /// Agent presets on the device (docs/agent-presets.md): `ListPresets
+    /// {path?}` → `{presets}` (the project's at `path`, its imported Claude
+    /// Code subagents, and the user's); `UpsertPreset {preset}` → `{preset}`;
+    /// `DeletePreset {id}` → `{deleted}`.
+    pub const LIST_PRESETS: &str = "ListPresets";
+    pub const UPSERT_PRESET: &str = "UpsertPreset";
+    pub const DELETE_PRESET: &str = "DeletePreset";
     pub const SET_HARNESS_ENABLED: &str = "SetHarnessEnabled";
     pub const LIST_MODELS: &str = "ListModels";
     pub const LIST_SKILLS: &str = "ListSkills";
