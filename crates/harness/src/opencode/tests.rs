@@ -256,8 +256,8 @@ impl TurnWire {
             .unwrap()
             .extend(overrides.as_object().unwrap().clone());
         // Approval answers, in order; any approval beyond them fails the run.
-        let approval_answers: Arc<std::sync::Mutex<VecDeque<String>>> = Arc::new(
-            std::sync::Mutex::new(
+        let approval_answers: Arc<std::sync::Mutex<VecDeque<String>>> =
+            Arc::new(std::sync::Mutex::new(
                 overrides["answers"]
                     .as_array()
                     .into_iter()
@@ -265,8 +265,7 @@ impl TurnWire {
                     .filter_map(Value::as_str)
                     .map(str::to_owned)
                     .collect(),
-            ),
-        );
+            ));
         let approvals = Arc::new(std::sync::Mutex::new(Vec::new()));
         let asked = approvals.clone();
         let run = tokio::spawn(run_session(Session {
@@ -1846,7 +1845,13 @@ impl TurnWire {
 async fn bypass_answers_every_permission_once_without_asking() {
     for v2 in [false, true] {
         let wire = policy_wire(v2, json!({"mode": "bypass"}), json!([])).await;
-        wire.ask_permission(v2, "push", "bash", &["git push --force origin main"], json!({}));
+        wire.ask_permission(
+            v2,
+            "push",
+            "bash",
+            &["git push --force origin main"],
+            json!({}),
+        );
         assert_eq!(wire.permission_reply("push").await, ("once".into(), None));
         assert!(wire.approvals().is_empty());
     }
@@ -1866,7 +1871,10 @@ async fn ask_mode_routes_permissions_to_the_user_and_honours_the_answer() {
         assert_eq!(wire.permission_reply("read").await, ("once".into(), None));
         // Allow once allows only this one.
         wire.ask_permission(v2, "deploy-1", "bash", &["make deploy"], json!({}));
-        assert_eq!(wire.permission_reply("deploy-1").await, ("once".into(), None));
+        assert_eq!(
+            wire.permission_reply("deploy-1").await,
+            ("once".into(), None)
+        );
         let asked = wire.approvals();
         assert_eq!(asked.len(), 1);
         assert_eq!(asked[0].question, "Allow the agent to run `make deploy`?");
@@ -1893,7 +1901,13 @@ async fn ask_mode_routes_permissions_to_the_user_and_honours_the_answer() {
 async fn auto_mode_runs_dev_commands_and_refuses_force_pushes_without_asking() {
     for v2 in [false, true] {
         let wire = policy_wire(v2, json!({"mode": "auto"}), json!([])).await;
-        wire.ask_permission(v2, "test", "bash", &["cargo test -p zeron-engine"], json!({}));
+        wire.ask_permission(
+            v2,
+            "test",
+            "bash",
+            &["cargo test -p zeron-engine"],
+            json!({}),
+        );
         assert_eq!(wire.permission_reply("test").await, ("once".into(), None));
         // 1.x lists each simple command of a pipeline as its own pattern.
         wire.ask_permission(
@@ -1940,7 +1954,10 @@ async fn plan_mode_selects_the_plan_agent_and_refuses_edits() {
             &[plan.to_str().unwrap()],
             json!({"filepath": plan}),
         );
-        assert_eq!(wire.permission_reply("plan-file").await, ("once".into(), None));
+        assert_eq!(
+            wire.permission_reply("plan-file").await,
+            ("once".into(), None)
+        );
         assert!(wire.approvals().is_empty());
     }
 }
@@ -1966,22 +1983,29 @@ fn permission_requests_map_to_policy_actions() {
     let exec = v1("bash", json!(["cargo test"]), json!({})).unwrap();
     assert_eq!(exec.kind, ActionKind::Exec);
     assert_eq!(exec.command.as_deref(), Some("cargo test"));
-    let edit = v1("edit", json!(["src/a.rs"]), json!({"filepath":"/w/src/a.rs"})).unwrap();
+    let edit = v1(
+        "edit",
+        json!(["src/a.rs"]),
+        json!({"filepath":"/w/src/a.rs"}),
+    )
+    .unwrap();
     assert_eq!(edit.kind, ActionKind::Edit);
     assert_eq!(edit.paths, vec![PathBuf::from("/w/src/a.rs")]);
     let outside = v1("external_directory", json!(["/tmp/*"]), json!({})).unwrap();
     assert_eq!(outside.kind, ActionKind::Read);
     assert_eq!(outside.paths, vec![PathBuf::from("/tmp")]);
-    let fetch = permission_action(&json!({"action":"webfetch", "resources":["https://docs.rs/serde"]}))
-        .unwrap();
+    let fetch =
+        permission_action(&json!({"action":"webfetch", "resources":["https://docs.rs/serde"]}))
+            .unwrap();
     assert_eq!(fetch.kind, ActionKind::Network);
     assert_eq!(fetch.host.as_deref(), Some("docs.rs"));
     let mcp = v1("zeron_list_chats", json!(["*"]), json!({})).unwrap();
     assert_eq!(mcp.kind, ActionKind::Mcp);
     assert!(v1("question", json!(["*"]), json!({})).is_none());
     // The pre-1.1 shape.
-    let legacy = permission_action(&json!({"type":"bash", "pattern":"ls", "metadata":{"command":"ls -la"}}))
-        .unwrap();
+    let legacy =
+        permission_action(&json!({"type":"bash", "pattern":"ls", "metadata":{"command":"ls -la"}}))
+            .unwrap();
     assert_eq!(legacy.command.as_deref(), Some("ls -la"));
 }
 
@@ -2052,7 +2076,11 @@ http.createServer((req, res) => {
             assert_eq!(config["permission"]["*"], "ask");
             assert_eq!(config["agent"]["plan"]["permission"]["*"], "ask");
         } else if std::env::var_os("OPENCODE_CONFIG_CONTENT").is_none() {
-            assert_eq!(probe["config"], Value::Null, "Bypass must not configure opencode");
+            assert_eq!(
+                probe["config"],
+                Value::Null,
+                "Bypass must not configure opencode"
+            );
         }
     }
 }

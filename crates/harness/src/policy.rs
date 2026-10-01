@@ -112,11 +112,18 @@ const ZERON_READ_ONLY_TOOLS: &[&str] = &[
     "search_chats",
 ];
 
+/// Agents spell an MCP tool differently (`zeron__read_chat` from Claude's
+/// `mcp__zeron__read_chat`, OpenCode's `zeron_read_chat`, ACP agents'
+/// `zeron/read_chat` or `zeron.read_chat`): any of them names Zeron's tool.
 fn zeron_read_only(action: &Action) -> bool {
     action.kind == ActionKind::Mcp
         && action.mcp.as_deref().is_some_and(|name| {
-            let name = name.strip_prefix("zeron__").or_else(|| name.strip_prefix("zeron_"));
-            name.is_some_and(|tool| ZERON_READ_ONLY_TOOLS.contains(&tool))
+            let name = name.strip_prefix("mcp__").unwrap_or(name);
+            let Some(rest) = name.strip_prefix("zeron") else {
+                return false;
+            };
+            let tool = rest.trim_start_matches(['_', '/', '.', ':']);
+            tool.len() < rest.len() && ZERON_READ_ONLY_TOOLS.contains(&tool)
         })
 }
 
@@ -637,7 +644,9 @@ impl SharedGate {
     }
 
     fn lock(&self) -> std::sync::MutexGuard<'_, Gate> {
-        self.0.lock().unwrap_or_else(|poisoned| poisoned.into_inner())
+        self.0
+            .lock()
+            .unwrap_or_else(|poisoned| poisoned.into_inner())
     }
 
     pub fn mode(&self) -> PermissionMode {
@@ -654,16 +663,20 @@ impl SharedGate {
     pub async fn settle(
         &self,
         action: &Action,
-        request_input: &(dyn Fn(Vec<UserInputQuestion>) -> tokio::sync::oneshot::Receiver<Vec<UserInputAnswer>>
-              + Send
-              + Sync),
+        request_input: &(
+             dyn Fn(Vec<UserInputQuestion>) -> tokio::sync::oneshot::Receiver<Vec<UserInputAnswer>>
+                 + Send
+                 + Sync
+         ),
     ) -> Decision {
         match self.decide(action) {
             Decision::Ask => {}
             settled => return settled,
         }
         let question = approval_question(action);
-        let answers = request_input(vec![question.clone()]).await.unwrap_or_default();
+        let answers = request_input(vec![question.clone()])
+            .await
+            .unwrap_or_default();
         let verdict = read_approval(&question, &answers);
         if verdict == Verdict::AllowAlways
             && let Some(rule) = rule_from(action)
@@ -673,7 +686,10 @@ impl SharedGate {
         if verdict.allows() {
             Decision::Allow
         } else {
-            Decision::Deny(format!("The user denied permission to {}.", action.summary()))
+            Decision::Deny(format!(
+                "The user denied permission to {}.",
+                action.summary()
+            ))
         }
     }
 }
@@ -750,6 +766,12 @@ mod tests {
     fn zeron_read_tools_run_everywhere_and_unattended_runs_never_ask() {
         let read = Action { mcp: Some("zeron__read_chat".into()), ..Action::new(ActionKind::Mcp, "mcp__zeron__read_chat") };
         let spawn = Action { mcp: Some("zeron__create_chat".into()), ..Action::new(ActionKind::Mcp, "mcp__zeron__create_chat") };
+        for spelling in ["zeron_read_chat", "zeron/submit_result", "mcp__zeron__get_goal", "zeron.whoami"] {
+            let action = Action { mcp: Some(spelling.into()), ..Action::new(ActionKind::Mcp, spelling) };
+            assert_eq!(decide_in(PermissionMode::Plan, &action), Decision::Allow, "{spelling}");
+        }
+        let lookalike = Action { mcp: Some("zeronx_read_chat".into()), ..Action::new(ActionKind::Mcp, "zeronx_read_chat") };
+        assert_eq!(decide_in(PermissionMode::Plan, &lookalike), Decision::Ask);
         assert_eq!(decide_in(PermissionMode::Plan, &read), Decision::Allow);
         assert_eq!(decide_in(PermissionMode::Ask, &read), Decision::Allow);
         assert_eq!(decide_in(PermissionMode::Plan, &spawn), Decision::Ask);
