@@ -13,10 +13,21 @@ This PR is the **engine**: the interpreter, the run model, the journal, the sche
 tools and the authoring guide. The workflow card, the run pane and the approval dialog (PR4),
 mobile (PR5) and saved workflows (PR6) consume the state and RPCs described here.
 
-Screenshots (live, mock harness with `ZERON_MOCK_WORKFLOW=1`, see "Demo" below):
-[`docs/screenshots/workflows-engine/`](screenshots/workflows-engine/) — `approval` (the question
-the user answers), `running` (start marker; the card arrives in PR4), `completed` (the result row
-in the parent chat), `stopped` (a provider error stopping a run).
+Screenshots (live app, mock harness with `ZERON_MOCK_WORKFLOW=1`; see "Demo" below). The approval
+is the ordinary question panel — graph-free clients show exactly this text; PR4 renders
+`UserInputQuestion.meta`:
+
+![The approval question: phases, agents, literal commands, limits, script excerpt](screenshots/workflows-engine/approval.png)
+
+Lifecycle marker rows in the parent chat (PR4 replaces them with the card): started, then a run that
+completed, with the machine message delivered to the agent as a compact row —
+
+![A workflow started](screenshots/workflows-engine/running.png)
+![A workflow completed and its result sent to the agent](screenshots/workflows-engine/completed.png)
+
+— and a run a provider error stopped (resumable, reason on the marker):
+
+![A workflow stopped by an authentication error](screenshots/workflows-engine/stopped.png)
 
 ## Pieces
 
@@ -234,9 +245,12 @@ node rewrites one ~250-byte value. The engine **coalesces**: deltas merge into a
 chat, flushed at most every 250 ms (lifecycle events flush at once). `WorkflowsUpdate` rides the
 transcript watch (`TranscriptUpdate.workflows`): the whole state on the opening / reset frame, then
 a delta per change computed against what *that subscription* last saw (read only when
-`workflowRev` moved). **Cost** (`tests/workflows.rs::a_200_node_run_writes_a_bounded_amount_to_the_doc`):
-a 200-node, 20-actor run produces ≈ 1200 events and ≈ 600 KB of deltas in about 40 doc writes —
-bounded by the batch window, not by the event rate. Full results never enter the doc.
+`workflowRev` moved). **Cost** (`tests/workflows.rs::a_200_node_run_writes_a_bounded_amount_to_the_doc`, fake agents that
+answer instantly, so the whole run takes about a second): a 200-node, 20-actor run produces 1805
+events, **6 doc writes and ~107 KB of deltas in total** (about 530 bytes per node for its whole
+life). A slower run writes at most one batch per 250 ms (≈ 4/s), each carrying only what changed in
+that window, so the cost is bounded by the window, not by the event rate. Full results never enter
+the doc.
 
 ## Journal and storage
 
