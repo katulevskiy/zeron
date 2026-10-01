@@ -1155,6 +1155,14 @@ mod tests {
         goal_on_command: Mutex<Option<Value>>,
         /// What `SubmitAskResult` answers.
         submit_reply: Mutex<Option<Value>>,
+        /// `Workflow*` RPCs fail with this message when set.
+        workflow_error: Mutex<Option<String>>,
+        /// The chat every run reported by `WorkflowGet` belongs to.
+        workflow_owner: Mutex<String>,
+        /// The ask spec offers `escalate`.
+        ask_escalation: Mutex<bool>,
+        /// What `AskEscalate` answers.
+        escalate_reply: Mutex<Option<Value>>,
     }
 
     fn stream(item: Value) -> RpcReply {
@@ -1214,7 +1222,51 @@ mod tests {
                     }
                     stream(frame)
                 }
+                methods::WORKFLOW_START
+                | methods::WORKFLOW_GET
+                | methods::WORKFLOW_LIST
+                | methods::WORKFLOW_STOP
+                | methods::WORKFLOW_RESUME
+                | methods::WORKFLOW_ANSWER => {
+                    self.writes
+                        .lock()
+                        .unwrap()
+                        .push((method.to_owned(), params));
+                    if let Some(message) = self.workflow_error.lock().unwrap().clone() {
+                        return Err(RpcError::Failed(message));
+                    }
+                    RpcReply::Value(match method {
+                        methods::WORKFLOW_START => json!({
+                            "runId": "run-1", "name": "Demo",
+                            "graph": {
+                                "phases": [{ "name": "review" }, { "name": "gate" }],
+                                "actors": [{}, {}],
+                                "commands": [{ "command": "cargo" }]
+                            },
+                            "warnings": [], "maxConcurrency": 4,
+                            "draftPath": ".zeron/workflow-drafts/demo-abc.star"
+                        }),
+                        methods::WORKFLOW_GET => json!({
+                            "run": { "runId": "run-1", "chatId": *self.workflow_owner.lock().unwrap(), "status": "running" }
+                        }),
+                        methods::WORKFLOW_LIST => json!([{ "runId": "run-1", "status": "running" }]),
+                        methods::WORKFLOW_STOP => json!({ "stopped": true }),
+                        methods::WORKFLOW_RESUME => json!({ "runId": "run-2", "resumedFrom": "run-1" }),
+                        _ => json!({ "answered": true }),
+                    })
+                }
+                methods::ASK_ESCALATE => {
+                    self.writes
+                        .lock()
+                        .unwrap()
+                        .push((method.to_owned(), params));
+                    RpcReply::Value(self.escalate_reply.lock().unwrap().clone().unwrap_or(json!({
+                        "status": "answered", "questionId": "q1", "answer": "Postgres",
+                        "message": "Answer from the parent agent:\nPostgres", "left": 2
+                    })))
+                }
                 methods::GET_ASK_SPEC => RpcReply::Value(json!({
+                    "escalation": *self.ask_escalation.lock().unwrap(),
                     "askId": "ask-1",
                     "resultSchema": {
                         "type": "object",
@@ -1826,5 +1878,188 @@ mod tests {
             writes.last().unwrap().1["command"]["command"]["action"],
             "pause"
         );
+    }
+
+    // ── workflows ────────────────────────────────────────────────────────
+
+    fn chat_origin(chat: &str) -> Origin {
+        Origin {
+            chat_id: Some(chat.into()),
+            device_id: None,
+            ask_id: None,
+        }
+    }
+
+    fn last_write(world: &World) -> (String, Value) {
+        world.writes.lock().unwrap().last().cloned().expect("a write")
+    }
+
+    #[tokio::test]
+    async fn workflow_tools_are_listed_and_the_guide_is_served() {
+        let t = tools(Arc::new(World::default()), chat_origin("chat-beta-2"));
+        for name in [
+            "workflow_guide",
+            "start_workflow",
+            "get_workflow_run",
+            "list_workflow_runs",
+            "stop_workflow_run",
+            "resume_workflow_run",
+            "resolve_workflow_question",
+        ] {
+            assert!(t.has(name), "{name}");
+        }
+        let guide = t.call("workflow_guide", json!({})).await.unwrap();
+        assert!(guide["guide"].as_str().unwrap().contains("def main(args)"));
+    }
+
+    #[tokio::test]
+    async fn start_workflow_targets_the_callers_own_chat_and_shapes_the_answer() {
+        let world = Arc::new(World::default());
+        let t = tools(world.clone(), chat_origin("chat-beta-2"));
+        let out = t
+            .call(
+                "start_workflow",
+                json!({
+                    "name": "Demo", "script": "def main(args): return 1",
+                    "args": {"n": 3}, "max_concurrency": 4, "harness": "codex",
+                    "max_asks": 50, "max_tokens": 1000
+                }),
+            )
+            .await
+            .unwrap();
+        assert_eq!(out["runId"], "run-1");
+        assert_eq!(out["phases"], json!(["review", "gate"]));
+        assert_eq!(out["agents"], 2);
+        assert_eq!(out["commands"], json!(["cargo"]));
+        assert!(out["note"].as_str().unwrap().contains("Do not poll"));
+        let (method, params) = last_write(&world);
+        assert_eq!(method, methods::WORKFLOW_START);
+        assert_eq!(params["chatId"], "chat-beta-2");
+        assert_eq!(params["args"], json!({"n": 3}));
+        assert_eq!(params["maxConcurrency"], 4);
+        assert_eq!(params["harness"], "codex");
+        assert_eq!(params["maxAsks"], 50);
+        assert_eq!(params["maxTokens"], 1000);
+        assert!(params["path"].is_null());
+
+        // No chat to deliver the result to: refused before reaching the engine.
+        let before = world.writes.lock().unwrap().len();
+        let anon = tools(world.clone(), Origin::default());
+        let err = anon.call("start_workflow", json!({"script": "x"})).await.unwrap_err();
+        assert!(err.contains("inside a Zeron chat"), "{err}");
+        assert_eq!(world.writes.lock().unwrap().len(), before);
+    }
+
+    #[tokio::test]
+    async fn start_workflow_errors_reach_the_model_without_plumbing() {
+        let world = Arc::new(World::default());
+        *world.workflow_error.lock().unwrap() =
+            Some("workflow.star:2:5 phase \"x\" contains no ask() or run()".into());
+        let t = tools(world, chat_origin("chat-beta-2"));
+        let err = t.call("start_workflow", json!({"script": "x"})).await.unwrap_err();
+        assert!(err.starts_with("workflow.star:2:5"), "{err}");
+        assert!(!err.contains("WorkflowStart"), "{err}");
+    }
+
+    #[tokio::test]
+    async fn get_validates_include_and_list_defaults_to_the_own_chat() {
+        let world = Arc::new(World::default());
+        *world.workflow_owner.lock().unwrap() = "chat-beta-2".into();
+        let t = tools(world.clone(), chat_origin("chat-beta-2"));
+        t.call("get_workflow_run", json!({"run_id": "run-1", "include": ["nodes", "result"]}))
+            .await
+            .unwrap();
+        let (_, params) = last_write(&world);
+        assert_eq!(params["include"], json!(["nodes", "result"]));
+        assert!(t
+            .call("get_workflow_run", json!({"run_id": "run-1", "include": ["everything"]}))
+            .await
+            .is_err());
+        t.call("list_workflow_runs", json!({})).await.unwrap();
+        assert_eq!(last_write(&world).1["chatId"], "chat-beta-2");
+        t.call("list_workflow_runs", json!({"chat": "all"})).await.unwrap();
+        assert!(last_write(&world).1["chatId"].is_null());
+        t.call("list_workflow_runs", json!({"chat": "alpha"})).await.unwrap();
+        assert_eq!(last_write(&world).1["chatId"], "chat-alpha-1");
+    }
+
+    #[tokio::test]
+    async fn an_agent_acts_only_on_its_own_chats_runs() {
+        let world = Arc::new(World::default());
+        let t = tools(world.clone(), chat_origin("chat-beta-2"));
+        // A run of another chat: stop, resume and answer are refused before the engine acts.
+        *world.workflow_owner.lock().unwrap() = "chat-alpha-1".into();
+        for (tool, args) in [
+            ("stop_workflow_run", json!({"run_id": "run-1"})),
+            ("resume_workflow_run", json!({"run_id": "run-1"})),
+            ("resolve_workflow_question", json!({"run_id": "run-1", "qid": "q", "answer": "a"})),
+        ] {
+            let err = t.call(tool, args).await.unwrap_err();
+            assert!(err.contains("your own chat"), "{tool}: {err}");
+        }
+        assert!(
+            world.writes.lock().unwrap().iter().all(|(m, _)| m == methods::WORKFLOW_GET),
+            "only the ownership lookup reached the engine"
+        );
+        // Its own run: allowed.
+        *world.workflow_owner.lock().unwrap() = "chat-beta-2".into();
+        let stopped = t.call("stop_workflow_run", json!({"run_id": "run-1", "reason": "enough"})).await.unwrap();
+        assert_eq!(stopped["stopped"], true);
+        let (method, params) = last_write(&world);
+        assert_eq!(method, methods::WORKFLOW_STOP);
+        assert_eq!(params["reason"], "enough");
+        let resumed = t.call("resume_workflow_run", json!({"run_id": "run-1"})).await.unwrap();
+        assert_eq!(resumed["runId"], "run-2");
+        t.call("resolve_workflow_question", json!({"run_id": "run-1", "qid": "q9", "answer": "Postgres"}))
+            .await
+            .unwrap();
+        let (method, params) = last_write(&world);
+        assert_eq!(method, methods::WORKFLOW_ANSWER);
+        assert_eq!((params["qid"].as_str(), params["answer"].as_str()), (Some("q9"), Some("Postgres")));
+        // A user's own MCP client (no chat origin) may act on any run.
+        *world.workflow_owner.lock().unwrap() = "chat-alpha-1".into();
+        let user = tools(world.clone(), Origin::default());
+        user.call("stop_workflow_run", json!({"run_id": "run-1"})).await.unwrap();
+    }
+
+    #[tokio::test]
+    async fn workflow_tools_are_never_offered_inside_an_ask_and_escalate_only_when_enabled() {
+        let world = Arc::new(World::default());
+        let plain = tools(world.clone(), ask_origin());
+        let names: Vec<_> = plain.list().await.iter().map(|d| d.name).collect();
+        assert!(names.iter().all(|n| !n.contains("workflow") && *n != "escalate"), "{names:?}");
+        assert!(plain.call("start_workflow", json!({"script": "x"})).await.is_err());
+        // Not offered: calling it is refused without reaching the engine.
+        let err = plain.call("escalate", json!({"question": "?"})).await.unwrap_err();
+        assert!(err.contains("not available"), "{err}");
+
+        *world.ask_escalation.lock().unwrap() = true;
+        let actor = tools(world.clone(), ask_origin());
+        let listed = actor.list().await;
+        let escalate = listed.iter().find(|d| d.name == "escalate").expect("offered");
+        assert!(escalate.description.contains("Last resort"));
+        assert!(listed.iter().any(|d| d.name == "submit_result"));
+        let out = actor
+            .call("escalate", json!({"question": "Which database?", "context": "two configured"}))
+            .await
+            .unwrap();
+        assert_eq!(out["status"], "answered");
+        assert_eq!(out["answer"], "Postgres");
+        let (method, params) = last_write(&world);
+        assert_eq!(method, methods::ASK_ESCALATE);
+        assert_eq!(params["question"], "Which database?");
+        assert_eq!(params["askId"], "ask-1");
+        // Pending is a result, not an error; a refusal is an error the model reads.
+        *world.escalate_reply.lock().unwrap() = Some(json!({
+            "status": "pending", "questionId": "q1", "message": "No answer yet. Your question is still pending", "left": 2
+        }));
+        let pending = actor.call("escalate", json!({"question": "?"})).await.unwrap();
+        assert_eq!(pending["status"], "pending");
+        assert_eq!(pending["question_id"], "q1");
+        *world.escalate_reply.lock().unwrap() = Some(json!({
+            "status": "refused", "questionId": "", "message": "You have no escalations left", "left": 0
+        }));
+        let err = actor.call("escalate", json!({"question": "?"})).await.unwrap_err();
+        assert!(err.contains("no escalations left"), "{err}");
     }
 }

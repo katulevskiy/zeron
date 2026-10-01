@@ -22,7 +22,8 @@ use gpui::{
 use zeron_doc::{MessagePart, MessageRole, SessionMessageEntry};
 use zeron_proto::{
     GOAL_OBJECTIVE_MAX_CHARS, Goal, GoalCommand, GoalEventKind, GoalLimits,
-    GoalStatus, MessageOrigin, TodoStatus, ToolCall, VerdictOutcome,
+    GoalStatus, MessageOrigin, TodoStatus, ToolCall, VerdictOutcome, WorkflowEventMarker,
+    WorkflowStatus,
 };
 
 use crate::composer::{Composer, QUEUE_COMPOSER_OVERLAP};
@@ -327,6 +328,11 @@ pub enum MarkerKind {
     /// A round's prompt, sent by the controller.
     Round,
     Event(GoalEventKind),
+    /// A workflow lifecycle marker (started, completed, stopped…).
+    Workflow(WorkflowEventMarker),
+    /// A workflow's machine message to the parent agent (its result, or an
+    /// agent's question), shown compactly: the full text is for the model.
+    WorkflowMessage(WorkflowStatus),
 }
 
 /// The marker an entry stands for, when it is goal machinery rather than a
@@ -357,6 +363,42 @@ pub(crate) fn goal_marker(entry: &SessionMessageEntry) -> Option<GoalMarker> {
             detail: detail.clone(),
             verifier_chat_id: verifier_chat_id.clone(),
         }),
+        MessageOrigin::WorkflowEvent {
+            marker,
+            name,
+            detail,
+            ..
+        } => Some(GoalMarker {
+            kind: MarkerKind::Workflow(*marker),
+            round: 0,
+            title: name.clone(),
+            detail: detail.clone(),
+            verifier_chat_id: None,
+        }),
+        MessageOrigin::Workflow { name, status, .. } if entry.role == MessageRole::User => {
+            let text = entry
+                .parts
+                .iter()
+                .find_map(|p| match p {
+                    MessagePart::Text { text, .. } => Some(text.as_str()),
+                    _ => None,
+                })
+                .unwrap_or_default();
+            // Line two of a result is the one-line summary; of a question,
+            // the question itself.
+            let detail = if text.starts_with("[Workflow question]") {
+                text.lines().nth(2).unwrap_or_default().to_owned()
+            } else {
+                text.lines().nth(1).unwrap_or_default().to_owned()
+            };
+            Some(GoalMarker {
+                kind: MarkerKind::WorkflowMessage(*status),
+                round: 0,
+                title: name.clone(),
+                detail,
+                verifier_chat_id: None,
+            })
+        }
         _ => None,
     }
 }
@@ -379,6 +421,18 @@ impl GoalMarker {
             MarkerKind::Event(VerifierFailed) => {
                 format!("Verifier · round {} failed", self.round)
             }
+            MarkerKind::Workflow(marker) => zeron_proto::workflow_marker_text(marker, &self.title, ""),
+            MarkerKind::WorkflowMessage(WorkflowStatus::Running) => {
+                format!("Workflow agent asks a question · {}", one_line(&self.title))
+            }
+            MarkerKind::WorkflowMessage(status) => {
+                let word = match status {
+                    WorkflowStatus::Completed => "completed",
+                    WorkflowStatus::Errored => "failed",
+                    _ => "stopped",
+                };
+                format!("Workflow {word} · {} — result sent to the agent", one_line(&self.title))
+            }
         }
     }
 
@@ -386,6 +440,17 @@ impl GoalMarker {
         use GoalEventKind::*;
         match self.kind {
             MarkerKind::Event(Complete) => Tone::Success,
+            MarkerKind::Workflow(WorkflowEventMarker::Completed)
+            | MarkerKind::WorkflowMessage(WorkflowStatus::Completed) => Tone::Success,
+            MarkerKind::Workflow(
+                WorkflowEventMarker::Errored
+                | WorkflowEventMarker::Stopped
+                | WorkflowEventMarker::Denied,
+            )
+            | MarkerKind::WorkflowMessage(WorkflowStatus::Errored | WorkflowStatus::Stopped) => {
+                Tone::Warning
+            }
+            MarkerKind::Workflow(_) | MarkerKind::WorkflowMessage(_) => Tone::Accent,
             MarkerKind::Event(BudgetLimited | VerifierFailed) => Tone::Warning,
             MarkerKind::Round | MarkerKind::Event(Set | Resumed) => Tone::Accent,
             _ => Tone::Muted,
@@ -1149,6 +1214,15 @@ fn todo_dot(status: TodoStatus, theme: &Theme) -> AnyElement {
 pub(crate) fn marker_element(marker: &GoalMarker, theme: &Theme) -> AnyElement {
     let color = tone_color(marker.tone(), theme);
     let glyph = match marker.kind {
+        MarkerKind::Workflow(WorkflowEventMarker::Completed)
+        | MarkerKind::WorkflowMessage(WorkflowStatus::Completed) => icons::CHECK,
+        MarkerKind::Workflow(
+            WorkflowEventMarker::Errored | WorkflowEventMarker::Denied,
+        )
+        | MarkerKind::WorkflowMessage(WorkflowStatus::Errored) => icons::DANGER_TRIANGLE,
+        MarkerKind::Workflow(WorkflowEventMarker::Stopped)
+        | MarkerKind::WorkflowMessage(WorkflowStatus::Stopped) => icons::PAUSE,
+        MarkerKind::Workflow(_) | MarkerKind::WorkflowMessage(_) => icons::GIT_BRANCH,
         MarkerKind::Event(GoalEventKind::Complete) => icons::CHECK,
         MarkerKind::Event(GoalEventKind::Paused) => icons::PAUSE,
         MarkerKind::Event(GoalEventKind::BudgetLimited | GoalEventKind::VerifierFailed) => {
@@ -1413,6 +1487,82 @@ mod tests {
             continuation_of: None,
             duration_ms: None,
         }
+    }
+
+    fn workflow_entry(role: MessageRole, origin: MessageOrigin, text: &str) -> SessionMessageEntry {
+        SessionMessageEntry {
+            origin: Some(origin),
+            id: "w".into(),
+            role,
+            parts: vec![MessagePart::Text {
+                id: "t".into(),
+                text: text.into(),
+            }],
+            created_at: 1,
+            device_id: "d".into(),
+            status: None,
+            continuation_of: None,
+            duration_ms: None,
+        }
+    }
+
+    #[test]
+    fn workflow_machinery_renders_as_compact_markers() {
+        let started = goal_marker(&workflow_entry(
+            MessageRole::System,
+            MessageOrigin::WorkflowEvent {
+                run_id: "r".into(),
+                marker: WorkflowEventMarker::Started,
+                name: "PR review".into(),
+                detail: String::new(),
+            },
+            "Workflow started: PR review",
+        ))
+        .unwrap();
+        assert_eq!(started.label(), "Workflow started: PR review");
+        assert_eq!(started.tone(), Tone::Accent);
+
+        let stopped = goal_marker(&workflow_entry(
+            MessageRole::System,
+            MessageOrigin::WorkflowEvent {
+                run_id: "r".into(),
+                marker: WorkflowEventMarker::Stopped,
+                name: "PR review".into(),
+                detail: "stopped by a provider error · 4 agents".into(),
+            },
+            "x",
+        ))
+        .unwrap();
+        assert_eq!(stopped.tone(), Tone::Warning);
+        assert_eq!(stopped.detail_line().as_deref(), Some("stopped by a provider error · 4 agents"));
+
+        // The agent-facing result message is hidden behind a one-line row.
+        let result = goal_marker(&workflow_entry(
+            MessageRole::User,
+            MessageOrigin::Workflow {
+                run_id: "r".into(),
+                name: "PR review".into(),
+                status: WorkflowStatus::Completed,
+            },
+            "[Workflow completed] PR review (run r)\ncompleted · 4 agents · 12 asks · 2m 5s\n\nResult: ...",
+        ))
+        .unwrap();
+        assert_eq!(result.label(), "Workflow completed · PR review — result sent to the agent");
+        assert_eq!(result.tone(), Tone::Success);
+        assert_eq!(result.detail_line().as_deref(), Some("completed · 4 agents · 12 asks · 2m 5s"));
+        // An escalation notice shows the question.
+        let question = goal_marker(&workflow_entry(
+            MessageRole::User,
+            MessageOrigin::Workflow {
+                run_id: "r".into(),
+                name: "PR review".into(),
+                status: WorkflowStatus::Running,
+            },
+            "[Workflow question] An agent (\"a\") in workflow \"PR review\" is blocked and asks:\n<workflow_question>\nWhich database?\n",
+        ))
+        .unwrap();
+        assert_eq!(question.detail_line().as_deref(), Some("Which database?"));
+        assert!(question.label().starts_with("Workflow agent asks a question"));
     }
 
     #[test]
