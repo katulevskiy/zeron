@@ -13,7 +13,7 @@ Asset QA: [android-audit.md](android-audit.md).
 - **Restraint.** Feedback answers a person or announces a one-shot event. There
   is none on scrolling, none per recomposition, none on typing, none for a state
   that merely redraws. Interface cues sit 2 to 4 dB under the session chimes
-  (RMS -44 dBFS over their active part against -40 to -42) and last 34 to 176 ms
+  (active RMS -26.0 dBFS against -22.2 to -23.8 at full slider) and last 34 to 176 ms
   against 520 to 650, so they read as far quieter; the shortest are under 40 ms.
 - **Consistency.** One vocabulary (`Feedback.kt`: `Haptic`, `Cue`) names the
   *moment*, never the vibration. A tap is always `Select` + `Tap`, a choice
@@ -31,9 +31,10 @@ Asset QA: [android-audit.md](android-audit.md).
   which cannot clash with itself or with the desktop chimes. The slider detent is
   one pure 880 Hz tick resampled up a pentatonic ladder, so dragging "plays"
   the scale.
-- **Accessibility.** Both channels have independent switches; haptic strength
-  scales; the system's touch-vibration and touch-sound settings are honoured;
-  nothing is the only carrier of information (every cue accompanies visible
+- **Accessibility.** One master switch above two independent ones; haptic
+  strength scales; the in-app switches are the single source of truth (the phone's
+  own touch-sound and touch-vibration settings are not consulted, see "When it
+  plays"); nothing is the only carrier of information (every cue accompanies visible
   state).
 - **Battery and calm.** Sounds are preloaded in a `SoundPool` (no decoding on
   press, no audio focus, nothing held open). Haptics are short; light ones are
@@ -44,8 +45,10 @@ Asset QA: [android-audit.md](android-audit.md).
 | Rule | Detail |
 | --- | --- |
 | App active | Only while the app is in the foreground **and** the screen is on. Otherwise nothing plays in-app. Events that matter in the background arrive as notifications (below). |
-| Haptics | Needs the in-app **Haptics** switch, a vibrator, and the system's *Touch feedback* setting. The ringer mode does **not** matter (Android's own keyboard and touch haptics also keep working on silent). |
-| Sounds | Needs the **Sounds** master, the category switch, a normal ringer (silent and vibrate mute everything), no total-silence / alarms-only Do Not Disturb, and a non-zero system sound volume. Interface cues also follow the system's *Touch sounds* setting unless **Play sounds anyway** is on (see "If you hear nothing"); session chimes never do (they are events, not touch feedback). Priority-only Do Not Disturb does not block them (they are sonification, like keyboard clicks). |
+| Master | **Sounds & haptics** is absolute. Off: nothing plays, no sound and no vibration, in the app and in the notifications it posts (they become silent). On: the rows below decide. |
+| Haptics | Needs the **Haptics** switch and a vibrator. |
+| Sounds | Needs the **Sounds** switch and the category switch (Interface, or Session sounds with Completion / Input required / Errors). |
+| Not consulted | With the master on, the phone's *Touch sounds* and *Touch feedback* settings, the ringer mode and Do Not Disturb are **not** read: the user said play, so the app does not second-guess it. The only thing left outside the app is physical: Android itself may still mute the audio stream (silent or vibrate mode and total-silence Do Not Disturb mute the system-sound stream, volume zero is silence); see "If you hear nothing". |
 | No audio focus | Cues are `USAGE_ASSISTANCE_SONIFICATION` / `CONTENT_TYPE_SONIFICATION` and never take focus, so music keeps playing and nothing ducks. |
 | Rate limits | The same cue never stacks inside its own gap (60 to 400 ms by cue); any two cues of equal or lower priority keep 20 ms apart; at most 4 concurrent streams (a more important cue still gets in); the same haptic is coalesced (70 ms for ticks up to 400 ms for alerts); at most 12 light haptics per second; any alert cuts through light ticks. |
 | Order | Wherever a sound and a haptic belong to the same moment, the **sound is issued first**, then the haptic, from the same synchronous call (`Feedback.both`, `Feedback.play`, the default tap, previews). See Latency. |
@@ -102,13 +105,11 @@ Confirm click is played at scale 0.97 / 0.32 (`dumpsys vibrator_manager`).
 
 Files are `res/raw/fx_<name>.wav`. Interface cues are generated
 (`scripts/generate-android-sounds.py`, deterministic, mono 16-bit 48 kHz) and
-committed. The three session chimes exist twice: `fx_done`, `fx_request`,
-`fx_attention` are still copied byte-for-byte from `crates/ui/assets/sounds` by the
-Gradle `genSounds` task and are what the notification channels play; the in-app
-cues use `fx_chime_done` / `_request` / `_attention`, the same sounds as mono,
-leading silence trimmed, plus the slider headroom (+6 dB, see Volume). The five
-promoted cues come from `docs/sound-design/auditions/` (stereo to mono, trimmed,
-+6 dB). `silence_keepalive.wav` is not a cue (see Latency).
+committed. The three session chimes are `fx_chime_done` / `_request` / `_attention`:
+the desktop sounds from `crates/ui/assets/sounds` (left untouched) as mono, leading
+silence trimmed and mastered loud (see Volume); the in-app cues and the notification
+channels both play them. The five promoted cues come from `docs/sound-design/auditions/` (stereo to mono, trimmed,
+mastered like the rest). `silence_keepalive.wav` is not a cue (see Latency).
 Category = the in-app switch that governs it. "Trigger" lists every place the
 cue is wired.
 
@@ -175,28 +176,61 @@ the model chip are used by the model picker, `Press` is reserved.
 
 ## Volume
 
-The slider is 0 to 100% in ten steps and **starts at 50%**. 50% is exactly the
-loudness the app always had at its old maximum; 100% is twice as loud (+6 dB). The
-curve, `FeedbackSettings.gainFor(slider)`: `v = 2 * slider`; for `v <= 1` the gain is
-`v^2` (the curve the app always used, so 25% reads about -12 dB), above that it is
-`2^(v - 1)`, equal dB steps up to gain 2.0 at 100%. Both pieces meet at gain 1 with no
-jump.
+The slider is 0 to 100% in ten steps and **starts at 50%**. 100% is twice as loud
+(+6 dB) as 50%. The curve, `FeedbackSettings.gainFor(slider)`: `v = 2 * slider`; for
+`v <= 1` the gain is `v^2` (25% reads about -12 dB), above that it is `2^(v - 1)`,
+equal dB steps up to gain 2.0 at 100%. Both pieces meet at gain 1 with no jump.
 
-`SoundPool` volume cannot exceed 1.0, so the headroom is in the files: every `fx_*`
-asset is generated 6.02 dB hotter than before (`BOOST_DB` in the generator: active
-RMS -38 dBFS, peaks about -24 dBFS, always under -3 dBFS, no clipping, checked by the
-audit) and the app plays a cue at `gain * trim / ASSET_BOOST` (`CueTable.volume`).
-At the default that is half volume of a file twice as hot as before: the same sound
-pressure as yesterday. At 100% it is full volume: twice. The in-app session chimes
-carry the same boost; the notification channels still play the desktop originals, so
-background alerts did not change.
+`SoundPool` volume cannot exceed 1.0, so the headroom is in the files: the app plays a
+cue at `gain * trim / ASSET_BOOST` (`CueTable.volume`, `ASSET_BOOST` = 2): the default
+plays the file at half volume, 100% at full volume.
 
-**Migration.** Settings written by the old layout stored the volume on the old scale
-(100% = today's 50%). `FeedbackSettingsCodec.migrate` runs once, keyed on
-`feedback.prefs_version` (absent = 1), and halves a stored volume, so a user who had
-chosen v keeps the gain `v^2` they were hearing. A fresh install has no stored
-volume, is just stamped, and gets 50%. Unit tests cover the mapping, the migration
-for stored values 0 to 1, idempotence and malformed values.
+**Round 3: "2x louder again, default stays 50%".** The previous build's files sat at
+active RMS -38 dBFS with peaks only -24 to -30 dBFS (the chimes and promoted cues
+-34 to -37 dBFS, peaks -13), so there was real room below full scale. Every `fx_*`
+file is now mastered by `scripts/generate-android-sounds.py`:
+
+1. a gentle +3.5 dB peaking boost at 2.6 kHz (Q 0.8), where phone speakers are efficient
+   and hearing is most sensitive (not on `Detent`, which SoundPool transposes and which
+   must stay a flat 880 Hz sine, nor `Zip` and `Surge`, whose falling / climbing
+   direction the boost would blur);
+2. a soft-knee tanh limiter (knee -4 dBFS, ceiling **-0.5 dBFS**): peaks are rounded
+   rather than clipped, and only the chimes and promoted cues (crest factor 22 to 25 dB)
+   reach it;
+3. the gain is solved with the limiter in the loop until the active RMS hits the target:
+   interface cues -25.98 dBFS (previous -38 + 6.0 lift + 6.02 slider headroom), the
+   promoted cues and chimes their desktop level + 18.04 dB.
+
+Result (`android-audit.md`, "Loudness against the previous build"; all numbers include
+the SoundPool volume factor, trims and the cap at 1.0): at the **default 50% every cue
+is +6.0 dB (min, plain and A-weighted active RMS) above the previous build's 100%**,
+and the new 100% is another +6.02 dB, +12 dB above the previous build's loudest. Seen
+from the previous *default* (what the user had been hearing) that is +12 dB at 50%
+(4x the amplitude) and +18 dB at 100%. The audit asserts at least +5.5 dB for every
+cue, volume at most 1.0 at every slider position, no clipping, and a stored baseline of
+the previous build that it re-checks against git (`f1d4eff1`) when the history is there.
+The mastering changes nothing about timing: onset is still within 1 ms in every file
+(the trim threshold sits 0.5 dB above the audit's so 16-bit rounding cannot push it).
+
+Notification channels play the same mastered files (`fx_chime_done`, `_request`,
+`_attention`, formerly the untouched desktop WAVs through a Gradle copy, which is gone),
++18 dB at file level; `Notifier.CHANNEL_VERSION` is 2 so existing channels, whose
+sounds are immutable, are recreated. The system's notification volume still applies.
+
+**What is not possible.** Digital full scale is the limit: the interface cues still
+have 10 to 18 dB of peak room (mastered by loudness, not by peak, as asked: the set is
+not squashed against the ceiling), the chimes have none. `SoundPool` volume is capped
+at 1.0 and cannot be amplified. `LoudnessEnhancer` cannot be attached to a
+`SoundPool`'s internal session. Playing as `USAGE_GAME` / `USAGE_MEDIA` would follow the
+media volume (often set higher than the system-sound volume) and ignore silent mode,
+but it changes which slider governs the sounds and cannot be judged without a phone;
+not done.
+
+**Migration.** `FeedbackSettingsCodec.migrate` runs once, keyed on `feedback.prefs_version`
+(now 3), and **resets the stored volume to the new default 50%** (no attempt to preserve
+the old loudness: the user asked for louder) and silently deletes the retired
+`feedback.ignore_touch_sounds` key. Every other choice is kept. Unit tests cover the
+reset from versions 1 and 2, idempotence, malformed values and the dropped key.
 
 ## Latency
 
@@ -210,12 +244,12 @@ prove the changes, only a phone proves the milliseconds).
 | --- | --- | --- |
 | Default tap | `defaultTap` waits `ClaimTracker.DEFER_MS` = 40 ms after release (so an explicit cue can claim the moment), after the release interaction's own coroutine hop | unchanged on purpose (the wait is what keeps a Tap from stacking on an Open); it is the largest remaining software term, about 2.4 frames at 60 Hz. Explicit cues (`feedbackClickable`, `toggleAction`, `both`) already fire inside the click handler, synchronously |
 | Order | haptic first, then sound: the vibrator service is a binder call (about 1 to 3 ms, sometimes tens when the service is busy), and a late sound is the one a person hears as late | sound first everywhere (`both`, `play`, `defaultTap`, `preview`) |
-| Gate | per event: `PowerManager.isInteractive`, `AudioManager.getRingerMode` and `getStreamVolume`, `NotificationManager.currentInterruptionFilter`, two `Settings.System` reads, `hasVibrator`: five binder calls and two settings reads on the UI thread | one `SystemSnapshot` read per 2 s (`TtlValue`), dropped at once by the system's own broadcasts (ringer, volume, interruption filter, screen on/off) and content observers on the two touch settings, registered only while foregrounded. `hasVibrator` is read once |
+| Gate | per event: `PowerManager.isInteractive`, `AudioManager.getRingerMode` and `getStreamVolume`, `NotificationManager.currentInterruptionFilter`, two `Settings.System` reads, `hasVibrator`: five binder calls and two settings reads on the UI thread | the phone's sound state is no longer read at all (see "When it plays"); what is left, `isInteractive`, is cached for 2 s (`TtlValue`) and dropped at once by the screen on / off broadcasts, registered only while foregrounded. `hasVibrator` is read once |
 | Output standby | after a few seconds with no stream the audio output goes to standby, and waking it takes tens of ms on many phones (more over Bluetooth): the first sound after a pause came late | a silent looped stream (`silence_keepalive.wav`) keeps the mixer running; started on a finger-down anywhere (`MainActivity.dispatchTouchEvent` to `AndroidFeedback.onTouchDown`, so it is up before the click that sounds), stopped 12 s after the last touch or when the app leaves the foreground (`WarmPolicy`) |
 | First play per stream | `SoundPool` creates a stream's `AudioTrack` at its first `play`: a few ms the first four cues paid | after the last sample loads, four silent (-60 dB) plays of the shortest cue create all four tracks (`SoundBank.prime`). The pool has one stream more than the gate allows, for the keep-alive loop |
 | Sample rate | assets are 48 kHz; a mixer at another rate must resample every cue and loses the fast path | `AudioManager.PROPERTY_OUTPUT_SAMPLE_RATE` is read at start (logged: `outputRate=`); at 48 kHz (every current phone) nothing changes; otherwise each asset is resampled once to the output rate with a Catmull-Rom interpolator into `cacheDir/sounds-<rate>-<install time>` and loaded from there |
 | Attributes | `USAGE_ASSISTANCE_SONIFICATION` only | plus `FLAG_LOW_LATENCY` (deprecated since 29, still read by the audio policy, which then selects the fast output; `SoundPool` has no performance-mode API) |
-| Leading silence in the files | 1.1 to 8.2 ms before the sound reaches -40 dB re peak (Archive 8.2; the promoted desktop cues 7.3 to 7.5; Open 3.3), measured by the audit | every file is trimmed to a 0.25 ms lead-in with a click-free fade from exact zero; the audit and `LatencyTest` assert onset within 1 ms for every `fx_` file. The desktop `fx_done`, `fx_request`, `fx_attention` keep their 7 ms (notification sounds; the in-app copies are trimmed) |
+| Leading silence in the files | 1.1 to 8.2 ms before the sound reaches -40 dB re peak (Archive 8.2; the promoted desktop cues 7.3 to 7.5; Open 3.3), measured by the audit | every file is trimmed to a 0.25 ms lead-in with a click-free fade from exact zero; the audit and `LatencyTest` assert onset within 1 ms for every `fx_` file. The desktop originals keep their 7 ms (they are no longer shipped: the notification channels use the trimmed `fx_chime_*`) |
 | Loading | `onLoadComplete` was tracked; a cue that was not ready yet was dropped (`NotLoaded`) | unchanged: dropping is right (a late sound is worse than none); loading is one background thread at start |
 
 What is **not** fixed, and cannot be in software: the Bluetooth link's own delay,
@@ -227,34 +261,28 @@ more files).
 ## If you hear nothing
 
 Zeron's sounds are played by the app itself as *interface sonification*, the same
-channel the keyboard clicks use. They follow your phone's **system sound volume**
-(the "Ring / System" slider, not Media), silent and vibrate mode, and Do Not Disturb
-set to total silence or alarms only. Check, in this order:
+channel the keyboard clicks use. With **Sounds & haptics** on, the app plays them
+whatever the phone's *Touch sounds*, ringer or Do Not Disturb settings say; what is
+left is physical. Check, in this order:
 
-1. Settings, Sounds & haptics: **Sounds** and **Interface sounds** are on.
-2. The phone is not on silent or vibrate, and the system sound volume is above zero.
-3. A banner at the top of Sounds & haptics explains what the phone is doing to
-   Zeron. If it says **Touch sounds are off in your phone's settings**, tap it:
-   - **Open sound settings** goes to the phone's sound settings. Turn on *Touch
-     sounds* (Pixel and most phones: Settings, Sound & vibration, Touch sounds;
-     Samsung: Settings, Sounds and vibration, System sound/vibration control, Touch
-     sounds). For vibration also check Vibration & haptics, Touch feedback.
-   - **Play sounds anyway** makes Zeron ignore that one phone setting for its
-     interface sounds. This is safe because the cues do not go through Android's
-     touch-sound path (`playSoundEffect`) at all: the setting does not technically
-     stop them, Zeron only honours it by default as a courtesy. Silent mode, Do Not
-     Disturb, volume zero and the in-app switches still apply. Session chimes
-     never depended on it.
-4. Haptics have their own line: *Touch vibration is turned off in system settings*
-   means the phone's Touch feedback is off, which Zeron honours for haptics.
+1. Settings, Sounds & haptics: the top **Sounds & haptics** switch, **Sounds** and
+   **Interface sounds** are on, and the page is not greyed out.
+2. Raise the phone's **system / touch sound volume** (the "Ring / System" slider, not
+   Media): at zero the audio stream itself is silent, and Android also mutes the
+   system-sound stream in silent or vibrate mode and in total-silence Do Not Disturb.
+   Zeron does not check any of this and has nothing to override it with.
+3. Zeron's own **Volume** slider is above 0%.
+
+There is no warning on the page and no override: the switches are the single source
+of truth. Haptics are the same: the phone's *Touch feedback* setting is not read.
 
 ## Where each event goes
 
 | Event | In the foreground | In the background |
 | --- | --- | --- |
-| Turn finished | `Success` + `Done` (Completion switch) | notification, channel sound `fx_done`, vibration 24-40-30 |
-| Question / approval | `Attention` + `Request` (Input switch) | notification, `fx_request`, 18-90-18 |
-| Session failed | `Error` + `Attention` (Errors switch) | notification, `fx_attention`, 35-55-45 |
+| Turn finished | `Success` + `Done` (Completion switch) | notification, channel sound `fx_chime_done`, vibration 24-40-30 |
+| Question / approval | `Attention` + `Request` (Input switch) | notification, `fx_chime_request`, 18-90-18 |
+| Session failed | `Error` + `Attention` (Errors switch) | notification, `fx_chime_attention`, 35-55-45 |
 | Connection lost mid-turn | `Attention` + `Attention` | nothing (nobody can hear it) |
 | Connection restored | `Confirm` + `Reconnected`, only if the loss was announced | nothing |
 
@@ -266,7 +294,7 @@ happened while away already had its notification. Periodic (clock) refreshes nev
 announce, so a status that merely aged out is not an event.
 
 **Notification channels.** Channel sounds are immutable once a channel exists, so
-session channels are versioned (`session-<kind>-v1-<s|v|sv|q>`); bumping
+session channels are versioned (`session-<kind>-v2-<s|v|sv|q>`); bumping
 `Notifier.CHANNEL_VERSION` migrates (deletes) older ones. One channel exists per
 kind and per sound / vibration combination the in-app switches ask for, created
 lazily, so turning a chime off in Zeron also turns it off in the notification.
@@ -279,21 +307,19 @@ this change).
 
 ## Settings
 
-Settings, then **Sounds & haptics**: master **Sounds**, **Interface sounds**, a
-ten-step **Volume** (default 50%, 100% is twice as loud, see Volume; sits a small
-gap under the Interface sounds row), the **Session
-sounds** master with independent **Completion**, **Input required** and **Errors**
-(mirroring the desktop's Settings, Notifications), **Background alerts**
-(notification permission), **Haptics** with **Strength** (Subtle / Standard /
-Strong) and a **Try them** list that plays the real cue and haptic together.
-Previews ignore rate limits and category switches (hearing a muted category is
-their point) but obey the master switches and the system state; a note at the top
-says when the phone is silent, in Do Not Disturb, has touch vibration off, or has
-no vibrator. The touch-sounds line is tappable and opens a sheet with how to turn the
-phone setting on, **Open sound settings** (`ACTION_SOUND_SETTINGS`, falling back to
-`ACTION_SETTINGS`) and **Play sounds anyway** (see "If you hear nothing"); the note is
-read again whenever the page resumes, so it clears itself after you fix the setting.
-Everything defaults on at the restrained levels above.
+Settings, then **Sounds & haptics**: the **Sounds & haptics** master at the top (off
+greys out everything below and silences sounds, haptics and the notification sounds
+and vibration; on lets the switches decide), then **Sounds** (every sound),
+**Interface sounds**, a ten-step **Volume** (default 50%, 100% is twice as loud, see
+Volume), the **Session sounds** master with independent **Completion**, **Input
+required** and **Errors** (mirroring the desktop's Settings, Notifications),
+**Background alerts** (notification permission), **Haptics** with **Strength**
+(Subtle / Standard / Strong) and a **Try them** list that plays the real cue and
+haptic together. Previews ignore rate limits and category switches (hearing a muted
+category is their point) but obey the master, Sounds and Haptics switches. Groups of
+rows that sit directly under each other are 10 dp apart (`GroupGap`; a section title
+has its own larger gap); the Session sounds group and the Background alerts card used
+to touch. Everything defaults on.
 
 ## Debugging
 
@@ -322,16 +348,16 @@ asserts durations (interface cues at most about 120 ms, event cues at most about
 last samples with zero-slope fades, DC offset, rising Open and falling Close,
 rising ToggleOn and falling ToggleOff, a rising Surge and falling Zip / FastOff,
 onset within 1 ms of the file start for every `fx_` file, that the in-app chimes are
-the desktop chimes plus the 6.02 dB headroom, that the provider cues are
+the desktop chimes plus 18.04 dB (previous headroom, slider headroom, the lift), that the provider cues are
 structurally distinct, and that interface cues stay 2 to 4 dB under the chimes. The full table is in [android-audit.md](android-audit.md).
 
 ## Verification and its limits
 
 JVM tests (`apps/android/app/src/test/java/sh/zeron/android/feedback`) cover the
-gate (switches, system state, silent, DND, throttling, stream cap, the "play anyway"
-override, reads per decision), the haptic planner (a plan for every `Haptic` at
+gate (the absolute master, the switches, that the environment has no system-state
+property at all, throttling, stream cap, reads per decision), the haptic planner (a plan for every `Haptic` at
 several levels on several simulated devices, strength scaling, the round-2 designs),
-the volume curve and its migration, the latency pieces (`LatencyTest`: the TTL cache,
+the volume curve and its one-time reset, the latency pieces (`LatencyTest`: the TTL cache,
 output-rate handling, the resampler, the keep-warm policy, every shipped file starting
 within 1 ms), the cue table (every `Cue` has its own file), the settings codec and the
 event policy with a recording fake (a finished session fires Done once; a

@@ -188,12 +188,13 @@ The desktop's Subagents view (#638, #647), on the phone:
 
 Every tap, toggle, sheet, swipe and session event has a considered haptic and a
 soft sound, played only while the app is open and in your control: Settings,
-**Sounds & haptics** has the master switches, interface and session sounds
+**Sounds & haptics** has one master switch (off silences every sound and vibration,
+on lets the switches below decide, whatever the phone's own touch-sound, ringer or
+Do Not Disturb settings say), interface and session sounds
 (completion, input required, errors, like the desktop), volume (default 50%; 100%
 is twice as loud), haptic strength (Subtle / Standard / Strong) and a Try them list.
-If the phone's Touch sounds setting is off a tappable note explains how to turn it
-on, or lets Zeron play its interface sounds anyway. The desktop's done / request /
-attention chimes are reused (trimmed and level-matched in the app, byte for byte for
+The desktop's done / request /
+attention chimes are reused (mastered louder and trimmed, in the app and for
 notifications); the interface cues are generated in the same family. When the app is in the background, session events arrive as
 notifications with the same sounds and matching vibration. Design, the cue and
 haptic tables and the policy: [`sound-design/android.md`](sound-design/android.md).
