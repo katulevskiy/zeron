@@ -624,6 +624,60 @@ impl Gate {
     }
 }
 
+/// A [`Gate`] shared by a run's concurrent approval requests (OpenCode and
+/// ACP answer each one on its own task). Unlike [`Gate::ask`] it never holds
+/// the gate while the user thinks, so requests the policy settles on its own
+/// keep flowing while a question is open.
+#[derive(Debug, Clone)]
+pub struct SharedGate(std::sync::Arc<std::sync::Mutex<Gate>>);
+
+impl SharedGate {
+    pub fn new(gate: Gate) -> Self {
+        Self(std::sync::Arc::new(std::sync::Mutex::new(gate)))
+    }
+
+    fn lock(&self) -> std::sync::MutexGuard<'_, Gate> {
+        self.0.lock().unwrap_or_else(|poisoned| poisoned.into_inner())
+    }
+
+    pub fn mode(&self) -> PermissionMode {
+        self.lock().policy.mode
+    }
+
+    pub fn decide(&self, action: &Action) -> Decision {
+        self.lock().decide(action)
+    }
+
+    /// The final answer for `action`: `Allow` or `Deny(reason)`, asking the
+    /// user through `request_input` when the policy says to. An "Always
+    /// allow" answer becomes a rule for the rest of the run.
+    pub async fn settle(
+        &self,
+        action: &Action,
+        request_input: &(dyn Fn(Vec<UserInputQuestion>) -> tokio::sync::oneshot::Receiver<Vec<UserInputAnswer>>
+              + Send
+              + Sync),
+    ) -> Decision {
+        match self.decide(action) {
+            Decision::Ask => {}
+            settled => return settled,
+        }
+        let question = approval_question(action);
+        let answers = request_input(vec![question.clone()]).await.unwrap_or_default();
+        let verdict = read_approval(&question, &answers);
+        if verdict == Verdict::AllowAlways
+            && let Some(rule) = rule_from(action)
+        {
+            self.lock().policy.rules.insert(0, rule);
+        }
+        if verdict.allows() {
+            Decision::Allow
+        } else {
+            Decision::Deny(format!("The user denied permission to {}.", action.summary()))
+        }
+    }
+}
+
 #[cfg(test)]
 mod tests {
     use super::*;
