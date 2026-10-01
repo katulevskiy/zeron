@@ -59,7 +59,7 @@ describe("multi-user browser authentication", () => {
       const jwt = await new SignJWT({ sid: `sid-${owner}`, org_id: organization, auth_time: Math.floor(Date.now() / 1000) })
         .setProtectedHeader({ alg: "RS256", kid: "multi-user" }).setSubject(owner)
         .setIssuer(bindings.WORKOS_ISSUER!).setExpirationTime("1h").sign(pair.privateKey);
-      replies.push({ user: { id: responseOwner }, access_token: jwt, refresh_token: `refresh-${owner}` });
+      replies.push({ user: { id: responseOwner, email: `${owner}@example.test`, first_name: "Fixture", last_name: owner, profile_picture_url: `https://images.example.test/${owner}.png`, metadata: { private: "not-public" } }, access_token: jwt, refresh_token: `refresh-${owner}` });
       const path = `callback?code=code&state=${authorization.searchParams.get("state")}`;
       const response = await call(bindings, path, transactionCookie);
       expect((await call(bindings, path, transactionCookie)).status).toBe(401);
@@ -74,7 +74,9 @@ describe("multi-user browser authentication", () => {
       expect(setCookie).toContain("Secure; HttpOnly; Path=/; SameSite=Strict");
       const cookie = `${SESSION_COOKIE}=${setCookie.match(/__Host-comet_session=([^;]+)/)![1]}`;
       const session = await (await call(bindings, "session", cookie)).json() as { ownerId: string; csrfToken: string };
-      expect(session).toMatchObject({ authenticated: true, ownerId: owner });
+      expect(session).toMatchObject({ authenticated: true, ownerId: owner, profile: { email: `${owner}@example.test`, firstName: "Fixture", lastName: owner, avatarUrl: `https://images.example.test/${owner}.png` } });
+      expect(Object.keys(session).sort()).toEqual(["authenticated", "csrfToken", "expiresAt", "organizationId", "ownerId", "profile"]);
+      expect(await (await call(bindings, `session?ownerId=someone-else`, cookie)).json()).toEqual(session);
       users.push({ owner, cookie, csrf: session.csrfToken, hash: await tokenHash(cookie.slice(cookie.indexOf("=") + 1)), device: `device-${crypto.randomUUID()}` });
     }
     expect((await login("signed-user", "different-response-user")).status).toBe(403);
@@ -92,7 +94,7 @@ describe("multi-user browser authentication", () => {
       expect(sessions.sessions.map(({ hash }) => hash)).toEqual([user.hash]);
       expect(await (await call(bindings, `devices?ownerId=${other.owner}`, user.cookie)).json()).toEqual({ devices: [{ id: user.device, online: true }] });
       expect((await call(bindings, `sessions/${other.hash}/revoke`, user.cookie, "POST", user.csrf)).status).toBe(200);
-      expect(await (await call(bindings, "session", other.cookie)).json()).toMatchObject({ authenticated: true, ownerId: other.owner });
+      expect(await (await call(bindings, "session", other.cookie)).json()).toMatchObject({ authenticated: true, ownerId: other.owner, profile: { email: `${other.owner}@example.test`, avatarUrl: `https://images.example.test/${other.owner}.png` } });
       expect((await call(bindings, "revoke-all", user.cookie, "POST", other.csrf)).status).toBe(401);
       expect((await call(bindings, "activity", user.cookie, "POST")).status).toBe(401);
       const activity = new URL("https://test/api/browser/activity");

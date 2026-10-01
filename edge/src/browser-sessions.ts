@@ -1,6 +1,6 @@
 import { verifyBrowserToken } from "./auth";
 import type { Env } from "./env";
-import { WorkOsAuthFailed, refresh } from "./workos";
+import { WorkOsAuthFailed, refresh, browserProfile, getBrowserProfile, type BrowserProfile } from "./workos";
 
 export const SESSION_COOKIE = "__Host-comet_session";
 
@@ -38,6 +38,7 @@ export interface BrowserSession {
   readonly expiresAt: number;
   readonly generation: number;
   readonly organizationId?: string;
+  readonly profile?: BrowserProfile;
 }
 
 
@@ -112,6 +113,8 @@ export class BrowserSessionStore implements DurableObject {
     this.env = env;
     ctx.storage.sql.exec("CREATE TABLE IF NOT EXISTS browser_sessions (hash TEXT PRIMARY KEY, owner TEXT NOT NULL, sid TEXT NOT NULL, csrf TEXT NOT NULL, organization_id TEXT, access_secret TEXT NOT NULL, refresh_secret TEXT NOT NULL, provider_expiry INTEGER NOT NULL, created INTEGER NOT NULL, last_active INTEGER NOT NULL, absolute_expiry INTEGER NOT NULL, generation INTEGER NOT NULL DEFAULT 1, revoked INTEGER NOT NULL DEFAULT 0)");
     ensureColumn(ctx.storage.sql, "browser_sessions", "organization_id", "TEXT");
+    ensureColumn(ctx.storage.sql, "browser_sessions", "profile_json", "TEXT");
+    ensureColumn(ctx.storage.sql, "browser_sessions", "profile_retry_after", "INTEGER NOT NULL DEFAULT 0");
     ctx.storage.sql.exec("CREATE INDEX IF NOT EXISTS browser_sessions_owner ON browser_sessions(owner, revoked)");
     ctx.storage.sql.exec("CREATE TABLE IF NOT EXISTS browser_transactions (state TEXT PRIMARY KEY, nonce_hash TEXT NOT NULL, verifier TEXT NOT NULL, expires INTEGER NOT NULL, consumed INTEGER NOT NULL DEFAULT 0)");
 
@@ -168,9 +171,10 @@ export class BrowserSessionStore implements DurableObject {
     const now = Date.now();
     const absolute = now + MAX_AGE;
     this.ctx.storage.sql.exec(
-      "INSERT INTO browser_sessions(hash, owner, sid, csrf, organization_id, access_secret, refresh_secret, provider_expiry, created, last_active, absolute_expiry) VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)",
+      "INSERT INTO browser_sessions(hash, owner, sid, csrf, organization_id, access_secret, refresh_secret, provider_expiry, created, last_active, absolute_expiry, profile_json) VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)",
       input.hash, input.ownerId, input.providerSessionId, input.csrfToken, input.organizationId ?? null,
-      await seal(this.env.BROWSER_SESSION_KEY, input.accessToken), await seal(this.env.BROWSER_SESSION_KEY, input.refreshToken), input.providerExpiresAt, now, now, absolute
+      await seal(this.env.BROWSER_SESSION_KEY, input.accessToken), await seal(this.env.BROWSER_SESSION_KEY, input.refreshToken), input.providerExpiresAt, now, now, absolute,
+      input.profile === undefined ? null : JSON.stringify(browserProfile(input.profile))
     );
     await this.schedule();
     return json({ expiresAt: absolute, generation: 1 });
@@ -179,10 +183,27 @@ export class BrowserSessionStore implements DurableObject {
     if (!string(input.hash, 128) || typeof input.touch !== "boolean") return json({ error: "invalid_request" }, 400);
     const row = await this.session(input.hash);
     if (!row) return json({ authenticated: false });
-    const refreshed = input.refresh === false ? row : await this.refreshIfNeeded(row);
+    const authenticated = input.refresh === false ? row : await this.refreshIfNeeded(row);
+    const refreshed = authenticated && input.profile === true && input.refresh !== false ? await this.backfillProfile(authenticated) : authenticated;
     if (!refreshed) return json({ authenticated: false });
     if (input.touch) this.ctx.storage.sql.exec("UPDATE browser_sessions SET last_active = ? WHERE hash = ? AND generation = ? AND revoked = 0", Date.now(), refreshed.hash, refreshed.generation);
-    return json({ authenticated: true, ownerId: refreshed.owner, providerSessionId: refreshed.sid, csrfToken: refreshed.csrf, expiresAt: refreshed.absolute_expiry, generation: refreshed.generation, organizationId: refreshed.organization_id ?? undefined });
+    return json({ authenticated: true, ownerId: refreshed.owner, providerSessionId: refreshed.sid, csrfToken: refreshed.csrf, expiresAt: refreshed.absolute_expiry, generation: refreshed.generation, organizationId: refreshed.organization_id ?? undefined, profile: refreshed.profile_json === null ? undefined : browserProfile(JSON.parse(refreshed.profile_json)) });
+  }
+  private async backfillProfile(row: SessionRow): Promise<SessionRow | undefined> {
+    if (row.profile_json !== null || row.profile_retry_after > Date.now() || !this.env.WORKOS_API_KEY) return row;
+    // Reserve the retry window before yielding: concurrent polls and restarts
+    // cannot hammer WorkOS. Profile failure never invalidates authentication.
+    this.ctx.storage.sql.exec("UPDATE browser_sessions SET profile_retry_after = ? WHERE hash = ? AND generation = ? AND revoked = 0", Date.now() + 60 * 60_000, row.hash, row.generation);
+    try {
+      const profile = await getBrowserProfile(this.env.WORKOS_API_KEY, row.owner);
+      const current = await this.session(row.hash);
+      if (!current || current.generation !== row.generation) return undefined;
+      this.ctx.storage.sql.exec("UPDATE browser_sessions SET profile_json = ? WHERE hash = ? AND generation = ? AND revoked = 0", JSON.stringify(profile), row.hash, row.generation);
+    } catch {
+      // A provider outage (including a deleted user) is not an auth decision.
+    }
+    const current = await this.session(row.hash);
+    return current?.generation === row.generation ? current : undefined;
   }
   private async activity(input: Json): Promise<Response> {
     if (!string(input.hash, 128) || !string(input.csrf, 256)) return json({ error: "invalid_request" }, 400);
@@ -354,7 +375,7 @@ export class BrowserSessionStore implements DurableObject {
   }
 }
 
-type SessionRow = { hash: string; owner: string; sid: string; csrf: string; organization_id?: string | null; access_secret: string; refresh_secret: string; provider_expiry: number; created: number; last_active: number; absolute_expiry: number; generation: number; revoked: number };
+type SessionRow = { hash: string; owner: string; sid: string; csrf: string; organization_id?: string | null; profile_json: string | null; profile_retry_after: number; access_secret: string; refresh_secret: string; provider_expiry: number; created: number; last_active: number; absolute_expiry: number; generation: number; revoked: number };
 
 const store = (env: Env) => env.BROWSER_SESSIONS.get(env.BROWSER_SESSIONS.idFromName(SESSION_STORE_NAME));
 const invoke = async (env: Env, path: string, value: Json): Promise<Json | undefined> => {
@@ -374,9 +395,10 @@ export const validateBrowserSession = async (
   env: Env,
   hash: string,
   touch = false,
-  refreshProvider = true
+  refreshProvider = true,
+  includeProfile = false
 ): Promise<BrowserSession | undefined> => {
-  const value = await invoke(env, "/validate", { hash, touch, refresh: refreshProvider });
+  const value = await invoke(env, "/validate", { hash, touch, refresh: refreshProvider, profile: includeProfile });
   if (!value || value.authenticated !== true || !string(value.ownerId, 256) || !string(value.providerSessionId, 256) || !string(value.csrfToken, 256) || typeof value.expiresAt !== "number" || typeof value.generation !== "number") return undefined;
   return {
     hash,
@@ -385,7 +407,8 @@ export const validateBrowserSession = async (
     csrfToken: value.csrfToken,
     expiresAt: value.expiresAt,
     generation: value.generation,
-    ...(typeof value.organizationId === "string" ? { organizationId: value.organizationId } : {})
+    ...(typeof value.organizationId === "string" ? { organizationId: value.organizationId } : {}),
+    ...(record(value.profile) ? { profile: browserProfile(value.profile) } : {})
   };
 };
 export const browserActivity = (env: Env, hash: string, csrf: string) => invoke(env, "/activity", { hash, csrf });

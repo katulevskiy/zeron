@@ -31,6 +31,7 @@ export interface ExchangeResult {
     readonly email: string;
     readonly firstName: string | null;
     readonly lastName: string | null;
+    readonly avatarUrl?: string | null;
   };
   readonly accessToken: string;
   readonly refreshToken: string;
@@ -52,6 +53,7 @@ interface WireUser {
   email: string;
   first_name: string | null;
   last_name: string | null;
+  profile_picture_url?: string | null;
 }
 
 interface WireAuthResponse {
@@ -117,6 +119,36 @@ export const exchange = async (env: Env, apiKey: string, code: string): Promise<
   };
 };
 
+export interface BrowserProfile {
+  readonly firstName?: string;
+  readonly lastName?: string;
+  readonly email?: string;
+  readonly avatarUrl?: string;
+}
+
+/** Explicit public projection: never copy provider credentials or metadata. */
+export const browserProfile = (value: unknown): BrowserProfile => {
+  if (typeof value !== "object" || value === null) return {};
+  const user = value as Record<string, unknown>;
+  const profile: Record<string, string> = {};
+  for (const field of ["firstName", "lastName", "email", "avatarUrl"] as const) {
+    const item = user[field];
+    if (typeof item === "string" && item.length > 0 && item.length <= 4096) profile[field] = item;
+  }
+  return profile;
+};
+
+/** Legacy browser-session backfill, bound to the already authenticated owner. */
+export const getBrowserProfile = async (apiKey: string, ownerId: string): Promise<BrowserProfile> => {
+  const res = await fetch(`${API}/user_management/users/${encodeURIComponent(ownerId)}`, {
+    headers: { authorization: `Bearer ${apiKey}` },
+    signal: AbortSignal.timeout(5000)
+  });
+  if (!res.ok) return failed(res);
+  const user = (await res.json()) as WireUser;
+  if (user.id !== ownerId) throw new WorkOsAuthFailed();
+  return browserProfile({ firstName: user.first_name, lastName: user.last_name, email: user.email, avatarUrl: user.profile_picture_url });
+};
 
 /** Browser-only code exchange. Native code-only sign-in intentionally remains
  * on `exchange`; callers must supply an RFC 7636 S256 verifier here. */
@@ -144,7 +176,8 @@ export const exchangeWithVerifier = async (
       id: r.user.id,
       email: r.user.email,
       firstName: r.user.first_name,
-      lastName: r.user.last_name
+      lastName: r.user.last_name,
+      avatarUrl: r.user.profile_picture_url
     },
     accessToken: r.access_token,
     refreshToken: r.refresh_token

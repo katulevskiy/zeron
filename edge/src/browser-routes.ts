@@ -1,7 +1,7 @@
 import { AUTH_USER_HEADER, type Env } from "./env";
 import { decodeDeviceFrame, encodeDeviceFrame } from "./device-frame";
 import { verifyBrowserToken } from "./auth";
-import { exchangeWithVerifier, revokeSession } from "./workos";
+import { browserProfile, exchangeWithVerifier, revokeSession } from "./workos";
 import {
   SESSION_COOKIE,
   DEV_SESSION_COOKIE,
@@ -63,10 +63,10 @@ const redirectWithCookies = (location: string, values: string[]): Response => {
 };
 
 const sessionCookieName = (env: Env, url: URL) => devBrowser(env, url) ? DEV_SESSION_COOKIE : SESSION_COOKIE;
-const session = async (request: Request, env: Env, url: URL) => {
+const session = async (request: Request, env: Env, url: URL, includeProfile = false) => {
   const all = cookies(request);
   const raw = all[sessionCookieName(env, url)] ?? all[SESSION_COOKIE];
-  return raw ? validateBrowserSession(env, await tokenHash(raw), false, true) : undefined;
+  return raw ? validateBrowserSession(env, await tokenHash(raw), false, true, includeProfile && !devBrowser(env, url)) : undefined;
 };
 const localSession = async (request: Request, env: Env, url: URL) => {
   const all = cookies(request);
@@ -149,6 +149,7 @@ export const handleBrowserRoute = async (request: Request, env: Env, url: URL): 
       const created = await createBrowserSession(env, {
         hash: await tokenHash(raw),
         ownerId: verified.userId,
+        profile: browserProfile(result.user),
         providerSessionId: verified.sessionId,
         csrfToken: csrf,
         ...(verified.orgId ? { organizationId: verified.orgId } : {}),
@@ -166,8 +167,8 @@ export const handleBrowserRoute = async (request: Request, env: Env, url: URL): 
     }
   }
   if (path === "/api/browser/session" && request.method === "GET") {
-    const found = await session(request, env, url);
-    return json(found ? { authenticated: true, ownerId: found.ownerId, ...(found.organizationId ? { organizationId: found.organizationId } : {}), expiresAt: found.expiresAt, csrfToken: found.csrfToken } : { authenticated: false });
+    const found = await session(request, env, url, true);
+    return json(found ? { authenticated: true, ownerId: found.ownerId, ...(found.organizationId ? { organizationId: found.organizationId } : {}), expiresAt: found.expiresAt, csrfToken: found.csrfToken, ...(found.profile ? { profile: found.profile } : {}) } : { authenticated: false });
   }
   if (path === "/api/browser/activity" && request.method === "POST") {
     const found = await csrfSession(request, env, url);
