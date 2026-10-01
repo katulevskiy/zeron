@@ -2348,16 +2348,7 @@ pub fn sending_bridge(
 
 /// Compact elapsed formatting, using at most two units up to days.
 pub fn format_elapsed(secs: i64) -> String {
-    let secs = secs.max(0);
-    if secs < 60 {
-        format!("{secs}s")
-    } else if secs < 3_600 {
-        format!("{}m {}s", secs / 60, secs % 60)
-    } else if secs < 86_400 {
-        format!("{}h {}m", secs / 3_600, (secs % 3_600) / 60)
-    } else {
-        format!("{}d {}h", secs / 86_400, (secs % 86_400) / 3_600)
-    }
+    zeron_proto::view::format_elapsed(secs)
 }
 
 fn worked_for_label(secs: i64) -> String {

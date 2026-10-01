@@ -8,12 +8,15 @@ pub mod ask;
 pub mod entities;
 pub mod file_mentions;
 pub mod goal;
+pub mod goal_view;
 pub mod invocation;
 pub mod motion;
 pub mod preview;
 pub mod sidebar_pins;
+pub mod todo_view;
 pub mod view;
 pub mod workflow;
+pub mod workflow_view;
 pub mod workspace;
 
 pub use agent::*;

@@ -53,8 +53,7 @@ pub type ActionSink = Rc<dyn Fn(WorkflowAction, &mut Window, &mut App)>;
 
 /// Whitespace collapsed, capped at 220 characters: one line of prose.
 pub(crate) fn one_line(text: &str) -> String {
-    let flat = text.split_whitespace().collect::<Vec<_>>().join(" ");
-    zeron_proto::truncate_chars(&flat, 220)
+    zeron_proto::view::one_line(text)
 }
 
 /// Capture knob `ZERON_WORKFLOW_CARD=expanded|collapsed`: the default open
