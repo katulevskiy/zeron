@@ -29,6 +29,7 @@ const SPAWN: &str = "spawn-background";
 struct BackgroundHarness {
     starts: Arc<AtomicUsize>,
     interrupted: Arc<AtomicBool>,
+    callback_script: Option<Vec<AgentEvent>>,
 }
 
 fn done() -> AgentEvent {
@@ -67,8 +68,19 @@ impl Harness for BackgroundHarness {
     ) -> Result<BoxStream<'static, Result<AgentEvent, HarnessError>>, HarnessError> {
         self.starts.fetch_add(1, Ordering::SeqCst);
         let interrupted = self.interrupted.clone();
+        let callback_script = self.callback_script.clone();
         let (tx, rx) = tokio::sync::mpsc::channel(16);
         tokio::spawn(async move {
+            if let Some(script) = callback_script {
+                for event in script {
+                    if tx.send(Ok(event)).await.is_err() {
+                        return;
+                    }
+                    tokio::time::sleep(Duration::from_millis(400)).await;
+                }
+                controls.interrupt.cancelled().await;
+                return;
+            }
             for event in [
                 AgentEvent::ToolCall {
                     id: SPAWN.into(),
@@ -129,6 +141,23 @@ impl Harness for BackgroundHarness {
     }
 }
 
+fn run_request(prompt: &str) -> RunRequest {
+    RunRequest {
+        mcp: None,
+        prompt: prompt.into(),
+        harness: Some(HarnessId::Mock),
+        model: None,
+        reasoning: None,
+        model_options: Default::default(),
+        cwd: "/tmp".into(),
+        sandbox: SandboxLevel::WorkspaceWrite,
+        auto_approve: false,
+        attachments: vec![],
+        resume: None,
+        worktree: None,
+    }
+}
+
 async fn wait_for(what: &str, mut predicate: impl FnMut() -> bool) {
     tokio::time::timeout(Duration::from_secs(10), async {
         while !predicate() {
@@ -150,6 +179,7 @@ async fn mobile_send_to_idle_parent_preserves_running_subagents() {
     registry.register(Arc::new(BackgroundHarness {
         starts: starts.clone(),
         interrupted: interrupted.clone(),
+        callback_script: None,
     }));
     let core = EngineCore::assemble_with_identity(
         host_dir.path(),
@@ -178,20 +208,7 @@ async fn mobile_send_to_idle_parent_preserves_running_subagents() {
         .unwrap();
     let handle = core.doc_host.open(CHAT).unwrap();
     // Match the desktop composer, including its approval policy.
-    let initial = RunRequest {
-        mcp: None,
-        prompt: "start background work".into(),
-        harness: Some(HarnessId::Mock),
-        model: None,
-        reasoning: None,
-        model_options: Default::default(),
-        cwd: "/tmp".into(),
-        sandbox: SandboxLevel::WorkspaceWrite,
-        auto_approve: false,
-        attachments: vec![],
-        resume: None,
-        worktree: None,
-    };
+    let initial = run_request("start background work");
     core.sessions
         .dispatch(
             CHAT,
@@ -294,4 +311,88 @@ async fn mobile_send_to_idle_parent_preserves_running_subagents() {
     .await;
     phone.shutdown();
     core.shutdown().await;
+}
+
+/// Background metadata survives a completed turn without fabricating another
+/// assistant entry, then clears on callback completion or runtime shutdown.
+#[tokio::test(flavor = "multi_thread")]
+async fn parked_background_callbacks_do_not_unpark_the_main_thread() {
+    let dir = tempfile::tempdir().unwrap();
+    let registry = HarnessRegistry::new();
+    registry.register(Arc::new(BackgroundHarness {
+        starts: Arc::new(AtomicUsize::new(0)),
+        interrupted: Arc::new(AtomicBool::new(false)),
+        callback_script: Some(vec![
+            AgentEvent::TextDelta {
+                text: "Waiting for a build".into(),
+            },
+            AgentEvent::PendingCallbacks { count: 1 },
+            done(),
+            AgentEvent::PendingCallbacks { count: 0 },
+            AgentEvent::TextDelta {
+                text: "Build finished".into(),
+            },
+            done(),
+            AgentEvent::PendingCallbacks { count: 1 },
+        ]),
+    }));
+    let core = EngineCore::assemble(dir.path(), Arc::new(registry), HarnessId::Mock, None).unwrap();
+    let handle = core.doc_host.open(CHAT).unwrap();
+    core.sessions
+        .dispatch(
+            CHAT,
+            HarnessId::Mock,
+            run_request("start a background build"),
+            Some("callback-user".into()),
+        )
+        .await
+        .unwrap();
+    let entries = || handle.doc().read_entries().unwrap();
+    let idle_with = |count| {
+        core.sessions
+            .session_status(CHAT)
+            .is_some_and(|s| s.status == SessionStatus::Idle && s.pending_callbacks == count)
+    };
+    wait_for("settled main thread awaiting callback", || idle_with(1)).await;
+    let first_completion = core
+        .sessions
+        .session_status(CHAT)
+        .unwrap()
+        .last_completed_turn;
+    let first_assistants = entries()
+        .iter()
+        .filter(|entry| entry.role == MessageRole::Assistant)
+        .count();
+    wait_for("callback completion metadata", || idle_with(0)).await;
+    assert_eq!(
+        core.sessions
+            .session_status(CHAT)
+            .unwrap()
+            .last_completed_turn,
+        first_completion,
+        "metadata cannot fabricate another completed main turn"
+    );
+    assert_eq!(
+        entries()
+            .iter()
+            .filter(|entry| entry.role == MessageRole::Assistant)
+            .count(),
+        first_assistants,
+        "callback metadata cannot fabricate assistant output"
+    );
+    wait_for("new callback after an actual wake turn", || idle_with(1)).await;
+    assert!(
+        entries().iter().any(|entry| {
+            entry.role == MessageRole::Assistant
+                && entry.status == Some(MessageStatus::Complete)
+                && entry.parts.iter().any(|part| {
+                    matches!(part, MessagePart::Text { text, .. } if text == "Build finished")
+                })
+        }),
+        "main output still wakes and settles its own assistant entry"
+    );
+    // Cancel targets an in-flight user turn; an idle warm process is retired
+    // by engine shutdown, which must clear its deferred-work metadata too.
+    core.sessions.shutdown().await;
+    wait_for("runtime shutdown clears pending callbacks", || idle_with(0)).await;
 }

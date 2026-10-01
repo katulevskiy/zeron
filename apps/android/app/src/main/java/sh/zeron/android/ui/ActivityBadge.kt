@@ -63,8 +63,9 @@ fun HarnessActivityTile(harness: String?, tone: Color, running: UInt) {
         ) { HarnessMark(harness, 24.dp, tint = MaterialTheme.colorScheme.onSurface) }
         if (running > 0u) {
             // Keep the right edge fixed as the capsule grows inward. Even
-            // "99+" leaves the row's headline clear and never covers the mark.
-            SubagentCountBadge(running, Modifier.align(Alignment.TopEnd).offset(x = 8.dp, y = (-11).dp))
+            // "99+" leaves the row's headline clear. The vertical overhang
+            // fits inside a grouped row's padding so its top cannot clip.
+            SubagentCountBadge(running, Modifier.align(Alignment.TopEnd).offset(x = 8.dp, y = (-8).dp))
         }
     }
 }
