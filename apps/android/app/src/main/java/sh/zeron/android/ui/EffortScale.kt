@@ -112,25 +112,6 @@ class DetentTracker(private val count: Int, start: Int) {
  * the last, and one unit is the distance between two levels.
  */
 object EffortTuning {
-    /**
-     * How far from a level, as a fraction of one step on each side, the finger can wander before the
-     * thumb starts leaving it (the magnetic well). The thumb then crosses to the next level across the
-     * remaining `1 - 2 * WELL_FRACTION` of the step. It equals `0.5 - [EffortScale.HYSTERESIS]`, so the
-     * thumb has just landed on the new level when the selection (and its haptic) changes.
-     */
-    const val WELL_FRACTION = 0.38f
-
-    /**
-     * The speed limit of the finger as the slider sees it, in steps per second. 7.5 is one level per
-     * 133 ms: a quick flick moves one or two levels, a deliberate drag across a five-level bar (about
-     * 4 steps) still takes about half a second and the whole bar in 1 to 2 s feels unrestrained.
-     */
-    const val MAX_STEPS_PER_SECOND = 7.5f
-
-    /** Spring stiffness (1/s^2) and damping ratio of the thumb chasing the finger's target. Near critical: a touch of give. */
-    const val FOLLOW_STIFFNESS = 520f
-    const val FOLLOW_DAMPING_RATIO = 0.72f
-
     /** Spring of the thumb dropping into a level after release or a tap: slight overshoot, springs into the detent. */
     const val SETTLE_STIFFNESS = 430f
     const val SETTLE_DAMPING_RATIO = 0.6f
@@ -138,12 +119,6 @@ object EffortTuning {
     /** Spring of the thumb snapping back from a rubber-band stretch: loose and bouncy. */
     const val REBOUND_STIFFNESS = 420f
     const val REBOUND_DAMPING_RATIO = 0.3f
-
-    /**
-     * On release the thumb is carried at most this far (in steps) toward where the finger is, beyond where the speed limit had
-     * got it: a short quick flick still moves one level, but can never throw the selection further.
-     */
-    const val RELEASE_CARRY_STEPS = 0.5f
 
     /** The thumb grows by this many px (per side) for each px it is stretched past an end. */
     const val THUMB_STRETCH_GAIN = 0.3f
@@ -153,45 +128,24 @@ object EffortTuning {
 }
 
 /**
- * The finger-to-thumb mapping of the effort selector, pure so it can be tested. The thumb does not follow
- * the finger 1:1: every level is a well it clings to, and it springs to the next one once the finger has
- * pulled out of the well.
+ * The finger-to-thumb mapping of the effort selector, pure so it can be tested. While a finger is down the
+ * thumb is exactly under it (no stickiness, no lag, no inertia); only past an end does it rubber-band.
+ * On release the thumb springs to the nearest level ([EffortTuning.SETTLE_STIFFNESS]).
  */
 object EffortDrag {
-    /** smoothstep(0..1). */
-    private fun smooth(t: Float): Float {
-        val c = t.coerceIn(0f, 1f)
-        return c * c * (3f - 2f * c)
-    }
-
     /**
-     * The thumb's target for a finger at [p] (steps, unbounded). Between two levels it is a staircase:
-     * flat inside the wells ([EffortTuning.WELL_FRACTION] each side of a level) and a smoothstep across
-     * the rest. Beyond the first or last level's well it is the end's rubber band: [EffortFx.damp] of how
-     * far the finger got past the well, never more than [maxStretch] steps past the end. Monotonic and
-     * continuous everywhere, equal to [p] at every level and exactly midway at every midpoint.
+     * The thumb for a finger at [p] (steps, unbounded): [p] itself between the first and last level, and past
+     * an end the rubber band, [EffortFx.damp] of how far the finger got, never more than [maxStretch] steps
+     * past the end. Monotonic and continuous everywhere.
      */
-    fun target(p: Float, count: Int, maxStretch: Float, well: Float = EffortTuning.WELL_FRACTION): Float {
+    fun follow(p: Float, count: Int, maxStretch: Float): Float {
         if (count <= 1) return 0f
         val last = (count - 1).toFloat()
-        if (p >= last) return last + EffortFx.damp((p - last - well).coerceAtLeast(0f), maxStretch)
-        if (p <= 0f) return -EffortFx.damp((-p - well).coerceAtLeast(0f), maxStretch)
-        val base = kotlin.math.floor(p)
-        val t = p - base
-        return base + smooth((t - well) / (1f - 2f * well))
-    }
-
-    /**
-     * The position (steps) a release settles toward: the speed-limited [pEffective], carried up to
-     * [EffortTuning.RELEASE_CARRY_STEPS] toward the [finger]. The nearest level to it is the landing.
-     */
-    fun landing(pEffective: Float, finger: Float): Float =
-        pEffective + (finger - pEffective).coerceIn(-EffortTuning.RELEASE_CARRY_STEPS, EffortTuning.RELEASE_CARRY_STEPS)
-
-    /** One frame of the finger as the slider sees it: [pEffective] moves toward [finger] at most [MAX_STEPS][EffortTuning.MAX_STEPS_PER_SECOND] a second. */
-    fun advance(pEffective: Float, finger: Float, dt: Float, maxStepsPerSecond: Float = EffortTuning.MAX_STEPS_PER_SECOND): Float {
-        val budget = maxStepsPerSecond * dt.coerceAtLeast(0f)
-        return pEffective + (finger - pEffective).coerceIn(-budget, budget)
+        return when {
+            p > last -> last + EffortFx.damp(p - last, maxStretch)
+            p < 0f -> -EffortFx.damp(-p, maxStretch)
+            else -> p
+        }
     }
 }
 

@@ -200,10 +200,9 @@ fun EffortSlider(
     // past an end). Thumb, fill, dots and halo are all derived from it, so they can never disagree.
     val spring = remember(count) { ThumbSpring(step.toFloat()) }
     var thumbX by remember(count) { mutableFloatStateOf(step.toFloat()) }
-    // The finger as the slider sees it: where it is (steps) and the speed-limited position the thumb works from.
+    // The finger, in steps (unbounded): while it is down the thumb is exactly under it.
     val finger = remember(count) { floatArrayOf(step.toFloat()) }
-    val effective = remember(count) { floatArrayOf(step.toFloat()) }
-    // Mode of the spring: following a finger that has pulled out of its well, dropping into a level, or rebounding from a stretch.
+    // Mode of the thumb: under a dragging finger, dropping into a level, or rebounding from a stretch.
     var engaged by remember { mutableStateOf(false) }
     var rebounding by remember { mutableStateOf(false) }
     // The level the thumb settles on when not dragging (set at release before the parent's recomposition catches up).
@@ -265,8 +264,7 @@ fun EffortSlider(
         val busy = dragging && engaged
         val target: Float
         if (busy) {
-            effective[0] = EffortDrag.advance(effective[0], finger[0], dt)
-            target = EffortDrag.target(effective[0], count, maxStretch)
+            target = EffortDrag.follow(finger[0], count, maxStretch)
             // Stretch haptics fire once per pull: entering it, then reaching the wall.
             val mag = EffortGeometry.stretch(target, count, travel)
             if (!pull[0] && mag > 1.5f * density.density) {
@@ -283,11 +281,11 @@ fun EffortSlider(
         } else {
             target = restStep.toFloat()
         }
-        if (reduceMotion) {
+        if (reduceMotion || busy) {
+            // Under the finger: no spring, no lag.
             spring.snapTo(target)
         } else {
             val (k, z) = when {
-                busy -> EffortTuning.FOLLOW_STIFFNESS to EffortTuning.FOLLOW_DAMPING_RATIO
                 rebounding -> EffortTuning.REBOUND_STIFFNESS to EffortTuning.REBOUND_DAMPING_RATIO
                 else -> EffortTuning.SETTLE_STIFFNESS to EffortTuning.SETTLE_DAMPING_RATIO
             }
@@ -401,19 +399,17 @@ fun EffortSlider(
                             if (change.positionChanged()) {
                                 finger[0] = stepsAt(change.position.x)
                                 if (!engaged && abs(change.position.x - down.position.x) > viewConfiguration.touchSlop) {
-                                    // Out of the tap: from here the thumb works from where it is, toward the finger, at a limited speed.
+                                    // Out of the tap: from here the thumb is under the finger.
                                     moved = true
                                     engaged = true
-                                    effective[0] = spring.x.coerceIn(0f, span.toFloat())
                                     ensureLoop()
                                 }
                                 change.consume()
                             }
                             if (!change.pressed) break
                         }
-                        // A tap lands on the stop under the finger; a drag on the stop nearest the (speed-limited) thumb, carried a
-                        // half step toward the finger. No fling: a flick must not throw the selection past what the drag covered.
-                        val landAt = if (engaged) EffortDrag.landing(effective[0], finger[0]) / span else EffortScale.fractionAt(down.position.x, width, inset)
+                        // A tap lands on the stop under the finger; a drag on the stop nearest to where it let go. No fling.
+                        val landAt = if (engaged) finger[0] / span else EffortScale.fractionAt(down.position.x, width, inset)
                         val land = EffortScale.nearestStep(landAt.coerceIn(0f, 1f), count)
                         if (land != tracker.step) {
                             tracker.jump(land)
