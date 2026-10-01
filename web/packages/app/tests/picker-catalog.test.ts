@@ -1,7 +1,7 @@
 import { afterEach, beforeEach, describe, expect, it, vi } from "vitest";
 import { RpcError } from "@zeron/engine-client";
 import type { HarnessDescriptor, Model } from "@zeron/proto";
-import { PickerCatalog } from "../src/state/picker-catalog";
+import { modelDiscoveryErrorMessage, PickerCatalog } from "../src/state/picker-catalog";
 import { HARNESS_IN_FLIGHT_MS } from "../src/lib/catalog-loading";
 
 interface Call {
@@ -352,5 +352,72 @@ describe("PickerCatalog", () => {
     expect(rows[0]!.id).toBe("titan");
     expect(rows[0]!.label).toBe("Titan");
     expect(rows[0]!.options.some((option) => option.id === "contextWindow")).toBe(true);
+  });
+
+  it("drops a stale model discovery error after that harness is reset and retried", async () => {
+    class DeferredModelsClient {
+      readonly calls: Call[] = [];
+      readonly pending: Array<{ resolve: (rows: Model[]) => void; reject: (error: Error) => void }> = [];
+
+      call<T>(method: string, params?: unknown): Promise<T> {
+        this.calls.push({ method, params });
+        if (method !== "ListModels") {
+          return Promise.resolve([] as T);
+        }
+        return new Promise<T>((resolve, reject) => {
+          this.pending.push({
+            resolve: (rows) => resolve(rows as T),
+            reject,
+          });
+        });
+      }
+    }
+
+    const deferred = new DeferredModelsClient();
+    const retrying = new PickerCatalog(deferred as unknown as ConstructorParameters<typeof PickerCatalog>[0]);
+    try {
+      const first = retrying.loadModels("codex");
+      retrying.resetModels("codex");
+      const second = retrying.loadModels("codex", { force: true });
+      expect(deferred.pending).toHaveLength(2);
+      deferred.pending[1]!.resolve([{ id: "gpt-b", label: "GPT B", reasoningLevels: ["medium"], options: [] }]);
+      await second;
+      deferred.pending[0]!.reject(new RpcError("failed", "missing_executable: codex"));
+      await first;
+      expect(retrying.getModels("codex").rows.map((row) => row.id)).toEqual(["gpt-b"]);
+      expect(retrying.getModels("codex").error).toBeNull();
+    } finally {
+      retrying.dispose();
+    }
+  });
+
+  it("keeps discovery failures and retry destinations with their engine catalog", async () => {
+    const engineA = new FakeClient();
+    const engineB = new FakeClient();
+    const catalogA = new PickerCatalog(engineA as unknown as ConstructorParameters<typeof PickerCatalog>[0]);
+    const catalogB = new PickerCatalog(engineB as unknown as ConstructorParameters<typeof PickerCatalog>[0]);
+    try {
+      engineA.nextError = new RpcError("failed", "missing_executable: harness binary not found: codex");
+      await catalogA.loadModels("codex");
+      engineB.models = [{ id: "gpt-b", label: "GPT B", reasoningLevels: ["high"], options: [] }];
+      await catalogB.loadModels("codex");
+
+      expect(catalogA.getModels("codex").error).toContain("missing_executable");
+      expect(catalogB.getModels("codex").rows.map((row) => row.id)).toEqual(["gpt-b"]);
+      expect(modelDiscoveryErrorMessage(catalogA.getModels("codex").error!, "codex", "Engine A")).toContain(
+        "CODEX_EXECUTABLE there; the browser cannot do this",
+      );
+
+      catalogA.resetModels("codex");
+      engineA.models = [{ id: "gpt-a", label: "GPT A", reasoningLevels: ["medium"], options: [] }];
+      await catalogA.loadModels("codex", { force: true });
+      expect(catalogA.getModels("codex").rows.map((row) => row.id)).toEqual(["gpt-a"]);
+      expect(catalogB.getModels("codex").rows.map((row) => row.id)).toEqual(["gpt-b"]);
+      expect(engineA.calls.filter((call) => call.method === "ListModels")).toHaveLength(2);
+      expect(engineB.calls.filter((call) => call.method === "ListModels")).toHaveLength(1);
+    } finally {
+      catalogA.dispose();
+      catalogB.dispose();
+    }
   });
 });

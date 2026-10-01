@@ -104,6 +104,19 @@ function listWithError<T>(prev: LoadableList<T>, message: string, kind: RpcError
   return { rows: prev.rows, loaded: prev.loaded, error: message, errorKind: kind, loading: false, generation: prev.generation };
 }
 
+/**
+ * Contextualize an engine-side discovery failure without implying that the
+ * browser can install a CLI or change the remote engine's executable path.
+ */
+export function modelDiscoveryErrorMessage(error: string, harness: HarnessId, engineLabel: string): string {
+  const target = engineLabel.trim() || "this engine";
+  if (/missing_executable/i.test(error)) {
+    const override = harness === "codex" ? "CODEX_EXECUTABLE" : "that harness's executable override";
+    return `Model discovery on ${target} failed: ${error}. Install ${harness} on ${target}, or set ${override} there; the browser cannot do this.`;
+  }
+  return `Model discovery on ${target} failed: ${error}`;
+}
+
 function listWithLoading<T>(prev: LoadableList<T>): LoadableList<T> {
   return { rows: prev.rows, loaded: prev.loaded, error: prev.error, errorKind: prev.errorKind, loading: true, generation: prev.generation + 1 };
 }
@@ -181,7 +194,9 @@ export class PickerCatalog {
    */
   #harnessesFlightSeq = 0;
   readonly #models = new Map<HarnessId, LoadableList<Model>>();
-  readonly #modelsInFlight = new Set<HarnessId>();
+  /** Per-harness flight identities make a reset/retry reject old replies. */
+  readonly #modelsInFlight = new Map<HarnessId, number>();
+  #modelsFlightSeq = 0;
   readonly #listeners = new Set<() => void>();
   readonly #modelListeners = new Map<HarnessId, Set<() => void>>();
   /** The device that runs the agents, when it differs from the engine's own. */
@@ -231,7 +246,7 @@ export class PickerCatalog {
     }
     this.#targetDeviceId = deviceId;
     const hadHarnesses = this.#harnesses.loaded || this.#harnesses.loading || this.#harnesses.error !== null;
-    const requestedModels = [...this.#modelsInFlight, ...this.#models.keys()];
+    const requestedModels = [...this.#modelsInFlight.keys(), ...this.#models.keys()];
     this.invalidate();
     if (hadHarnesses) {
       void this.loadHarnesses();
@@ -343,7 +358,8 @@ export class PickerCatalog {
     if (!shouldLoad) {
       return;
     }
-    this.#modelsInFlight.add(harness);
+    const flight = ++this.#modelsFlightSeq;
+    this.#modelsInFlight.set(harness, flight);
     const epoch = this.#epoch;
     const generation = current.generation + 1;
     if (!current.loaded) {
@@ -358,7 +374,7 @@ export class PickerCatalog {
             harness,
             ...this.#targetParams(),
           });
-          if (this.#disposed || this.#epoch !== epoch) {
+          if (this.#modelFlightStale(harness, flight, epoch)) {
             return;
           }
           const arr = Array.isArray(rows) ? rows : [];
@@ -371,7 +387,7 @@ export class PickerCatalog {
         } catch (error) {
           const rpcError = error instanceof RpcError ? error : new RpcError("transport", String(error));
           if (isUnknownMethod(rpcError)) {
-            if (this.#disposed || this.#epoch !== epoch) {
+            if (this.#modelFlightStale(harness, flight, epoch)) {
               return;
             }
             this.#models.set(harness, listWithRows(this.getModels(harness), EMPTY_MODELS, generation));
@@ -381,28 +397,31 @@ export class PickerCatalog {
           if (harness !== "opencode" || attempt >= OPENCODE_MAX_ATTEMPTS) {
             throw error;
           }
-          // A plugin-heavy OpenCode cold start can fail once while caches,
-          // MCP servers, or plugin runtimes are still warming. Keep this
-          // single Loading slot alive so recovery requires no picker
-          // close/reopen and cannot launch duplicate probes.
           this.#log("opencode model discovery failed; retrying automatically", { attempt });
           await delay(attempt * 2_000);
           attempt += 1;
-          if (this.#disposed || this.#epoch !== epoch) {
+          if (this.#modelFlightStale(harness, flight, epoch)) {
             return;
           }
         }
       }
     } catch (error) {
-      if (this.#disposed || this.#epoch !== epoch) {
+      if (this.#modelFlightStale(harness, flight, epoch)) {
         return;
       }
       const rpcError = error instanceof RpcError ? error : new RpcError("transport", String(error));
       this.#models.set(harness, listWithError(this.getModels(harness), rpcError.message, rpcError.kind));
       this.#commitModels(harness);
     } finally {
-      this.#modelsInFlight.delete(harness);
+      if (this.#modelsInFlight.get(harness) === flight) {
+        this.#modelsInFlight.delete(harness);
+      }
     }
+  }
+
+  /** True when this model flight belongs to an older retry or engine target. */
+  #modelFlightStale(harness: HarnessId, flight: number, epoch: number): boolean {
+    return this.#disposed || this.#epoch !== epoch || this.#modelsInFlight.get(harness) !== flight;
   }
 
   /**
@@ -437,6 +456,10 @@ export class PickerCatalog {
 
   /** Reset one model slot to `Idle` (a Retry click). */
   resetModels(harness: HarnessId): void {
+    // A Retry starts a new ownership epoch for this harness. The old promise
+    // may still settle, but #modelFlightStale drops it instead of repainting
+    // the new target's successful catalog or error state.
+    this.#modelsInFlight.delete(harness);
     this.#models.set(harness, emptyList<Model>());
     this.#commitModels(harness);
   }

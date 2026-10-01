@@ -56,6 +56,8 @@ export interface SendBlockedConditions {
    * agents — offline/loading must not block.
    */
   readonly newChatNoAgents: boolean;
+  /** The selected harness is no longer offered by its selected engine. */
+  readonly selectedHarnessUnavailable: boolean;
 }
 
 /**
@@ -67,7 +69,8 @@ export function sendBlocked(conditions: SendBlockedConditions): boolean {
     conditions.queueEditFinishing ||
     conditions.requestTargetDisconnected ||
     conditions.reviewCommentFlushPending ||
-    conditions.newChatNoAgents
+    conditions.newChatNoAgents ||
+    conditions.selectedHarnessUnavailable
   );
 }
 

@@ -83,12 +83,14 @@ describe("sendBlocked", () => {
       requestTargetDisconnected: false,
       reviewCommentFlushPending: false,
       newChatNoAgents: false,
+      selectedHarnessUnavailable: false,
     };
     expect(sendBlocked(open)).toBe(false);
     expect(sendBlocked({ ...open, queueEditFinishing: true })).toBe(true);
     expect(sendBlocked({ ...open, requestTargetDisconnected: true })).toBe(true);
     expect(sendBlocked({ ...open, reviewCommentFlushPending: true })).toBe(true);
     expect(sendBlocked({ ...open, newChatNoAgents: true })).toBe(true);
+    expect(sendBlocked({ ...open, selectedHarnessUnavailable: true })).toBe(true);
   });
 });
 

@@ -28,7 +28,14 @@ import {
   noticeToneForMessage,
 } from "../lib/notice-chip";
 import { NoticeChip } from "./notice-chip";
-import { chatDrafts, composerDefaults, draftFromChat, rememberedModelFor } from "../lib/composer-draft";
+import {
+  chatDrafts,
+  composerDefaults,
+  defaultDraftHarness,
+  draftFromChat,
+  reconcileFreshDraftHarness,
+  rememberedModelFor,
+} from "../lib/composer-draft";
 import { useDraftModelReconciliation } from "../lib/composer-reconciliation";
 import { offeredHarnesses } from "../lib/model-rows";
 import {
@@ -503,10 +510,11 @@ export function Composer({
     // the remembered model outright (an empty one defers to the model
     // reconciliation, which seeds it once the list lands).
     const rememberedHarness = chat.config === null ? composerDefaults.getSnapshot().harness : null;
+    const initialHarness = chat.config?.harness ?? defaultDraftHarness(harnesses.rows, rememberedHarness);
     return draftFromChat(
       chat,
       harnesses.rows,
-      catalog.getModels(chat.config?.harness ?? rememberedHarness ?? "claude-code").rows,
+      catalog.getModels(initialHarness).rows,
       composerDefaults.getSnapshot().reasoning,
       rememberedHarness !== null
         ? { harness: rememberedHarness, model: rememberedModelFor(rememberedHarness) }
@@ -527,6 +535,12 @@ export function Composer({
   // flip state, and a mode flip there never commits (7284-7300 — auto-grow
   // still morphs; only the compact↔expanded flip is suppressed).
   const newChat = chat.id === "";
+  // Loading preserves sticky intent; only a settled selected-engine catalog
+  // can declare the draft unavailable and block discovery/sends.
+  const selectedHarnessUnavailable =
+    harnesses.loaded &&
+    harnesses.error === null &&
+    !offeredHarnesses(harnesses.rows).some((row) => row.id === draft.harness);
   // Route coordination must not force an established thread into the
   // two-row layout: `dock_height`'s session side reads the composer's OWN
   // expanded state, never the forced one.
@@ -645,47 +659,20 @@ export function Composer({
       );
       return;
     }
-    if (harnesses.rows.length === 0) {
-      return;
-    }
-    setDraft((current) => {
-      if (harnesses.rows.some((h: HarnessDescriptor) => h.id === current.harness)) {
-        return current;
-      }
-      const remembered = composerDefaults.getSnapshot().harness;
-      const offered = offeredHarnesses(harnesses.rows);
-      const next =
-        remembered !== null && harnesses.rows.some((h: HarnessDescriptor) => h.id === remembered)
-          ? remembered
-          : offered[0]?.id ?? harnesses.rows[0]?.id;
-      if (next === undefined) {
-        return current;
-      }
-      return {
-        harness: next,
-        model: null,
-        // A corrected harness keeps the remembered level as the preference
-        // layer (native falls back to it via effective_reasoning); the
-        // reconciliation below re-derives it against the new harness's
-        // effective ladder once models resolve.
-        reasoning: composerDefaults.getSnapshot().reasoning,
-        sandbox: "workspace-write",
-        modelOptions: {},
-      };
-    });
+    const defaults = composerDefaults.getSnapshot();
+    setDraft((current) =>
+      reconcileFreshDraftHarness(current, harnesses.rows, defaults.harness, defaults.reasoning),
+    );
   }, [chat.config, harnesses.rows]);
 
   // Once a harness is picked, ensure the model catalog is loaded and seed
   // the draft with the remembered model (pickers.rs:748-796).
   useEffect(() => {
-    if (!harnesses.loaded) {
-      return;
-    }
-    if (harnesses.rows.length === 0) {
+    if (!harnesses.loaded || !offeredHarnesses(harnesses.rows).some((row) => row.id === draft.harness)) {
       return;
     }
     void catalog.loadModels(draft.harness);
-  }, [catalog, draft.harness, harnesses.loaded, harnesses.rows.length]);
+  }, [catalog, draft.harness, harnesses.loaded, harnesses.rows]);
 
   // Model/descriptor reconciliation: seed the draft's model and re-derive
   // reasoning against the EFFECTIVE ladder (model levels when nonempty, else
@@ -2404,6 +2391,7 @@ export function Composer({
         // LOADED catalog that reports no agents — offline/loading must not
         // block.
         newChatNoAgents: newChat && harnesses.loaded && offeredHarnesses(harnesses.rows).length === 0,
+        selectedHarnessUnavailable,
       })
     ) {
       // A blocked send is a no-op — no failure, no wire call
@@ -2411,7 +2399,7 @@ export function Composer({
       return;
     }
     await send(text, mode === "queue");
-  }, [busy, text, staged, runLive, commentCount, editingMessage, onEditFinish, session.client, interrupt, send, commitQueueEdit, newChat, harnesses.loaded, harnesses.rows]);
+  }, [busy, text, staged, runLive, commentCount, editingMessage, onEditFinish, session.client, interrupt, send, commitQueueEdit, newChat, harnesses.loaded, harnesses.rows, selectedHarnessUnavailable]);
 
   // ── Key policy: completions → phone newline → wizard → Enter (§2.7) ────
   // `resolveEnterAction` (lib/composer-send.ts) is the Enter branch's single
@@ -2753,6 +2741,7 @@ export function Composer({
       requestTargetDisconnected: session.client.state !== "connected",
       reviewCommentFlushPending: false,
       newChatNoAgents: newChat && harnesses.loaded && offeredHarnesses(harnesses.rows).length === 0,
+      selectedHarnessUnavailable,
     });
 
   // ── The queue-degraded caption (§2.3) ───────────────────────────────────
@@ -3141,6 +3130,7 @@ export function Composer({
                       catalog={catalog}
                       draft={draft}
                       chatConfig={chat.config}
+                      engineLabel={session.engine.label}
                       newChat={newChat}
                       onDraft={applyDraft}
                       onPersist={persistDraft}

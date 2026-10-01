@@ -3,6 +3,7 @@ import type { DraftConfig, DraftConfigUpdate } from "./composer-actions";
 import { buildChatConfig } from "./composer-actions";
 import type { StorageLike } from "./storage";
 import { clampReasoning, effectiveReasoningLadder, offeredOptions } from "./traits-summary";
+import { offeredHarnesses } from "./model-rows";
 
 /**
  * The native reasoning normalization (`pickers.rs:1493-1512`): clamp ONLY
@@ -45,18 +46,18 @@ export function defaultDraft(
   remembered: ReasoningLevel | null = null,
   sticky: StickyDraftPicks | null = null,
 ): DraftConfig {
+  const offered = offeredHarnesses(catalog);
   const harness =
-    (sticky !== null ? catalog.find((row) => row.id === sticky.harness) : undefined) ??
-    catalog.find((row) => row.enabled !== false) ??
-    catalog[0] ??
-    null;
-  // An empty catalog seeds the remembered harness itself (the models have
-  // not landed — a null model, seeded by the reconciliation once they do).
-  const harnessId: HarnessId = harness?.id ?? sticky?.harness ?? "claude-code";
-  // The remembered model only applies while the resolved harness IS the
-  // remembered one — the model list is per-harness.
+    (sticky !== null ? offered.find((row) => row.id === sticky.harness) : undefined) ?? offered[0] ?? null;
+  // An empty catalog is still loading intent: keep the sticky harness long
+  // enough for its own catalog rows to land. A loaded nonempty catalog with
+  // no offered harness deliberately has no selectable model.
+  const harnessId: HarnessId = harness?.id ?? (catalog.length === 0 ? sticky?.harness : undefined) ?? "claude-code";
   const rememberedModel = sticky !== null && sticky.harness === harnessId ? sticky.model : null;
-  const modelRow = models.find((row) => row.id === rememberedModel?.id) ?? models[0] ?? null;
+  const modelRow =
+    harness !== null || catalog.length === 0
+      ? models.find((row) => row.id === rememberedModel?.id) ?? models[0] ?? null
+      : null;
   const model = modelRow?.id ?? null;
   const ladder = effectiveReasoningLadder(modelRow, harness);
   const reasoning = normalizeReasoning(remembered, ladder);
@@ -64,6 +65,38 @@ export function defaultDraft(
     harness: harnessId,
     model,
     reasoning,
+    sandbox: "workspace-write",
+    modelOptions: {},
+  };
+}
+
+/** The fresh-draft harness that model discovery is allowed to query. */
+export function defaultDraftHarness(catalog: readonly HarnessDescriptor[], sticky: HarnessId | null): HarnessId {
+  const offered = offeredHarnesses(catalog);
+  return (sticky !== null ? offered.find((row) => row.id === sticky) : undefined)?.id ?? offered[0]?.id ?? sticky ?? "claude-code";
+}
+
+/**
+ * Reconcile only a fresh draft's harness against the selected engine's offered
+ * set. A persisted chat is intentionally excluded: its committed config is
+ * historical state, not a preference to silently rewrite.
+ */
+export function reconcileFreshDraftHarness(
+  current: DraftConfig,
+  catalog: readonly HarnessDescriptor[],
+  rememberedHarness: HarnessId | null,
+  rememberedReasoning: ReasoningLevel | null,
+): DraftConfig {
+  const offered = offeredHarnesses(catalog);
+  if (offered.length === 0 || offered.some((row) => row.id === current.harness)) {
+    return current;
+  }
+  const harness =
+    (rememberedHarness !== null ? offered.find((row) => row.id === rememberedHarness) : undefined) ?? offered[0]!;
+  return {
+    harness: harness.id,
+    model: null,
+    reasoning: rememberedReasoning,
     sandbox: "workspace-write",
     modelOptions: {},
   };

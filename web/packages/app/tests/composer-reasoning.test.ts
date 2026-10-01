@@ -86,12 +86,18 @@ afterAll(() => {
 class FakeClient {
   harnesses: HarnessDescriptor[] = [];
   readonly modelsByHarness = new Map<string, Model[]>();
+  nextModelError: Error | null = null;
 
   async call<T>(method: string, params?: unknown): Promise<T> {
     if (method === "ListHarnesses") {
       return this.harnesses as unknown as T;
     }
     if (method === "ListModels") {
+      if (this.nextModelError !== null) {
+        const error = this.nextModelError;
+        this.nextModelError = null;
+        throw error;
+      }
       const harness = (params as { harness: string }).harness;
       return (this.modelsByHarness.get(harness) ?? []) as unknown as T;
     }
@@ -193,6 +199,7 @@ function mountPicker(options: {
   chatConfig?: ChatConfig | null;
   /** Mount under the phone arm (≤768px) — the drawer sheet + drill-downs. */
   phone?: boolean;
+  engineLabel?: string;
 }): MountedPicker {
   phoneMode = options.phone ?? false;
   const catalog = new PickerCatalog(options.client);
@@ -205,6 +212,7 @@ function mountPicker(options: {
     return createElement(ComposerPickers, {
       catalog,
       draft: current,
+      engineLabel: options.engineLabel,
       chatConfig: options.chatConfig ?? null,
       onDraft: (next: DraftConfig) => {
         drafts.push(next);
@@ -250,7 +258,7 @@ async function flush(): Promise<void> {
   await act(async () => {});
 }
 
-async function openCard(handle: MountedPicker): Promise<void> {
+async function openCard(handle: { readonly container: HTMLElement }): Promise<void> {
   const trigger = handle.container.querySelector<HTMLElement>("#picker-model");
   expect(trigger).not.toBeNull();
   await act(async () => {
@@ -448,6 +456,118 @@ describe("ComposerPickers reasoning over the effective ladder", () => {
     expect(handle.observed.current.reasoning).toBe("high");
     await openSetting("reasoning");
     expect(reasoningRow("high")?.getAttribute("aria-selected")).toBe("true");
+  });
+});
+
+
+describe("ComposerPickers availability states", () => {
+  const committedCodex: ChatConfig = {
+    harness: "codex",
+    model: "gpt-5",
+    reasoning: "medium",
+    modelOptions: { mode: "fast" },
+    sandbox: "workspace-write",
+  };
+
+  it("keeps an existing unavailable committed harness and makes the state explicit", async () => {
+    const client = new FakeClient();
+    client.harnesses = [CLAUDE, { ...BARE, installed: false }];
+    const initial = draft({ harness: "codex", model: "gpt-5", reasoning: "medium", modelOptions: { mode: "fast" } });
+    const handle = mountPicker({ client, initial, chatConfig: committedCodex, engineLabel: "Engine A" });
+    await act(async () => {
+      await handle.catalog.loadHarnesses();
+    });
+    await flush();
+    await openCard(handle);
+    expect(handle.observed.current).toEqual(initial);
+    expect(document.body.textContent).toContain("Codex is unavailable");
+    expect(document.body.textContent).toContain("This chat is committed to that agent on this engine");
+    expect(handle.drafts).toHaveLength(0);
+    expect(handle.persists).toHaveLength(0);
+  });
+
+  it("renders no-agents only after the selected engine's catalog settles", async () => {
+    const client = new FakeClient();
+    client.harnesses = [{ ...BARE, enabled: false }];
+    const handle = mountPicker({ client, initial: draft({ harness: "codex", model: "gpt-5" }), engineLabel: "Engine B" });
+    expect(handle.container.textContent).not.toContain("No agents available");
+    await act(async () => {
+      await handle.catalog.loadHarnesses();
+    });
+    await flush();
+    await openCard(handle);
+    expect(document.body.textContent).toContain("No agents available");
+    expect(document.body.textContent).toContain("Enable an installed agent");
+  });
+
+  it("shows missing-executable discovery as an Engine A failure, not a browser setup task", async () => {
+    const client = new FakeClient();
+    client.harnesses = [BARE];
+    client.nextModelError = new Error("missing_executable: harness binary not found: codex");
+    const handle = mountPicker({ client, initial: draft({ harness: "codex", model: "gpt-5" }), engineLabel: "Engine A" });
+    await flush();
+    await openCard(handle);
+    await flush();
+
+    expect(document.body.textContent).toContain("Model discovery on Engine A failed");
+    expect(document.body.textContent).toContain("CODEX_EXECUTABLE there; the browser cannot do this");
+  });
+
+  it("renders A → B → A without carrying an A discovery error into B", async () => {
+    const clientA = new FakeClient();
+    const clientB = new FakeClient();
+    clientA.harnesses = [BARE];
+    clientB.harnesses = [BARE];
+    const catalogA = new PickerCatalog(clientA);
+    const catalogB = new PickerCatalog(clientB);
+    await catalogA.loadHarnesses();
+    clientA.nextModelError = new Error("missing_executable: harness binary not found: codex");
+    await catalogB.loadHarnesses();
+    clientB.modelsByHarness.set("codex", [{ id: "gpt-b", label: "GPT B", reasoningLevels: ["high"], options: [] }]);
+    await catalogB.loadModels("codex");
+
+    const container = document.createElement("div");
+    document.body.appendChild(container);
+    const root = createRoot(container);
+    const render = (catalog: PickerCatalog, engineLabel: string): void => {
+      act(() => {
+        root.render(
+          createElement(ComposerPickers, {
+            catalog,
+            draft: draft({ harness: "codex", model: "gpt-5" }),
+            engineLabel,
+            chatConfig: null,
+            onDraft: () => {},
+            onPersist: () => {},
+            escapeFocusTarget: () => null,
+          }),
+        );
+      });
+    };
+
+    try {
+      render(catalogA, "Engine A");
+      await openCard({ container });
+      expect(document.body.textContent).toContain("Model discovery on Engine A failed");
+
+      render(catalogB, "Engine B");
+      await flush();
+      expect(document.body.textContent).not.toContain("Model discovery on Engine A failed");
+      expect(document.body.textContent).toContain("GPT B");
+
+      catalogA.resetModels("codex");
+      clientA.modelsByHarness.set("codex", [{ id: "gpt-a", label: "GPT A", reasoningLevels: ["medium"], options: [] }]);
+      await catalogA.loadModels("codex", { force: true });
+      render(catalogA, "Engine A");
+      await flush();
+      expect(document.body.textContent).not.toContain("Model discovery on Engine A failed");
+      expect(document.body.textContent).toContain("GPT A");
+    } finally {
+      act(() => root.unmount());
+      container.remove();
+      catalogA.dispose();
+      catalogB.dispose();
+    }
   });
 });
 

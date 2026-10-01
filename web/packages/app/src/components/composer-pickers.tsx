@@ -32,7 +32,7 @@ import {
   type ModelRail,
   type SettingGroup,
 } from "../lib/model-rows";
-import type { PickerCatalog, LoadableList } from "../state/picker-catalog";
+import { modelDiscoveryErrorMessage, type PickerCatalog, type LoadableList } from "../state/picker-catalog";
 import { isMacPlatform, onShortcut } from "../state/shortcuts";
 import { openChipClass } from "./ui/Chip";
 import { useCursorList } from "./ui/CursorList";
@@ -72,6 +72,8 @@ const OVERSCAN = 6;
 export interface ComposerPickersProps {
   readonly catalog: PickerCatalog;
   readonly draft: DraftConfig;
+  /** User-facing selected-engine identity for discovery failures. */
+  readonly engineLabel?: string;
   /** The chat's persisted config — locks the harness facet once non-null. */
   readonly chatConfig: ChatConfig | null;
   /** Apply the next draft (clamped + offered-filtered by `applyDraftUpdate`). */
@@ -101,6 +103,7 @@ export interface ComposerPickersProps {
 
 export function ComposerPickers(props: ComposerPickersProps) {
   const { catalog, draft, chatConfig, onDraft, onPersist, escapeFocusTarget, onOpenChange, newChat = false } = props;
+  const engineLabel = props.engineLabel ?? "this engine";
   const [open, setOpen] = useState(false);
   const setOpenAndNotify = useCallback(
     (next: boolean) => {
@@ -181,6 +184,8 @@ export function ComposerPickers(props: ComposerPickersProps) {
   }, [chatConfig?.harness, offered, harnesses.rows]);
 
   const noAgents = harnesses.loaded && harnesses.error === null && offered.length === 0;
+  const harnessUnavailable =
+    harnesses.loaded && harnesses.error === null && !offered.some((row) => row.id === effectiveHarness);
 
   // The catalog error shows only once the slot has actually errored — not
   // while an initial load is in flight.
@@ -287,6 +292,7 @@ export function ComposerPickers(props: ComposerPickersProps) {
 
   const brand = harnessBrandIcon(effectiveHarness);
   const modelLabel = resolveChipLabel(draft.model, selectedModel, effectiveHarness, modelsList);
+  const unavailableLabel = descriptor?.name ?? effectiveHarness;
   const rememberedLabel = draft.model === null ? null : rememberedLabelFor(draft.model);
   // `chip_label_loading` (pickers.rs:4220-4221): nothing names the pick yet
   // AND the catalog is Idle/Loading. An errored harness or model slot is
@@ -408,7 +414,9 @@ export function ComposerPickers(props: ComposerPickersProps) {
             {labelLoading ? (
               <SkeletonBar width={56} />
             ) : (
-              <span className="identity-chip-model">{noAgents ? "No agents available" : modelLabel}</span>
+              <span className="identity-chip-model">
+                {noAgents ? "No agents available" : harnessUnavailable ? `${unavailableLabel} unavailable` : modelLabel}
+              </span>
             )}
             {suffix !== null && !noAgents && (
               <span className={`identity-chip-suffix ${suffixActive ? "identity-chip-suffix-active" : ""}`}>
@@ -429,6 +437,13 @@ export function ComposerPickers(props: ComposerPickersProps) {
           harnesses={harnesses}
           harnessError={harnessError}
           noAgents={noAgents}
+          harnessUnavailable={harnessUnavailable}
+          unavailableLabel={unavailableLabel}
+          modelError={
+            modelsList.error === null
+              ? null
+              : modelDiscoveryErrorMessage(modelsList.error, effectiveHarness, engineLabel)
+          }
           locked={locked}
           railDescriptors={railDescriptors}
           modelsLists={modelsLists}
@@ -527,6 +542,11 @@ interface IdentityCardProps {
   readonly harnesses: LoadableList<HarnessDescriptor>;
   readonly harnessError: string | null;
   readonly noAgents: boolean;
+  /** A committed chat can retain a harness that this engine no longer offers. */
+  readonly harnessUnavailable: boolean;
+  readonly unavailableLabel: string;
+  /** Error attributed to this card's selected engine. */
+  readonly modelError: string | null;
   readonly locked: boolean;
   readonly railDescriptors: readonly HarnessDescriptor[];
   readonly modelsLists: Map<HarnessId, LoadableList<Model>>;
@@ -551,6 +571,9 @@ function IdentityCard(props: IdentityCardProps) {
     harnesses,
     harnessError,
     noAgents,
+    harnessUnavailable,
+    unavailableLabel,
+    modelError,
     locked,
     railDescriptors,
     modelsLists,
@@ -859,7 +882,7 @@ function IdentityCard(props: IdentityCardProps) {
 
   // The empty-list note precedence (§2.3.3).
   const modelsList = modelsLists.get(effectiveHarness);
-  const modelSlotError = modelsList?.error ?? null;
+  const modelSlotError = modelError;
   const emptyNote =
     query.trim().length > 0
       ? "No models found"
@@ -896,6 +919,17 @@ function IdentityCard(props: IdentityCardProps) {
               <span className="model-no-agents-title">No agents available</span>
               <span className="model-no-agents-body">
                 Enable an installed agent in Settings → Agents, or install an agent CLI.
+              </span>
+            </div>
+          );
+        }
+        if (harnessUnavailable) {
+          return (
+            <div className="model-no-agents">
+              <Icon name="terminal" size={20} className="model-no-agents-icon" />
+              <span className="model-no-agents-title">{unavailableLabel} is unavailable</span>
+              <span className="model-no-agents-body">
+                This chat is committed to that agent on this engine. Enable and install it on the engine before sending.
               </span>
             </div>
           );

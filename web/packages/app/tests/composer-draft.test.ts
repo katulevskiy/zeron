@@ -11,6 +11,7 @@ import {
   draftsEqual,
   isHarnessLocked,
   reconcileDraftModel,
+  reconcileFreshDraftHarness,
   rememberNoProject,
 } from "../src/lib/composer-draft";
 import type { StorageLike } from "../src/lib/storage";
@@ -138,6 +139,42 @@ describe("defaultDraft sticky picks", () => {
     const draft = defaultDraft(HARNESSES, CODEX_MODELS, null, { harness: "opencode", model: SOL });
     expect(draft.harness).toBe("claude-code");
     expect(draft.model).toBe("gpt-5");
+  });
+  it.each([
+    ["not installed", { ...HARNESSES[1]!, installed: false }],
+    ["disabled", { ...HARNESSES[1]!, enabled: false }],
+  ])("does not seed remembered Codex when it is %s on this engine", (_case, unavailableCodex) => {
+    const draft = defaultDraft([HARNESSES[0]!, unavailableCodex], MODELS, null, { harness: "codex", model: SOL });
+    expect(draft.harness).toBe("claude-code");
+    expect(draft.model).toBe("sonnet");
+  });
+});
+
+describe("reconcileFreshDraftHarness", () => {
+  const current: DraftConfig = {
+    harness: "codex",
+    model: "gpt-5",
+    reasoning: "medium",
+    sandbox: "workspace-write",
+    modelOptions: { mode: "fast" },
+  };
+
+  it.each([
+    ["not installed", { ...HARNESSES[1]!, installed: false }],
+    ["disabled", { ...HARNESSES[1]!, enabled: false }],
+  ])("replaces remembered Codex when it is %s but an offered alternative exists", (_case, unavailableCodex) => {
+    expect(reconcileFreshDraftHarness(current, [HARNESSES[0]!, unavailableCodex], "codex", "low")).toEqual({
+      harness: "claude-code",
+      model: null,
+      reasoning: "low",
+      sandbox: "workspace-write",
+      modelOptions: {},
+    });
+  });
+
+  it("keeps remembered intent while the selected engine is loading or offers no agents", () => {
+    expect(reconcileFreshDraftHarness(current, [], "codex", "low")).toBe(current);
+    expect(reconcileFreshDraftHarness(current, [{ ...HARNESSES[1]!, installed: false }], "codex", "low")).toBe(current);
   });
 });
 
