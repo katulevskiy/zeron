@@ -36,6 +36,10 @@ pub struct TranscriptUpdate {
     /// The goal was removed since the previous frame.
     #[serde(default, skip_serializing_if = "std::ops::Not::not")]
     pub goal_cleared: bool,
+    /// The chat's workflow runs: everything on the opening / reset frame,
+    /// then only what changed. Absent when nothing changed (or never ran).
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub workflows: Option<zeron_proto::WorkflowsUpdate>,
 }
 
 /// Compact presentation watermark: stable part ids and text byte lengths.
@@ -521,7 +525,7 @@ mod context_update_tests {
         assert!(update.replay_baseline.is_none());
         let value = serde_json::to_value(TranscriptUpdate {
             goal: None,
-            goal_cleared: false,
+            goal_cleared: false, workflows: None,
             frame: TranscriptFrame::reset(&[]),
             replay_baseline: Some(TranscriptBaseline::default()),
             context_usage: Some(zeron_proto::ContextUsage {

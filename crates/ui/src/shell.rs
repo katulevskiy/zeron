@@ -3987,7 +3987,7 @@ impl Shell {
                     let value = reply.ok()?;
                     let entries: Vec<zeron_doc::SessionMessageEntry> =
                         serde_json::from_str(value.get("text")?.as_str()?).ok()?;
-                    let update = zeron_doc::TranscriptUpdate { goal: None, goal_cleared: false,
+                    let update = zeron_doc::TranscriptUpdate { goal: None, goal_cleared: false, workflows: None,
                         replay_baseline: Some(zeron_doc::TranscriptBaseline::capture(&entries)),
                         frame: zeron_doc::TranscriptFrame::Reset { reset: entries },
                         context_usage: None,

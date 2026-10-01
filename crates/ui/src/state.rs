@@ -3781,7 +3781,7 @@ mod tests {
     ) {
         let state = cx.new(|_| AppState::new());
         state.update(cx, |state, cx| {
-            let update = |id: &str| zeron_doc::TranscriptUpdate { goal: None, goal_cleared: false,
+            let update = |id: &str| zeron_doc::TranscriptUpdate { goal: None, goal_cleared: false, workflows: None,
                 frame: TranscriptFrame::reset(&[user_entry(id)]),
                 context_usage: None,
                 replay_baseline: None,

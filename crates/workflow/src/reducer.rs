@@ -263,7 +263,9 @@ fn apply(run: &mut WorkflowRun, event: &WorkflowEvent, t: &mut Touch) {
             harness,
             model,
         } => {
+            let order = run.actors.iter().map(|a| a.order + 1).max().unwrap_or(0);
             let actor = WorkflowActor {
+                order,
                 site_id: site_id.clone(),
                 ordinal: *ordinal,
                 name: name.clone(),
@@ -326,7 +328,9 @@ fn apply(run: &mut WorkflowRun, event: &WorkflowEvent, t: &mut Touch) {
                 progress_of(&mut run.header, p).observed += 1;
                 note_alongside(&mut run.header, p);
             }
+            let order = run.nodes.iter().map(|n| n.order + 1).max().unwrap_or(0);
             let node = WorkflowNode {
+                order,
                 site_id: site_id.clone(),
                 ordinal: *ordinal,
                 kind: *kind,

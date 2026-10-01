@@ -66,6 +66,10 @@ pub fn rebuild_thin_doc(source: &SessionDoc) -> Result<ThinRebuild, DocError> {
     if let Some(tag) = source.workflow_actor() {
         thin.set_workflow_actor(&tag)?;
     }
+    // Workflow runs are live state too.
+    for run in source.workflow_runs().runs {
+        thin.replace_workflow_run(&run)?;
+    }
     let mut sidecar = Vec::new();
     let entries = source.read_entries()?;
     let entry_count = entries.len();

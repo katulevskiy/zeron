@@ -121,6 +121,10 @@ pub enum ActorStatus {
 #[derive(Debug, Clone, PartialEq, Serialize, Deserialize)]
 #[serde(rename_all = "camelCase")]
 pub struct WorkflowActor {
+    /// Creation order within the run (lists are sorted by it; map-backed
+    /// storage has no order of its own).
+    #[serde(default)]
+    pub order: u32,
     /// Call-site identity (see `zeron-workflow` `site`), plus how many times
     /// that site had run before (`agent()` inside a loop or `pmap`).
     pub site_id: String,
@@ -154,6 +158,9 @@ impl WorkflowActor {
 #[derive(Debug, Clone, PartialEq, Serialize, Deserialize)]
 #[serde(rename_all = "camelCase")]
 pub struct WorkflowNode {
+    /// Creation order within the run.
+    #[serde(default)]
+    pub order: u32,
     pub site_id: String,
     pub ordinal: u32,
     pub kind: NodeKind,
@@ -286,7 +293,7 @@ impl WorkflowQuestion {
 
 /// One keyed record of a run's synced state.
 #[derive(Debug, Clone, PartialEq, Serialize, Deserialize)]
-#[serde(tag = "kind", rename_all = "camelCase")]
+#[serde(tag = "entry", rename_all = "camelCase")]
 pub enum WorkflowEntry {
     Actor(WorkflowActor),
     Node(WorkflowNode),
@@ -735,6 +742,15 @@ pub struct WorkflowActorTag {
     pub name: String,
 }
 
+/// How a transcript watch carries workflow state: the whole state on the
+/// opening (and reset) frame, deltas after.
+#[derive(Debug, Clone, PartialEq, Serialize, Deserialize)]
+#[serde(rename_all = "camelCase")]
+pub enum WorkflowsUpdate {
+    Full(WorkflowRunsState),
+    Delta(WorkflowRunsDelta),
+}
+
 // ── events (the journal's vocabulary) ─────────────────────────────────────
 
 /// One thing that happened in a run. Events are the journal's spine and the
@@ -1085,6 +1101,7 @@ mod tests {
 
     fn node(site: &str, ordinal: u32, phase: NodePhase) -> WorkflowNode {
         WorkflowNode {
+            order: 0,
             site_id: site.into(),
             ordinal,
             kind: NodeKind::Ask,

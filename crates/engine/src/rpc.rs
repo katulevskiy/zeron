@@ -1495,8 +1495,17 @@ fn doc_messages_stream(
             None,
             zeron_doc::TranscriptBaseline::default(),
             None::<Option<zeron_proto::Goal>>,
+            None::<(u64, zeron_proto::WorkflowRunsState)>,
         ),
-        |(mut rx, mut prev, doc, mut previous_usage, mut opening_baseline, mut sent_goal)| async move {
+        |(
+            mut rx,
+            mut prev,
+            doc,
+            mut previous_usage,
+            mut opening_baseline,
+            mut sent_goal,
+            mut sent_workflows,
+        )| async move {
             loop {
                 if prev.is_some() {
                     rx.changed().await.ok()?;
@@ -1548,10 +1557,36 @@ fn doc_messages_stream(
                 // chat, so it restates the goal.
                 let goal_changed = sent_goal.as_ref() != Some(&goal)
                     || matches!(frame, TranscriptFrame::Reset { .. });
+                // Workflow runs: whole on a reset frame, a delta against what
+                // this subscription last saw otherwise (read only when the
+                // doc's workflow revision moved).
+                let is_reset = matches!(frame, TranscriptFrame::Reset { .. });
+                let revision = doc.workflow_revision();
+                let workflows = if !is_reset
+                    && sent_workflows.as_ref().is_some_and(|(r, _)| *r == revision)
+                {
+                    None
+                } else {
+                    let now = doc.workflow_runs();
+                    match (&sent_workflows, is_reset) {
+                        (Some((_, before)), false) => {
+                            let delta = before.diff(&now);
+                            sent_workflows = Some((revision, now));
+                            delta.map(zeron_proto::WorkflowsUpdate::Delta)
+                        }
+                        _ => {
+                            let nothing = now.runs.is_empty() && revision == 0;
+                            let update = (!nothing).then(|| zeron_proto::WorkflowsUpdate::Full(now.clone()));
+                            sent_workflows = Some((revision, now));
+                            update
+                        }
+                    }
+                };
                 if frame.is_empty_delta()
                     && usage == previous_usage
                     && replay_baseline.is_none()
                     && !goal_changed
+                    && workflows.is_none()
                 {
                     continue;
                 }
@@ -1572,11 +1607,20 @@ fn doc_messages_stream(
                     replay_baseline,
                     goal: goal_update,
                     goal_cleared,
+                    workflows,
                 })
                 .ok()?;
                 return Some((
                     value,
-                    (rx, prev, doc, previous_usage, opening_baseline, sent_goal),
+                    (
+                        rx,
+                        prev,
+                        doc,
+                        previous_usage,
+                        opening_baseline,
+                        sent_goal,
+                        sent_workflows,
+                    ),
                 ));
             }
         },
@@ -1598,7 +1642,7 @@ async fn opening_doc_messages_stream(
             context_usage: handle.doc().context_usage(),
             replay_baseline: Some(zeron_doc::TranscriptBaseline::capture(&entries)),
             goal: handle.doc().goal(),
-            goal_cleared: false,
+            goal_cleared: false, workflows: None,
         })
         .map_err(|e| crate::EngineError::Other(e.to_string()))?;
         preview["historyPending"] = serde_json::Value::Bool(true);
