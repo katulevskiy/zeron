@@ -70,6 +70,7 @@ mod navigation_focus;
 #[cfg(test)]
 mod navigation_tests;
 mod project_icon;
+mod session_move;
 mod side_chats;
 mod sidebar_pins;
 mod sidebar_sections;
@@ -1934,6 +1935,7 @@ pub struct Shell {
     /// Independent watches retain device identity across selection changes.
     /// Device file transfers: send picker, titlebar panel, toast.
     file_transfers: file_transfers::FileTransfersUi,
+    session_move: session_move::SessionMoveUi,
     harness_update_devices: std::collections::BTreeMap<String, harness_updates::DeviceUpdates>,
     harness_update_expanded: bool,
     harness_update_transition: Option<WidthTween>,
@@ -2347,6 +2349,7 @@ impl Shell {
             harness_update_seen: std::collections::HashSet::new(),
             harness_update_banner_task: None,
             file_transfers: Default::default(),
+            session_move: Default::default(),
             harness_update_devices: Default::default(),
             harness_update_expanded: false,
             harness_update_transition: None,
@@ -6929,15 +6932,19 @@ impl Shell {
         };
         let compact = search_query.is_none() && self.settings.sidebar_compact;
         let show_label = search_query.is_some() || self.settings.sidebar_show_project_label;
-        let remote = self
-            .state
-            .read(cx)
-            .chats
-            .iter()
-            .find(|chat| chat.id == id)
-            .is_some_and(|chat| {
-                self.state.read(cx).local_device_id.as_deref() != Some(chat.device_id.as_str())
-            });
+        let (remote, moving) = {
+            let state = self.state.read(cx);
+            let chat = state.chats.iter().find(|chat| chat.id == id);
+            (
+                chat.is_some_and(|chat| {
+                    state.local_device_id.as_deref() != Some(chat.device_id.as_str())
+                }),
+                // A live move wears an arrow in the status slot; the row's
+                // tooltip names the destination.
+                chat.and_then(crate::session_move::live_move)
+                    .map(|m| SharedString::from(crate::session_move::moving_label(m))),
+            )
+        };
         let project_icon = (search_query.is_none() && self.settings.sidebar_show_project_icon)
             .then(|| self.render_project_icon(&id, SIDEBAR_ACTIVE_HARNESS_ICON_SIZE, selected, cx));
         let corner_hovered = !preview && self.chat_status_hover.as_deref() == Some(row_id.as_str());
@@ -6986,7 +6993,12 @@ impl Shell {
         let queued = queued && !undelivered;
         let working = status == zeron_proto::ChatIndicator::Working && !queued && !undelivered;
         let compact_status = compact.then(|| {
-            let glyph = if working {
+            let glyph = if moving.is_some() {
+                icon(icons::ARROW_RIGHT)
+                    .size(px(11.0))
+                    .text_color(theme.accent)
+                    .into_any_element()
+            } else if working {
                 loaders::mini_glyph_spinner(
                     format!("{row_id}-working"),
                     2.0,
@@ -7018,7 +7030,11 @@ impl Shell {
                 .flex()
                 .items_center()
                 .justify_center()
-                .aria_label(status_label.unwrap_or("Idle"))
+                .aria_label(if moving.is_some() {
+                    "Moving"
+                } else {
+                    status_label.unwrap_or("Idle")
+                })
                 .child(glyph)
                 .into_any_element()
         });
@@ -7099,6 +7115,28 @@ impl Shell {
             } else {
                 div().into_any_element()
             }
+        } else if moving.is_some() {
+            // Moving outranks the run status: it's the transient fact the
+            // row should carry (the run itself keeps going meanwhile).
+            div()
+                .flex()
+                .flex_row()
+                .items_center()
+                .gap(px(4.0))
+                .child(
+                    icon(icons::ARROW_RIGHT)
+                        .size(px(11.0))
+                        .flex_none()
+                        .text_color(theme.accent),
+                )
+                .child(
+                    div()
+                        .text_size(crate::typography::ui_rems(10.0))
+                        .font_weight(gpui::FontWeight::MEDIUM)
+                        .text_color(theme.accent)
+                        .child(SharedString::from("Moving")),
+                )
+                .into_any_element()
         } else {
             match status_label {
                 Some(label) => {
@@ -7172,6 +7210,8 @@ impl Shell {
                         } else {
                             "Session actions"
                         }
+                    } else if moving.is_some() {
+                        "Moving"
                     } else {
                         status_label.unwrap_or("Idle")
                     }
@@ -7256,6 +7296,9 @@ impl Shell {
             .py(px(6.0))
             .text_color(motion::hover_blend(&fade_key, rest_text, text))
             .bg(motion::hover_blend(&fade_key, rest_bg, hover_bg))
+            .when_some(moving.clone().filter(|_| !preview), |el, label| {
+                el.tooltip(settings::widgets::text_tooltip(label))
+            })
             // No selection ring (user request) — the wash alone marks the
             // active row.
             // Row hover drives BOTH the wash blend and the corner's
@@ -9125,7 +9168,7 @@ impl Shell {
     /// Resolve shell-owned Escape surfaces in capture phase, before focused
     /// descendants such as an integrated terminal can consume the key.
     fn capture_escape_surface(&mut self, cx: &mut Context<Self>) -> bool {
-        if self.dismiss_file_transfer_popovers(cx) {
+        if self.dismiss_file_transfer_popovers(cx) || self.dismiss_move_picker(cx) {
             return true;
         }
         // Modals and context menus sit above the rest of the shell. Preserve
@@ -9291,6 +9334,7 @@ impl Shell {
         let theme = Theme::of(cx).for_popup();
         let mut overlays: Vec<AnyElement> = Vec::new();
         overlays.extend(self.render_send_menu(cx));
+        overlays.extend(self.render_move_picker(cx));
 
         if let Some(menu_state) = self.chat_menu.get().cloned() {
             let chat_id = menu_state.chat_id;
@@ -9304,6 +9348,8 @@ impl Shell {
                     .iter()
                     .any(|chat| chat.id == chat_id && chat.parent_chat_id.is_some());
             let is_pinned = self.active_sidebar_pins(cx).contains(&chat_id);
+            let movable = !is_side_chat && self.chat_movable(&chat_id, cx);
+            let move_id = chat_id.clone();
             let rename_id = chat_id.clone();
             let pin_id = chat_id.clone();
             let archive_id = chat_id.clone();
@@ -9327,6 +9373,22 @@ impl Shell {
                             .child(icon(icons::PEN).size(px(16.0)).text_color(theme.text_muted))
                             .child(SharedString::from("Rename…")),
                     )
+                    .when(movable, |menu| {
+                        menu.child(
+                            popover::menu_row(&theme, false, format!("chat-menu-move-{chat_id}"))
+                                .id("chat-menu-move")
+                                .on_click(cx.listener(move |this, _, _, cx| {
+                                    this.close_chat_menu(cx);
+                                    this.open_move_picker(move_id.clone(), position, cx);
+                                }))
+                                .child(
+                                    icon(icons::LAPTOP)
+                                        .size(px(16.0))
+                                        .text_color(theme.text_muted),
+                                )
+                                .child(SharedString::from("Move to…")),
+                        )
+                    })
                     .when(!is_side_chat, |menu| {
                         menu.child(
                             popover::menu_row(&theme, false, format!("chat-menu-pin-{chat_id}"))
@@ -10154,6 +10216,14 @@ impl Shell {
                     .child(status)
                     .when(has_spaces || no_project || has_appshots, |el| {
                         let composer_opacity = self.composer_dock.borrow().opacity();
+                        // A chat moving to another device says so right above
+                        // the box, riding the composer's dock transform; the
+                        // jump pill (pinned above this slot) clears it.
+                        let move_banner = if has_selection {
+                            self.render_move_banner(cx)
+                        } else {
+                            None
+                        };
                         el.child(
                             crate::composer_dock::docked_composer(
                                 div()
@@ -10162,6 +10232,7 @@ impl Shell {
                                     .w(px(composer_width))
                                     .opacity(composer_opacity)
                                     .mx_auto()
+                                    .children(move_banner)
                                     .child(self.composer.clone())
                                     .children(if has_selection {
                                         self.render_jump_to_bottom(cx)

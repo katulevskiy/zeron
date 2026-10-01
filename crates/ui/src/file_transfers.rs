@@ -466,7 +466,7 @@ pub fn send_targets(
 /// never do; rows without capabilities (engines that predate advertising
 /// them — listed so the picker can say "update Zeron") fall back to the
 /// platform, where phones, tablets and the web only view.
-fn runs_an_engine(device: &Device) -> bool {
+pub(crate) fn runs_an_engine(device: &Device) -> bool {
     !device.capabilities.is_empty()
         || !matches!(
             device.platform.as_str(),

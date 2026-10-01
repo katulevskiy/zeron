@@ -45,6 +45,8 @@ enum Entry {
     /// Device file transfers (docs/file-transfer.md).
     SendFileToDevice,
     ShowFileTransfers,
+    /// Move the selected chat to another device.
+    MoveChat,
     Chat(String),
 }
 
@@ -64,6 +66,7 @@ impl Entry {
             )),
             Self::SendFileToDevice => Some(("Send current file to device…", icons::SMARTPHONE)),
             Self::ShowFileTransfers => Some(("Show file transfers", icons::SORT_VERTICAL)),
+            Self::MoveChat => Some(("Move this chat to another device…", icons::LAPTOP)),
             Self::Chat(_) => None,
         }
     }
@@ -163,6 +166,17 @@ impl Shell {
                 .filter(|entry| matches_query(&query, entry.action().unwrap().0)),
             );
         }
+        // Chat-scoped: only while the selected chat can move.
+        if self
+            .state
+            .read(cx)
+            .selected_chat
+            .as_deref()
+            .is_some_and(|id| self.chat_movable(id, cx))
+            && matches_query(&query, Entry::MoveChat.action().unwrap().0)
+        {
+            entries.push(Entry::MoveChat);
+        }
         let state = self.state.read(cx);
         // Global history deliberately ignores the sidebar's project filter and
         // collapsed groups. Archived conversations remain searchable too.
@@ -235,6 +249,7 @@ impl Shell {
             Entry::Theme(_) => unreachable!(),
             Entry::SendFileToDevice => self.open_send_menu_for_current_file(cx),
             Entry::ShowFileTransfers => self.open_file_transfers_panel(cx),
+            Entry::MoveChat => self.open_move_picker_centered(cx),
             Entry::Chat(id) => self.open_chat(id, cx),
         }
     }

@@ -44,9 +44,12 @@ struct PanelTitlebarWidths {
     files_controls: f32,
 }
 
-/// The session header's "+" and fork buttons (28px each, 2px gap) plus the
-/// row gap they cost the project-actions control.
-const SESSION_CONTROLS_WIDTH: f32 = 28.0 * 2.0 + 2.0 + 8.0;
+/// The session header's buttons ("+", fork and, when the chat can move,
+/// "Move to…": 28px each, 2px gaps) plus the row gap they cost the
+/// project-actions control.
+fn session_controls_width(buttons: usize) -> f32 {
+    28.0 * buttons as f32 + 2.0 * buttons.saturating_sub(1) as f32 + 8.0
+}
 
 /// The two fixed right-edge anchors: the explorer toggle and the pane toggle
 /// (28px each) with the same 4px gap the surface strip keeps between its
@@ -514,6 +517,16 @@ impl Shell {
         // under this session, fork copies its history into one. Same pair
         // the side-chat header carries, so a family reads the same from
         // either end.
+        // "Move to…" joins them while the chat can move (see
+        // `crate::session_move::can_offer_move`).
+        let movable = !takeover
+            && !on_canvas
+            && self
+                .state
+                .read(cx)
+                .selected_chat
+                .as_deref()
+                .is_some_and(|id| self.chat_movable(id, cx));
         let session_controls = (!takeover && !on_canvas).then(|| {
             let busy = self.side_chat_creating;
             div()
@@ -546,9 +559,28 @@ impl Shell {
                     .aria_label("Fork this session")
                     .when(busy, |el| el.opacity(0.4)),
                 )
+                .when(movable, |el| {
+                    el.child(
+                        header_icon_button(
+                            "session-move",
+                            icons::LAPTOP,
+                            "Move to another device",
+                            &theme,
+                            cx.listener(|this, event: &gpui::ClickEvent, _, cx| {
+                                // Hang the picker under the button, its right
+                                // edge near the pointer.
+                                let x = f32::from(event.position().x) - 260.0;
+                                this.open_move_picker_for_selected_chat(x, cx)
+                            }),
+                        )
+                        .role(gpui::Role::Button)
+                        .aria_label("Move to another device"),
+                    )
+                })
         });
         let available_titlebar_width = if session_controls.is_some() {
-            (available_titlebar_width - SESSION_CONTROLS_WIDTH).max(0.0)
+            (available_titlebar_width - session_controls_width(if movable { 3 } else { 2 }))
+                .max(0.0)
         } else {
             available_titlebar_width
         };
@@ -630,6 +662,13 @@ impl Shell {
 #[cfg(test)]
 mod panel_titlebar_tests {
     use super::*;
+
+    #[test]
+    fn session_controls_budget_counts_each_button_and_gap() {
+        assert_eq!(session_controls_width(2), 28.0 * 2.0 + 2.0 + 8.0);
+        // "Move to…" adds one button and one gap.
+        assert_eq!(session_controls_width(3), 28.0 * 3.0 + 4.0 + 8.0);
+    }
 
     #[test]
     fn tabs_align_with_the_panel_for_each_caption_layout_and_files_width() {

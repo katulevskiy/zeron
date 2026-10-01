@@ -68,7 +68,7 @@ fn send_blocker(state: &AppState, host: &str) -> Option<String> {
 }
 
 /// A compact pill button in the agent-update card's style.
-fn pill(theme: &Theme, primary: bool) -> gpui::Div {
+pub(super) fn pill(theme: &Theme, primary: bool) -> gpui::Div {
     div()
         .h(px(PILL_HEIGHT))
         .px(px(9.0))
@@ -96,7 +96,7 @@ fn pill(theme: &Theme, primary: bool) -> gpui::Div {
 }
 
 /// A 22px square icon button (panel row trailing controls).
-fn icon_button(theme: &Theme, glyph: &'static str) -> gpui::Div {
+pub(super) fn icon_button(theme: &Theme, glyph: &'static str) -> gpui::Div {
     let hover = theme.element_hover;
     div()
         .size(px(22.0))
@@ -111,7 +111,7 @@ fn icon_button(theme: &Theme, glyph: &'static str) -> gpui::Div {
 }
 
 /// Thin progress track, filled from the left.
-fn progress_bar(fraction: f32, tint: gpui::Hsla) -> gpui::Div {
+pub(super) fn progress_bar(fraction: f32, tint: gpui::Hsla) -> gpui::Div {
     div()
         .h(px(3.0))
         .w_full()
