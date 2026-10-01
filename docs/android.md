@@ -141,6 +141,18 @@ The desktop's Subagents view (#638, #647), on the phone:
   `--es route subagents:chat-fanout` or
   `--es route 'subagent:chat-fanout|chat-fanout--sub--fo-soak'`.
 
+## Sounds and haptics
+
+Every tap, toggle, sheet, swipe and session event has a considered haptic and a
+soft sound, played only while the app is open and in your control: Settings,
+**Sounds & haptics** has the master switches, interface and session sounds
+(completion, input required, errors, like the desktop), volume, haptic strength
+(Subtle / Standard / Strong) and a Try them list. The desktop's done / request /
+attention chimes are reused byte for byte; the interface cues are generated in the
+same family. When the app is in the background, session events arrive as
+notifications with the same sounds and matching vibration. Design, the cue and
+haptic tables and the policy: [`sound-design/android.md`](sound-design/android.md).
+
 ## Development
 
 Try the app against your own computers with no WorkOS:

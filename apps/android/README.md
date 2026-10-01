@@ -39,6 +39,29 @@ iterating on Kotlin; `ZERON_ANDROID_ABIS=arm64-v8a` builds one ABI.
 (needs `rsvg-convert`). The Geist fonts are read straight from the iOS app's
 `Fonts/` folder, so both platforms measure and draw the same bytes.
 
+## Sounds and haptics
+
+`feedback/` is the app's sensory layer: `Feedback.kt` is the vocabulary
+(`Haptic`, `Cue`) every screen speaks, `AndroidFeedback` plays it (platform
+haptic constants, `VibrationEffect` primitives, a preloaded `SoundPool`),
+`FeedbackGate` decides whether and when (switches, system touch / silent / DND,
+foreground only, rate limits), and `FeedbackCompose` holds the hooks
+(`LocalFeedback`, `tapAction`, `feedbackAction`, `toggleAction`,
+`OpenCloseFeedback`, `feedbackClickable`). Non-Compose code uses
+`AppFeedback.current`. Settings, Sounds & haptics has the switches and previews.
+
+```sh
+adb logcat -s ZeronFeedback          # one line per haptic / cue, or why it was skipped
+adb shell dumpsys vibrator_manager   # what the motor was asked to play
+adb shell am broadcast -a sh.zeron.android.DEBUG_EVENT -p sh.zeron.android \
+  --es kind done|input|failed [--ez background true]   # debug builds: a session event
+python3 scripts/generate-android-sounds.py && python3 scripts/audit-android-sounds.py
+```
+
+Full design, tables and policy: [`docs/sound-design/android.md`](../../docs/sound-design/android.md).
+The session chimes come from `crates/ui/assets/sounds` through the Gradle
+`genSounds` task; the rest are committed under `app/src/main/res/raw`.
+
 ## Layout
 
 ```
@@ -46,7 +69,9 @@ core/        AppModel (owns CoreClient, republishes snapshots as flows),
              CredentialStore, Fonts + AndroidMeasurer (Minikin fallback
              measurement for glyphs Geist lacks), Agents (harness install
              and agent sign-in over host_call), Favorites, Notifier (Save
-             to Downloads progress)
+             to Downloads progress, session alerts)
+feedback/    Haptics and sound: vocabulary, engine, gate, SoundPool bank,
+             Compose hooks, settings, session-event policy
 design/      ZeronTheme (Material 3 Expressive), transcript palette
 transcript/  TranscriptState (layout engine + viewport: anchoring, follow the
              tail), Transcript (virtualized rows over LayoutFrame), RowModel
@@ -76,7 +101,7 @@ adb shell am start -n sh.zeron.android/.MainActivity \
 | `--ez demo true` | Offline demo workspace (Rust `DemoHost`) |
 | `--ez fast true` / `--ez longreply true` | Demo stream speed / reply length |
 | `--ez big true` / `--ez huge true` | Demo transcripts with 120 / 600 turns |
-| `--es route chat:<id>` / `new` / `search` / `settings` / `agents` | Open a screen at launch |
+| `--es route chat:<id>` / `new` / `search` / `settings` / `agents` / `sounds` | Open a screen at launch |
 | `--es route subagents:<chat>` / `subagent:<chat>\|<doc>` | Open the Subagents panel / a subagent (Demo: `chat-fanout`) |
 | `--es route files:<chat>` / `terminal:<chat>` / `file:<chat>\|<path>` / `browser:<chat>\|<url>` | Open a developer tool at launch (`space:<id>` instead of a chat id for a project) |
 | `--es dev-edge <url> --es dev-user <u> --es dev-org <o>` | Debuggable builds: sign in to an `AUTH_MODE=dev` edge (also seven taps on the sign-in mark) |
