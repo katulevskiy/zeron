@@ -50,6 +50,12 @@ object EffortScale {
         return if (travel <= 0f) 0f else ((x - inset) / travel).coerceIn(0f, 1f)
     }
 
+    /** The pointer's unclamped rail fraction: below 0 or above 1 when the finger is past the first or last stop. */
+    fun rawFractionAt(x: Float, width: Float, inset: Float): Float {
+        val travel = width - 2 * inset
+        return if (travel <= 0f) 0f else (x - inset) / travel
+    }
+
     /** Where a release at [fraction] moving [velocity] (rail fractions per second) settles. */
     fun landing(fraction: Float, velocity: Float, count: Int, current: Int): Int =
         snap(fraction + velocity * FLING_HORIZON, count, current)

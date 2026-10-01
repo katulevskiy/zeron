@@ -11,6 +11,8 @@ import androidx.compose.foundation.BorderStroke
 import androidx.compose.foundation.background
 import androidx.compose.foundation.gestures.detectTapGestures
 import androidx.compose.foundation.layout.Box
+import androidx.compose.foundation.layout.BoxScope
+import androidx.compose.foundation.layout.padding
 import androidx.compose.foundation.layout.Column
 import androidx.compose.foundation.layout.requiredSize
 import androidx.compose.ui.graphics.Color
@@ -54,6 +56,9 @@ import androidx.compose.ui.window.PopupProperties
 /** Side margin, anchor gap and the shortest popover worth opening above its chip. */
 private val Margin = 12.dp
 private val Gap = 8.dp
+
+/** Space kept between a window with an overhang and the screen's start edge. */
+private val OverhangEdge = 4.dp
 private val MinAbove = 260.dp
 
 /**
@@ -64,6 +69,11 @@ private val MinAbove = 260.dp
  * that space and [maxHeight], so it never covers the screen. Tapping
  * outside or Back dismisses it. A fixed [width] (capped to the window) makes
  * a compact card; [scrim] dims the page behind and catches taps outside.
+ *
+ * [overlay] is drawn over the card, unclipped, in a layer the size of the card
+ * plus [overhang] on its start side: something that straddles the card's edge
+ * (the picker's provider rail) lives there, since the card clips its content.
+ * The card keeps its place; the window just extends [overhang] further left.
  */
 @Composable
 fun AnchoredPopover(
@@ -73,6 +83,8 @@ fun AnchoredPopover(
     maxHeight: Dp = 520.dp,
     width: Dp? = null,
     scrim: Boolean = false,
+    overhang: Dp = 0.dp,
+    overlay: (@Composable BoxScope.() -> Unit)? = null,
     content: @Composable ColumnScope.() -> Unit,
 ) {
     val density = LocalDensity.current
@@ -101,11 +113,14 @@ fun AnchoredPopover(
     val spaceBelow = with(density) { (screenHeight - bottomInset - anchorBottom - margin).coerceAtLeast(0f).toDp() }
     val above = spaceAbove >= MinAbove || spaceAbove >= spaceBelow
     val height = min(maxHeight, if (above) spaceAbove else spaceBelow)
-    val windowWidth = with(density) { window.width.toDp() } - Margin * 2
+    val windowWidth = with(density) { window.width.toDp() } - Margin * 2 - if (overhang > 0.dp) overhang + OverhangEdge - Margin else 0.dp
     val cardWidth = min(windowWidth, width ?: 560.dp)
 
-    val provider = remember(above, density, width) {
-        AnchoredPosition(above, with(density) { Margin.roundToPx() }, with(density) { Gap.roundToPx() }, startAligned = width != null)
+    val provider = remember(above, density, width, overhang) {
+        AnchoredPosition(
+            above, with(density) { Margin.roundToPx() }, with(density) { Gap.roundToPx() }, startAligned = width != null,
+            overhang = with(density) { overhang.roundToPx() }, edge = with(density) { OverhangEdge.roundToPx() },
+        )
     }
     if (scrim) {
         // A full-window layer under the card: dims the page and takes taps outside it.
@@ -133,14 +148,17 @@ fun AnchoredPopover(
             exit = fadeOut(MaterialTheme.motionScheme.fastEffectsSpec()) +
                 scaleOut(MaterialTheme.motionScheme.fastSpatialSpec(), targetScale = 0.95f, transformOrigin = TransformOrigin(0.5f, if (above) 1f else 0f)),
         ) {
-            Surface(
-                shape = RoundedCornerShape(28.dp),
-                color = MaterialTheme.colorScheme.surfaceContainerHigh,
-                border = BorderStroke(1.dp, MaterialTheme.colorScheme.outlineVariant),
-                shadowElevation = 8.dp,
-                modifier = Modifier.heightIn(max = height).then(if (wide || width != null) Modifier.width(cardWidth) else Modifier),
-            ) {
-                Column(content = content)
+            Box {
+                Surface(
+                    shape = RoundedCornerShape(28.dp),
+                    color = MaterialTheme.colorScheme.surfaceContainerHigh,
+                    border = BorderStroke(1.dp, MaterialTheme.colorScheme.outlineVariant),
+                    shadowElevation = 8.dp,
+                    modifier = Modifier.padding(start = overhang).heightIn(max = height).then(if (wide || width != null) Modifier.width(cardWidth) else Modifier),
+                ) {
+                    Column(content = content)
+                }
+                if (overlay != null) Box(Modifier.matchParentSize(), content = overlay)
             }
         }
     }
@@ -152,10 +170,20 @@ private object ScrimPosition : PopupPositionProvider {
 }
 
 /** Above (or below) the anchor, centred on it (or, for a fixed-width card, starting at its edge) but kept inside the window's margins. */
-private class AnchoredPosition(private val above: Boolean, private val margin: Int, private val gap: Int, private val startAligned: Boolean = false) : PopupPositionProvider {
+private class AnchoredPosition(
+    private val above: Boolean,
+    private val margin: Int,
+    private val gap: Int,
+    private val startAligned: Boolean = false,
+    private val overhang: Int = 0,
+    private val edge: Int = 0,
+) : PopupPositionProvider {
     override fun calculatePosition(anchorBounds: IntRect, windowSize: IntSize, layoutDirection: LayoutDirection, popupContentSize: IntSize): IntOffset {
-        val maxX = (windowSize.width - popupContentSize.width - margin).coerceAtLeast(margin)
-        val x = (if (startAligned) anchorBounds.left else anchorBounds.center.x - popupContentSize.width / 2).coerceIn(margin, maxX)
+        // With an overhang the card sits `overhang` in from the window's start; keep the card where it would be.
+        val minX = if (overhang > 0) edge else margin
+        val maxX = (windowSize.width - popupContentSize.width - margin).coerceAtLeast(minX)
+        val card = popupContentSize.width - overhang
+        val x = (if (startAligned) anchorBounds.left - overhang else anchorBounds.center.x - card / 2 - overhang).coerceIn(minX, maxX)
         val y = if (above) anchorBounds.top - gap - popupContentSize.height else anchorBounds.bottom + gap
         return IntOffset(x, y.coerceIn(0, (windowSize.height - popupContentSize.height).coerceAtLeast(0)))
     }
