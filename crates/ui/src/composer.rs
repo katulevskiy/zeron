@@ -8246,7 +8246,7 @@ impl Composer {
 
         // Optimistic echo (client-minted id doubles as the persisted message id,
         // so the doc frame dedups it away).
-        let echo = SessionMessageEntry {
+        let echo = SessionMessageEntry { origin: None,
             id: message_id.clone(),
             role: zeron_doc::MessageRole::User,
             parts: vec![MessagePart::Text {
@@ -8412,7 +8412,7 @@ impl Composer {
                     // flicker. A queued message has no transcript echo at all;
                     // its queue row is the only representation until dispatch.
                     if should_publish_optimistic_echo(queue) {
-                        let refreshed = SessionMessageEntry {
+                        let refreshed = SessionMessageEntry { origin: None,
                             id: message_id.clone(),
                             role: zeron_doc::MessageRole::User,
                             parts: vec![MessagePart::Text {
@@ -15009,7 +15009,7 @@ mod tests {
             let mut q = question("editor", &[], false);
             q.prefill = Some("  initial\ntext\n".into());
             q.multiline = true;
-            vec![SessionMessageEntry {
+            vec![SessionMessageEntry { origin: None,
                 id: "assistant".into(),
                 role: MessageRole::Assistant,
                 parts: vec![MessagePart::Input {
@@ -15080,7 +15080,7 @@ mod tests {
             questions: vec![question("q", &["a"], false)],
             resolved: false,
         };
-        let entry = |status: Option<MessageStatus>, parts: Vec<MessagePart>| SessionMessageEntry {
+        let entry = |status: Option<MessageStatus>, parts: Vec<MessagePart>| SessionMessageEntry { origin: None,
             id: "m".into(),
             role: MessageRole::Assistant,
             parts,
@@ -15114,7 +15114,7 @@ mod tests {
         // A NEWER assistant entry supersedes an unanswered question.
         let t = vec![
             entry(Some(MessageStatus::Aborted), vec![input_part.clone()]),
-            SessionMessageEntry {
+            SessionMessageEntry { origin: None,
                 id: "m2".into(),
                 role: MessageRole::Assistant,
                 parts: vec![MessagePart::Text {
@@ -15147,7 +15147,7 @@ mod tests {
         // AFTER the streaming assistant entry — the question must still be
         // found (a last-entry-only read vanished the panel exactly when the
         // user typed, bricking the answer flow).
-        let user_echo = SessionMessageEntry {
+        let user_echo = SessionMessageEntry { origin: None,
             id: "u2".into(),
             role: MessageRole::User,
             parts: vec![MessagePart::Text {
