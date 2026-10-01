@@ -170,8 +170,8 @@ interface Feedback {
 
     /** A haptic and a sound for the same moment, the common case. */
     fun both(haptic: Haptic, cue: Cue, step: Int = 0) {
+        cue(cue, step) // sound first: it is the channel perceived late (see docs/sound-design/android.md, Latency)
         haptic(haptic)
-        cue(cue, step)
     }
 }
 

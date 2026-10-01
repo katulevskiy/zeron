@@ -1,6 +1,11 @@
 package sh.zeron.android.feedback
 
-/** What the device and the system are doing right now. Read per event; cheap. */
+/**
+ * What the device and the system are doing right now. Read per event, so
+ * implementations cache (the real one answers from a snapshot refreshed by
+ * system broadcasts and a short TTL, see `SystemEnvironment`): the gate sits
+ * on the tap-to-sound path and must not make a binder call per event.
+ */
 interface FeedbackEnvironment {
     /** The app is in the foreground and its screen is on and interactive. */
     val active: Boolean
@@ -57,8 +62,12 @@ sealed interface Decision {
  *  - Sounds: the Sounds master and the category switch, an active app, the
  *    ringer (silent and vibrate mute), Do Not Disturb (total silence / alarms
  *    only), a non-zero stream volume, and for interface cues the system's
- *    touch-sounds setting. Session chimes ignore the touch-sounds setting
- *    (they are events, not touch feedback) but still follow every other rule.
+ *    touch-sounds setting unless the user turned on "play anyway"
+ *    ([FeedbackSettings.ignoreSystemTouchSounds]): the cues are SoundPool
+ *    sonification, not the system touch-sound path, so the flag is honoured by
+ *    choice rather than by necessity. Session chimes ignore the touch-sounds
+ *    setting (they are events, not touch feedback) but still follow every
+ *    other rule.
  *  - Rate: the same haptic / cue never repeats inside its minimum gap, any
  *    two light events keep a short global gap, a burst of light events is
  *    capped per second, and sound streams are capped.
@@ -113,7 +122,7 @@ class FeedbackGate(
         if (!env.ringerNormal) return skip(Skipped.Silent)
         if (env.silencedByDnd) return skip(Skipped.Dnd)
         if (!env.streamAudible) return skip(Skipped.Muted)
-        if (spec.category == CueCategory.Interface && !env.systemTouchSounds) return skip(Skipped.SystemSoundsOff)
+        if (spec.category == CueCategory.Interface && !env.systemTouchSounds && !s.ignoreSystemTouchSounds) return skip(Skipped.SystemSoundsOff)
         if (preview) return Decision.Play
         val now = clock()
         if (now - (lastCue[cue] ?: Long.MIN_VALUE / 2) < spec.minGapMs) return skip(Skipped.Rate)

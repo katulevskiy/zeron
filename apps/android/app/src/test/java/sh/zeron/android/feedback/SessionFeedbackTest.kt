@@ -20,16 +20,16 @@ class SessionFeedbackTest {
     @Test fun finishingATurnFiresDoneOnce() {
         policy.session("a", SessionEvent.Done)
         policy.session("a", SessionEvent.Done)
-        assertEquals(listOf("h:Success", "c:Done"), rec.events)
+        assertEquals(listOf("c:Done", "h:Success"), rec.events)
         assertTrue(alerts.isEmpty())
     }
 
     @Test fun questionAndFailure() {
         policy.session("a", SessionEvent.NeedsInput)
-        assertEquals(listOf("h:Attention", "c:Request"), rec.events)
+        assertEquals(listOf("c:Request", "h:Attention"), rec.events)
         rec.events.clear()
         policy.session("a", SessionEvent.Failed)
-        assertEquals(listOf("h:Error", "c:Attention"), rec.events)
+        assertEquals(listOf("c:Attention", "h:Error"), rec.events)
     }
 
     @Test fun backgroundGoesToNotificationsOnly() {
@@ -66,10 +66,10 @@ class SessionFeedbackTest {
 
     @Test fun linkEvents() {
         policy.link(LinkEvent.Lost)
-        assertEquals(listOf("h:Attention", "c:Attention"), rec.events)
+        assertEquals(listOf("c:Attention", "h:Attention"), rec.events)
         rec.events.clear()
         policy.link(LinkEvent.Restored)
-        assertEquals(listOf("h:Confirm", "c:Reconnected"), rec.events)
+        assertEquals(listOf("c:Reconnected", "h:Confirm"), rec.events)
     }
 
     // ── transitions ────────────────────────────────────────────────────────

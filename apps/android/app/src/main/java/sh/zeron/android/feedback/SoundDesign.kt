@@ -26,11 +26,26 @@ data class CueSpec(
 )
 
 object CueTable {
-    fun spec(cue: Cue): CueSpec = when (cue) {
-        // Session events: the desktop's own chimes at their native level (2-4 dB above the interface set).
-        Cue.Done -> CueSpec(cue, "fx_done", CueCategory.Completion, 1f, 2, 400, 560)
-        Cue.Request -> CueSpec(cue, "fx_request", CueCategory.Input, 1f, 2, 400, 600)
-        Cue.Attention -> CueSpec(cue, "fx_attention", CueCategory.Errors, 1f, 3, 400, 660)
+    /**
+     * Every `fx_*.wav` is generated this much hotter (+6.02 dB) than the level the app used to ship, to give the
+     * volume slider its headroom: [android.media.SoundPool] volume cannot exceed 1.0, so "twice as loud at 100%"
+     * has to live in the asset, and the default volume plays it at half (see [volume]).
+     */
+    const val ASSET_BOOST = 2f
+
+    /** SoundPool volume (0..1) for [spec] at user gain [userGain] (0..[FeedbackSettings.MAX_GAIN]). */
+    fun volume(spec: CueSpec, userGain: Float): Float = (userGain * spec.gain / ASSET_BOOST).coerceIn(0f, 1f)
+
+    fun spec(cue: Cue): CueSpec = specs[cue.ordinal]
+
+    private val specs: List<CueSpec> by lazy { Cue.entries.map(::build) }
+
+    private fun build(cue: Cue): CueSpec = when (cue) {
+        // Session events: the desktop's own chimes (2-4 dB above the interface set). The in-app copies are
+        // the same sound mono, trimmed and ASSET_BOOST louder; `fx_done` & co. stay as the notification sounds.
+        Cue.Done -> CueSpec(cue, "fx_chime_done", CueCategory.Completion, 1f, 2, 400, 520)
+        Cue.Request -> CueSpec(cue, "fx_chime_request", CueCategory.Input, 1f, 2, 400, 600)
+        Cue.Attention -> CueSpec(cue, "fx_chime_attention", CueCategory.Errors, 1f, 3, 400, 650)
 
         // Desktop audition cues promoted for the phone (about 2 dB hotter than the interface set, so trimmed).
         Cue.Send -> CueSpec(cue, "fx_send", CueCategory.Interface, 0.8f, 1, 120, 160)
@@ -56,15 +71,33 @@ object CueTable {
         Cue.Error -> CueSpec(cue, "fx_error", CueCategory.Interface, 1f, 3, 250, 180)
         Cue.Refresh -> CueSpec(cue, "fx_refresh", CueCategory.Interface, 1f, 1, 200, 120)
 
-        // Round 2 placeholders (real assets replace these): borrow a neighbour's file.
-        Cue.Surge, Cue.FastOn -> spec(Cue.Done).copy(cue = cue, category = CueCategory.Interface, priority = 1)
-        Cue.Zip, Cue.Rebound, Cue.FastOff -> spec(Cue.Select).copy(cue = cue)
-        Cue.ProviderClaude, Cue.ProviderCodex, Cue.ProviderCursor, Cue.ProviderDevin, Cue.ProviderGrok,
-        Cue.ProviderHermes, Cue.ProviderPi, Cue.ProviderOpenCode, Cue.ProviderAntigravity,
-        Cue.ProviderFavorites, Cue.ProviderOther -> spec(Cue.Select).copy(cue = cue)
+        // Round 2: thinking power and fast mode. Surge swells for half a second, so it ranks as an action
+        // (a later cue does not cut it); the rest are as short and light as their moments.
+        Cue.Surge -> CueSpec(cue, "fx_surge", CueCategory.Interface, 1f, 1, 400, 490)
+        Cue.Zip -> CueSpec(cue, "fx_zip", CueCategory.Interface, 1f, 0, 100, 85)
+        Cue.Rebound -> CueSpec(cue, "fx_rebound", CueCategory.Interface, 1f, 1, 150, 120)
+        Cue.FastOn -> CueSpec(cue, "fx_fast_on", CueCategory.Interface, 0.7f, 1, 300, 195)
+        Cue.FastOff -> CueSpec(cue, "fx_fast_off", CueCategory.Interface, 0.8f, 1, 200, 100)
+
+        // One motif per provider on the picker's rail. Scrubbed along quickly, so they are the lightest priority
+        // and keep a short gap; each is its own file (timbre and interval motif, see docs/sound-design/android.md).
+        Cue.ProviderClaude -> provider(cue, "claude", 115)
+        Cue.ProviderCodex -> provider(cue, "codex", 85)
+        Cue.ProviderCursor -> provider(cue, "cursor", 110)
+        Cue.ProviderDevin -> provider(cue, "devin", 115)
+        Cue.ProviderGrok -> provider(cue, "grok", 115)
+        Cue.ProviderHermes -> provider(cue, "hermes", 95)
+        Cue.ProviderPi -> provider(cue, "pi", 110)
+        Cue.ProviderOpenCode -> provider(cue, "opencode", 115)
+        Cue.ProviderAntigravity -> provider(cue, "antigravity", 115)
+        Cue.ProviderFavorites -> provider(cue, "favorites", 115)
+        Cue.ProviderOther -> provider(cue, "other", 60)
     }
 
-    val all: List<CueSpec> get() = Cue.entries.map(::spec)
+    private fun provider(cue: Cue, name: String, approxMs: Long) =
+        CueSpec(cue, "fx_provider_$name", CueCategory.Interface, 1f, 0, 60, approxMs)
+
+    val all: List<CueSpec> get() = specs
 }
 
 /**
