@@ -203,3 +203,94 @@ fn the_example_survives_failing_agents_and_a_gate_that_never_passes() {
         .count();
     assert_eq!(gates, 3);
 }
+
+// ── saved workflows (the guide's frontmatter example) ─────────────────────
+
+fn saved_example() -> String {
+    let start = GUIDE
+        .find("```python saved-example\n")
+        .expect("the guide has a saved-workflow example")
+        + "```python saved-example\n".len();
+    let end = GUIDE[start..].find("\n```").expect("the example is fenced") + start;
+    format!("{}\n", &GUIDE[start..end])
+}
+
+#[test]
+fn the_saved_workflow_example_parses_validates_and_runs() {
+    use zeron_proto::saved_workflow::{SavedArgType, validate_args};
+    use zeron_workflow::host::ReadOp;
+    use zeron_workflow::saved::parse;
+
+    let text = saved_example();
+    let file = parse("doc-drift.star", Some("doc-drift"), &text)
+        .unwrap_or_else(|d| panic!("{}", zeron_workflow::diagnostic::render(&d)));
+    let args = &file.meta.args;
+    assert_eq!(
+        args.iter()
+            .map(|a| (a.name.as_str(), a.ty))
+            .collect::<Vec<_>>(),
+        [
+            ("folders", SavedArgType::Json),
+            ("max_files", SavedArgType::Int),
+            ("strict", SavedArgType::Bool),
+            ("branch", SavedArgType::String),
+        ]
+    );
+    assert!(file.meta.when_to_use.is_some());
+    let analysis = analyze("doc-drift.star", &text).unwrap_or_else(|d| panic!("{d:?}"));
+    assert_eq!(analysis.graph.phase_names(), ["check"]);
+
+    // Defaults alone run it; `branch` is absent (hence `args.get`).
+    let given = validate_args(args, &json!({})).unwrap();
+    assert_eq!(
+        given,
+        json!({"folders": ["docs"], "max_files": 40, "strict": false})
+    );
+    let host = FakeHost::new();
+    host.on_read(|op| match op {
+        ReadOp::Glob { pattern } if pattern == "docs/**/*.md" => {
+            Ok(json!(["docs/a.md", "docs/b.md"]))
+        }
+        other => panic!("unexpected read {other:?}"),
+    });
+    host.on_ask(|req| {
+        assert!(req.read_only);
+        assert!(!req.instructions.contains("since"), "{}", req.instructions);
+        AskReply::ok(json!({"findings": [{"file": "docs/a.md", "claim": "c", "reality": "r"}]}))
+    });
+    let out = run(&text, given, &host).unwrap();
+    assert_eq!(out["conclusion"], "1 stale claim(s) found");
+
+    // With arguments: two folders, strict, a branch.
+    let given = validate_args(
+        args,
+        &json!({"folders": ["docs", "guides"], "strict": true, "branch": "main", "max_files": 1}),
+    )
+    .unwrap();
+    let host = FakeHost::new();
+    host.on_read(|op| match op {
+        ReadOp::Glob { pattern } => Ok(json!([format!("{pattern}-1"), format!("{pattern}-2")])),
+        other => panic!("unexpected read {other:?}"),
+    });
+    host.on_ask(|req| {
+        assert!(
+            req.instructions.contains("WRONG or unclear"),
+            "{}",
+            req.instructions
+        );
+        assert!(req.instructions.contains("since `main`"));
+        assert_eq!(
+            req.instructions.lines().count(),
+            2,
+            "max_files = 1 leaves one path"
+        );
+        AskReply::ok(json!({"findings": []}))
+    });
+    let out = run(&text, given, &host).unwrap();
+    assert_eq!(out["findings"], json!([]));
+    assert_eq!(host.asks().len(), 2, "one checker per folder");
+
+    // Bad arguments never reach the script.
+    let err = validate_args(args, &json!({"max_files": "many", "stict": true})).unwrap_err();
+    assert_eq!(err.len(), 2, "{err:?}");
+}
