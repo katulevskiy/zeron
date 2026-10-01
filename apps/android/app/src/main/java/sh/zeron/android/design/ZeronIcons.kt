@@ -70,6 +70,8 @@ object ZIcons {
     val AddCircle = R.drawable.zi_add_circle
     val Cloud = R.drawable.zi_cloud
     val Star = R.drawable.zi_star
+    /** Fast mode (the desktop's fast-tier bolt). */
+    val FastTier = R.drawable.zi_fast_tier
     val StarFilled = R.drawable.zi_star_bold
     // Developer tools (desktop files panel, editor, browser, terminal).
     val FileTree = R.drawable.zi_file_tree
