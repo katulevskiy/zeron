@@ -8161,9 +8161,7 @@ impl Composer {
                     return;
                 }
                 let outcome = list.and_then(|list| {
-                    let wf = pick_workflow(&name, &list.workflows)
-                        .map_err(|e| e)?
-                        .clone();
+                    let wf = pick_workflow(&name, &list.workflows)?.clone();
                     let bound =
                         bind_assignments(&wf, &assignments).map_err(|errors| errors.join(" "))?;
                     Ok((wf, bound))

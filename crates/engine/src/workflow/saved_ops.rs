@@ -272,12 +272,11 @@ impl WorkflowService {
         };
         let target = dir.join(format!("{}.star", req.name));
         let exists = std::fs::symlink_metadata(&target).is_ok();
-        let overwrite;
-        if req.by_user {
-            overwrite = req.overwrite;
+        let overwrite = if req.by_user {
+            req.overwrite
         } else {
             // What else answers to this name here?
-            let list = store.list(project.as_ref().map(std::slice::from_ref).unwrap_or(&[]));
+            let list = store.list(project.as_slice());
             let shadow = list
                 .workflows
                 .iter()
@@ -317,10 +316,10 @@ impl WorkflowService {
                 return Err(SaveError::Denied(reason));
             }
             // What the person approved: replacing, if the question said so.
-            overwrite = exists;
-        }
+            exists
+        };
         let written = store.write(req.scope, root.as_deref(), &meta, &script, overwrite)?;
-        let list = store.list(project.as_ref().map(std::slice::from_ref).unwrap_or(&[]));
+        let list = store.list(project.as_slice());
         let summary = list
             .workflows
             .into_iter()

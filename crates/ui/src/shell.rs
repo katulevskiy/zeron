@@ -16755,7 +16755,7 @@ mod settings_modal_regressions {
             .unwrap();
     }
 
-    fn init_settings_test(
+    pub(super) fn init_settings_test(
         saved: settings::UiSettings,
         dir: &std::path::Path,
         cx: &mut TestAppContext,
@@ -16775,7 +16775,7 @@ mod settings_modal_regressions {
         });
     }
 
-    fn test_shell(dir: &std::path::Path, cx: &mut Context<Shell>) -> Shell {
+    pub(super) fn test_shell(dir: &std::path::Path, cx: &mut Context<Shell>) -> Shell {
         let state = cx.new(|_| AppState::new());
         Shell::new(
             state,

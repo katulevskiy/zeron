@@ -587,7 +587,7 @@ pub fn group(list: &SavedWorkflowList, spaces: &[Space]) -> Vec<Group> {
             }
         })
         .collect();
-    projects.sort_by(|a, b| a.title.to_lowercase().cmp(&b.title.to_lowercase()));
+    projects.sort_by_key(|g| g.title.to_lowercase());
     groups.extend(projects);
 
     let mut built: Vec<&SavedWorkflowSummary> = list

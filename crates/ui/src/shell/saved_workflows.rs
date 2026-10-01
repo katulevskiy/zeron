@@ -861,12 +861,11 @@ impl Shell {
     ) -> Vec<AnyElement> {
         let theme = Theme::of(cx).clone();
         let mut out = Vec::new();
-        if let Some(l) = self.saved_ui.launcher.as_mut() {
-            if std::mem::take(&mut l.focus_pending)
-                && let Some(first) = l.inputs.iter().flatten().next()
-            {
-                window.focus(&first.focus_handle(cx), cx);
-            }
+        if let Some(l) = self.saved_ui.launcher.as_mut()
+            && std::mem::take(&mut l.focus_pending)
+            && let Some(first) = l.inputs.iter().flatten().next()
+        {
+            window.focus(&first.focus_handle(cx), cx);
         }
         if let Some(card) = self.render_launcher_card(&theme, cx) {
             out.push(popover::modal("saved-workflow-launcher", viewport, card));
@@ -1088,7 +1087,7 @@ impl Shell {
 
         // What the approval would show.
         let preview = match &l.preview {
-            Loadable::Ready(d) => d.graph.as_ref().map(|g| preview_line(g)),
+            Loadable::Ready(d) => d.graph.as_ref().map(preview_line),
             _ => None,
         };
         let diagnostics = match &l.preview {
@@ -1605,6 +1604,200 @@ mod tests {
             "2 phases, 1 agent and the commands cargo test, git"
         );
         assert_eq!(preview_line(&WorkflowGraph::default()), "0 phases");
+    }
+
+    fn typed_wf() -> SavedWorkflowSummary {
+        use zeron_proto::SavedArgType;
+        let arg = |name: &str, ty, required, default: Option<Value>| SavedArg {
+            name: name.into(),
+            ty,
+            required,
+            default,
+            description: Some(format!("the {name}")),
+        };
+        SavedWorkflowSummary {
+            args: vec![
+                arg("ticket", SavedArgType::Int, true, None),
+                arg("base", SavedArgType::String, false, Some(json!("main"))),
+                arg("strict", SavedArgType::Bool, false, Some(json!(false))),
+                arg("exclude", SavedArgType::Json, false, Some(json!(["a"]))),
+            ],
+            ..wf(SavedScope::Global, None, None)
+        }
+    }
+
+    fn shell_window(
+        cx: &mut gpui::TestAppContext,
+    ) -> (tempfile::TempDir, gpui::WindowHandle<Shell>) {
+        let dir = tempfile::tempdir().unwrap();
+        crate::shell::settings_modal_regressions::init_settings_test(
+            Default::default(),
+            dir.path(),
+            cx,
+        );
+        let window = cx.add_window(|_, cx| {
+            let mut shell = crate::shell::settings_modal_regressions::test_shell(dir.path(), cx);
+            shell.state.update(cx, |state, _| {
+                state.local_device_id = Some("local".into());
+                state.chats = vec![chat("c1", None, None, false)];
+                state.selected_chat = Some("c1".into());
+            });
+            shell
+        });
+        (dir, window)
+    }
+
+    #[gpui::test]
+    fn the_launcher_draws_validates_and_names_every_field_problem(cx: &mut gpui::TestAppContext) {
+        let (_dir, window) = shell_window(cx);
+        window
+            .update(cx, |shell, _, cx| {
+                shell.open_saved_launcher_with(
+                    typed_wf(),
+                    json!({"base": "dev"}),
+                    Some("c1".into()),
+                    Some("ticket is required.".into()),
+                    cx,
+                );
+                let l = shell.saved_ui.launcher.as_ref().expect("open");
+                assert_eq!(l.form.fields.len(), 4);
+                assert_eq!(l.form.fields[1].text, "dev", "typed values beat defaults");
+                assert_eq!(l.targets.len(), 1, "the open chat; no projects here");
+                assert!(l.inputs[2].is_none(), "a bool is a switch, not a box");
+                assert!(l.error.is_some());
+                // Run with the required field empty: the form says so, nothing is sent.
+                shell.submit_saved_launch(cx);
+                let l = shell.saved_ui.launcher.as_ref().unwrap();
+                assert_eq!(
+                    l.errors.fields.get(&0).map(String::as_str),
+                    Some("Required")
+                );
+                assert!(!l.pending, "a rejected form never starts anything");
+            })
+            .unwrap();
+        cx.update_window(window.into(), |_, window, cx| window.draw(cx).clear())
+            .unwrap();
+        // Typing into the box clears its error; a good value passes validation.
+        window
+            .update(cx, |shell, _, cx| {
+                let input = shell.saved_ui.launcher.as_ref().unwrap().inputs[0]
+                    .clone()
+                    .unwrap();
+                input.update(cx, |i, cx| i.set_text("4812", cx));
+            })
+            .unwrap();
+        cx.run_until_parked();
+        window
+            .update(cx, |shell, _, cx| {
+                let l = shell.saved_ui.launcher.as_ref().unwrap();
+                assert!(l.errors.fields.is_empty() || !l.errors.fields.contains_key(&0));
+                assert_eq!(
+                    l.form.collect().unwrap(),
+                    json!({"ticket": 4812, "base": "dev", "strict": false, "exclude": ["a"]})
+                );
+                // Escape closes it, like every other dialog.
+                assert!(shell.capture_escape_surface(cx));
+                assert!(shell.saved_ui.launcher.is_none());
+            })
+            .unwrap();
+    }
+
+    #[gpui::test]
+    fn without_an_engine_a_launch_fails_in_the_dialog_not_silently(cx: &mut gpui::TestAppContext) {
+        let (_dir, window) = shell_window(cx);
+        window
+            .update(cx, |shell, _, cx| {
+                let mut w = typed_wf();
+                w.args.retain(|a| a.name == "base");
+                shell.open_saved_launcher_with(w, Value::Null, Some("c1".into()), None, cx);
+                shell.submit_saved_launch(cx);
+                let l = shell.saved_ui.launcher.as_ref().expect("still open");
+                assert!(!l.pending);
+                assert_eq!(l.error.as_deref(), Some("Engine not connected"));
+            })
+            .unwrap();
+        cx.update_window(window.into(), |_, window, cx| window.draw(cx).clear())
+            .unwrap();
+    }
+
+    #[gpui::test]
+    fn the_save_dialog_suggests_a_name_validates_and_closes_on_escape(
+        cx: &mut gpui::TestAppContext,
+    ) {
+        let (_dir, window) = shell_window(cx);
+        window
+            .update(cx, |shell, _, cx| {
+                shell.build_save_dialog(
+                    "c1".into(),
+                    "r1".into(),
+                    "PR review!".into(),
+                    infer_args(&json!({"base": "main", "n": 3})),
+                    true,
+                    cx,
+                );
+                let d = shell.saved_ui.save.as_ref().expect("open");
+                assert_eq!(d.form.name, "pr-review");
+                assert_eq!(d.form.scope, SavedScope::Project);
+                assert_eq!(d.args.len(), 2);
+                // No description yet: the dialog says so and sends nothing.
+                shell.submit_save_workflow(cx);
+                let d = shell.saved_ui.save.as_ref().unwrap();
+                assert!(d.errors.description.is_some() && !d.pending);
+            })
+            .unwrap();
+        cx.update_window(window.into(), |_, window, cx| window.draw(cx).clear())
+            .unwrap();
+        window
+            .update(cx, |shell, _, cx| {
+                // The description box feeds the form.
+                let input = shell.saved_ui.save.as_ref().unwrap().description.clone();
+                input.update(cx, |i, cx| i.set_text("Reviews the diff", cx));
+            })
+            .unwrap();
+        cx.run_until_parked();
+        window
+            .update(cx, |shell, _, cx| {
+                let d = shell.saved_ui.save.as_ref().unwrap();
+                assert_eq!(d.form.description, "Reviews the diff");
+                assert!(d.form.validate(d.has_project).is_ok());
+                assert!(shell.capture_escape_surface(cx));
+                assert!(shell.saved_ui.save.is_none());
+            })
+            .unwrap();
+    }
+
+    #[gpui::test]
+    fn a_slash_start_with_everything_present_needs_no_dialog(cx: &mut gpui::TestAppContext) {
+        let (_dir, window) = shell_window(cx);
+        window
+            .update(cx, |shell, _, cx| {
+                // A missing required argument opens the launcher with the reason…
+                shell.saved_workflow_from_composer(
+                    "c1".into(),
+                    typed_wf(),
+                    json!({"base": "dev"}),
+                    vec!["ticket".into()],
+                    cx,
+                );
+                let l = shell.saved_ui.launcher.as_ref().expect("launcher");
+                assert_eq!(l.error.as_deref(), Some("ticket is required."));
+                assert_eq!(l.form.fields[1].text, "dev");
+                shell.close_saved_launcher(cx);
+                // …and nothing missing starts it (no engine here: a notice, no dialog).
+                shell.saved_workflow_from_composer(
+                    "c1".into(),
+                    typed_wf(),
+                    json!({"ticket": 1}),
+                    vec![],
+                    cx,
+                );
+                assert!(shell.saved_ui.launcher.is_none());
+                assert_eq!(
+                    shell.sidebar_notice.as_deref(),
+                    Some("Engine not connected")
+                );
+            })
+            .unwrap();
     }
 
     #[test]

@@ -1204,7 +1204,6 @@ mod tests {
 
     #[gpui::test]
     fn the_run_button_asks_the_shell_to_open_the_launcher(cx: &mut gpui::TestAppContext) {
-        use gpui::AppContext as _;
         let window = page(cx);
         let seen = std::rc::Rc::new(std::cell::RefCell::new(Vec::new()));
         let entity = window.entity(cx).unwrap();
