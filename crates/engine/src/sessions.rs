@@ -353,9 +353,19 @@ impl SessionsEngine {
     /// its `RunRequest::mcp`: the restricted ask toolset, bound to `ask_id`.
     /// `None` while the engine serves no IPC port — such a child could never
     /// submit its result.
-    pub fn ask_mcp_server(&self, chat_id: &str, ask_id: &str) -> Option<zeron_proto::McpServer> {
-        self.inner
-            .zeron_mcp_with(chat_id, &[(zeron_proto::ASK_ID_ENV, ask_id)])
+    pub fn ask_mcp_server(
+        &self,
+        chat_id: &str,
+        ask_id: &str,
+        token: &str,
+    ) -> Option<zeron_proto::McpServer> {
+        self.inner.zeron_mcp_with(
+            chat_id,
+            &[
+                (zeron_proto::ASK_ID_ENV, ask_id),
+                (zeron_proto::ASK_TOKEN_ENV, token),
+            ],
+        )
     }
 
     /// The last request dispatched for a chat (steer→new-turn fallback).

@@ -266,7 +266,16 @@ server lists only `whoami`, `get_chat` and `read_chat` plus the run-scoped
 `GetAskSpec`; a non-object schema travels under a `result` key). `submit_result`
 posts to `SubmitAskResult`: an accepted result completes the ask, a rejected one
 returns the path-level violations as an error result so the model repairs and calls
-again (three repair rounds, then the ask fails). Both RPCs are IPC-only.
+again (three repair rounds, then the ask fails).
+
+Only the child's own server can answer. The engine also puts a per-ask secret in
+that server's environment (`ZERON_ASK_TOKEN`), keeps it in memory (never in the
+synced doc, where `meta.askChild` is a bare marker), and refuses any
+`SubmitAskResult` without it. Both RPCs are machine-local: the device relay refuses
+them, so another device on the account cannot answer for a verifier. The token
+guards against a stray or curious process that learned the ids; a process running
+as the same OS user can still read another process's environment, so it is not a
+sandbox boundary.
 
 ## Parallel side chats
 

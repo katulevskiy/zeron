@@ -375,10 +375,13 @@ impl Zeron {
         result: Value,
     ) -> anyhow::Result<zeron_proto::AskSubmitReply> {
         let (chat_id, ask_id) = self.ask_ids()?;
+        // The engine accepts a result only with the ask's secret, which it
+        // put in this server's environment alone.
+        let token = std::env::var(zeron_proto::ASK_TOKEN_ENV).unwrap_or_default();
         let value = self
             .call(
                 methods::SUBMIT_ASK_RESULT,
-                json!({ "chatId": chat_id, "askId": ask_id, "result": result }),
+                json!({ "chatId": chat_id, "askId": ask_id, "token": token, "result": result }),
             )
             .await?;
         serde_json::from_value(value).context("SubmitAskResult: unexpected shape")

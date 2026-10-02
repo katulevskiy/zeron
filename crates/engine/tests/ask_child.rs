@@ -48,6 +48,7 @@ async fn submit(
             json!({
                 "chatId": env["ZERON_CHAT_ID"],
                 "askId": env["ZERON_ASK_ID"],
+                "token": env["ZERON_ASK_TOKEN"],
                 "result": result,
             }),
         )
@@ -166,6 +167,77 @@ async fn a_typed_result_comes_back_and_the_child_is_hidden_and_archived() {
             .unwrap()
     };
     assert!(!late.accepted);
+}
+
+#[tokio::test]
+async fn only_the_childs_own_server_can_answer_for_it() {
+    let attempts = Arc::new(Mutex::new(Vec::new()));
+    let log = attempts.clone();
+    let relay_slot: ClientSlot = Arc::new(OnceLock::new());
+    let relay_for_handler = relay_slot.clone();
+    let rig = rig(move |_, request, out, _controls, client| {
+        let log = log.clone();
+        let relay = relay_for_handler.get().expect("relay client wired").clone();
+        tokio::spawn(async move {
+            let env = request.mcp.as_ref().unwrap().env.clone();
+            let ids = |token: Option<&str>| {
+                let mut params = json!({
+                    "chatId": env["ZERON_CHAT_ID"],
+                    "askId": env["ZERON_ASK_ID"],
+                    "result": {"passed": true, "reason": "forged"},
+                });
+                if let Some(token) = token {
+                    params["token"] = token.into();
+                }
+                params
+            };
+            // Knowing the chat and ask ids is not enough...
+            let no_token: AskSubmitReply = client
+                .call_as(methods::SUBMIT_ASK_RESULT, ids(None))
+                .await
+                .unwrap();
+            let wrong_token: AskSubmitReply = client
+                .call_as(methods::SUBMIT_ASK_RESULT, ids(Some("guess")))
+                .await
+                .unwrap();
+            // ...and another device can't answer even with the token.
+            let over_relay = relay
+                .call_as::<AskSubmitReply>(
+                    methods::SUBMIT_ASK_RESULT,
+                    ids(Some(env["ZERON_ASK_TOKEN"].as_str())),
+                )
+                .await;
+            log.lock().unwrap().extend([
+                no_token.accepted,
+                wrong_token.accepted,
+                over_relay.is_ok(),
+            ]);
+            let reply = submit(&client, &request, json!({"passed": true, "reason": "real"})).await;
+            assert!(reply.accepted, "{reply:?}");
+            text_turn(&out, "done", Some((10, 2)));
+        });
+    });
+    let relay = zeron_rpc::memory_client(Arc::new(zeron_engine::rpc::RelayRpc(
+        rig.env.core.rpc_service(),
+    )));
+    relay_slot.set(Arc::new(relay)).ok();
+    let outcome = rig
+        .ask
+        .ask("parent", spec().read_only(), CancellationToken::new())
+        .await
+        .expect("ask succeeds");
+    assert_eq!(outcome.result["reason"], "real");
+    assert_eq!(
+        *attempts.lock().unwrap(),
+        [false, false, false],
+        "no-token, wrong-token and relay submissions are all refused"
+    );
+    // The synced doc marks the child without carrying its ask id.
+    let request = rig.env.runs.lock().unwrap()[0].clone();
+    let ask_id = request.mcp.unwrap().env["ZERON_ASK_ID"].clone();
+    let handle = rig.env.core.doc_host.open(&outcome.child_chat_id).unwrap();
+    let marker = handle.doc().ask_child().expect("marked as an ask child");
+    assert_ne!(marker, ask_id);
 }
 
 #[tokio::test]

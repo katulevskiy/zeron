@@ -31,9 +31,11 @@ AskBackend::ask(parent_chat, AskSpec { prompt, result_schema, … }, cancel)
    requester's own parent when the requester is itself a child, so nesting stays one
    level), same project, cwd and — by default — harness/model as the requester,
    overridable per ask; titled up front so the auto-titler stays away; marked
-   `meta.askChild` so boot recovery never revives it;
-3. injects a **run-scoped MCP server** (`ZERON_ASK_ID`, see `docs/mcp.md`) that
-   offers `read_chat`, `get_chat`, `whoami` and `submit_result`;
+   `meta.askChild` (a bare marker, not the ask id) so boot recovery never revives it;
+3. injects a **run-scoped MCP server** (`ZERON_ASK_ID` and a per-ask secret,
+   `ZERON_ASK_TOKEN`, see `docs/mcp.md`) that offers `read_chat`, `get_chat`,
+   `whoami` and `submit_result`; submissions without the secret, or arriving over
+   the device relay, are refused;
 4. prompts the child (the task, then a fixed "answer through `submit_result`, there
    is no person here" epilogue) and waits for its turn;
 5. validates each submission against the schema. A violating one is answered, as the
