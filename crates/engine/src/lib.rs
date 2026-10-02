@@ -259,8 +259,12 @@ impl EngineCore {
             Err(err) => tracing::error!(error = %err, "stale-session recovery failed"),
         }
         doc_host.spawn_transcript_salvage(profile.store_root().join("journals"));
-        // Dev knob: a scripted verifier for demos with the mock harness.
-        if std::env::var("ZERON_MOCK_GOAL").is_ok_and(|v| !v.is_empty() && v != "0") {
+        // Dev knob: a scripted verifier for demos with the mock harness. Debug
+        // builds only: it fakes passing verdicts for every goal, so a stray
+        // value in a release user's environment must not switch it on.
+        if cfg!(debug_assertions)
+            && std::env::var("ZERON_MOCK_GOAL").is_ok_and(|v| !v.is_empty() && v != "0")
+        {
             doc_host.set_ask_backend(ask::demo_verifier());
         }
         // Goals that were running when the engine last stopped resume here.

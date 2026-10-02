@@ -289,7 +289,8 @@ cargo test -p zeron-mcp
 cargo test -p zeron-ui --lib goal_panel
 ```
 
-Live: `ZERON_HARNESS=mock ZERON_MOCK_GOAL=1 ZERON_MOCK_DELAY_MS=400`, then
+Live (debug builds only; release builds ignore `ZERON_MOCK_GOAL`):
+`ZERON_HARNESS=mock ZERON_MOCK_GOAL=1 ZERON_MOCK_DELAY_MS=400`, then
 `/goal Make the build green` in a chat. The mock turns add checklist items and run a
 command; the engine's scripted verifier says "not satisfied" twice and then passes.
 
