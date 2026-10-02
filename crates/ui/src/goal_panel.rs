@@ -21,8 +21,8 @@ use gpui::{
 
 use zeron_doc::{MessagePart, MessageRole, SessionMessageEntry};
 use zeron_proto::{
-    GOAL_OBJECTIVE_MAX_CHARS, Goal, GoalCommand, GoalEventKind, GoalLimits,
-    GoalStatus, MessageOrigin, TodoStatus, ToolCall, VerdictOutcome,
+    GOAL_OBJECTIVE_MAX_CHARS, Goal, GoalCommand, GoalEventKind, GoalLimits, GoalStatus,
+    MessageOrigin, TodoStatus, ToolCall, VerdictOutcome,
 };
 
 use crate::composer::{Composer, QUEUE_COMPOSER_OVERLAP};
@@ -533,11 +533,18 @@ impl Composer {
             )
             .fade_overflow_y(&self.goal_scroll)
             .outset_bottom(TEXT_SIZE);
-            surface.child(div().mt(px(2.0)).pb(px(6.0)).child(rows).with_animation(
-                SharedString::from(format!("goal-body-{}", panel.epoch)),
-                motion::FADE_QUICK.animation(),
-                |el, t| el.opacity(t),
-            ))
+            // Clear the next tray or the composer, which tuck under this one.
+            surface.child(
+                div()
+                    .mt(px(2.0))
+                    .pb(px(BODY_BOTTOM_CLEARANCE))
+                    .child(rows)
+                    .with_animation(
+                        SharedString::from(format!("goal-body-{}", panel.epoch)),
+                        motion::FADE_QUICK.animation(),
+                        |el, t| el.opacity(t),
+                    ),
+            )
         } else {
             surface
         };
@@ -1041,17 +1048,19 @@ impl Composer {
     }
 
     /// Send a goal mutation to the chat's host through the command plane.
+    /// Queue a goal command on the chat's host. False when it could not be
+    /// sent at all (the failure line says why).
     pub(crate) fn send_goal_command(
         &mut self,
         chat_id: String,
         command: GoalCommand,
         cx: &mut Context<Self>,
-    ) {
+    ) -> bool {
         let Some(engine) = self.state.read(cx).engine().cloned() else {
             self.failure = Some("Engine not connected".into());
             self.failure_key = None;
             cx.notify();
-            return;
+            return false;
         };
         if !engine
             .engine_info()
@@ -1064,7 +1073,7 @@ impl Composer {
             self.failure = Some("Update Zeron on the chat's device to use goals.".into());
             self.failure_key = Some(chat_id);
             cx.notify();
-            return;
+            return false;
         }
         let params = goal_params(&chat_id, &command);
         cx.spawn(async move |this, cx| {
@@ -1082,6 +1091,7 @@ impl Composer {
             }
         })
         .detach();
+        true
     }
 
     /// Handle a typed `/goal …` line. Returns whether the line was consumed.
@@ -1095,12 +1105,18 @@ impl Composer {
             cx.notify();
             return true;
         };
+        // The draft is consumed only by a command that went out (or `/goal`
+        // opening the tray); a refused one stays so it can be fixed.
+        let mut consumed = false;
         match parsed {
             Err(message) => {
                 self.failure = Some(message.into());
                 self.failure_key = Some(chat_id);
             }
-            Ok(GoalInput::Show) => self.show_goal_panel(&chat_id, cx),
+            Ok(GoalInput::Show) => {
+                self.show_goal_panel(&chat_id, cx);
+                consumed = true;
+            }
             Ok(input) => {
                 if let Some(command) = input.command() {
                     // An existing running or paused goal: `/goal <text>` is a
@@ -1116,12 +1132,14 @@ impl Composer {
                         );
                         self.failure_key = Some(chat_id);
                     } else {
-                        self.send_goal_command(chat_id, command, cx);
+                        consumed = self.send_goal_command(chat_id, command, cx);
                     }
                 }
             }
         }
-        self.input.update(cx, |input, cx| input.set_text("", cx));
+        if consumed {
+            self.input.update(cx, |input, cx| input.set_text("", cx));
+        }
         cx.notify();
         true
     }
@@ -1679,12 +1697,16 @@ mod composer_tests {
         show(&state, Some(goal(GoalStatus::Active)), cx);
         handle
             .update(cx, |c, _, cx| {
+                c.input
+                    .update(cx, |input, cx| input.set_text("/goal something else", cx));
                 assert!(c.run_goal_input("/goal something else", cx))
             })
             .unwrap();
         handle
-            .read_with(cx, |c, _| {
+            .read_with(cx, |c, cx| {
                 assert!(c.failure.as_ref().is_some_and(|f| f.contains("replace")));
+                // Refused, so the draft stays for the user to fix.
+                assert_eq!(c.input.read(cx).text(), "/goal something else");
             })
             .unwrap();
     }
