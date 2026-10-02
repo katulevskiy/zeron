@@ -345,3 +345,57 @@ async fn steer_moves_the_turn_snapshot_but_not_the_run_snapshot() {
     );
     core.shutdown().await;
 }
+
+/// An agent writing a file every ~0.3 s never leaves the 500 ms of quiet a plain
+/// trailing debounce waits for, so nothing was published until it stopped. The
+/// diff must show the new files while the stream is still going on.
+#[tokio::test(flavor = "multi_thread", worker_threads = 2)]
+async fn diff_publishes_during_a_steady_write_stream() {
+    let tmp = tempfile::tempdir().expect("tempdir");
+    let repo_dir = tmp.path().join("repo");
+    init_dirty_repo(&repo_dir).await;
+
+    let core = assemble(&tmp.path().join("data"));
+    core.workspace
+        .create_space(
+            "space-1",
+            &core.device_id,
+            &repo_dir.to_string_lossy(),
+            None,
+            true,
+        )
+        .expect("space row");
+    core.workspace
+        .create_chat("chat-1", Some("space-1"), None, None, None)
+        .expect("chat row");
+    wait_chat_state(&core, "chat-1", true).await;
+    core.diff_sync.reconcile_now().await;
+    wait_for_diff(&core.diff_sync).await;
+    // Let the watchers attach and the initial capture settle.
+    tokio::time::sleep(Duration::from_secs(2)).await;
+
+    let stream_dir = repo_dir.clone();
+    let stream = tokio::spawn(async move {
+        for i in 0..60 {
+            std::fs::write(stream_dir.join(format!("stream-{i}.txt")), "x\n").expect("write");
+            tokio::time::sleep(Duration::from_millis(300)).await;
+        }
+    });
+    // The stream runs for 18 s; the diff must list a file well before it ends.
+    let started = tokio::time::Instant::now();
+    loop {
+        let listed = current_diffs(&core.diff_sync)
+            .iter()
+            .any(|diff| diff.files.iter().any(|f| f.path.starts_with("stream-")));
+        if listed {
+            break;
+        }
+        assert!(
+            started.elapsed() < Duration::from_secs(6),
+            "no stream file published within 6 s of a steady write stream"
+        );
+        tokio::time::sleep(Duration::from_millis(100)).await;
+    }
+    stream.abort();
+    core.shutdown().await;
+}

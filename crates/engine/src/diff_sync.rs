@@ -15,7 +15,8 @@
 //! is captured by the command host and is never rewritten from this watcher;
 //! otherwise one checkout change would relabel every chat sharing that folder.
 //!
-//! Fast recursive `notify` watchers (debounced [`WATCH_DEBOUNCE`]) are backed by a
+//! Fast recursive `notify` watchers (debounced [`WATCH_DEBOUNCE`], and synced at
+//! least every [`WATCH_MAX_WAIT`] under a steady stream of writes) are backed by a
 //! slow 2-minute repair tick because native watchers may coalesce or drop events.
 //! Snapshots carry a sha256 checksum; an unchanged checksum publishes nothing.
 //!
@@ -59,6 +60,9 @@ pub const MAX_PATCH_BYTES: usize = 3 * 1024 * 1024;
 pub const MAX_DIFF_SOURCE_BYTES: usize = 2 * 1024 * 1024;
 /// Trailing debounce after a filesystem event burst.
 const WATCH_DEBOUNCE: Duration = Duration::from_millis(500);
+/// A burst that never goes quiet (an agent writing a file every half second)
+/// still syncs after this long, so the diff keeps up while it is going on.
+const WATCH_MAX_WAIT: Duration = Duration::from_millis(1_500);
 /// Slow repair pass: re-reconcile + re-sync every checkout.
 const REPAIR_INTERVAL: Duration = Duration::from_secs(120);
 /// Max subdirectories a checkout may have before we skip its live recursive
@@ -677,32 +681,52 @@ fn is_checkout_change(event: &notify::Event) -> bool {
     !matches!(event.kind, notify::EventKind::Access(_))
 }
 
-/// Per-checkout task: trailing-debounce fs kicks, then compute + publish. Runs
-/// syncs sequentially — kicks during a sync accumulate and trigger another pass.
+/// After a first kick, wait for the burst to settle: `debounce` of quiet, but
+/// never longer than `max_wait` in total, so a steady stream of events cannot
+/// postpone the sync forever. `false` when the channel closed mid-burst.
+async fn settle(
+    kick_rx: &mut mpsc::UnboundedReceiver<()>,
+    debounce: Duration,
+    max_wait: Duration,
+) -> bool {
+    let started = std::time::Instant::now();
+    while let Some(left) = max_wait.checked_sub(started.elapsed()) {
+        match tokio::time::timeout(debounce.min(left), kick_rx.recv()).await {
+            Ok(Some(())) => continue,
+            Ok(None) => return false,
+            Err(_) => break,
+        }
+    }
+    true
+}
+
+/// Per-checkout task: debounce fs kicks, then compute + publish. Runs syncs
+/// sequentially — kicks during a sync accumulate and trigger another pass.
 async fn entry_task(
     inner: Weak<DiffSyncInner>,
     entry: Weak<CheckoutEntry>,
     mut kick_rx: mpsc::UnboundedReceiver<()>,
     cancel: CancellationToken,
 ) {
+    let mut last_sync = Duration::ZERO;
     while kick_rx.recv().await.is_some() {
-        // Trailing debounce: wait for the burst to settle.
-        loop {
-            match tokio::time::timeout(WATCH_DEBOUNCE, kick_rx.recv()).await {
-                Ok(Some(())) => continue,
-                Ok(None) => return, // entry closed mid-burst
-                Err(_) => break,
-            }
+        // The cap grows with the cost of a sync, so a tree that never stops
+        // changing can't keep a core busy re-capturing it.
+        let max_wait = WATCH_MAX_WAIT.max(last_sync * 4);
+        if !settle(&mut kick_rx, WATCH_DEBOUNCE, max_wait).await {
+            return;
         }
         let (Some(inner), Some(entry)) = (inner.upgrade(), entry.upgrade()) else {
             return;
         };
+        let started = std::time::Instant::now();
         // The upgraded Arc would let a sync outlive shutdown — race the token
         // so an in-flight sidecar POST is dropped, not completed.
         tokio::select! {
             _ = cancel.cancelled() => return,
             _ = sync_entry(&inner, &entry) => {}
         }
+        last_sync = started.elapsed();
     }
 }
 
@@ -1931,8 +1955,65 @@ pub async fn capture_turn_diff(
 mod watch_budget_tests {
     use super::{
         CheckoutIdentity, MAX_WATCH_DIRS, exceeds_watch_budget, has_non_utf8_status_path,
-        is_checkout_change, path_batches, watch_targets,
+        is_checkout_change, path_batches, settle, watch_targets,
     };
+
+    /// A write every 30 ms never leaves the 60 ms of quiet a plain trailing
+    /// debounce waits for. With the cap it must still settle, on time. (An
+    /// agent writing a file every half second did exactly this to the 500 ms
+    /// debounce: nothing published until it stopped.)
+    #[tokio::test]
+    async fn settle_gives_up_waiting_on_a_steady_stream() {
+        let (tx, mut rx) = tokio::sync::mpsc::unbounded_channel();
+        let sender = tokio::spawn(async move {
+            for _ in 0..100 {
+                if tx.send(()).is_err() {
+                    break;
+                }
+                tokio::time::sleep(std::time::Duration::from_millis(30)).await;
+            }
+        });
+        let started = std::time::Instant::now();
+        let open = settle(
+            &mut rx,
+            std::time::Duration::from_millis(60),
+            std::time::Duration::from_millis(300),
+        )
+        .await;
+        let waited = started.elapsed();
+        assert!(open);
+        assert!(
+            waited >= std::time::Duration::from_millis(280)
+                && waited < std::time::Duration::from_millis(900),
+            "settled after {waited:?}, expected about the 300 ms cap"
+        );
+        sender.abort();
+    }
+
+    #[tokio::test]
+    async fn settle_still_waits_for_quiet_and_reports_a_closed_channel() {
+        let (tx, mut rx) = tokio::sync::mpsc::unbounded_channel::<()>();
+        let started = std::time::Instant::now();
+        // No further kicks: returns after one debounce, far under the cap.
+        assert!(
+            settle(
+                &mut rx,
+                std::time::Duration::from_millis(50),
+                std::time::Duration::from_secs(10),
+            )
+            .await
+        );
+        assert!(started.elapsed() < std::time::Duration::from_secs(2));
+        drop(tx);
+        assert!(
+            !settle(
+                &mut rx,
+                std::time::Duration::from_millis(50),
+                std::time::Duration::from_secs(10),
+            )
+            .await
+        );
+    }
 
     /// End to end through a real watcher: opening a file under a watched
     /// checkout raises access events on Linux, and before the filter each one
