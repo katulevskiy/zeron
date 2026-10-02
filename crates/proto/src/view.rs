@@ -376,6 +376,8 @@ pub fn chat_location(chat: &Chat) -> Option<String> {
 // Tool summaries (pure)
 // ---------------------------------------------------------------------------
 
+pub use crate::command_display::display_command;
+
 /// Collapse model-generated text onto ONE line for single-line surfaces (tool
 /// chips, titles, previews): newlines, tabs and runs of whitespace become
 /// single spaces, trimmed.
@@ -405,7 +407,7 @@ pub fn tool_chip_content(call: &crate::ToolCall) -> (&'static str, String) {
 fn tool_chip_content_raw(call: &crate::ToolCall) -> (&'static str, String) {
     use crate::ToolCall;
     match call {
-        ToolCall::Exec { command } => ("Run", command.clone()),
+        ToolCall::Exec { command } => ("Run", display_command(command).into_owned()),
         ToolCall::ReadFile { path } => ("Read", path.clone()),
         ToolCall::WriteFile { path, .. } => ("Write", path.clone()),
         ToolCall::EditFile { path, .. } => ("Edit", path.clone()),

@@ -155,7 +155,7 @@ fn wrap_cols(line: &str, cols: usize) -> Vec<String> {
 /// The full invocation the header truncates (desktop `call_block`).
 fn call_text(call: &ToolCall) -> String {
     match call {
-        ToolCall::Exec { command } => command.clone(),
+        ToolCall::Exec { command } => zeron_proto::view::display_command(command).into_owned(),
         ToolCall::ReadFile { path } => path.clone(),
         ToolCall::WriteFile { path, content } => match content {
             Some(c) => format!("{path}\n{c}"),
@@ -1166,6 +1166,16 @@ mod tests {
         // Under budget: untouched.
         let (lines, more) = thought_lines(&parse_full("short thought"), MAX_LINES);
         assert!(!more && bytes(&lines) == "short thought".len());
+    }
+
+    #[test]
+    fn shell_wrapped_command_is_consistent_in_header_and_expanded_block() {
+        let script = "Get-Content 'main.rs'\nWrite-Output 'done'";
+        let call = ToolCall::Exec {
+            command: format!(r#""C:\Windows\System32\WindowsPowerShell\v1.0\powershell.exe" -Command "{script}""#),
+        };
+        assert_eq!(zeron_proto::view::tool_chip_content(&call), ("Run", zeron_proto::view::single_line(script)));
+        assert_eq!(call_text(&call), script);
     }
 
     #[test]

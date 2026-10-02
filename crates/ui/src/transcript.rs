@@ -869,7 +869,7 @@ fn wrap_cols(line: &str, cols: usize) -> Vec<SharedString> {
 /// code-block payload so rendering and height stay one implementation.
 pub fn call_block(call: &ToolCall) -> Option<ToolDetail> {
     let text: String = match call {
-        ToolCall::Exec { command } => command.clone(),
+        ToolCall::Exec { command } => zeron_proto::view::display_command(command).into_owned(),
         ToolCall::ReadFile { path } => path.clone(),
         ToolCall::WriteFile { path, content } => match content {
             Some(content) => format!("{path}\n{content}"),
@@ -13870,6 +13870,29 @@ mod tests {
             query: "line one\nline two".into(),
         });
         assert_eq!(q, "line one line two");
+    }
+
+    #[test]
+    fn shell_wrapped_command_is_consistent_in_header_and_expanded_block() {
+        let script = "Get-Content 'main.rs'\nWrite-Output 'done'";
+        let call = ToolCall::Exec {
+            command: format!(
+                r#""C:\Windows\System32\WindowsPowerShell\v1.0\powershell.exe" -Command "{script}""#
+            ),
+        };
+        assert_eq!(tool_chip_content(&call), ("Run", single_line(script)));
+        let Some(ToolDetail::Output {
+            lines,
+            truncated_by,
+        }) = call_block(&call)
+        else {
+            panic!("expected a command block");
+        };
+        assert_eq!(truncated_by, 0);
+        assert_eq!(
+            lines.iter().map(|l| l.as_ref()).collect::<Vec<_>>(),
+            vec!["Get-Content 'main.rs'", "Write-Output 'done'"]
+        );
     }
 
     #[test]
