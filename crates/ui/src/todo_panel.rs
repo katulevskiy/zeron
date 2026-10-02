@@ -183,7 +183,7 @@ pub(crate) struct TodoPanelState {
     expanded: Option<bool>,
     show_earlier: bool,
     show_later: bool,
-    /// Signature of the finished list the user dismissed.
+    /// Signature of the list the user dismissed.
     dismissed: Option<u64>,
     /// Whether the previous frame was settled, to detect the transition.
     was_settled: bool,
@@ -224,9 +224,11 @@ impl TodoPanelState {
         self.dismissed = Some(signature(items));
     }
 
-    /// A dismissal only applies to a finished list it was made on.
-    pub fn is_dismissed(&self, items: &[TodoItem], finished: bool) -> bool {
-        finished && self.dismissed == Some(signature(items))
+    /// A dismissal holds until the agent writes a different list. It covers
+    /// unfinished lists too: one the agent abandoned (an interrupted turn, a
+    /// cancelled item that never completes) must not stay pinned forever.
+    pub fn is_dismissed(&self, items: &[TodoItem]) -> bool {
+        self.dismissed == Some(signature(items))
     }
 }
 
@@ -294,7 +296,7 @@ impl Composer {
 
         let panel = self.todo_panels.entry(chat_id.clone()).or_default();
         panel.observe(settled);
-        if panel.is_dismissed(&items, summary.finished()) {
+        if panel.is_dismissed(&items) {
             return None;
         }
         let expanded = panel.is_expanded(summary.finished());
@@ -302,7 +304,8 @@ impl Composer {
 
         let theme = Theme::of(cx).clone();
         let view = cx.entity_id();
-        let header = self.todo_header(&chat_id, &items, summary, expanded, settled, &theme, cx);
+        // Dismissable whenever the turn is idle, finished or not.
+        let header = self.todo_header(&chat_id, &items, summary, expanded, !live, &theme, cx);
 
         let surface = crate::queue::queue_panel_surface(&theme).child(header);
         let surface = if expanded {
@@ -369,7 +372,7 @@ impl Composer {
     }
 
     /// `Todo · 2/5` and what is being worked on; one button that toggles the
-    /// list, plus a dismiss once everything is done.
+    /// list, plus a dismiss while the turn is idle.
     #[allow(clippy::too_many_arguments)]
     fn todo_header(
         &self,
@@ -377,7 +380,7 @@ impl Composer {
         items: &[TodoItem],
         summary: TodoSummary,
         expanded: bool,
-        settled: bool,
+        dismissable: bool,
         theme: &Theme,
         cx: &mut Context<Self>,
     ) -> AnyElement {
@@ -486,7 +489,7 @@ impl Composer {
             .items_center()
             .gap(px(2.0))
             .child(toggle)
-            .when(settled, |row| {
+            .when(dismissable, |row| {
                 row.child(
                     div()
                         .id("todo-panel-dismiss")
@@ -923,16 +926,21 @@ mod tests {
     }
 
     #[test]
-    fn dismissal_holds_only_for_the_finished_list_it_was_made_on() {
+    fn dismissal_holds_only_for_the_list_it_was_made_on() {
         let done = items("xxx");
         let mut state = TodoPanelState::default();
-        assert!(!state.is_dismissed(&done, true));
+        assert!(!state.is_dismissed(&done));
         state.dismiss(&done);
-        assert!(state.is_dismissed(&done, true));
-        // Never hides a list that still has work (e.g. it was reopened).
-        assert!(!state.is_dismissed(&items("xx."), false));
-        // A different finished list is a new thing worth showing.
-        assert!(!state.is_dismissed(&items("xxxx"), true));
+        assert!(state.is_dismissed(&done));
+        // A changed list (reopened, or a new one) is shown again.
+        assert!(!state.is_dismissed(&items("xx.")));
+        assert!(!state.is_dismissed(&items("xxxx")));
+        // An abandoned list that will never finish (interrupted turn, a
+        // cancelled item) can be dismissed too, until the agent rewrites it.
+        let stuck = items("x..");
+        state.dismiss(&stuck);
+        assert!(state.is_dismissed(&stuck));
+        assert!(!state.is_dismissed(&items("xx.")));
     }
 
     #[test]
