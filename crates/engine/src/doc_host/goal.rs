@@ -849,6 +849,8 @@ impl DocHost {
                 zeron_proto::VerdictOutcome::Failed => {
                     (GoalEventKind::VerifierFailed, String::new())
                 }
+                // Only this host's own verdicts reach here; kept total.
+                zeron_proto::VerdictOutcome::Unknown => (GoalEventKind::Unknown, String::new()),
             };
             self.goal_marker(
                 handle,

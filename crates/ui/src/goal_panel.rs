@@ -135,6 +135,7 @@ pub(crate) fn chip(goal: &Goal) -> (&'static str, Tone) {
         GoalStatus::Paused => ("Paused", Tone::Muted),
         GoalStatus::Complete => ("Complete", Tone::Success),
         GoalStatus::BudgetLimited => ("Budget reached", Tone::Warning),
+        GoalStatus::Unknown => ("Unknown status", Tone::Muted),
     }
 }
 
@@ -280,6 +281,7 @@ pub(crate) fn rounds(goal: &Goal, entries: &[SessionMessageEntry]) -> Vec<RoundV
                 Some(VerdictOutcome::Pass) => RoundState::Passed,
                 Some(VerdictOutcome::NotSatisfied) => RoundState::NotSatisfied,
                 Some(VerdictOutcome::Failed) => RoundState::VerifierFailed,
+                Some(VerdictOutcome::Unknown) => RoundState::Stopped,
                 None if number == goal.iteration => match goal.status {
                     GoalStatus::Active => RoundState::Working,
                     GoalStatus::Verifying => RoundState::Verifying,
@@ -379,6 +381,7 @@ impl GoalMarker {
             MarkerKind::Event(VerifierFailed) => {
                 format!("Verifier · round {} failed", self.round)
             }
+            MarkerKind::Event(Unknown) => "Goal updated".into(),
         }
     }
 
@@ -717,7 +720,9 @@ impl Composer {
                     cx,
                 ));
             }
-            GoalStatus::Complete => {}
+            // A status from a newer host: no pause or resume, but Clear
+            // (below) always stays, so the user can still end the goal.
+            GoalStatus::Complete | GoalStatus::Unknown => {}
         }
         row = row.child(self.goal_action(
             "goal-clear",

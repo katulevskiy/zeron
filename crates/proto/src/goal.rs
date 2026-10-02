@@ -40,6 +40,10 @@ pub enum GoalStatus {
     Complete,
     /// A round / token / time cap was reached. Resumable (extends the cap).
     BudgetLimited,
+    /// A value from a newer host this build doesn't know. Decoding it here
+    /// keeps the rest of the transcript frame readable.
+    #[serde(other)]
+    Unknown,
 }
 
 impl GoalStatus {
@@ -81,6 +85,10 @@ pub enum GoalReasonKind {
     Restarted,
     /// The verifier passed.
     Verified,
+    /// A value from a newer host this build doesn't know. Decoding it here
+    /// keeps the rest of the transcript frame readable.
+    #[serde(other)]
+    Unknown,
 }
 
 #[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
@@ -100,6 +108,10 @@ pub enum VerdictOutcome {
     NotSatisfied,
     /// No verdict: the verifier itself failed.
     Failed,
+    /// A value from a newer host this build doesn't know. Decoding it here
+    /// keeps the rest of the transcript frame readable.
+    #[serde(other)]
+    Unknown,
 }
 
 /// One verifier judgement (or failure) at a round boundary.
@@ -134,6 +146,10 @@ pub enum GoalPendingKind {
     Turn,
     /// The round's turn finished; the verifier is judging it.
     Verify,
+    /// A value from a newer host this build doesn't know. Decoding it here
+    /// keeps the rest of the transcript frame readable.
+    #[serde(other)]
+    Unknown,
 }
 
 /// The controller's ledger: what the active goal is waiting for. Persisted so
@@ -497,6 +513,10 @@ pub enum GoalEventKind {
     Complete,
     BudgetLimited,
     VerifierFailed,
+    /// A value from a newer host this build doesn't know. Decoding it here
+    /// keeps the rest of the transcript frame readable.
+    #[serde(other)]
+    Unknown,
 }
 
 impl MessageOrigin {
@@ -511,6 +531,7 @@ impl MessageOrigin {
             GoalEventKind::Complete => format!("Goal complete after {round} round(s)"),
             GoalEventKind::BudgetLimited => "Goal stopped at its limit".to_owned(),
             GoalEventKind::VerifierFailed => format!("Round {round}: verifier failed"),
+            GoalEventKind::Unknown => "Goal updated".to_owned(),
         };
         if detail.trim().is_empty() {
             head
@@ -526,6 +547,24 @@ mod tests {
 
     fn goal() -> Goal {
         Goal::new("g1", "Ship the thing", &GoalLimits::default(), 10).unwrap()
+    }
+
+    #[test]
+    fn values_from_a_newer_host_decode_as_unknown() {
+        let mut value = serde_json::to_value(goal()).unwrap();
+        value["status"] = "someFutureStatus".into();
+        value["reason"] = serde_json::json!({"kind": "someFutureReason", "message": "m"});
+        let decoded: Goal = serde_json::from_value(value).unwrap();
+        assert_eq!(decoded.status, GoalStatus::Unknown);
+        assert_eq!(decoded.reason.unwrap().kind, GoalReasonKind::Unknown);
+        for (raw, want) in [("pass", VerdictOutcome::Pass), ("later", VerdictOutcome::Unknown)] {
+            let outcome: VerdictOutcome = serde_json::from_value(raw.into()).unwrap();
+            assert_eq!(outcome, want);
+        }
+        let event: GoalEventKind = serde_json::from_value("later".into()).unwrap();
+        assert_eq!(event, GoalEventKind::Unknown);
+        let pending: GoalPendingKind = serde_json::from_value("later".into()).unwrap();
+        assert_eq!(pending, GoalPendingKind::Unknown);
     }
 
     #[test]

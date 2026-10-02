@@ -114,6 +114,8 @@ fn stop(status: GoalStatus, kind: GoalReasonKind, message: impl Into<String>) ->
 pub fn decide(goal: &Goal, obs: &Observation) -> Action {
     match goal.status {
         GoalStatus::Paused | GoalStatus::BudgetLimited | GoalStatus::Complete => Action::Wait,
+        // Written by a newer host: never drive a state this build can't read.
+        GoalStatus::Unknown => Action::Wait,
         GoalStatus::Verifying => match &goal.pending {
             Some(p) if p.kind == GoalPendingKind::Verify && !obs.verifier_live => {
                 Action::RestartVerification { round: p.round }
