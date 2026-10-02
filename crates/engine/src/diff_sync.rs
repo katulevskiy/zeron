@@ -151,6 +151,18 @@ pub struct TurnSnapshot {
     pub at: chrono::DateTime<chrono::Utc>,
 }
 
+/// How long a request for a run's base waits for its snapshot to be taken.
+const RUN_BASE_WAIT: Duration = Duration::from_secs(5);
+
+/// A run's base tree: pending while its snapshot is being taken.
+#[derive(Debug, Clone)]
+enum RunBase {
+    Pending,
+    /// Not a checkout, or the snapshot failed.
+    Missing,
+    Ready(TurnSnapshot),
+}
+
 struct DiffSyncInner {
     repos: Repos,
     workspace: WorkspaceHost,
@@ -171,6 +183,10 @@ struct DiffSyncInner {
     statuses_tx: watch::Sender<Vec<zeron_proto::CheckoutGitStatus>>,
     /// chat_id → turn-start tree (see [`TurnSnapshot`]).
     turn_trees: Mutex<HashMap<String, TurnSnapshot>>,
+    /// chat_id → tree at the start of the current run. Unlike `turn_trees`, a
+    /// steer into a run that is already working leaves it alone, so it spans
+    /// everything the agent did since it started working.
+    run_trees: Mutex<HashMap<String, watch::Sender<RunBase>>>,
     /// The tasks hold `Weak` refs, but an in-flight iteration holds an
     /// upgraded Arc — the token cuts it so no sidecar HTTP outlives shutdown.
     cancel: CancellationToken,
@@ -225,6 +241,7 @@ impl CheckoutDiffSync {
                 diffs_tx,
                 statuses_tx: watch::channel(Vec::new()).0,
                 turn_trees: Mutex::new(HashMap::new()),
+                run_trees: Mutex::new(HashMap::new()),
                 cancel: CancellationToken::new(),
                 supervisor: Mutex::new(None),
             }),
@@ -286,31 +303,34 @@ impl CheckoutDiffSync {
     /// A turn is starting for `chat_id` in `cwd`: snapshot the checkout's tree
     /// in the background so "Latest turn" has a base. Best-effort — failures
     /// only log; a chat outside a checkout simply records nothing.
-    pub fn note_turn_start(&self, chat_id: &str, cwd: &str) {
+    ///
+    /// `starts_run` is false for a steer into a run that is already working: it
+    /// is a new turn, but the run's own snapshot (see [`Self::run_snapshot`])
+    /// keeps its original base. A chat with no run snapshot yet (engine
+    /// restarted mid-run) takes this one as its base.
+    pub fn note_turn_start(&self, chat_id: &str, cwd: &str, starts_run: bool) {
+        // A new run replaces the old base at once, while its snapshot is still
+        // being taken: a request for it must wait for the new tree rather
+        // than be answered from the previous run's.
+        let run_slot = {
+            let mut runs = lock(&self.inner.run_trees);
+            (starts_run || !runs.contains_key(chat_id)).then(|| {
+                let (slot, _) = watch::channel(RunBase::Pending);
+                runs.insert(chat_id.to_string(), slot.clone());
+                slot
+            })
+        };
         let inner = Arc::downgrade(&self.inner);
         let chat_id = chat_id.to_string();
         let cwd = PathBuf::from(cwd);
         tokio::spawn(async move {
             let Some(inner) = inner.upgrade() else { return };
-            let identity = match inner.repos.checkout_identity(&cwd).await {
-                Ok(identity) => identity,
-                Err(_) => return, // not a checkout
-            };
-            match snapshot_tree(&identity.root).await {
-                Ok(tree) => {
-                    lock(&inner.turn_trees).insert(
-                        chat_id,
-                        TurnSnapshot {
-                            root: identity.root,
-                            tree,
-                            at: chrono::Utc::now(),
-                        },
-                    );
-                }
-                Err(err) => {
-                    tracing::debug!(chat = %chat_id, error = %err,
-                        "diff-sync: turn snapshot failed");
-                }
+            let snapshot = snapshot_checkout(&inner.repos, &chat_id, &cwd).await;
+            if let Some(slot) = run_slot {
+                slot.send_replace(snapshot.clone().map_or(RunBase::Missing, RunBase::Ready));
+            }
+            if let Some(snapshot) = snapshot {
+                lock(&inner.turn_trees).insert(chat_id, snapshot);
             }
         });
     }
@@ -319,6 +339,24 @@ impl CheckoutDiffSync {
     /// since boot.
     pub fn turn_snapshot(&self, chat_id: &str) -> Option<TurnSnapshot> {
         lock(&self.inner.turn_trees).get(chat_id).cloned()
+    }
+
+    /// The snapshot from when the chat's current run started working; steers
+    /// mid-run don't move it. Waits (briefly) for a run that has just started
+    /// and is still taking its snapshot.
+    pub async fn run_snapshot(&self, chat_id: &str) -> Option<TurnSnapshot> {
+        let mut base = lock(&self.inner.run_trees).get(chat_id)?.subscribe();
+        let base = tokio::time::timeout(
+            RUN_BASE_WAIT,
+            base.wait_for(|base| !matches!(base, RunBase::Pending)),
+        )
+        .await
+        .ok()?
+        .ok()?;
+        match &*base {
+            RunBase::Ready(snapshot) => Some(snapshot.clone()),
+            _ => None,
+        }
     }
 
     /// Discard the complete uncommitted state for a tracked checkout after
@@ -1720,6 +1758,23 @@ pub async fn merge_base(root: &Path, base_ref: &str) -> Result<String, EngineErr
         return Err(EngineError::Other(format!("no merge base with {base_ref}")));
     }
     Ok(sha)
+}
+
+/// Snapshot the checkout `cwd` sits in for `chat_id`'s turn. Best-effort: a
+/// directory outside a checkout, or a failed snapshot, records nothing.
+async fn snapshot_checkout(repos: &Repos, chat_id: &str, cwd: &Path) -> Option<TurnSnapshot> {
+    let identity = repos.checkout_identity(cwd).await.ok()?;
+    match snapshot_tree(&identity.root).await {
+        Ok(tree) => Some(TurnSnapshot {
+            root: identity.root,
+            tree,
+            at: chrono::Utc::now(),
+        }),
+        Err(err) => {
+            tracing::debug!(chat = %chat_id, error = %err, "diff-sync: turn snapshot failed");
+            None
+        }
+    }
 }
 
 /// Write the checkout's current tracked + untracked (unignored) tree into the
