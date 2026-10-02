@@ -2259,7 +2259,7 @@ fn spawn_command(
     executable: &Path,
     args: &[&str],
     env: &[(&str, &str)],
-) -> Result<tokio::process::Child, String> {
+) -> Result<zeron_harness::process::Child, String> {
     let mut command = Command::new(executable);
     command
         .args(args)
@@ -2280,7 +2280,7 @@ fn spawn_command(
 }
 
 async fn collect_command(
-    mut child: tokio::process::Child,
+    mut child: zeron_harness::process::Child,
     executable: &Path,
     timeout: Duration,
 ) -> Result<String, String> {
