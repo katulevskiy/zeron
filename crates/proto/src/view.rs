@@ -439,10 +439,11 @@ pub fn tool_chip_content(call: &crate::ToolCall) -> (&'static str, String) {
 
 /// Full invocation text for expanded tool blocks. Viewports own wrapping and
 /// truncation; this mapping keeps their command, content and input text identical.
+/// Commands stay verbatim so the executed binary is always available to audit.
 pub fn tool_call_text(call: &crate::ToolCall) -> String {
     use crate::ToolCall;
     match call {
-        ToolCall::Exec { command } => display_command(command),
+        ToolCall::Exec { command } => command.clone(),
         ToolCall::ReadFile { path } | ToolCall::EditFile { path, .. } => path.clone(),
         ToolCall::WriteFile { path, content } => match content {
             Some(content) => format!("{path}\n{content}"),

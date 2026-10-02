@@ -1,7 +1,7 @@
-//! Presentation-only removal of recognizable shell launch wrappers.
-//! The original invocation remains in ToolCall; uncertain syntax stays visible.
+//! Compact-title-only removal of recognizable shell launch wrappers.
+//! Expanded blocks retain the original invocation for auditing.
 
-/// Show the script rather than its shell executable and launch options.
+/// Show the script rather than its shell executable and launch options in a title.
 /// Only unwrap one layer: a shell explicitly invoked by the script is meaningful.
 pub fn display_command(command: &str) -> String {
     unwrap_command(command).unwrap_or_else(|| command.to_owned())

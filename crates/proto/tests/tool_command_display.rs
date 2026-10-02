@@ -10,9 +10,30 @@ fn command_display_hides_powershell_executable_from_screenshot() {
     let command = format!(
         "\"C:\\WINDOWS\\System32\\WindowsPowerShell\\v1.0\\powershell.exe\" -Command \"{script}\""
     );
-    let call = ToolCall::Exec { command };
+    let call = ToolCall::Exec {
+        command: command.clone(),
+    };
     assert_eq!(tool_chip_content(&call), ("Run", script.to_owned()));
-    assert_eq!(tool_call_text(&call), script);
+    assert_eq!(tool_call_text(&call), command);
+}
+
+#[test]
+fn expanded_commands_preserve_the_exact_invocation_for_auditing() {
+    for command in [
+        "./bash -c 'ls -la'",
+        "/tmp/evil/sh -c 'ls -la'",
+        "~/bin/zsh -c 'ls'",
+        r"C:\Users\x\Downloads\bash.exe -c 'ls'",
+        r#".\powershell.exe -Command "Get-ChildItem""#,
+        "/bin/bash -lc 'git status'",
+        "pwsh -NoProfile -Command \"Get-Date\"",
+        "  bash -c 'echo one\n\techo two'  \n",
+    ] {
+        let call = ToolCall::Exec {
+            command: command.into(),
+        };
+        assert_eq!(tool_call_text(&call), command, "{command:?}");
+    }
 }
 
 fn assert_display(command: &str, script: &str) {

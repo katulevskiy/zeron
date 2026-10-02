@@ -13831,12 +13831,10 @@ mod tests {
     }
 
     #[test]
-    fn shell_wrapped_command_is_consistent_in_header_and_expanded_block() {
+    fn shell_wrapped_command_has_compact_header_and_raw_expanded_block() {
         let script = "Get-Content 'main.rs'\nWrite-Output 'done'";
         let call = ToolCall::Exec {
-            command: format!(
-                r#""C:\Windows\System32\WindowsPowerShell\v1.0\powershell.exe" -Command "{script}""#
-            ),
+            command: format!("pwsh -NoProfile -Command \"{script}\""),
         };
         assert_eq!(tool_chip_content(&call), ("Run", single_line(script)));
         let Some(ToolDetail::Output {
@@ -13849,7 +13847,10 @@ mod tests {
         assert_eq!(truncated_by, 0);
         assert_eq!(
             lines.iter().map(|l| l.as_ref()).collect::<Vec<_>>(),
-            vec!["Get-Content 'main.rs'", "Write-Output 'done'"]
+            vec![
+                "pwsh -NoProfile -Command \"Get-Content 'main.rs'",
+                "Write-Output 'done'\""
+            ]
         );
     }
 
