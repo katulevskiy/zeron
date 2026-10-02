@@ -860,13 +860,15 @@ impl Composer {
             round.reason.is_some() || !round.todos.is_empty() || round.verifier_chat_id.is_some();
         let number = round.number;
         let toggle_chat = chat_id.to_owned();
-        let outcome_label = match round.state {
-            RoundState::Passed => "passed",
-            RoundState::NotSatisfied => "not satisfied",
-            RoundState::VerifierFailed => "verifier failed",
-            RoundState::Working => "working",
-            RoundState::Verifying => "verifying",
-            RoundState::Stopped => "stopped",
+        // A tinted pill like the PR badge: the state's color at low strength
+        // behind its label, so outcomes read at a glance down the list.
+        let (outcome_label, outcome_color) = match round.state {
+            RoundState::Passed => ("Passed", theme.success),
+            RoundState::NotSatisfied => ("Not satisfied", theme.warning),
+            RoundState::VerifierFailed => ("Verifier failed", theme.danger),
+            RoundState::Working => ("Working", accent),
+            RoundState::Verifying => ("Verifying", accent),
+            RoundState::Stopped => ("Stopped", theme.text_muted),
         };
         let glyph: AnyElement = match round.state {
             RoundState::Passed => icon(icons::CHECK)
@@ -945,14 +947,25 @@ impl Composer {
                     .child(SharedString::from(format!("{number}. {}", round.title))),
             )
             .child(
+                // Centered on the title's first line, like the glyph.
                 div()
                     .flex_none()
                     .h(px(TEXT_LINE))
                     .flex()
                     .items_center()
-                    .text_size(px(11.0))
-                    .text_color(theme.text_faint)
-                    .child(outcome_label),
+                    .child(
+                        div()
+                            .h(px(18.0))
+                            .px(px(6.0))
+                            .flex()
+                            .items_center()
+                            .rounded(px(5.0))
+                            .bg(outcome_color.opacity(0.10))
+                            .text_size(px(11.0))
+                            .font_weight(gpui::FontWeight::MEDIUM)
+                            .text_color(outcome_color.opacity(0.9))
+                            .child(outcome_label),
+                    ),
             );
         let detail = (open && has_detail).then(|| {
             div()
