@@ -1773,6 +1773,7 @@ mod tests {
             Origin {
                 chat_id: Some("chat-alpha-1".into()),
                 device_id: None,
+                ask_id: None,
             },
         );
         for (args, kind, parent) in [
@@ -1967,6 +1968,7 @@ mod tests {
             Origin {
                 chat_id: Some("chat-alpha-1".into()),
                 device_id: None,
+                ask_id: None,
             },
         );
         let result = tools
