@@ -1,7 +1,11 @@
 //! The row above the composer: the "N files changed +A −D" pill while the
 //! selected chat's agent is working (clicking it lists each file with its own
 //! counts), and the "Scroll to bottom" chip, which folds into a bare ↓ beside
-//! the pill. The row has no height at rest.
+//! the pill. The row has no layout height: both float just above the composer
+//! (like the chip always did), so the composer never moves when the pill
+//! arrives — the dock springs the composer's top edge, so any height added
+//! above the input would make it dip and settle. The transcript instead gets
+//! the pill's height through [`LiveDiff::clearance`].
 //!
 //! The pill's numbers are the engine's capture since the agent started
 //! working (`GetCheckoutDiff` in `run` mode), so edits already in the working
@@ -41,6 +45,8 @@ const PILL_KEY: &str = "live-diff-pill";
 const WATCH_RETRY: Duration = Duration::from_secs(2);
 
 const PILL_HEIGHT: f32 = 30.0;
+/// How far below its resting place the pill starts when it rises in.
+const PILL_RISE: f32 = 12.0;
 /// The file list scrolls past this height (about nine rows).
 const LIST_MAX_HEIGHT: f32 = 264.0;
 /// The folded scroll-to-bottom button's size.
@@ -125,9 +131,13 @@ pub struct LiveDiff {
     /// transcript whose scroll-to-bottom chip this row carries.
     transcript: Option<Entity<Transcript>>,
     _transcript: Option<Subscription>,
-    /// 0 = no pill, 1 = pill: drives the row's height, the arrow folding and
-    /// sliding aside, and the pill fading in (and the reverse).
+    /// 0 = no pill, 1 = pill: drives the arrow folding and sliding aside, the
+    /// pill rising in and fading, and the transcript's clearance (and the
+    /// reverse).
     pill: Glide,
+    /// Height the transcript should leave above the composer for the pill,
+    /// as of the last render.
+    clearance: f32,
     /// 0 = no arrow, 1 = arrow: slides the pill over to make room for it.
     jump_slot: Glide,
     /// The pill's laid-out width, read back from last frame so the arrow
@@ -168,9 +178,17 @@ impl LiveDiff {
             transcript: None,
             _transcript: None,
             pill: Glide::settled(0.0),
+            clearance: 0.0,
             jump_slot: Glide::settled(0.0),
             pill_width: Rc::default(),
         }
+    }
+
+    /// Room the transcript keeps above the composer for the pill (zero while
+    /// there is none). Fed into the shell's bottom-stack measurement, so the
+    /// transcript eases up to make room without the composer moving.
+    pub(crate) fn clearance(&self) -> f32 {
+        self.clearance
     }
 
     pub(crate) fn set_transcript(
@@ -422,7 +440,7 @@ impl LiveDiff {
         let pill = div()
             .id(PILL_KEY)
             .relative()
-            .top(px(2.0 * (1.0 - fade)))
+            .top(px(PILL_RISE * (1.0 - fade)))
             .opacity(fade)
             .h(px(PILL_HEIGHT))
             .rounded_full()
@@ -590,11 +608,12 @@ fn chip_label_width(window: &Window, theme: &Theme) -> f32 {
 }
 
 impl Render for LiveDiff {
-    /// The row above the composer. It has no height at rest and floats the
-    /// "Scroll to bottom" chip (when wanted) just above the composer. When the
-    /// pill arrives, one clock `g` moves everything, staged so nothing piles
-    /// up: the box grows, the chip folds to a bare ↓ and slides to the pill's
-    /// right, and the pill fades in. The run ending plays it backwards.
+    /// The row above the composer. It never has any height: the pill and the
+    /// "Scroll to bottom" chip float above it, so the composer stays put. When
+    /// the pill arrives one clock `g` moves everything: it rises into place and
+    /// fades in, and with the chip present, the chip first folds to a bare ↓
+    /// and slides to the pill's right so the two never overlap. The transcript
+    /// leaves room via [`Self::clearance`]. The run ending plays it backwards.
     fn render(&mut self, window: &mut Window, cx: &mut Context<Self>) -> impl IntoElement {
         let reduced = motion::reduced_motion(cx);
         let theme = Theme::of(cx).for_popup();
@@ -615,9 +634,12 @@ impl Render for LiveDiff {
         if g_moving || j_moving {
             window.request_animation_frame();
         }
+        self.clearance = (PILL_HEIGHT + ROW_GAP) * g;
         let folded = stage(g, 0.0, 0.55);
         let slide = stage(g, 0.25, 1.0);
-        let fade = stage(g, 0.7, 1.0);
+        // Alone, the pill rises and fades over the whole glide; beside the
+        // chip it waits until the chip has cleared its spot.
+        let fade = stage(g, if jump_wanted { 0.7 } else { 0.0 }, 1.0);
 
         // The pill sits left of the arrow, so it shifts over as the arrow
         // appears; the arrow lands one gap right of the pill's far edge.
@@ -647,14 +669,14 @@ impl Render for LiveDiff {
         div()
             .relative()
             .mx(px(QUEUE_SIDE_INSET))
-            // Grows from nothing, cancelling the column gap that follows it,
-            // so the transcript above eases up to make room.
-            .h(px(PILL_HEIGHT * g))
-            .mb(px(-Theme::SPACE_SM * (1.0 - g)))
+            // No height, and the column gap that follows is cancelled: the
+            // composer's top edge never moves, whatever floats above it.
+            .h_0()
+            .mb(px(-Theme::SPACE_SM))
             .children(capture.map(|capture| {
                 div()
                     .absolute()
-                    .bottom_0()
+                    .bottom(px(ROW_GAP))
                     .left_0()
                     .right_0()
                     .flex()
@@ -667,7 +689,7 @@ impl Render for LiveDiff {
                 // has; with the pill it settles into the pill's row.
                 div()
                     .absolute()
-                    .bottom(px(6.0 * (1.0 - g)))
+                    .bottom(px(motion::lerp(6.0, ROW_GAP, g)))
                     .left_0()
                     .right_0()
                     .flex()

@@ -10220,8 +10220,10 @@ impl Shell {
                         gpui::canvas(
                             move |bounds, window, cx| {
                                 // Reserve the destination footprint, never the animated height.
+                                let composer = composer.read(cx);
                                 let next_height = f32::from(bounds.size.height)
-                                    + composer.read(cx).dock_clearance_correction();
+                                    + composer.dock_clearance_correction()
+                                    + composer.live_diff_clearance(cx);
                                 let changed = (measured.get() - next_height).abs() > 0.5
                                     || measured_has_composer.get() != contains_composer;
                                 measured.set(next_height);

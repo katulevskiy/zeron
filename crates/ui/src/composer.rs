@@ -7862,6 +7862,12 @@ impl Composer {
             .update(cx, |live_diff, cx| live_diff.set_transcript(transcript, cx));
     }
 
+    /// Height the transcript leaves above the composer for the live-diff pill,
+    /// which floats there without moving the composer.
+    pub(crate) fn live_diff_clearance(&self, cx: &App) -> f32 {
+        self.live_diff.read(cx).clearance()
+    }
+
     pub(crate) fn run_live(&self, cx: &App) -> bool {
         let s = self.state.read(cx);
         let Some(chat_id) = s.selected_chat.as_deref() else {
