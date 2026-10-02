@@ -776,6 +776,10 @@ pub struct AppState {
     /// This engine's device id (best-effort `LocalDevice` probe; `None` until
     /// the engine serves it — views degrade gracefully).
     pub local_device_id: Option<String>,
+    /// This engine's "Disable local execution" policy (`WatchLocalExecution`).
+    /// The engine enforces it; the UI only steers new work to a remote device.
+    /// Kept across engine detach so a reconnect never briefly offers local.
+    pub local_execution_disabled: bool,
     /// Device-local agent CLI update lifecycle. Unlike `ListHarnesses`, this
     /// standing stream may be backed by subprocess and network probes.
     pub harness_updates: Vec<zeron_proto::HarnessUpdateStatus>,
@@ -859,6 +863,7 @@ impl AppState {
             review_comments: HashMap::new(),
             review_comment_flushes: HashMap::new(),
             local_device_id: None,
+            local_execution_disabled: false,
             harness_updates: Vec::new(),
             data_dir: None,
             engine: None,
@@ -929,7 +934,8 @@ impl AppState {
             if space_id.is_empty() {
                 self.selected_device
                     .clone()
-                    .or_else(|| self.local_device_id.clone())?
+                    .filter(|device| self.may_execute_on(device))
+                    .or_else(|| self.default_execution_device())?
             } else {
                 self.spaces
                     .iter()
@@ -1370,12 +1376,18 @@ impl AppState {
     fn first_space_on_picked_device(&self) -> Option<String> {
         let device = self
             .selected_device
-            .as_deref()
-            .or(self.local_device_id.as_deref());
+            .clone()
+            .or_else(|| self.default_execution_device());
+        let device = device.as_deref();
         let sorted = self.spaces_sorted();
         device
             .and_then(|d| sorted.iter().find(|s| s.device_id == d).copied())
-            .or_else(|| sorted.first().copied())
+            .or_else(|| {
+                sorted
+                    .iter()
+                    .find(|s| self.may_execute_on(&s.device_id))
+                    .copied()
+            })
             .map(|s| s.id.clone())
     }
 
@@ -1843,14 +1855,68 @@ impl AppState {
     }
 
     /// The device the new-session canvas targets: the picked project's host
-    /// when one is selected, else the explicit device pick, else this device.
+    /// when one is selected, else the explicit device pick, else this device
+    /// (with local execution disabled: a remote device, else none).
     pub fn effective_device_id(&self) -> Option<String> {
         if let Some(space) = self.selected_space_row() {
             return Some(space.device_id.clone());
         }
         self.selected_device
             .clone()
-            .or_else(|| self.local_device_id.clone())
+            .filter(|device| self.may_execute_on(device))
+            .or_else(|| self.default_execution_device())
+    }
+
+    /// Where work goes when nothing is picked: this device, or — with local
+    /// execution disabled — the first remote device (online ones first).
+    /// `None` means no remote device is known; callers must not fall back.
+    pub fn default_execution_device(&self) -> Option<String> {
+        if !self.local_execution_disabled {
+            return self.local_device_id.clone();
+        }
+        let now = Utc::now();
+        let mut remote: Vec<&Device> = self
+            .devices
+            .iter()
+            .filter(|device| self.may_execute_on(&device.id))
+            .collect();
+        remote.sort_by_key(|device| {
+            (
+                !self.device_online(&device.id, now),
+                device.name.to_lowercase(),
+            )
+        });
+        remote.first().map(|device| device.id.clone())
+    }
+
+    /// Policy frame: when it turns on, move a canvas aimed at this device to
+    /// a remote one (or none) instead of leaving a target it cannot use.
+    pub fn apply_local_execution(&mut self, disabled: bool) -> bool {
+        if self.local_execution_disabled == disabled {
+            return false;
+        }
+        self.local_execution_disabled = disabled;
+        if disabled {
+            if self
+                .selected_device
+                .as_deref()
+                .is_some_and(|device| !self.may_execute_on(device))
+            {
+                self.selected_device = None;
+            }
+            if self
+                .selected_space_row()
+                .is_some_and(|space| !self.may_execute_on(&space.device_id))
+            {
+                self.selected_space = self.first_space_on_picked_device();
+            }
+        }
+        true
+    }
+
+    /// False only for this device while local execution is disabled.
+    pub fn may_execute_on(&self, device_id: &str) -> bool {
+        !self.local_execution_disabled || self.local_device_id.as_deref() != Some(device_id)
     }
 
     /// Pick the composer's target device. Keeps the project pick consistent:
@@ -2279,6 +2345,12 @@ impl AppState {
                 true
             }),
             spawn_local_device_probe(cx, handle.clone()),
+            spawn_watch(
+                cx,
+                handle.clone(),
+                methods::WATCH_LOCAL_EXECUTION,
+                AppState::apply_local_execution,
+            ),
         ]);
         if supports_harness_updates {
             watch_tasks.push(spawn_watch(
@@ -4419,6 +4491,31 @@ mod tests {
             },
             Some((Some("parent".into()), "src/lib.rs".into()))
         );
+    }
+
+    #[test]
+    fn disabled_local_execution_retargets_new_work_and_never_falls_back() {
+        let mut state = AppState::new();
+        state.local_device_id = Some("local".into());
+        state.devices = vec![device("local", "Workstation"), device("remote", "Server")];
+        state.apply_spaces(vec![
+            space("s1", "local", "/Users/me/proj", 1),
+            space("remote-space", "remote", "/remote/proj", 2),
+        ]);
+        state.selected_space = Some("s1".into());
+        assert_eq!(state.effective_device_id().as_deref(), Some("local"));
+
+        assert!(state.apply_local_execution(true));
+        assert!(!state.may_execute_on("local"));
+        assert_eq!(state.selected_space.as_deref(), Some("remote-space"));
+        assert_eq!(state.effective_device_id().as_deref(), Some("remote"));
+
+        // No remote device: nothing, never this device.
+        state.devices = vec![device("local", "Workstation")];
+        state.no_project = true;
+        state.selected_space = None;
+        assert_eq!(state.effective_device_id(), None);
+        assert_eq!(state.default_execution_device(), None);
     }
 
     #[test]
