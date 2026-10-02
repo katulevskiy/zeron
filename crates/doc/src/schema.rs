@@ -2376,6 +2376,7 @@ mod goal_tests {
             id: "c1".into(),
             payload: crate::SessionCommandPayload::Goal {
                 command: GoalCommand::Pause,
+                issuer: None,
             },
             issued_by: "dev".into(),
             issued_at: 1,

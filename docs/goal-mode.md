@@ -249,8 +249,10 @@ are the defaults in the UI and `max_rounds` / `token_budget` /
 `time_budget_seconds` on the MCP `set_goal`.
 
 **MCP**: `get_goal`, `set_goal`, `pause_goal`, `resume_goal`, `clear_goal`
-(`docs/mcp.md`). No tool completes a goal, and an agent cannot pause, resume, clear or
-replace the goal verifying its own chat.
+(`docs/mcp.md`). No tool completes a goal. Agent-issued goal commands are checked on
+the host: no goal on the agent's own chat, at most the default rounds, a goal changes
+only by whoever set it (so never a person's goal), and only a person extends a goal
+past its limit.
 
 **Mobile**: out of scope here. The additive types (`Goal`, `MessageOrigin`,
 `TranscriptUpdate.goal`) live in `zeron-proto` / `zeron-doc` for the follow-up.

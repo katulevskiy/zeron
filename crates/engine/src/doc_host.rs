@@ -5339,8 +5339,9 @@ impl DocHost {
                 self.interrupt_and_pause_queue(sessions, handle).await?;
                 Ok((SessionCommandStatus::Applied, None))
             }
-            SessionCommandPayload::Goal { command } => {
-                self.apply_goal_command(handle, command).await
+            SessionCommandPayload::Goal { command, issuer } => {
+                self.apply_goal_command(handle, command, issuer.as_deref())
+                    .await
             }
             SessionCommandPayload::RespondInput {
                 request_id,

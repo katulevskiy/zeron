@@ -289,6 +289,7 @@ async fn a_read_only_chat_records_the_goal_but_never_pursues_it() {
         .queue_command(
             "ro",
             SessionCommandPayload::Goal {
+                issuer: None,
                 command: GoalCommand::Set {
                     objective: "Look around".into(),
                     limits: Default::default(),
@@ -443,6 +444,67 @@ async fn the_token_budget_stops_the_goal_before_paying_for_another_verifier() {
 }
 
 #[tokio::test]
+async fn agents_cannot_loop_their_own_chat_or_touch_a_persons_goal() {
+    // Hold every turn open (the event sender is never dropped) so goals sit
+    // still while commands are tried.
+    let rig = rig_with(Arc::new(|_, _, out, _| std::mem::forget(out)));
+    let set = |objective: &str| GoalCommand::Set {
+        objective: objective.into(),
+        limits: GoalLimits::default(),
+        replace: true,
+    };
+    // An agent can't put its own chat into a loop.
+    rig.env.goal_command_as(CHAT, set("Keep myself busy"), CHAT);
+    stays_false(
+        || rig.env.goal(CHAT).is_some(),
+        Duration::from_millis(400),
+        "an agent's goal on its own chat",
+    )
+    .await;
+
+    // A person's goal: no agent can pause, replace or clear it.
+    rig.env.set_goal(CHAT, "The person's objective");
+    wait_for(|| rig.env.goal(CHAT).is_some(), "the person's goal").await;
+    let original = goal_of(&rig);
+    assert_eq!(original.set_by_agent, None);
+    for command in [GoalCommand::Pause, set("Say hi"), GoalCommand::Clear] {
+        rig.env.goal_command_as(CHAT, command, "side-chat");
+    }
+    stays_false(
+        || {
+            rig.env
+                .goal(CHAT)
+                .is_none_or(|g| g.id != original.id || g.status == GoalStatus::Paused)
+        },
+        Duration::from_millis(500),
+        "an agent changing a person's goal",
+    )
+    .await;
+
+    // An agent-set goal records its setter; only that agent manages it.
+    rig.env.goal_command(CHAT, GoalCommand::Clear);
+    wait_for(|| rig.env.goal(CHAT).is_none(), "the person clears it").await;
+    rig.env
+        .goal_command_as(CHAT, set("Supervised work"), "boss");
+    wait_for(|| rig.env.goal(CHAT).is_some(), "the agent's goal").await;
+    assert_eq!(goal_of(&rig).set_by_agent.as_deref(), Some("boss"));
+    rig.env
+        .goal_command_as(CHAT, GoalCommand::Pause, "another-agent");
+    stays_false(
+        || {
+            rig.env
+                .goal(CHAT)
+                .is_some_and(|g| g.status == GoalStatus::Paused)
+        },
+        Duration::from_millis(400),
+        "a different agent pausing it",
+    )
+    .await;
+    rig.env.goal_command_as(CHAT, GoalCommand::Pause, "boss");
+    wait_status(&rig, GoalStatus::Paused).await;
+}
+
+#[tokio::test]
 async fn a_round_that_cannot_be_sent_pauses_the_goal_instead_of_looping() {
     let rig = rig();
     // A chat on a harness this engine doesn't have (uninstalled or disabled):
@@ -467,12 +529,19 @@ async fn a_round_that_cannot_be_sent_pauses_the_goal_instead_of_looping() {
         .unwrap();
     rig.env.set_goal(chat, "Never deliverable");
     wait_for(
-        || rig.env.goal(chat).is_some_and(|g| g.status == GoalStatus::Paused),
+        || {
+            rig.env
+                .goal(chat)
+                .is_some_and(|g| g.status == GoalStatus::Paused)
+        },
         "the goal pauses on the failed send",
     )
     .await;
     let goal = rig.env.goal(chat).unwrap();
-    assert_eq!(goal.reason.as_ref().unwrap().kind, GoalReasonKind::TurnFailed);
+    assert_eq!(
+        goal.reason.as_ref().unwrap().kind,
+        GoalReasonKind::TurnFailed
+    );
     // Paused, not retrying: the goal and its queue stay still.
     let settled = rig.env.goal(chat).unwrap().updated_at;
     stays_false(

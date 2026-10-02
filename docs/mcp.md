@@ -251,11 +251,21 @@ when it returns (the result says `queued`). `get_goal` returns the goal with its
 verdict history, budgets and stop reason, or `null`.
 
 Trust rules: there is **no tool that completes a goal** — only the verifier
-child chat can. An agent also cannot `pause_goal`, `resume_goal` or `clear_goal`
-the goal that is verifying *its own* chat, nor replace it with `set_goal
-replace=true`: ending that loop is the user's decision, not a way out of
-verification. It can read it, set a goal on its own chat when it has none, and
-manage goals of other chats it supervises.
+child chat can. Goal commands from these tools carry the calling chat as their
+issuer, and the chat's host applies narrower rules to them than to a person's
+(`agent_goal_permission`), so relaying a request through another chat changes
+nothing:
+
+- an agent cannot give **its own chat** a goal, and sets at most the default
+  number of rounds;
+- a goal still in play can be paused, resumed, replaced or cleared only by the
+  agent that set it, so **no agent can change a goal a person set** (a finished
+  goal may be cleared or followed by a new one);
+- only a person extends a goal **past its limit**.
+
+The tools check the same rules before queuing, so a refusal returns at once with
+its reason. A process that bypasses the tools and writes commands to the engine's
+local port directly is outside this model (see the ask profile below).
 
 ## The ask profile
 

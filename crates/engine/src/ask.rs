@@ -427,7 +427,13 @@ impl AskService {
 
     /// The `submit_result` tool call: validate, and either accept (the ask's
     /// waiter wakes) or answer with the violations to repair.
-    pub fn submit(&self, chat_id: &str, ask_id: &str, token: &str, result: Value) -> AskSubmitReply {
+    pub fn submit(
+        &self,
+        chat_id: &str,
+        ask_id: &str,
+        token: &str,
+        result: Value,
+    ) -> AskSubmitReply {
         let Some(state) = lock(&self.live).get(chat_id).cloned() else {
             return rejected("No result is being collected from this chat any more.", 0);
         };
@@ -440,7 +446,10 @@ impl AskService {
         // answer for the verifier.
         if !constant_time_eq(state.token.as_bytes(), token.as_bytes()) {
             tracing::warn!(chat = %chat_id, "ask submission without the ask's token refused");
-            return rejected("This result was not submitted by the request's own chat.", 0);
+            return rejected(
+                "This result was not submitted by the request's own chat.",
+                0,
+            );
         }
         if state.accepted.is_some() {
             return AskSubmitReply {

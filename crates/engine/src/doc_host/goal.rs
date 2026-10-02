@@ -12,7 +12,7 @@ use std::time::Duration;
 
 use zeron_proto::{
     Goal, GoalCommand, GoalError, GoalEventKind, GoalReasonKind, GoalStatus, MessageOrigin,
-    SessionStatus,
+    SessionStatus, agent_goal_permission,
 };
 
 use super::*;
@@ -241,10 +241,11 @@ impl DocHost {
         &self,
         handle: &Arc<ChatDocHandle>,
         command: &GoalCommand,
+        issuer: Option<&str>,
     ) -> CommandOutcome {
         let outcome = {
             let _guard = handle.goal_lock.lock().await;
-            self.apply_goal_command_locked(handle, command)
+            self.apply_goal_command_locked(handle, command, issuer)
         };
         self.goal_tick(handle).await;
         outcome
@@ -254,10 +255,20 @@ impl DocHost {
         &self,
         handle: &Arc<ChatDocHandle>,
         command: &GoalCommand,
+        issuer: Option<&str>,
     ) -> CommandOutcome {
         let now = now_ms();
         let rejected = |message: String| Ok((SessionCommandStatus::Rejected, Some(message)));
         let current = handle.doc.goal();
+        // An agent's tools get a narrower set of goal actions than a person.
+        let agent = issuer.filter(|id| !id.trim().is_empty());
+        if let Some(agent) = agent
+            && let Err(message) =
+                agent_goal_permission(command, current.as_ref(), agent, &handle.chat_id)
+        {
+            tracing::info!(chat = %handle.chat_id, agent, "agent goal command refused: {message}");
+            return rejected(message);
+        }
         match command {
             GoalCommand::Set {
                 objective,
@@ -271,10 +282,11 @@ impl DocHost {
                 {
                     return rejected(GoalError::AlreadyExists.to_string());
                 }
-                let goal = match Goal::new(new_id(), objective, limits, now) {
+                let mut goal = match Goal::new(new_id(), objective, limits, now) {
                     Ok(goal) => goal,
                     Err(err) => return rejected(err.to_string()),
                 };
+                goal.set_by_agent = agent.map(str::to_owned);
                 if let Some(old) = &current {
                     self.discard_goal_runtime(handle, old);
                 }
@@ -303,7 +315,12 @@ impl DocHost {
                     GoalStatus::Active | GoalStatus::Verifying => {
                         self.discard_goal_runtime(handle, &goal);
                         self.fold_turn(handle, &mut goal, now);
-                        goal.stop(GoalStatus::Paused, GoalReasonKind::User, "Paused by you.");
+                        let by = if agent.is_some() {
+                            "Paused by the agent that set it."
+                        } else {
+                            "Paused by you."
+                        };
+                        goal.stop(GoalStatus::Paused, GoalReasonKind::User, by);
                         goal.updated_at = now;
                         handle.doc.set_goal(&goal)?;
                         self.sync_goal_live(handle, Some(&goal));
@@ -332,7 +349,7 @@ impl DocHost {
                         }
                         if goal.status == GoalStatus::BudgetLimited {
                             // Resuming past a cap grants another allowance.
-                            goal.extensions += 1;
+                            goal.extensions = goal.extensions.saturating_add(1);
                         }
                         goal.status = GoalStatus::Active;
                         goal.reason = None;

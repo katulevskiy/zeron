@@ -2415,20 +2415,24 @@ mod tests {
                 ask_id: None,
             },
         );
+        // The user set this chat's goal: nothing the agent sends touches it.
+        *world.goal.lock().unwrap() = Some(goal_json_value("g", "x", "active"));
         for tool in ["pause_goal", "resume_goal", "clear_goal"] {
             let err = tools.call(tool, json!({})).await.unwrap_err();
-            assert!(err.contains("only the user can"), "{tool}: {err}");
+            assert!(err.contains("ask the user"), "{tool}: {err}");
             let err = tools
                 .call(tool, json!({ "chat": "beta" }))
                 .await
                 .unwrap_err();
-            assert!(err.contains("only the user can"), "{tool}: {err}");
+            assert!(err.contains("ask the user"), "{tool}: {err}");
         }
-        let err = tools
-            .call("set_goal", json!({ "objective": "x", "replace": true }))
-            .await
-            .unwrap_err();
-        assert!(err.contains("own chat"), "{err}");
+        for replace in [true, false] {
+            let err = tools
+                .call("set_goal", json!({ "objective": "x", "replace": replace }))
+                .await
+                .unwrap_err();
+            assert!(err.contains("own chat"), "{err}");
+        }
         assert!(
             world.writes.lock().unwrap().is_empty(),
             "nothing reached the command plane"
@@ -2436,7 +2440,7 @@ mod tests {
     }
 
     #[tokio::test]
-    async fn another_chats_goal_can_be_paused() {
+    async fn another_chats_goal_can_be_paused_only_by_the_agent_that_set_it() {
         let world = Arc::new(World::default());
         let tools = tools(
             world.clone(),
@@ -2446,7 +2450,18 @@ mod tests {
                 ask_id: None,
             },
         );
-        *world.goal.lock().unwrap() = Some(goal_json_value("g", "x", "paused"));
+        // A person's goal on another chat is out of reach...
+        *world.goal.lock().unwrap() = Some(goal_json_value("g", "x", "active"));
+        let err = tools
+            .call("pause_goal", json!({ "chat": "alpha" }))
+            .await
+            .unwrap_err();
+        assert!(err.contains("ask the user"), "{err}");
+        assert!(world.writes.lock().unwrap().is_empty());
+        // ...one this agent set, it manages.
+        let mut own_goal = goal_json_value("g", "x", "paused");
+        own_goal["setByAgent"] = "chat-beta-2".into();
+        *world.goal.lock().unwrap() = Some(own_goal);
         let result = tools
             .call("pause_goal", json!({ "chat": "alpha" }))
             .await
