@@ -868,49 +868,7 @@ fn wrap_cols(line: &str, cols: usize) -> Vec<SharedString> {
 /// per line, MCP/unknown input as pretty-printed JSON. Reuses the output
 /// code-block payload so rendering and height stay one implementation.
 pub fn call_block(call: &ToolCall) -> Option<ToolDetail> {
-    let text: String = match call {
-        ToolCall::Exec { command } => zeron_proto::view::display_command(command).into_owned(),
-        ToolCall::ReadFile { path } => path.clone(),
-        ToolCall::WriteFile { path, content } => match content {
-            Some(content) => format!("{path}\n{content}"),
-            None => path.clone(),
-        },
-        ToolCall::EditFile { path, .. } => path.clone(),
-        ToolCall::ApplyPatch { path } => path.clone().unwrap_or_else(|| "workspace".into()),
-        ToolCall::Search { pattern, path } => match path {
-            Some(path) => format!("{pattern} in {path}"),
-            None => pattern.clone(),
-        },
-        ToolCall::Glob { pattern } => pattern.clone(),
-        ToolCall::WebFetch { url, prompt } => match prompt {
-            Some(prompt) => format!("{url}\n{prompt}"),
-            None => url.clone(),
-        },
-        ToolCall::WebSearch { query } => query.clone(),
-        ToolCall::Todo { items } => items
-            .iter()
-            .map(|i| format!("{} {}", if i.done { "[x]" } else { "[ ]" }, i.text))
-            .collect::<Vec<_>>()
-            .join("\n"),
-        ToolCall::Mcp {
-            server,
-            tool,
-            input,
-        } => match input {
-            Some(input) => format!(
-                "{server} · {tool}\n{}",
-                serde_json::to_string_pretty(input).unwrap_or_default()
-            ),
-            None => format!("{server} · {tool}"),
-        },
-        ToolCall::Unknown { name, input } => match input {
-            Some(input) => format!(
-                "{name}\n{}",
-                serde_json::to_string_pretty(input).unwrap_or_default()
-            ),
-            None => name.clone(),
-        },
-    };
+    let text = zeron_proto::view::tool_call_text(call);
     let mut lines: Vec<SharedString> = text
         .lines()
         .flat_map(|l| wrap_cols(l, CALL_WRAP_COLS))

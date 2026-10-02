@@ -400,14 +400,9 @@ fn plural(n: usize, one: &str, many: &str) -> String {
 /// Per-kind chip label + one-line detail. Labels match zeron's `describeTool`
 /// (tool-chip.tsx) exactly, so the two viewports name a tool identically.
 pub fn tool_chip_content(call: &crate::ToolCall) -> (&'static str, String) {
-    let (label, detail) = tool_chip_content_raw(call);
-    (label, single_line(&detail))
-}
-
-fn tool_chip_content_raw(call: &crate::ToolCall) -> (&'static str, String) {
     use crate::ToolCall;
-    match call {
-        ToolCall::Exec { command } => ("Run", display_command(command).into_owned()),
+    let (label, detail) = match call {
+        ToolCall::Exec { command } => ("Run", display_command(command)),
         ToolCall::ReadFile { path } => ("Read", path.clone()),
         ToolCall::WriteFile { path, .. } => ("Write", path.clone()),
         ToolCall::EditFile { path, .. } => ("Edit", path.clone()),
@@ -437,6 +432,55 @@ fn tool_chip_content_raw(call: &crate::ToolCall) -> (&'static str, String) {
             Some(description) => ("Agent", description.to_owned()),
             None if name == "Agent" => ("Agent", String::new()),
             None => ("Tool", name.clone()),
+        },
+    };
+    (label, single_line(&detail))
+}
+
+/// Full invocation text for expanded tool blocks. Viewports own wrapping and
+/// truncation; this mapping keeps their command, content and input text identical.
+pub fn tool_call_text(call: &crate::ToolCall) -> String {
+    use crate::ToolCall;
+    match call {
+        ToolCall::Exec { command } => display_command(command),
+        ToolCall::ReadFile { path } | ToolCall::EditFile { path, .. } => path.clone(),
+        ToolCall::WriteFile { path, content } => match content {
+            Some(content) => format!("{path}\n{content}"),
+            None => path.clone(),
+        },
+        ToolCall::ApplyPatch { path } => path.clone().unwrap_or_else(|| "workspace".into()),
+        ToolCall::Search { pattern, path } => match path {
+            Some(path) => format!("{pattern} in {path}"),
+            None => pattern.clone(),
+        },
+        ToolCall::Glob { pattern } => pattern.clone(),
+        ToolCall::WebFetch { url, prompt } => match prompt {
+            Some(prompt) => format!("{url}\n{prompt}"),
+            None => url.clone(),
+        },
+        ToolCall::WebSearch { query } => query.clone(),
+        ToolCall::Todo { items } => items
+            .iter()
+            .map(|i| format!("{} {}", if i.done { "[x]" } else { "[ ]" }, i.text))
+            .collect::<Vec<_>>()
+            .join("\n"),
+        ToolCall::Mcp {
+            server,
+            tool,
+            input,
+        } => match input {
+            Some(input) => format!(
+                "{server} · {tool}\n{}",
+                serde_json::to_string_pretty(input).unwrap_or_default()
+            ),
+            None => format!("{server} · {tool}"),
+        },
+        ToolCall::Unknown { name, input } => match input {
+            Some(input) => format!(
+                "{name}\n{}",
+                serde_json::to_string_pretty(input).unwrap_or_default()
+            ),
+            None => name.clone(),
         },
     }
 }

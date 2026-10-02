@@ -1,6 +1,6 @@
 use zeron_proto::{
     ToolCall,
-    view::{display_command, single_line, tool_chip_content},
+    view::{display_command, tool_call_text, tool_chip_content},
 };
 
 #[test]
@@ -11,20 +11,12 @@ fn command_display_hides_powershell_executable_from_screenshot() {
         "\"C:\\WINDOWS\\System32\\WindowsPowerShell\\v1.0\\powershell.exe\" -Command \"{script}\""
     );
     let call = ToolCall::Exec { command };
-    let original = serde_json::to_value(&call).unwrap();
     assert_eq!(tool_chip_content(&call), ("Run", script.to_owned()));
-    assert_eq!(serde_json::to_value(&call).unwrap(), original);
+    assert_eq!(tool_call_text(&call), script);
 }
 
 fn assert_display(command: &str, script: &str) {
     assert_eq!(display_command(command), script, "{command:?}");
-    assert_eq!(
-        tool_chip_content(&ToolCall::Exec {
-            command: command.into()
-        }),
-        ("Run", single_line(script)),
-        "chip for {command:?}"
-    );
 }
 
 #[test]

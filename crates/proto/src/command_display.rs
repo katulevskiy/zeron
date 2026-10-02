@@ -1,15 +1,13 @@
 //! Presentation-only removal of recognizable shell launch wrappers.
 //! The original invocation remains in ToolCall; uncertain syntax stays visible.
 
-use std::borrow::Cow;
-
 /// Show the script rather than its shell executable and launch options.
 /// Only unwrap one layer: a shell explicitly invoked by the script is meaningful.
-pub fn display_command(command: &str) -> Cow<'_, str> {
-    unwrap_command(command).unwrap_or(Cow::Borrowed(command))
+pub fn display_command(command: &str) -> String {
+    unwrap_command(command).unwrap_or_else(|| command.to_owned())
 }
 
-fn unwrap_command(command: &str) -> Option<Cow<'_, str>> {
+fn unwrap_command(command: &str) -> Option<String> {
     let mut input = command.trim();
     // PowerShell's call operator, commonly used with quoted executable paths.
     let call_operator = input.starts_with('&');
@@ -42,15 +40,11 @@ fn unwrap_command(command: &str) -> Option<Cow<'_, str>> {
         if powershell {
             let option = option.to_ascii_lowercase();
             if matches!(option.as_str(), "-command" | "-c") {
-                let script = after.trim();
-                if script.is_empty() || script == "-" || script == "\"\"" || script == "''" {
-                    return None;
-                }
-                let script = windows_script(script)?;
+                let script = windows_script(after.trim())?;
                 if script.trim().is_empty() || script == "-" {
                     return None;
                 }
-                return Some(Cow::Borrowed(script));
+                return Some(script.to_owned());
             }
             match option.as_str() {
                 "-nologo" | "-noprofile" | "-noninteractive" | "-sta" | "-mta" => rest = after,
@@ -86,7 +80,7 @@ fn unwrap_command(command: &str) -> Option<Cow<'_, str>> {
                 if script.trim().is_empty() {
                     return None;
                 }
-                return Some(Cow::Borrowed(script));
+                return Some(script.to_owned());
             }
             match option.as_str() {
                 "/s" => {
@@ -110,7 +104,7 @@ fn unwrap_command(command: &str) -> Option<Cow<'_, str>> {
                     if script.trim().is_empty() || !suffix.trim().is_empty() {
                         return None;
                     }
-                    return Some(Cow::Owned(script));
+                    return Some(script);
                 }
                 rest = after;
             } else if matches!(
@@ -152,7 +146,7 @@ fn literal_word(input: &str) -> Option<(&str, &str)> {
 /// Remove a single, complete Windows command-string enclosure. Preserve all
 /// inner spelling (backslashes, PowerShell backticks and doubled quotes).
 fn windows_script(script: &str) -> Option<&str> {
-    let quote = script.as_bytes()[0];
+    let quote = *script.as_bytes().first()?;
     if !matches!(quote, b'\'' | b'"') {
         return Some(script);
     }
