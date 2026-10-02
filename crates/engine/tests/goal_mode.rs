@@ -443,6 +443,50 @@ async fn the_token_budget_stops_the_goal_before_paying_for_another_verifier() {
 }
 
 #[tokio::test]
+async fn a_round_that_cannot_be_sent_pauses_the_goal_instead_of_looping() {
+    let rig = rig();
+    // A chat on a harness this engine doesn't have (uninstalled or disabled):
+    // every attempt to send its round prompt fails.
+    let chat = "unsendable";
+    rig.env
+        .core
+        .workspace
+        .create_chat(
+            chat,
+            Some("space-main"),
+            None,
+            Some(zeron_proto::ChatConfig {
+                harness: zeron_proto::HarnessId::Codex,
+                model: None,
+                reasoning: None,
+                model_options: Default::default(),
+                sandbox: SandboxLevel::WorkspaceWrite,
+            }),
+            None,
+        )
+        .unwrap();
+    rig.env.set_goal(chat, "Never deliverable");
+    wait_for(
+        || rig.env.goal(chat).is_some_and(|g| g.status == GoalStatus::Paused),
+        "the goal pauses on the failed send",
+    )
+    .await;
+    let goal = rig.env.goal(chat).unwrap();
+    assert_eq!(goal.reason.as_ref().unwrap().kind, GoalReasonKind::TurnFailed);
+    // Paused, not retrying: the goal and its queue stay still.
+    let settled = rig.env.goal(chat).unwrap().updated_at;
+    stays_false(
+        || {
+            rig.env.goal(chat).is_some_and(|g| g.updated_at != settled)
+                || !rig.env.runs.lock().unwrap().is_empty()
+        },
+        Duration::from_millis(800),
+        "retrying the failed send on its own",
+    )
+    .await;
+}
+
+#[tokio::test]
 async fn a_failing_verifier_pauses_the_goal_instead_of_looping() {
     let rig = rig();
     rig.ask

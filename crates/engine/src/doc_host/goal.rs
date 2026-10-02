@@ -323,6 +323,13 @@ impl DocHost {
                         Some("already running".into()),
                     )),
                     GoalStatus::Paused | GoalStatus::BudgetLimited => {
+                        // Resuming is the deliberate retry for a queue frozen
+                        // by a failed send (the goal paused on it): thaw it so
+                        // the stale round prompt either goes out or fails and
+                        // pauses the goal again, once.
+                        if handle.queue_send_failed.swap(false, Ordering::AcqRel) {
+                            handle.queue_paused.store(false, Ordering::Release);
+                        }
                         if goal.status == GoalStatus::BudgetLimited {
                             // Resuming past a cap grants another allowance.
                             goal.extensions += 1;
@@ -631,8 +638,13 @@ impl DocHost {
         let own_row_queued =
             pending_turn.is_some_and(|p| queue.iter().any(|r| r.id == p.message_id));
         // A recovered or Stop-frozen queue holding only the controller's own
-        // round prompt would never drain by itself; it is safe to thaw.
-        if own_row_queued && queue.len() == 1 && handle.queue_paused.load(Ordering::Acquire) {
+        // round prompt would never drain by itself; it is safe to thaw. Not a
+        // queue frozen by a failed send: thawing it would retry the same
+        // failing send on every tick (each try writes the doc, which ticks
+        // again). The controller pauses the goal instead (`round_send_failed`).
+        let send_failed = handle.queue_send_failed.load(Ordering::Acquire);
+        let paused = handle.queue_paused.load(Ordering::Acquire);
+        if own_row_queued && queue.len() == 1 && paused && !send_failed {
             handle.queue_paused.store(false, Ordering::Release);
         }
         let status = sessions.session_status(&handle.chat_id).map(|s| s.status);
@@ -647,6 +659,7 @@ impl DocHost {
             session_errored,
             queue_has_rows: !queue.is_empty(),
             own_row_queued,
+            round_send_failed: own_row_queued && paused && send_failed,
             round_outcome,
             subagents_running,
             read_only_chat: self
