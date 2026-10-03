@@ -63,7 +63,7 @@ pub fn usage_level(fraction: f32) -> UsageLevel {
 /// Compact account list geometry: every row shares one usage column and one
 /// action slot, so meters and buttons line up down the list however many
 /// accounts there are.
-const USAGE_LABEL_WIDTH: f32 = 52.0;
+pub(crate) const USAGE_LABEL_WIDTH: f32 = 52.0;
 const USAGE_BAR_WIDTH: f32 = 88.0;
 const USAGE_PERCENT_WIDTH: f32 = 34.0;
 const USAGE_COLUMN_WIDTH: f32 = USAGE_LABEL_WIDTH + USAGE_BAR_WIDTH + USAGE_PERCENT_WIDTH + 16.0;
@@ -2388,6 +2388,7 @@ mod tests {
             plan_label: None,
             active,
             usage_windows: vec![],
+            available_resets: None,
             usage_fetched_at: None,
             usage_error: None,
             display_name: None,
@@ -2540,6 +2541,7 @@ mod tests {
                 used_fraction: 0.4,
                 resets_at: None,
             }],
+            available_resets: None,
             usage_fetched_at: None,
             usage_error: None,
             display_name: None,
@@ -2630,6 +2632,7 @@ mod tests {
             plan_label: None,
             active,
             usage_windows: vec![],
+            available_resets: None,
             usage_fetched_at: None,
             usage_error: None,
             display_name: None,

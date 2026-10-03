@@ -6,6 +6,7 @@
 //! either shows up in the other.
 use std::time::{Duration, Instant};
 
+use chrono::{DateTime, Local, Utc};
 use gpui::{
     Context, Entity, IntoElement, Render, SharedString, Subscription, Task, Window, div,
     prelude::*, px,
@@ -26,6 +27,36 @@ use crate::theme::Theme;
 const FORCE_MIN_INTERVAL: Duration = Duration::from_secs(30);
 /// Background re-probe while a composer is alive: usage moves as turns run.
 const POLL_INTERVAL: Duration = Duration::from_secs(5 * 60);
+/// Repaint an open card locally; a ticking countdown needs no provider request.
+const COUNTDOWN_INTERVAL: Duration = Duration::from_secs(30);
+
+/// Round up so a future reset never reads "0m". Expired snapshots must not
+/// claim the provider has replenished the allowance until a probe confirms it.
+fn reset_countdown(at: DateTime<Utc>, now: DateTime<Utc>) -> String {
+    let millis = at.signed_duration_since(now).num_milliseconds();
+    if at <= now {
+        return "Reset pending".into();
+    }
+    let minutes = (millis.max(1) + 59_999) / 60_000;
+    let (days, hours, mins) = (minutes / 1440, (minutes / 60) % 24, minutes % 60);
+    let duration = if days > 0 {
+        format!("{days}d {hours}h")
+    } else if hours > 0 {
+        format!("{hours}h {mins}m")
+    } else {
+        format!("{mins}m")
+    };
+    format!("Resets in {duration}")
+}
+
+fn banked_resets(count: Option<u32>) -> Option<String> {
+    count.filter(|count| *count > 0).map(|count| {
+        format!(
+            "{count} {} available",
+            if count == 1 { "reset" } else { "resets" }
+        )
+    })
+}
 
 /// The binding limit: the most-used window of the account. Pure.
 pub fn used_fraction(account: &AgentAccount) -> Option<f32> {
@@ -61,12 +92,61 @@ pub struct AccountUsage {
     action_task: Option<Task<()>>,
     popup: popover::Popup<FooterCard>,
     _poll: Task<()>,
+    _countdown: Task<()>,
     _cache: Subscription,
     _state: Subscription,
 }
 
 impl AccountUsage {
+    /// Offline visual fixture: opens the production card without a live engine.
+    #[cfg(feature = "account-usage-fixture")]
+    pub fn fixture_accounts(
+        &mut self,
+        harness: HarnessId,
+        snapshot: AgentAccountsSnapshot,
+        cx: &mut Context<Self>,
+    ) {
+        self.harness = Some(harness);
+        self.loaded = true;
+        cx.default_global::<AccountsSnapshotCache>()
+            .0
+            .insert(None, snapshot);
+        self.popup.open(FooterCard::Accounts);
+        cx.notify();
+    }
+
     pub fn new(state: Entity<AppState>, cx: &mut Context<Self>) -> Self {
+        let countdown = cx.spawn(async move |this, cx| {
+            let mut previous = Utc::now();
+            loop {
+                cx.background_executor().timer(COUNTDOWN_INTERVAL).await;
+                let now = Utc::now();
+                if this
+                    .update(cx, |usage, cx| {
+                        if usage.popup.as_open() == Some(&FooterCard::Accounts) {
+                            let crossed_reset = usage.snapshot(cx).is_some_and(|snapshot| {
+                                usage
+                                    .harness
+                                    .map(|harness| accounts::provider_accounts(snapshot, harness))
+                                    .unwrap_or_default()
+                                    .iter()
+                                    .flat_map(|account| &account.usage_windows)
+                                    .filter_map(|window| window.resets_at)
+                                    .any(|at| at > previous && at <= now)
+                            });
+                            if crossed_reset {
+                                usage.load(true, cx);
+                            }
+                            cx.notify();
+                        }
+                    })
+                    .is_err()
+                {
+                    break;
+                }
+                previous = now;
+            }
+        });
         let poll = cx.spawn(async move |this, cx| {
             loop {
                 cx.background_executor().timer(POLL_INTERVAL).await;
@@ -94,6 +174,7 @@ impl AccountUsage {
             action_task: None,
             popup: popover::Popup::default(),
             _poll: poll,
+            _countdown: countdown,
             // Settings → Accounts writes the same cache.
             _cache: cx.observe_global::<AccountsSnapshotCache>(|_, cx| cx.notify()),
         }
@@ -299,6 +380,7 @@ impl AccountUsage {
 
     fn accounts_card(&self, cx: &mut Context<Self>) -> gpui::Div {
         let theme = &Theme::of(cx).for_popup();
+        let now = Utc::now();
         let harness = self.harness;
         let rows: Vec<AgentAccount> = match (harness, self.snapshot(cx)) {
             (Some(harness), Some(snapshot)) => accounts::provider_accounts(snapshot, harness)
@@ -369,17 +451,48 @@ impl AccountUsage {
                             )
                             .when(!meta.is_empty(), |el| {
                                 el.child(crate::settings::widgets::meta_line(theme, meta))
-                            }),
+                            })
+                            .children(banked_resets(account.available_resets).map(|label| {
+                                div()
+                                    .id(("banked-resets", ix))
+                                    .mt(px(3.0))
+                                    .text_size(crate::typography::ui_rems(11.0))
+                                    .text_color(theme.text_muted)
+                                    .tooltip(crate::settings::widgets::text_tooltip(
+                                        "Banked usage resets. Manage them in your provider's usage settings.",
+                                    ))
+                                    .child(SharedString::from(label))
+                            })),
                     )
-                    .child(
-                        div().flex_none().flex().flex_col().gap(px(2.0)).children(
-                            account
-                                .usage_windows
-                                .iter()
-                                .take(2)
-                                .map(|window| render_usage_meter(window, theme)),
+                    .child(div().flex_none().flex().flex_col().gap(px(5.0)).children(
+                        account.usage_windows.iter().take(2).enumerate().map(
+                            |(window_ix, window)| {
+                                div()
+                                    .id(("account-reset", ix * 2 + window_ix))
+                                    .flex()
+                                    .flex_col()
+                                    .child(render_usage_meter(window, theme))
+                                    .when_some(window.resets_at, |el, at| {
+                                        let exact = at
+                                            .with_timezone(&Local)
+                                            .format("%a, %b %-d at %-I:%M %p %Z");
+                                        el.tooltip(crate::settings::widgets::text_tooltip(format!(
+                                            "{} limit resets {exact}",
+                                            window.label
+                                        )))
+                                        .child(
+                                            div()
+                                                .pl(px(accounts::USAGE_LABEL_WIDTH + 8.0))
+                                                .text_size(crate::typography::ui_rems(10.5))
+                                                .text_color(theme.text_muted)
+                                                .child(SharedString::from(reset_countdown(
+                                                    at, now,
+                                                ))),
+                                        )
+                                    })
+                            },
                         ),
-                    )
+                    ))
             }))
             .children(self.error.clone().map(|error| {
                 div()
@@ -510,5 +623,41 @@ mod tests {
             Some("Codex-true")
         );
         assert!(active_account(&snapshot, HarnessId::Cursor).is_none());
+    }
+
+    #[test]
+    fn countdown_handles_boundaries_and_expired_snapshots() {
+        let now: DateTime<Utc> = "2026-10-02T12:00:00Z".parse().unwrap();
+        assert_eq!(
+            reset_countdown(now + chrono::TimeDelta::nanoseconds(1), now),
+            "Resets in 1m"
+        );
+        for (millis, expected) in [
+            (-1, "Reset pending"),
+            (0, "Reset pending"),
+            (1, "Resets in 1m"),
+            (60_000, "Resets in 1m"),
+            (60_001, "Resets in 2m"),
+            (3_600_000, "Resets in 1h 0m"),
+            (8_040_000, "Resets in 2h 14m"),
+            (288_000_000, "Resets in 3d 8h"),
+            (2_592_000_000, "Resets in 30d 0h"),
+        ] {
+            assert_eq!(
+                reset_countdown(now + chrono::TimeDelta::milliseconds(millis), now),
+                expected
+            );
+        }
+    }
+
+    #[test]
+    fn banked_reset_label_only_reports_available_credits() {
+        assert_eq!(banked_resets(None), None);
+        assert_eq!(banked_resets(Some(0)), None);
+        assert_eq!(banked_resets(Some(1)).as_deref(), Some("1 reset available"));
+        assert_eq!(
+            banked_resets(Some(3)).as_deref(),
+            Some("3 resets available")
+        );
     }
 }
