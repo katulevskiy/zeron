@@ -1355,6 +1355,10 @@ struct PartState {
     emitted: usize,
     tool_started: bool,
     tool_done: bool,
+    /// The outer chip typed as [`ToolCall::Exec`] at open time. Completion
+    /// frames carry no input, so nested Code Mode calls consult this instead
+    /// of retyping: shell entries already painted on the outer chip skip.
+    outer_exec: bool,
 }
 
 /// Streaming state for one opencode session's feed (ours or a child's).
@@ -3370,9 +3374,11 @@ fn part_snapshot_events(
                 && (has_input || matches!(status, "running" | "completed" | "error"))
             {
                 entry.tool_started = true;
+                let call = oc_tool_call(tool, &input);
+                entry.outer_exec = matches!(call, ToolCall::Exec { .. });
                 events.push(AgentEvent::ToolCall {
                     id: call_id.clone(),
-                    call: oc_tool_call(tool, &input),
+                    call,
                 });
                 // A task spawn on the MAIN feed registers a pending chip so
                 // the child's session.created (or its metadata) can bind.
@@ -3395,11 +3401,23 @@ fn part_snapshot_events(
                     .filter(|t| !t.is_empty())
                     .map(|t| cap_text(t, OUTPUT_CAP));
                 events.push(AgentEvent::ToolResult {
-                    id: call_id,
+                    id: call_id.clone(),
                     is_error: status == "error",
                     output,
                     diff: None,
                 });
+                // A settled Code Mode `execute` names its nested calls in
+                // `state.metadata.toolCalls`: surface each as its own chip so
+                // the transcript shows what actually ran.
+                if tool == "execute" {
+                    events.extend(nested_codemode_events(
+                        &call_id,
+                        entry.outer_exec,
+                        part.get("state")
+                            .and_then(|s| s.get("metadata"))
+                            .and_then(|m| m.get("toolCalls")),
+                    ));
+                }
             }
             events
         }
@@ -3757,6 +3775,56 @@ fn codemode_command_arg(region: &str) -> Option<String> {
     None
 }
 
+/// Max nested Code Mode calls surfaced as chips per `execute`; the outer
+/// result still carries the full outcome, so truncation only costs chips.
+const MAX_NESTED_CODEMODE_CALLS: usize = 20;
+
+/// Chip events for one settled Code Mode `execute`'s nested `toolCalls`
+/// (`[{tool, input?, status?}]` from `state.metadata`).
+///
+/// The outer chip already shows scanner-extracted shell commands, so nested
+/// shell entries are skipped when the outer call typed as [`ToolCall::Exec`] —
+/// otherwise every shell-in-`execute` would paint twice. Everything else (and
+/// everything, when the outer stayed opaque) surfaces as its own typed chip,
+/// each immediately settled: per-nested outputs aren't reported, only status.
+fn nested_codemode_events(
+    call_id: &str,
+    outer_is_exec: bool,
+    tool_calls: Option<&Value>,
+) -> Vec<AgentEvent> {
+    let Some(calls) = tool_calls.and_then(Value::as_array) else {
+        return Vec::new();
+    };
+    let mut events = Vec::new();
+    for (ix, entry) in calls.iter().enumerate().take(MAX_NESTED_CODEMODE_CALLS) {
+        let name = entry
+            .get("tool")
+            .and_then(Value::as_str)
+            .unwrap_or_default();
+        let name = name.strip_prefix("tools.").unwrap_or(name);
+        if name.is_empty() {
+            continue;
+        }
+        let nested_input = entry.get("input").cloned().unwrap_or(Value::Null);
+        // Already painted on the outer chip: skip, don't show twice.
+        if outer_is_exec && matches!(oc_tool_call(name, &nested_input), ToolCall::Exec { .. }) {
+            continue;
+        }
+        let id = format!("{call_id}#{ix}");
+        events.push(AgentEvent::ToolCall {
+            id: id.clone(),
+            call: oc_tool_call(name, &nested_input),
+        });
+        events.push(AgentEvent::ToolResult {
+            id,
+            is_error: entry.get("status").and_then(Value::as_str) == Some("error"),
+            output: None,
+            diff: None,
+        });
+    }
+    events
+}
+
 /// Type an opencode-native tool invocation.
 ///
 /// V2 renames: `bash` is now `shell` (same `{command}` input); `execute` is
@@ -4078,12 +4146,17 @@ fn normalize_v2_frame_with_session_models(
                         .join("\n")
                 })
                 .unwrap_or_default();
-            vec![v2_tool_part(
-                &data,
-                id,
-                &name,
-                &json!({ "status": "completed", "output": output }),
-            )]
+            let mut state = json!({ "status": "completed", "output": output });
+            // Code Mode settles its nested calls here (`metadata.toolCalls`);
+            // the decoder surfaces each as its own chip.
+            if let Some(tool_calls) = data
+                .get("metadata")
+                .and_then(|m| m.get("toolCalls"))
+                .filter(|tc| tc.is_array())
+            {
+                state["metadata"] = json!({ "toolCalls": tool_calls.clone() });
+            }
+            vec![v2_tool_part(&data, id, &name, &state)]
         }
         "session.tool.failed" | "session.tool.error" => {
             let id = data.get("id").and_then(Value::as_str).unwrap_or_default();
@@ -4095,12 +4168,15 @@ fn normalize_v2_frame_with_session_models(
                 .map(str::to_owned)
                 .or_else(|| error.as_str().map(str::to_owned))
                 .unwrap_or_default();
-            vec![v2_tool_part(
-                &data,
-                id,
-                &name,
-                &json!({ "status": "error", "error": message }),
-            )]
+            let mut state = json!({ "status": "error", "error": message });
+            if let Some(tool_calls) = data
+                .get("metadata")
+                .and_then(|m| m.get("toolCalls"))
+                .filter(|tc| tc.is_array())
+            {
+                state["metadata"] = json!({ "toolCalls": tool_calls.clone() });
+            }
+            vec![v2_tool_part(&data, id, &name, &state)]
         }
         "session.step.ended" => {
             let tokens = data.get("tokens").cloned().unwrap_or(Value::Null);
