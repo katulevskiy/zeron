@@ -24,7 +24,7 @@ jobs:
     steps:
       - uses: actions/checkout@11d5960a326750d5838078e36cf38b85af677262 # v4.4.0
         with:
-          ref: ${{ inputs.target || '5bc17907' }}
+          ref: ${{ inputs.target || '5bc179078da1333b8bc46ac5087b7f688711247f' }}
       - uses: ./.github/actions/linux-ci
         with:
           rust-cache: memory-no-lto
