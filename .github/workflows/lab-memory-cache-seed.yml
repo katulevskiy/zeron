@@ -1,8 +1,8 @@
 name: lab-memory-cache-seed
 on:
-  push:
+  pull_request:
     branches: [main]
-    paths: ['.github/workflows/lab-memory-cache-seed.yml']
+    paths: ['.github/workflows/memory-checks.yml']
   workflow_dispatch:
     inputs:
       target:
@@ -13,7 +13,7 @@ permissions:
   contents: read
 jobs:
   valgrind:
-    if: github.repository == 'katulevskiy/zeron' && github.ref == 'refs/heads/main'
+    if: github.repository == 'katulevskiy/zeron'
     runs-on: ubuntu-24.04
     timeout-minutes: 15
     env:
@@ -24,7 +24,7 @@ jobs:
     steps:
       - uses: actions/checkout@11d5960a326750d5838078e36cf38b85af677262 # v4.4.0
         with:
-          ref: ${{ inputs.target || '2d9913f2a3b1c731d126bb6affce95c63fa80b5e' }}
+          ref: ${{ inputs.target || '5bc17907' }}
       - uses: ./.github/actions/linux-ci
         with:
           rust-cache: memory-no-lto
