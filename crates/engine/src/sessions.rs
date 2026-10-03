@@ -3270,9 +3270,7 @@ mod tests {
         }
     }
 
-    // A tagged subagent event that folds to NO parts used to leave its sink
-    // dirty forever: the commit branch's guard stayed true on a deadline in
-    // the past and the run loop burned a core until real content arrived.
+    // A queued deletion can outlive its run and must not cancel a replacement.
     #[tokio::test]
     async fn stale_run_interrupt_does_not_cancel_the_current_provider() {
         let (_feed, receiver) = mpsc::unbounded_channel();
@@ -3305,6 +3303,9 @@ mod tests {
         core.shutdown().await;
     }
 
+    // A tagged subagent event that folds to NO parts used to leave its sink
+    // dirty forever: the commit branch's guard stayed true on a deadline in
+    // the past and the run loop burned a core until real content arrived.
     #[tokio::test]
     async fn empty_subagent_events_commit_once_per_window_not_per_tick() {
         use super::*;
