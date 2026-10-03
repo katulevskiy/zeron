@@ -95,7 +95,12 @@ The original automatic job took 16m25s: 10m03s for the duplicate release core
 suite and 5m53s for diagnostic builds and profiling. The fork-only speedup
 experiment removed that suite and disabled release LTO while retaining optimized
 code, source locations, all ten Memcheck checks, and all four Massif profiles.
-Its cold run still exceeded the seven-minute automatic CI budget, so memory
+The [cold fork run](https://github.com/katulevskiy/zeron/actions/runs/37092790985)
+passed all ten Memcheck checks with zero errors and all four Massif profiles,
+but took **9m10s** for the complete job (5m57s for the diagnostic example build).
+The [main cache-seeding run](https://github.com/katulevskiy/zeron/actions/runs/37092895163)
+also passed in 9m52s, including writing the dependency cache. Both exceeded
+the seven-minute automatic CI budget, so memory
 diagnostics now run only through `workflow_dispatch`, never on PRs or pushes.
 The separate `memory-no-lto` Rust cache uses the shared Linux setup: only runs
 on `main` can write it; other refs only restore. Regular core caches use a
@@ -122,8 +127,8 @@ stack storage. Extracting just the routing scalar inside an explicit workspace
 branch removes that read and releases the row's strings/config before document
 loading. The final run uses ordinary Memcheck definedness checks; no error
 suppression was added. Changes after its measured revision only format Rust,
-finish documentation, replace temporary fork CI wiring with main/PR wiring,
-and harden that client integration test's wait.
+finish documentation, revise CI triggers/build settings, and harden that client
+integration test's wait.
 
 Massif's useful-heap peaks (including native SQLite allocations, excluding
 stacks) are 56.48 MiB for the document fixture, 3.95 MiB for disconnected sync,
