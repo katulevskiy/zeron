@@ -75,6 +75,13 @@ New tests cover quiet cancellation, ordered/backpressured RPCs, bounded durable
 windows and HTTP drain, rejected-row recovery, lag/exit ordering, large/torn
 journal tails, font destruction, image normalization, and ANSI gap recovery.
 
+The PR's mobile-core integration check exposed a timing assumption: transcript
+publication can precede the separately derived composer/workspace status. The
+round-trip test now waits for the adopted echo, reply, connected room, and idle
+composer together before asserting them. The full local text/markdown/client/
+mobile suite passed (185 tests, one existing test ignored), and the affected
+round-trip test passed 20 consecutive runs.
+
 [Memory checks](../.github/workflows/memory-checks.yml) runs Linux core regressions,
 Valgrind Memcheck on nine finite offline scenarios plus font ownership, and
 Massif on document, sync, catch-up, and complete backend replacement workloads.
@@ -99,7 +106,8 @@ stack storage. Extracting just the routing scalar inside an explicit workspace
 branch removes that read and releases the row's strings/config before document
 loading. The final run uses ordinary Memcheck definedness checks; no error
 suppression was added. Changes after its measured revision only format Rust,
-finish documentation, and replace temporary fork CI wiring with main/PR wiring.
+finish documentation, replace temporary fork CI wiring with main/PR wiring,
+and harden that client integration test's wait.
 
 Massif's useful-heap peaks (including native SQLite allocations, excluding
 stacks) are 56.48 MiB for the document fixture, 3.95 MiB for disconnected sync,
