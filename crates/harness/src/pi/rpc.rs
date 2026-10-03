@@ -14,13 +14,14 @@ use tokio::{
 
 const MAX_FRAME: usize = 32 * 1024 * 1024;
 const QUEUE_BYTES: usize = 256 * 1024;
+const CONTROL_HEADROOM: usize = 8 * 1024;
 const WRITE_QUEUE: usize = 8;
 const READ_QUEUE: usize = 2;
 
 struct WriteFrame {
     bytes: Vec<u8>,
     // Includes the frame currently being written. One legal large frame may
-    // exceed the target, but occupies the whole budget until it is flushed.
+    // exceed the target, but leaves headroom for small controls until flushed.
     _permit: OwnedSemaphorePermit,
 }
 
@@ -116,7 +117,7 @@ impl Client {
         let permit = self
             .budget
             .clone()
-            .try_acquire_many_owned(bytes.0.len().min(QUEUE_BYTES) as u32)
+            .try_acquire_many_owned(bytes.0.len().min(QUEUE_BYTES - CONTROL_HEADROOM) as u32)
             .map_err(|_| HarnessError::Protocol("Pi pending writes exceed 256 KiB".into()))?;
         // The ordered Pi actor must keep reading stdout and handling shutdown.
         // Fail explicitly on overload rather than block it behind stalled stdin
@@ -369,7 +370,7 @@ mod tests {
     }
 
     #[tokio::test]
-    async fn one_large_write_occupies_budget_until_transport_shutdown() {
+    async fn one_large_write_leaves_control_headroom_until_transport_shutdown() {
         let (host, _peer) = tokio::io::duplex(64);
         let (read, write) = tokio::io::split(host);
         let transport = Transport::new(write, read);
@@ -377,17 +378,19 @@ mod tests {
         client
             .send(json!({"message":"x".repeat(QUEUE_BYTES)}))
             .unwrap();
-        assert_eq!(client.budget.available_permits(), 0);
+        assert_eq!(client.budget.available_permits(), CONTROL_HEADROOM);
+        client.send(json!({"type":"get_state"})).unwrap();
         assert!(
             client
-                .send(json!({"type":"get_state"}))
+                .send(json!({"message":"y".repeat(QUEUE_BYTES)}))
                 .unwrap_err()
                 .to_string()
                 .contains("256 KiB")
         );
         tokio::task::yield_now().await;
         // The budget includes the stalled in-flight frame, not just queued frames.
-        assert_eq!(client.budget.available_permits(), 0);
+        assert!(client.budget.available_permits() > 0);
+        assert!(client.budget.available_permits() < CONTROL_HEADROOM);
         drop(transport);
         tokio::time::timeout(std::time::Duration::from_secs(1), async {
             while client.budget.available_permits() != QUEUE_BYTES {
@@ -404,6 +407,130 @@ mod tests {
                 .to_string()
                 .contains("closed")
         );
+    }
+
+    #[tokio::test]
+    async fn a_response_before_large_write_flush_can_queue_ordered_controls() {
+        use futures::task::AtomicWaker;
+        use std::{
+            pin::Pin,
+            task::{Context, Poll},
+        };
+
+        struct FlushGate {
+            released: AtomicBool,
+            waker: AtomicWaker,
+        }
+        struct HeldFlush<W> {
+            writer: W,
+            gate: Arc<FlushGate>,
+        }
+        impl<W: AsyncWrite + Unpin> AsyncWrite for HeldFlush<W> {
+            fn poll_write(
+                mut self: Pin<&mut Self>,
+                cx: &mut Context<'_>,
+                bytes: &[u8],
+            ) -> Poll<std::io::Result<usize>> {
+                Pin::new(&mut self.writer).poll_write(cx, bytes)
+            }
+
+            fn poll_flush(
+                mut self: Pin<&mut Self>,
+                cx: &mut Context<'_>,
+            ) -> Poll<std::io::Result<()>> {
+                self.gate.waker.register(cx.waker());
+                if !self.gate.released.load(Ordering::Acquire) {
+                    return Poll::Pending;
+                }
+                Pin::new(&mut self.writer).poll_flush(cx)
+            }
+
+            fn poll_shutdown(
+                mut self: Pin<&mut Self>,
+                cx: &mut Context<'_>,
+            ) -> Poll<std::io::Result<()>> {
+                Pin::new(&mut self.writer).poll_shutdown(cx)
+            }
+        }
+
+        let gate = Arc::new(FlushGate {
+            released: AtomicBool::new(false),
+            waker: AtomicWaker::new(),
+        });
+        let (host, peer) = tokio::io::duplex(8192);
+        let (read, write) = tokio::io::split(host);
+        let (peer_read, mut peer_write) = tokio::io::split(peer);
+        let mut transport = Transport::new(
+            HeldFlush {
+                writer: write,
+                gate: gate.clone(),
+            },
+            read,
+        );
+        let prompt_id = transport
+            .client
+            .request(json!({
+                "type":"prompt", "message":"x".repeat(QUEUE_BYTES)
+            }))
+            .unwrap();
+        let mut lines = BufReader::new(peer_read).lines();
+        let line = tokio::time::timeout(std::time::Duration::from_secs(2), lines.next_line())
+            .await
+            .unwrap()
+            .unwrap()
+            .unwrap();
+        let prompt: Value = serde_json::from_str(&line).unwrap();
+        assert_eq!(prompt["id"], prompt_id);
+        assert_eq!(prompt["message"].as_str().unwrap().len(), QUEUE_BYTES);
+        assert_eq!(
+            transport.client.budget.available_permits(),
+            CONTROL_HEADROOM
+        );
+
+        // The peer received LF and responds while the writer still holds
+        // the large request's permit awaiting flush. Runner sends get_state
+        // at precisely this point; shutdown can also need clear_queue + abort.
+        let response = json!({"type":"response", "id":prompt_id, "success":true});
+        peer_write
+            .write_all(format!("{response}\n").as_bytes())
+            .await
+            .unwrap();
+        let received =
+            tokio::time::timeout(std::time::Duration::from_secs(2), transport.incoming.recv())
+                .await
+                .unwrap()
+                .unwrap()
+                .unwrap();
+        assert_eq!(received, response);
+        let mut controls = Vec::new();
+        for command in ["get_state", "clear_queue", "abort"] {
+            let id = transport.client.request(json!({"type":command})).unwrap();
+            controls.push((command, id));
+        }
+        assert!(!transport.client.failed.load(Ordering::Relaxed));
+        assert!(
+            transport
+                .client
+                .send(json!({
+                    "type":"prompt", "message":"y".repeat(QUEUE_BYTES)
+                }))
+                .unwrap_err()
+                .to_string()
+                .contains("256 KiB")
+        );
+
+        gate.released.store(true, Ordering::Release);
+        gate.waker.wake();
+        for (command, id) in controls {
+            let line = tokio::time::timeout(std::time::Duration::from_secs(2), lines.next_line())
+                .await
+                .unwrap()
+                .unwrap()
+                .unwrap();
+            let frame: Value = serde_json::from_str(&line).unwrap();
+            assert_eq!(frame["type"], command);
+            assert_eq!(frame["id"], id);
+        }
     }
 
     #[tokio::test]
