@@ -1306,9 +1306,6 @@ impl DocHost {
         // device has since cut over to chat2 would otherwise serve its frozen
         // fat lineage forever (the host writes only to the chat2 room now;
         // this device's s2 room has gone permanently silent).
-        let chat_row = self
-            .workspace()
-            .and_then(|w| w.chat(chat_id).ok().flatten());
         // A row that EXISTS without `roomGen` is a pre-cutover legacy chat
         // (gen 1). A MISSING row is a chat being born right now: its
         // CreateChat mint (which stamps roomGen 2) is racing this open —
@@ -1319,8 +1316,14 @@ impl DocHost {
         // follow the row's gen 2 to an empty chat2 room), the run's live doc
         // ref blocked every heal, and the transcript never synced anywhere
         // (2026-08-11).
-        let registry_gen = match chat_row.as_ref() {
-            Some(row) => row.room_gen.unwrap_or(1),
+        // Retain only the routing scalar, releasing the row's strings/config
+        // before loading a potentially large document. The explicit workspace
+        // branch also avoids constructing a large absent Chat on that path.
+        let registry_gen = match self.workspace() {
+            Some(workspace) => match workspace.chat(chat_id).ok().flatten() {
+                Some(row) => row.room_gen.unwrap_or(1),
+                None => 2,
+            },
             None => 2,
         };
         {

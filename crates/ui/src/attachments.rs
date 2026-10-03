@@ -666,7 +666,19 @@ impl ImageCache {
                     .ok()
                     .and_then(|reader| reader.into_dimensions().ok())
             })
-            .map_or(0, |(w, h)| (w as usize).saturating_mul(h as usize));
+            .map_or_else(
+                // SVG read-back previews rasterize within a 512-pixel square.
+                // Raster header readers cannot measure them; reserve that
+                // pixel budget so small vectors cannot bypass the cache cap.
+                || {
+                    if image.image.format == ImageFormat::Svg {
+                        512 * 512
+                    } else {
+                        0
+                    }
+                },
+                |(w, h)| (w as usize).saturating_mul(h as usize),
+            );
         let bytes = image
             .image
             .bytes

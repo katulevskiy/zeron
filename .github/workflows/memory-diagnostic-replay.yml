@@ -20,7 +20,8 @@ jobs:
           gh run download 37088676081 --repo katulevskiy/zeron --name memory-evidence-linux --dir original
           chmod +x original/memory-audit
           sha256sum original/memory-audit > evidence/binary.sha256
-          objdump -d -C --start-address=0xfce310 --stop-address=0xfce420 original/memory-audit > evidence/open-local-disassembly.txt
+          nm -C original/memory-audit | grep 'DocHost>::open_local' > evidence/open-local-symbols.txt
+          objdump -d -C original/memory-audit | sed -n '/<zeron_engine::doc_host::DocHost>::open_local.*>:/,+145p' > evidence/open-local-disassembly.txt
           set +e
           timeout 300 valgrind --error-exitcode=97 --expensive-definedness-checks=yes --leak-check=full --show-leak-kinds=definite,indirect --errors-for-leak-kinds=definite,indirect --track-origins=yes --num-callers=30 --xml=yes --xml-file=evidence/memcheck-docs-precise.xml original/memory-audit docs > evidence/docs.jsonl 2> evidence/docs.stderr
           result=$?

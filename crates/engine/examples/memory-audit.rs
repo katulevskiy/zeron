@@ -2,7 +2,7 @@
 //! Run each scenario in a separate process; this counts requested live Rust
 //! allocations, not RSS, allocator metadata, native allocations, or GPU memory.
 //! cargo run --release --locked -p zeron-engine --example memory-audit -- SCENARIO
-//! Scenarios: docs, journal, outbox, rpc, terminal, history, sync, sync-catchup.
+//! Scenarios: docs, journal, outbox, rpc, terminal, history, sync, sync-catchup, engine.
 
 use std::alloc::{GlobalAlloc, Layout, System};
 use std::sync::Arc;
@@ -640,7 +640,7 @@ fn main() -> anyhow::Result<()> {
             "sync-catchup" => sync_catchup().await,
             "engine" => engine().await,
             _ => anyhow::bail!(
-                "Choose docs, journal, outbox, rpc, terminal, history, sync, or sync-catchup"
+                "Choose docs, journal, outbox, rpc, terminal, history, sync, sync-catchup, or engine"
             ),
         }
     })
