@@ -441,7 +441,7 @@ pub fn tool_chip_content(call: &crate::ToolCall) -> (&'static str, String) {
 /// truncation; this mapping keeps their command, content and input text identical.
 /// Commands stay verbatim so the executed binary is always available to audit.
 pub fn tool_call_text(call: &crate::ToolCall) -> String {
-    use crate::ToolCall;
+    use crate::{TodoStatus, ToolCall};
     match call {
         ToolCall::Exec { command } => command.clone(),
         ToolCall::ReadFile { path } | ToolCall::EditFile { path, .. } => path.clone(),
@@ -462,7 +462,14 @@ pub fn tool_call_text(call: &crate::ToolCall) -> String {
         ToolCall::WebSearch { query } => query.clone(),
         ToolCall::Todo { items } => items
             .iter()
-            .map(|i| format!("{} {}", if i.done { "[x]" } else { "[ ]" }, i.text))
+            .map(|i| {
+                let mark = match i.status() {
+                    TodoStatus::Completed => "[x]",
+                    TodoStatus::InProgress => "[~]",
+                    TodoStatus::Pending => "[ ]",
+                };
+                format!("{mark} {}", i.text)
+            })
             .collect::<Vec<_>>()
             .join("\n"),
         ToolCall::Mcp {

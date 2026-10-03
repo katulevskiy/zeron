@@ -1,5 +1,5 @@
 use zeron_proto::{
-    ToolCall,
+    TodoItem, TodoStatus, ToolCall,
     view::{display_command, tool_call_text, tool_chip_content},
 };
 
@@ -34,6 +34,18 @@ fn expanded_commands_preserve_the_exact_invocation_for_auditing() {
         };
         assert_eq!(tool_call_text(&call), command, "{command:?}");
     }
+}
+
+#[test]
+fn expanded_todo_invocations_preserve_all_status_markers() {
+    let call = ToolCall::Todo {
+        items: vec![
+            TodoItem::new("finished", TodoStatus::Completed),
+            TodoItem::new("working", TodoStatus::InProgress),
+            TodoItem::new("next", TodoStatus::Pending),
+        ],
+    };
+    assert_eq!(tool_call_text(&call), "[x] finished\n[~] working\n[ ] next");
 }
 
 fn assert_display(command: &str, script: &str) {
