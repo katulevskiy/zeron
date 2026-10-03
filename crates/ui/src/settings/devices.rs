@@ -74,6 +74,9 @@ pub struct DevicesPage {
     /// Local work the engine reported when asked to disable local execution;
     /// shown for confirmation before it is stopped.
     stop_local_work: Option<Vec<String>>,
+    /// A SetLocalExecution call is in flight: the switch ignores clicks until
+    /// it replies, so two requests can never race each other on the wire.
+    local_execution_pending: bool,
     _observe: Subscription,
 }
 
@@ -88,6 +91,7 @@ impl DevicesPage {
             error: None,
             task: None,
             copy_task: None,
+            local_execution_pending: false,
             stop_local_work: None,
             _observe: observe,
         }
@@ -158,10 +162,14 @@ impl DevicesPage {
     /// running sessions or terminals reports them and changes nothing; the
     /// confirmation retries with `interrupt`.
     fn set_local_execution(&mut self, disabled: bool, interrupt: bool, cx: &mut Context<Self>) {
+        if self.local_execution_pending {
+            return;
+        }
         let Some(engine) = self.state.read(cx).engine().cloned() else {
             return;
         };
         self.stop_local_work = None;
+        self.local_execution_pending = true;
         let params = serde_json::json!({ "disabled": disabled, "interrupt": interrupt });
         self.task = Some(cx.spawn(async move |this, cx| {
             let result = engine
@@ -169,6 +177,7 @@ impl DevicesPage {
                 .call(methods::SET_LOCAL_EXECUTION, params)
                 .await;
             this.update(cx, |page, cx| {
+                page.local_execution_pending = false;
                 match result {
                     Ok(reply) if disabled && reply["disabled"] == false => {
                         let state = page.state.read(cx);

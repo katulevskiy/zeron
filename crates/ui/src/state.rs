@@ -1382,7 +1382,6 @@ impl AppState {
         let sorted = self.spaces_sorted();
         // With local execution disabled the fallback is held to the same bar
         // as the default device: online remotes only, never a silent queue.
-        let now = Utc::now();
         device
             .and_then(|d| sorted.iter().find(|s| s.device_id == d).copied())
             .or_else(|| {
@@ -1391,7 +1390,7 @@ impl AppState {
                     .find(|s| {
                         self.may_execute_on(&s.device_id)
                             && (!self.local_execution_disabled
-                                || self.device_online(&s.device_id, now))
+                                || self.remote_seen_recently(&s.device_id))
                     })
                     .copied()
             })
@@ -1883,16 +1882,27 @@ impl AppState {
         if !self.local_execution_disabled {
             return self.local_device_id.clone();
         }
-        let now = Utc::now();
         let mut remote: Vec<&Device> = self
             .devices
             .iter()
-            .filter(|device| {
-                self.may_execute_on(&device.id) && self.device_online(&device.id, now)
-            })
+            .filter(|device| self.may_execute_on(&device.id) && self.remote_seen_recently(&device.id))
             .collect();
         remote.sort_by_key(|device| device.name.to_lowercase());
         remote.first().map(|device| device.id.clone())
+    }
+
+    /// Strict presence for policy decisions: a device row we hold, seen
+    /// within the online window. Unlike [`Self::device_online`] (a display
+    /// helper that treats an unknown device as online) an unknown or stale
+    /// device is NOT a place to send work by default.
+    fn remote_seen_recently(&self, device_id: &str) -> bool {
+        let now = Utc::now();
+        self.devices
+            .iter()
+            .find(|device| device.id == device_id)
+            .is_some_and(|device| {
+                crate::settings::devices::device_online(device.last_seen_at, now)
+            })
     }
 
     /// Policy frame: when it turns on, move a canvas aimed at this device to
@@ -4535,6 +4545,15 @@ mod tests {
         state.selected_space = None;
         assert_eq!(state.effective_device_id(), None);
         assert_eq!(state.default_execution_device(), None);
+
+        // Reconnect order: spaces arrive before any device row. A space on a
+        // device we hold no row for is unknown, not online — no fallback.
+        state.devices.clear();
+        state.no_project = false;
+        state.apply_local_execution(false);
+        state.selected_space = Some("s1".into());
+        assert!(state.apply_local_execution(true));
+        assert_eq!(state.selected_space, None);
     }
 
     #[test]
