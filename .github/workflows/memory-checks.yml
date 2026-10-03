@@ -32,6 +32,7 @@ jobs:
     timeout-minutes: 60
     env:
       CARGO_PROFILE_RELEASE_DEBUG: 1
+      CARGO_PROFILE_RELEASE_STRIP: none
     steps:
       - uses: actions/checkout@11d5960a326750d5838078e36cf38b85af677262 # v4.4.0
       - uses: ./.github/actions/linux-ci
@@ -39,6 +40,15 @@ jobs:
           rust-cache: memory
           apt-cache: valgrind
           apt-packages: valgrind
+      # Fork push runs need a dependency cache too, including failed diagnostic
+      # runs. GitHub scopes caches to the repository; PR runs only restore.
+      - uses: Swatinem/rust-cache@6323deb102c322ba6fcbdcafc7e3dddab59af2b6 # v2.9.2
+        with:
+          prefix-key: ci-linux-v1
+          shared-key: memory
+          add-job-id-key: false
+          save-if: ${{ github.event_name == 'push' }}
+          cache-on-failure: true
       - name: Core regression tests
         run: cargo test --locked --release -p zeron-engine -p zeron-rpc -p zeron-sync -p zeron-harness -p zeron-text --lib
       - name: Valgrind Memcheck and Massif
