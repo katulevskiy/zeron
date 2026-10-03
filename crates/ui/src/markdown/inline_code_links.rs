@@ -10,18 +10,20 @@
 //! components as it takes to tell them apart.
 //!
 //! The rewrite walks a whole text part in document order, once per
-//! (link-roots revision, part): every probe is memoized for the revision, and
-//! the linked tree is reused across frames. A directory span is not a link,
+//! (link-roots revision, part): recent probes and linked trees are reused
+//! across frames within bounded caches. A directory span is not a link,
 //! but it becomes the context a later bare name in the same part resolves
 //! against.
 
 use std::collections::HashMap;
 use std::path::PathBuf;
 use std::sync::Arc;
+use std::time::Instant;
 
 use super::parser::{Block, BlockTree, InlineRun, TopBlock};
 use crate::workspace_links::{
-    FileLinkRoot, InlineCodePath, PathProbes, resolve_inline_code_path, without_location,
+    FILE_LINK_CACHE_TTL, FileLinkRoot, InlineCodePath, PathProbes, resolve_inline_code_path,
+    without_location,
 };
 
 /// How many text parts stay memoized, least recently used evicted first. A
@@ -29,6 +31,7 @@ use crate::workspace_links::{
 /// re-parses into a new tree on every commit, so stale streamed trees age out
 /// while every part on screen stays cached across frames.
 const CACHED_PARTS: usize = 32;
+const CACHED_PART_BYTES: usize = 4 * 1024 * 1024;
 
 /// Text parts already rewritten, keyed by their source tree and reset when
 /// the file-link roots change.
@@ -37,6 +40,8 @@ pub(crate) struct InlineCodeLinkCache {
     revision: u64,
     probes: PathProbes,
     parts: Vec<LinkedPart>,
+    bytes: usize,
+    refreshed_at: Option<Instant>,
 }
 
 struct LinkedPart {
@@ -44,20 +49,27 @@ struct LinkedPart {
     /// different part while this entry is cached.
     source: Arc<BlockTree>,
     linked: Arc<BlockTree>,
+    bytes: usize,
 }
 
 impl InlineCodeLinkCache {
-    /// Drop every memo when the file-link roots change — the only input that
-    /// can stale a resolved link. Reports whether anything was dropped, so
-    /// the caller can also invalidate presentation caches holding the old
-    /// styling.
+    /// Drop every memo when the file-link roots change. Filesystem probes
+    /// also expire so file creation/deletion can change a link. Reports whether
+    /// anything was dropped, so the caller also invalidates presentation caches
+    /// holding the old styling. Call before rendering each part.
     pub(crate) fn set_revision(&mut self, revision: u64) -> bool {
-        if self.revision == revision {
+        if self.revision == revision
+            && self
+                .refreshed_at
+                .is_some_and(|at| at.elapsed() < FILE_LINK_CACHE_TTL)
+        {
             return false;
         }
         self.revision = revision;
         self.probes = PathProbes::default();
         self.parts.clear();
+        self.bytes = 0;
+        self.refreshed_at = Some(Instant::now());
         true
     }
 
@@ -86,15 +98,101 @@ impl InlineCodeLinkCache {
             return linked;
         }
         let linked = Arc::new(link_tree(tree, roots, &mut self.probes));
-        if self.parts.len() >= CACHED_PARTS {
-            self.parts.remove(0);
+        // Conservatively charge both trees even when unchanged blocks share
+        // their allocation. A large part still renders completely; it simply
+        // does not pin an oversized history in this derived cache.
+        let bytes = tree_bytes(tree).saturating_add(tree_bytes(&linked));
+        if bytes > CACHED_PART_BYTES {
+            return linked;
+        }
+        while self.parts.len() >= CACHED_PARTS
+            || self.bytes.saturating_add(bytes) > CACHED_PART_BYTES
+        {
+            let retired = self.parts.remove(0);
+            self.bytes = self.bytes.saturating_sub(retired.bytes);
         }
         self.parts.push(LinkedPart {
             source: tree.clone(),
             linked: linked.clone(),
+            bytes,
         });
+        self.bytes += bytes;
         linked
     }
+}
+
+fn vec_bytes<T>(values: &Vec<T>) -> usize {
+    values.capacity().saturating_mul(std::mem::size_of::<T>())
+}
+
+fn runs_bytes(runs: &Vec<InlineRun>) -> usize {
+    runs.iter().fold(vec_bytes(runs), |bytes, run| {
+        let style = &run.style;
+        let image_bytes = style.image.as_ref().map_or(0, |image| {
+            image
+                .source
+                .capacity()
+                .saturating_add(image.alt.capacity())
+                .saturating_add(image.title.capacity())
+                .saturating_add(image.link.as_ref().map_or(0, String::capacity))
+        });
+        bytes
+            .saturating_add(run.text.capacity())
+            .saturating_add(style.link.as_ref().map_or(0, String::capacity))
+            .saturating_add(style.file_label.as_ref().map_or(0, String::capacity))
+            .saturating_add(image_bytes)
+    })
+}
+
+fn blocks_bytes(blocks: &Vec<Block>) -> usize {
+    blocks.iter().fold(vec_bytes(blocks), |bytes, block| {
+        bytes.saturating_add(block_heap_bytes(block))
+    })
+}
+
+fn block_heap_bytes(block: &Block) -> usize {
+    match block {
+        Block::Paragraph { runs } | Block::Heading { runs, .. } => runs_bytes(runs),
+        Block::CodeBlock { language, code } => code
+            .capacity()
+            .saturating_add(language.as_ref().map_or(0, String::capacity)),
+        Block::BlockQuote { children } => blocks_bytes(children),
+        Block::List { items, .. } => items.iter().fold(vec_bytes(items), |bytes, item| {
+            bytes.saturating_add(blocks_bytes(item))
+        }),
+        Block::Table {
+            header,
+            rows,
+            align,
+        } => {
+            let bytes = header.iter().fold(vec_bytes(header), |bytes, cell| {
+                bytes.saturating_add(runs_bytes(cell))
+            });
+            rows.iter().fold(
+                bytes
+                    .saturating_add(vec_bytes(rows))
+                    .saturating_add(vec_bytes(align)),
+                |bytes, row| {
+                    row.iter()
+                        .fold(bytes.saturating_add(vec_bytes(row)), |bytes, cell| {
+                            bytes.saturating_add(runs_bytes(cell))
+                        })
+                },
+            )
+        }
+        Block::Rule => 0,
+    }
+}
+
+fn tree_bytes(tree: &BlockTree) -> usize {
+    tree.blocks.iter().fold(
+        std::mem::size_of::<BlockTree>().saturating_add(vec_bytes(&tree.blocks)),
+        |bytes, top| {
+            bytes
+                .saturating_add(std::mem::size_of::<TopBlock>() + 2 * std::mem::size_of::<usize>())
+                .saturating_add(block_heap_bytes(&top.block))
+        },
+    )
 }
 
 /// A code span's text → the label it shows once it links.
@@ -691,6 +789,69 @@ mod tests {
             assert!(Arc::ptr_eq(&first, &cache.linked_tree(&kept, &roots, true)));
         }
         assert!(cache.parts.len() <= CACHED_PARTS);
+    }
+
+    #[test]
+    fn byte_budget_releases_old_histories_without_truncating_current_content() {
+        let mut cache = InlineCodeLinkCache::default();
+        let first = Arc::new(parse_full(&format!(
+            "```\n{}\n```",
+            "x".repeat(CACHED_PART_BYTES / 8)
+        )));
+        let old = Arc::downgrade(&first);
+        drop(cache.linked_tree(&first, &[], true));
+        drop(first);
+        assert!(old.upgrade().is_some());
+        for index in 0..8 {
+            let source = Arc::new(parse_full(&format!(
+                "```\n{index}{}\n```",
+                "y".repeat(CACHED_PART_BYTES / 8)
+            )));
+            let linked = cache.linked_tree(&source, &[], true);
+            assert_eq!(*linked, *source);
+            assert!(cache.bytes <= CACHED_PART_BYTES);
+        }
+        assert!(old.upgrade().is_none());
+        assert!(cache.parts.len() < CACHED_PARTS);
+        assert!(cache.set_revision(1));
+        assert_eq!(cache.bytes, 0);
+    }
+
+    #[test]
+    fn an_oversized_part_is_returned_completely_without_cache_ownership() {
+        let tree = Arc::new(parse_full(&format!(
+            "```\n{}\n```",
+            "x".repeat(CACHED_PART_BYTES)
+        )));
+        let mut cache = InlineCodeLinkCache::default();
+        let linked = cache.linked_tree(&tree, &[], true);
+        assert_eq!(*linked, *tree);
+        assert!(cache.parts.is_empty());
+        assert_eq!(Arc::strong_count(&tree), 1);
+    }
+
+    #[cfg(unix)]
+    #[test]
+    fn expired_linked_parts_reprobe_new_files_without_a_roots_change() {
+        let fixture = Fixture::new();
+        let tree = Arc::new(fixture.tree("`created.md`"));
+        let roots = fixture.roots(true);
+        let mut cache = InlineCodeLinkCache::default();
+        cache.set_revision(7);
+        let first = cache.linked_tree(&tree, &roots, true);
+        assert_eq!(fixture.target(&first, "created.md"), None);
+        std::fs::write(fixture.root.join("created.md"), "new").unwrap();
+        assert!(!cache.set_revision(7));
+        cache.refreshed_at = Some(Instant::now() - FILE_LINK_CACHE_TTL);
+        // The existing caller uses this result to invalidate its flattened
+        // presentation as well as the linked tree, even with unchanged roots.
+        assert!(cache.set_revision(7));
+        let refreshed = cache.linked_tree(&tree, &roots, true);
+        assert_eq!(
+            fixture.target(&refreshed, "created.md").as_deref(),
+            Some(fixture.file_target("created.md").as_str())
+        );
+        assert!(!Arc::ptr_eq(&first, &refreshed));
     }
 
     /// The linked span reaches the same hit testing a Markdown file link

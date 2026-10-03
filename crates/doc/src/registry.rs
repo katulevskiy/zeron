@@ -652,8 +652,9 @@ impl RegistryDoc {
 
     // ── overlay reads ───────────────────────────────────────────────────────
 
-    /// The row as this device should display it: authoritative + pending ops.
-    fn overlay_row(&self, kind: &str, id: &str) -> Option<RegistryRow> {
+    /// Authoritative + pending ops, including deletion guards. Background
+    /// writers must distinguish a deleted row from one not yet created.
+    fn overlay_row_with_tombstone(&self, kind: &str, id: &str) -> Option<RegistryRow> {
         let mut row = self
             .authoritative
             .get(kind)
@@ -669,7 +670,35 @@ impl RegistryDoc {
                 }
             }
         }
-        row.filter(|r| !r.deleted)
+        row
+    }
+
+    /// The row as this device should display it: authoritative + pending ops.
+    fn overlay_row(&self, kind: &str, id: &str) -> Option<RegistryRow> {
+        self.overlay_row_with_tombstone(kind, id)
+            .filter(|r| !r.deleted)
+    }
+
+    /// A local or remote tombstone prevents a stale run from claiming its
+    /// chat again. Explicit `upsert_chat` remains able to restore the row.
+    pub fn chat_deleted(&self, chat_id: &str) -> bool {
+        // Most status/retirement reads have no local edits for this chat.
+        // Borrow the authoritative flag without cloning fields or clocks;
+        // pending edits still use the exact merge semantics below.
+        if !self.pending.iter().any(|batch| {
+            batch
+                .ops
+                .iter()
+                .any(|op| op.kind == KIND_CHATS && op.id == chat_id)
+        }) {
+            return self
+                .authoritative
+                .get(KIND_CHATS)
+                .and_then(|rows| rows.get(chat_id))
+                .is_some_and(|row| row.deleted);
+        }
+        self.overlay_row_with_tombstone(KIND_CHATS, chat_id)
+            .is_some_and(|row| row.deleted)
     }
 
     /// All live rows of `kind`, overlay applied.
@@ -933,6 +962,9 @@ impl RegistryDoc {
         space_id: Option<&str>,
         created_at: DateTime<Utc>,
     ) {
+        if self.chat_deleted(chat_id) {
+            return;
+        }
         let mut set = fields([
             ("id", json!(chat_id)),
             ("deviceId", json!(self.device_id())),
@@ -1169,6 +1201,11 @@ impl RegistryDoc {
     /// Upsert a session-status row (writer discipline: each device writes only
     /// its own runs' rows). Staleness is checked client-side via `updatedAt`.
     pub fn upsert_session(&mut self, session: &Session) -> Result<(), DocError> {
+        // A cancelled run can settle after its chat/session were tombstoned.
+        // Never turn that final status or heartbeat into a new orphan row.
+        if self.chat_deleted(&session.chat_id) {
+            return Ok(());
+        }
         let set = fields([
             ("chatId", json!(session.chat_id)),
             ("deviceId", json!(session.device_id)),

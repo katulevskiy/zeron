@@ -66,13 +66,17 @@ fn choose(
     Err("No readable wallpapers found in this folder. Add images such as PNG or JPEG, or choose another folder.".into())
 }
 
-const LOOKAHEAD: usize = 3;
+// One ready wallpaper preserves instant shuffles without retaining three
+// complete sets of source, luminance, and effect pixels while idle.
+const LOOKAHEAD: usize = 1;
 
 #[derive(Clone, PartialEq, Eq)]
 struct QueueKey {
     folder: Option<PathBuf>,
     history: Vec<PathBuf>,
-    background: Option<super::NewThreadComposerBackground>,
+    /// Managed path only: adjusting the active image's framing must not
+    /// discard the decoded lookahead.
+    background: Option<String>,
     effect: super::NewThreadBackgroundEffect,
     light: bool,
     data_dir: PathBuf,
@@ -88,7 +92,9 @@ impl QueueKey {
         Self {
             folder: settings.wallpaper_folder,
             history,
-            background: settings.new_thread_composer_background,
+            background: settings
+                .new_thread_composer_background
+                .map(|background| background.path),
             effect: settings.new_thread_background_effect,
             light: cx
                 .try_global::<crate::theme::Theme>()
@@ -152,11 +158,10 @@ fn remove_orphaned_preloads(key: &QueueKey) {
     };
     // Compare names, not full paths, so a differently spelled data directory
     // can never make the active image look orphaned.
-    let active = key.background.as_ref().and_then(|background| {
-        Path::new(&background.path)
-            .file_name()
-            .map(|name| name.to_owned())
-    });
+    let active = key
+        .background
+        .as_deref()
+        .and_then(|path| Path::new(path).file_name().map(|name| name.to_owned()));
     for entry in entries.flatten() {
         let name = entry.file_name();
         let managed = name
@@ -184,13 +189,18 @@ fn synchronize(cx: &mut App) {
     }
 }
 
-/// Called on render as well as after a switch: warms on launch and invalidates
-/// when the folder, manual background, effect, or light/dark appearance changes.
+/// Called on render as well as after a switch: warms an enabled background and
+/// invalidates when the folder, background, effect, or appearance changes.
 pub fn preload(cx: &mut App) {
+    preload_requested(cx, false);
+}
+
+fn preload_requested(cx: &mut App, requested: bool) {
     synchronize(cx);
     let queue = cx.global_mut::<PreloadQueue>();
     let key = queue.key.as_ref().unwrap().clone();
     if key.folder.is_none()
+        || (!requested && key.background.is_none())
         || queue.loading
         || queue.error.is_some()
         || queue.ready.len() >= LOOKAHEAD
@@ -232,7 +242,7 @@ fn take_ready(cx: &mut App) -> Option<Result<(), String>> {
     if result.is_ok() {
         // Seed the exact managed path the renderer reads. No file read, decode,
         // resize, or effect generation is needed on the next frame.
-        candidate.artwork.install(&path);
+        candidate.artwork.install(&path, cx);
         let key = QueueKey::current(cx);
         cx.global_mut::<PreloadQueue>().key = Some(key);
         preload(cx);
@@ -247,7 +257,7 @@ pub fn randomize(cx: &mut App) -> Task<Result<(), String>> {
     // A user request retries a failed speculative preload (e.g. a folder that
     // has since been restored), but background rendering never spins on errors.
     cx.global_mut::<PreloadQueue>().error = None;
-    preload(cx);
+    preload_requested(cx, true);
     let folder = super::current(cx).wallpaper_folder;
     let generation = cx.global::<PreloadQueue>().generation;
     if let Some(result) = take_ready(cx) {
@@ -262,10 +272,11 @@ pub fn randomize(cx: &mut App) -> Task<Result<(), String>> {
                 if super::current(cx).wallpaper_folder != folder {
                     return Some(Ok(()));
                 }
-                preload(cx);
+                synchronize(cx);
                 if cx.global::<PreloadQueue>().generation != generation {
                     return Some(Ok(()));
                 }
+                preload_requested(cx, true);
                 take_ready(cx).or_else(|| cx.global::<PreloadQueue>().error.clone().map(Err))
             });
             if let Some(result) = result {
@@ -296,7 +307,7 @@ mod tests {
     }
 
     #[gpui::test]
-    fn preload_three_refills_and_warm_switch_needs_no_source_reads(cx: &mut gpui::TestAppContext) {
+    fn preload_one_refills_and_warm_switch_needs_no_source_reads(cx: &mut gpui::TestAppContext) {
         let dir = tempfile::tempdir().unwrap();
         let folder = wallpaper_folder(dir.path());
         cx.update(|cx| {
@@ -307,7 +318,7 @@ mod tests {
                 ..Default::default()
             };
             super::super::init(settings, dir.path().join("data"), cx);
-            preload(cx);
+            preload_requested(cx, true);
         });
         cx.run_until_parked();
         cx.update(|cx| {
@@ -359,6 +370,59 @@ mod tests {
     }
 
     #[gpui::test]
+    fn warm_switch_resets_previous_background_adjustment(cx: &mut gpui::TestAppContext) {
+        let dir = tempfile::tempdir().unwrap();
+        let folder = wallpaper_folder(dir.path());
+        let data = dir.path().join("data");
+        cx.update(|cx| {
+            cx.set_global(crate::theme::Theme::default());
+            super::super::init(
+                super::super::UiSettings {
+                    wallpaper_folder: Some(folder.clone()),
+                    ..Default::default()
+                },
+                &data,
+                cx,
+            );
+            super::super::install_new_thread_composer_background(&folder.join("0.png"), cx)
+                .unwrap();
+            preload(cx);
+        });
+        cx.run_until_parked();
+        cx.update(|cx| {
+            // Framing belongs to the active image; it must not flush the
+            // decoded lookahead for the next shuffle.
+            let generation = cx.global::<PreloadQueue>().generation;
+            super::super::set_new_thread_background_adjustment(
+                super::super::NewThreadBackgroundAdjustment {
+                    focal_x: 0.2,
+                    focal_y: 0.8,
+                    zoom: 2.0,
+                },
+                cx,
+            );
+            preload(cx);
+            assert_eq!(cx.global::<PreloadQueue>().generation, generation);
+            assert_eq!(cx.global::<PreloadQueue>().ready.len(), LOOKAHEAD);
+            let expected = cx.global::<PreloadQueue>().ready[0].source.clone();
+            randomize(cx).detach();
+            assert_eq!(cx.global::<PreloadQueue>().ready.len(), LOOKAHEAD - 1);
+            let settings = super::super::current(cx);
+            assert_eq!(settings.wallpaper_source.as_ref(), Some(&expected));
+            assert_eq!(
+                settings
+                    .new_thread_composer_background
+                    .as_ref()
+                    .unwrap()
+                    .adjustment,
+                super::super::NewThreadBackgroundAdjustment::default(),
+            );
+            assert_eq!(super::super::UiSettings::load(&data), settings);
+        });
+        cx.run_until_parked();
+    }
+
+    #[gpui::test]
     fn first_preload_retires_copies_left_by_a_previous_session(cx: &mut gpui::TestAppContext) {
         let dir = tempfile::tempdir().unwrap();
         let data = dir.path().join("data");
@@ -377,6 +441,7 @@ mod tests {
                         super::super::NewThreadComposerBackground {
                             path: active.to_string_lossy().into_owned(),
                             name: "active.png".into(),
+                            adjustment: super::super::NewThreadBackgroundAdjustment::default(),
                         },
                     ),
                     ..Default::default()
@@ -407,7 +472,7 @@ mod tests {
                 &data,
                 cx,
             );
-            preload(cx);
+            preload_requested(cx, true);
             // Invalidate before the first background job can publish.
             super::super::update(super::super::SavePolicy::Immediate, cx, |settings| {
                 settings.wallpaper_folder = None
@@ -420,7 +485,7 @@ mod tests {
             super::super::update(super::super::SavePolicy::Immediate, cx, |settings| {
                 settings.wallpaper_folder = Some(folder)
             });
-            preload(cx);
+            preload_requested(cx, true);
         });
         cx.run_until_parked();
         cx.update(|cx| {
@@ -446,6 +511,51 @@ mod tests {
                 .count(),
             0
         );
+    }
+
+    #[gpui::test]
+    fn removing_background_releases_lookahead_and_keeps_rotation_available(
+        cx: &mut gpui::TestAppContext,
+    ) {
+        let dir = tempfile::tempdir().unwrap();
+        let folder = wallpaper_folder(dir.path());
+        cx.update(|cx| {
+            super::super::init(
+                super::super::UiSettings {
+                    wallpaper_folder: Some(folder.clone()),
+                    ..Default::default()
+                },
+                dir.path().join("data"),
+                cx,
+            );
+            preload(cx);
+            assert!(!cx.global::<PreloadQueue>().loading);
+            assert!(cx.global::<PreloadQueue>().ready.is_empty());
+            preload_requested(cx, true);
+        });
+        cx.run_until_parked();
+        cx.update(|cx| assert!(take_ready(cx).unwrap().is_ok()));
+        cx.run_until_parked();
+        cx.update(|cx| {
+            assert_eq!(cx.global::<PreloadQueue>().ready.len(), LOOKAHEAD);
+            let files: Vec<_> = cx
+                .global::<PreloadQueue>()
+                .ready
+                .iter()
+                .map(|entry| entry.file.path().to_path_buf())
+                .collect();
+            super::super::remove_new_thread_composer_background(cx).unwrap();
+            assert_eq!(
+                super::super::current(cx).wallpaper_folder.as_ref(),
+                Some(&folder)
+            );
+            assert!(cx.global::<PreloadQueue>().ready.is_empty());
+            assert!(!cx.global::<PreloadQueue>().loading);
+            assert!(files.iter().all(|path| !path.exists()));
+            preload_requested(cx, true);
+        });
+        cx.run_until_parked();
+        cx.update(|cx| assert!(take_ready(cx).unwrap().is_ok()));
     }
 
     #[test]

@@ -18,7 +18,9 @@ impl Dialogs {
         }
         while self.tasks.try_join_next().is_some() {}
         let id = frame["id"].clone();
-        let Some(input) = &self.input else {
+        let Some(input) = self.input.as_ref().filter(|_| self.tasks.len() < 16) else {
+            // A peer cannot accumulate unlimited unanswered dialogs and their
+            // copied questions while the user is away.
             let _ = client.send(json!({"type":"extension_ui_response","id":id,"cancelled":true}));
             return;
         };

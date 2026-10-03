@@ -3,13 +3,14 @@ use std::sync::Arc;
 use async_trait::async_trait;
 use serde::{Serialize, de::DeserializeOwned};
 use serde_json::Value;
+#[cfg(test)]
 use tokio::sync::mpsc;
 use zeron_proto::{
     ListWorkspaceDirectoryRequest, ReadWorkspaceFileRequest, SearchWorkspaceFilesRequest,
     WatchWorkspaceFilesRequest, WorkspaceDirectoryPage, WorkspaceFileSearchMatch,
     WorkspaceFileText, WorkspaceTarget, WriteWorkspaceFileOutcome, WriteWorkspaceFileRequest,
 };
-use zeron_rpc::{RpcError, methods};
+use zeron_rpc::{RpcError, RpcSubscription, methods};
 
 use crate::state::{AppState, EngineHandle};
 
@@ -79,14 +80,29 @@ pub struct WorkspaceFilesClient {
     context: FilesRequestContext,
 }
 
+pub struct WorkspaceFilesWatch(WatchReceiver);
+
+enum WatchReceiver {
+    Rpc(RpcSubscription),
+    #[cfg(test)]
+    Fixture(mpsc::Receiver<Value>),
+}
+
+impl WorkspaceFilesWatch {
+    pub async fn recv(&mut self) -> Option<Value> {
+        match &mut self.0 {
+            WatchReceiver::Rpc(subscription) => subscription.recv().await,
+            #[cfg(test)]
+            WatchReceiver::Fixture(receiver) => receiver.recv().await,
+        }
+    }
+}
+
 #[async_trait]
 pub(super) trait WorkspaceFilesTransport: Send + Sync {
     async fn call(&self, method: &str, params: Value) -> Result<Value, RpcError>;
-    async fn subscribe(
-        &self,
-        method: &str,
-        params: Value,
-    ) -> Result<mpsc::Receiver<Value>, RpcError>;
+    async fn subscribe(&self, method: &str, params: Value)
+    -> Result<WorkspaceFilesWatch, RpcError>;
 }
 
 struct EngineFilesTransport(EngineHandle);
@@ -101,8 +117,12 @@ impl WorkspaceFilesTransport for EngineFilesTransport {
         &self,
         method: &str,
         params: Value,
-    ) -> Result<mpsc::Receiver<Value>, RpcError> {
-        self.0.client().subscribe(method, params).await
+    ) -> Result<WorkspaceFilesWatch, RpcError> {
+        self.0
+            .client()
+            .subscribe_scoped(method, params)
+            .await
+            .map(|subscription| WorkspaceFilesWatch(WatchReceiver::Rpc(subscription)))
     }
 }
 
@@ -132,7 +152,7 @@ impl WorkspaceFilesClient {
     /// Refresh through the cached children before publishing the new listing.
     /// Usually this reads only the pages already visited. If a cached child is
     /// missing, reach the end before treating it as deleted.
-    pub(super) async fn list_directory_snapshot(
+    pub(crate) async fn list_directory_snapshot(
         &self,
         mut request: ListWorkspaceDirectoryRequest,
         cached_paths: &[String],
@@ -156,6 +176,11 @@ impl WorkspaceFilesClient {
                 }
                 request.cursor = Some(cursor);
                 let next = self.list_directory(request.clone()).await?;
+                if next.checkout_id != page.checkout_id {
+                    return Err(FilesClientError::Decode(
+                        "Workspace changed between directory pages".into(),
+                    ));
+                }
                 for entry in &next.entries {
                     remaining.remove(entry.path.as_str());
                 }
@@ -256,7 +281,21 @@ impl WorkspaceFilesClient {
         self.call(methods::WRITE_WORKSPACE_FILE, &request).await
     }
 
-    pub async fn watch(&self) -> Result<mpsc::Receiver<serde_json::Value>, FilesClientError> {
+    pub async fn move_entry(
+        &self,
+        request: zeron_proto::MoveWorkspaceEntryRequest,
+    ) -> Result<zeron_proto::WorkspaceMutationOutcome, FilesClientError> {
+        self.call(methods::MOVE_WORKSPACE_ENTRY, &request).await
+    }
+
+    pub async fn delete_entry(
+        &self,
+        request: zeron_proto::DeleteWorkspaceEntryRequest,
+    ) -> Result<zeron_proto::WorkspaceMutationOutcome, FilesClientError> {
+        self.call(methods::DELETE_WORKSPACE_ENTRY, &request).await
+    }
+
+    pub async fn watch(&self) -> Result<WorkspaceFilesWatch, FilesClientError> {
         let request = WatchWorkspaceFilesRequest {
             target: self.context.target.clone(),
         };
@@ -329,13 +368,13 @@ mod tests {
             &self,
             method: &str,
             params: Value,
-        ) -> Result<mpsc::Receiver<Value>, RpcError> {
+        ) -> Result<WorkspaceFilesWatch, RpcError> {
             self.calls.lock().unwrap().push((method.into(), params));
             let (sender, receiver) = mpsc::channel(self.watch_values.len().max(1));
             for value in &self.watch_values {
                 sender.try_send(value.clone()).unwrap();
             }
-            Ok(receiver)
+            Ok(WorkspaceFilesWatch(WatchReceiver::Fixture(receiver)))
         }
     }
 
@@ -356,6 +395,40 @@ mod tests {
         })
     }
 
+    #[tokio::test]
+    async fn structural_mutations_preserve_remote_addressing_and_never_retry_transport_errors() {
+        let transport = Arc::new(DeterministicTransport {
+            scripted_responses: Mutex::new([Err(RpcError::Transport("reply lost".into()))].into()),
+            ..Default::default()
+        });
+        let client = WorkspaceFilesClient::with_transport(
+            transport.clone(),
+            FilesRequestContext {
+                target: target(),
+                target_device_id: Some("host".into()),
+                cwd: "/remote".into(),
+                checkout_id: Some("checkout".into()),
+            },
+        );
+        let result = client
+            .move_entry(zeron_proto::MoveWorkspaceEntryRequest {
+                target: target(),
+                operation_id: "op".into(),
+                expected_checkout_id: "checkout".into(),
+                source_path: "a".into(),
+                destination_path: "folder/a".into(),
+                expected_source_revision: "rev".into(),
+                expected_kind: zeron_proto::WorkspaceEntryKind::File,
+            })
+            .await;
+        assert!(result.is_err());
+        let calls = transport.calls.lock().unwrap();
+        assert_eq!(calls.len(), 1);
+        assert_eq!(calls[0].0, methods::MOVE_WORKSPACE_ENTRY);
+        assert_eq!(calls[0].1["targetDeviceId"], "host");
+        assert_eq!(calls[0].1["expectedCheckoutId"], "checkout");
+        assert_eq!(calls[0].1["sourcePath"], "a");
+    }
     #[tokio::test]
     async fn cached_directory_refresh_collects_pages_but_initial_load_stays_lazy() {
         for refresh in [false, true] {
@@ -745,7 +818,7 @@ mod tests {
                 .pop_front()
                 .expect("unexpected extra request")
         }
-        async fn subscribe(&self, _: &str, _: Value) -> Result<mpsc::Receiver<Value>, RpcError> {
+        async fn subscribe(&self, _: &str, _: Value) -> Result<WorkspaceFilesWatch, RpcError> {
             unreachable!()
         }
     }

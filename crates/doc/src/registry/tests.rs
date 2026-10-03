@@ -549,6 +549,49 @@ fn delete_chat_tombstones_row_and_session() {
 }
 
 #[test]
+fn stale_run_writes_do_not_revive_local_or_remote_deleted_chats() {
+    let mut local = RegistryDoc::new("dev-a");
+    let mut remote = RegistryDoc::new("dev-b");
+    let mut server = HashMap::new();
+    let mut seq = 0;
+    local.upsert_chat(&chat("chat-1", "dev-a")).unwrap();
+    server_round(&mut server, &mut seq, &mut [&mut local, &mut remote]);
+    local.delete_chat("chat-1").unwrap();
+    assert!(local.chat_deleted("chat-1"));
+    let pending = local.pending_len();
+    local.claim_chat("chat-1", Some("/tmp/repo"), None, ts(9_000));
+    local
+        .upsert_session(&session("chat-1", "dev-a", SessionStatus::Idle))
+        .unwrap();
+    assert_eq!(local.pending_len(), pending);
+    assert!(local.chat("chat-1").unwrap().is_none());
+    assert!(local.read_sessions().unwrap().is_empty());
+
+    server_round(&mut server, &mut seq, &mut [&mut local, &mut remote]);
+    assert!(remote.chat_deleted("chat-1"));
+    remote.claim_chat("chat-1", None, None, ts(10_000));
+    remote
+        .upsert_session(&session("chat-1", "dev-b", SessionStatus::Working))
+        .unwrap();
+    assert_eq!(remote.pending_len(), 0);
+    assert!(remote.chat("chat-1").unwrap().is_none());
+    assert!(remote.read_sessions().unwrap().is_empty());
+
+    // Explicit creation/restoration keeps its existing revival semantics.
+    local.upsert_chat(&chat("chat-1", "dev-a")).unwrap();
+    assert!(!local.chat_deleted("chat-1"));
+    local
+        .upsert_session(&session("chat-1", "dev-a", SessionStatus::Idle))
+        .unwrap();
+    assert!(local.chat("chat-1").unwrap().is_some());
+    assert_eq!(local.read_sessions().unwrap().len(), 1);
+
+    // A first command can still claim a chat before its create row arrives.
+    remote.claim_chat("not-yet-created", None, None, ts(11_000));
+    assert!(remote.chat("not-yet-created").unwrap().is_some());
+}
+
+#[test]
 fn spaces_round_trip_and_mutate() {
     let mut ws = RegistryDoc::new("dev-a");
     ws.upsert_space(&space("sp-1", "dev-a", "/home/u/project"))

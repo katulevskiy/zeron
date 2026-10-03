@@ -1,8 +1,10 @@
 //! Safe resolution of agent-authored Markdown links into workspace files.
 
 use std::borrow::Cow;
-use std::collections::HashMap;
+use std::collections::{HashMap, VecDeque};
 use std::path::{Component, Path, PathBuf};
+use std::sync::Arc;
+use std::time::{Duration, Instant};
 
 const FILE_MENTION_SCHEME: &str = "zeron-file:";
 
@@ -109,24 +111,76 @@ pub(crate) enum PathKind {
     Missing,
 }
 
-/// Memoized path probes behind inline-code file links: one `metadata` call
-/// per path per link-roots revision, however many spans and frames ask.
+const PATH_PROBE_MAX_ENTRIES: usize = 2048;
+const PATH_PROBE_MAX_BYTES: usize = 512 * 1024;
+pub(crate) const FILE_LINK_CACHE_TTL: Duration = Duration::from_secs(30);
+
+struct PathProbe {
+    kind: PathKind,
+    at: Instant,
+    bytes: usize,
+}
+
+/// Memoized path probes behind inline-code file links. Retire old probes
+/// rather than retaining every path encountered during a long transcript.
+/// Freshness also allows created/deleted files to change without a root edit.
 #[derive(Default)]
 pub(crate) struct PathProbes {
-    kinds: HashMap<PathBuf, PathKind>,
+    kinds: HashMap<Arc<Path>, PathProbe>,
+    oldest: VecDeque<Arc<Path>>,
+    bytes: usize,
 }
 
 impl PathProbes {
+    fn retire_oldest(&mut self) {
+        if let Some(path) = self.oldest.pop_front()
+            && let Some(probe) = self.kinds.remove(&path)
+        {
+            self.bytes = self.bytes.saturating_sub(probe.bytes);
+        }
+    }
+
     pub(crate) fn kind(&mut self, path: &Path) -> PathKind {
-        if let Some(kind) = self.kinds.get(path) {
-            return *kind;
+        while self
+            .oldest
+            .front()
+            .is_some_and(|path| self.kinds[path].at.elapsed() >= FILE_LINK_CACHE_TTL)
+        {
+            self.retire_oldest();
+        }
+        if let Some(probe) = self.kinds.get(path) {
+            return probe.kind;
         }
         let kind = match std::fs::metadata(path) {
             Ok(metadata) if metadata.is_file() => PathKind::File,
             Ok(metadata) if metadata.is_dir() => PathKind::Directory,
             _ => PathKind::Missing,
         };
-        self.kinds.insert(path.to_path_buf(), kind);
+        // The map and FIFO share the path allocation. Charge the path plus
+        // pointers, probe, Arc counters, and conservative hash-table overhead.
+        let bytes = path.as_os_str().len().saturating_add(
+            2 * std::mem::size_of::<Arc<Path>>()
+                + std::mem::size_of::<PathProbe>()
+                + 5 * std::mem::size_of::<usize>(),
+        );
+        if bytes <= PATH_PROBE_MAX_BYTES {
+            while self.kinds.len() >= PATH_PROBE_MAX_ENTRIES
+                || self.bytes.saturating_add(bytes) > PATH_PROBE_MAX_BYTES
+            {
+                self.retire_oldest();
+            }
+            let path: Arc<Path> = Arc::from(path);
+            self.oldest.push_back(path.clone());
+            self.kinds.insert(
+                path,
+                PathProbe {
+                    kind,
+                    at: Instant::now(),
+                    bytes,
+                },
+            );
+            self.bytes += bytes;
+        }
         kind
     }
 }
@@ -194,9 +248,8 @@ pub(crate) fn resolve_inline_code_path(
         // target the link grammar rejects, turning the span into a dead link,
         // so it keeps its inline-code look instead.
         let path = path.to_string_lossy();
-        path.starts_with('/').then(|| {
-            InlineCodePath::File(format!("file://{}{anchor}", percent_encode_path(&path)))
-        })
+        path.starts_with('/')
+            .then(|| InlineCodePath::File(format!("file://{}{anchor}", percent_encode_path(&path))))
     };
     if let Some(rest) = decoded.strip_prefix("~/") {
         let home = std::env::var_os("HOME").filter(|home| !home.is_empty())?;
@@ -652,6 +705,49 @@ fn percent_encode_path(path: &str) -> String {
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    #[test]
+    fn path_probes_retire_deleted_file_results_and_obey_entry_budget() {
+        let dir = tempfile::tempdir().unwrap();
+        let file = dir.path().join("changed.md");
+        std::fs::write(&file, "old").unwrap();
+        let mut probes = PathProbes::default();
+        assert_eq!(probes.kind(&file), PathKind::File);
+        std::fs::remove_file(&file).unwrap();
+        std::fs::create_dir(&file).unwrap();
+        for index in 0..PATH_PROBE_MAX_ENTRIES {
+            assert_eq!(
+                probes.kind(&dir.path().join(format!("missing-{index}.md"))),
+                PathKind::Missing
+            );
+        }
+        // The old file probe was retired, so the filesystem change is visible.
+        assert_eq!(probes.kind(&file), PathKind::Directory);
+        assert!(probes.kinds.len() <= PATH_PROBE_MAX_ENTRIES);
+        assert!(probes.bytes <= PATH_PROBE_MAX_BYTES);
+    }
+
+    #[test]
+    fn path_probe_byte_budget_and_expiry_allow_fresh_metadata() {
+        let dir = tempfile::tempdir().unwrap();
+        let mut probes = PathProbes::default();
+        let missing = dir.path().join("created.md");
+        assert_eq!(probes.kind(&missing), PathKind::Missing);
+        std::fs::write(&missing, "new").unwrap();
+        probes.kinds.get_mut(missing.as_path()).unwrap().at -= FILE_LINK_CACHE_TTL;
+        assert_eq!(probes.kind(&missing), PathKind::File);
+
+        // Long nonexistent paths exercise bytes before the entry-count cap.
+        for index in 0..PATH_PROBE_MAX_ENTRIES {
+            let path = dir.path().join(format!("{index}-{}", "x".repeat(512)));
+            assert_eq!(probes.kind(&path), PathKind::Missing);
+            assert!(probes.bytes <= PATH_PROBE_MAX_BYTES);
+        }
+        assert!(probes.kinds.len() < PATH_PROBE_MAX_ENTRIES);
+        let oversized = PathBuf::from("x".repeat(PATH_PROBE_MAX_BYTES + 1));
+        assert_eq!(probes.kind(&oversized), PathKind::Missing);
+        assert!(!probes.kinds.contains_key(oversized.as_path()));
+    }
 
     fn link(path: &str, line: Option<u32>, column: Option<u32>) -> WorkspaceFileLink {
         WorkspaceFileLink {

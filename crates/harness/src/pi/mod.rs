@@ -102,7 +102,7 @@ impl PiHarness {
             let result = tokio::select! {
                 result=tokio::time::timeout(Duration::from_secs(60),async {
                     if models {Ok(serde_json::to_value(catalog::models(&mut process).await?).unwrap())}
-                    else {process.query(json!({"type":"get_commands"}),&mut vec![]).await}
+                    else {process.query(json!({"type":"get_commands"}),&mut StartupBacklog::default()).await}
                 })=>result.unwrap_or_else(|_|Err(HarnessError::Protocol("Pi discovery timed out".into()))),
                 _=tx.closed()=>Err(HarnessError::Protocol("Pi discovery cancelled".into())),
             };
@@ -179,6 +179,26 @@ struct Process {
     dialogs: ui::Dialogs,
     exit_deadline: Option<tokio::time::Instant>,
 }
+
+#[derive(Default)]
+struct StartupBacklog {
+    frames: Vec<Value>,
+    bytes: usize,
+}
+
+impl StartupBacklog {
+    fn push(&mut self, frame: Value) -> Result<(), HarnessError> {
+        let bytes = rpc::frame_size(&frame)?;
+        if self.frames.len() >= 128 || self.bytes.saturating_add(bytes) > 32 * 1024 * 1024 {
+            return Err(HarnessError::Protocol(
+                "Pi startup event backlog exceeds its budget".into(),
+            ));
+        }
+        self.frames.push(frame);
+        self.bytes += bytes;
+        Ok(())
+    }
+}
 impl Drop for Process {
     fn drop(&mut self) {
         self.stderr_task.abort();
@@ -208,7 +228,7 @@ impl Process {
     async fn query(
         &mut self,
         command: Value,
-        backlog: &mut Vec<Value>,
+        backlog: &mut StartupBacklog,
     ) -> Result<Value, HarnessError> {
         let id = self.transport.client.request(command)?;
         loop {
@@ -219,7 +239,7 @@ impl Process {
             if frame["type"] == "extension_ui_request" {
                 self.dialogs.request(self.transport.client.clone(), &frame);
             } else {
-                backlog.push(frame);
+                backlog.push(frame)?;
             }
         }
     }
@@ -228,9 +248,9 @@ impl Process {
         self.child.shutdown(grace).await;
     }
 }
-fn response_data(frame: Value) -> Result<Value, HarnessError> {
+fn response_data(mut frame: Value) -> Result<Value, HarnessError> {
     if frame["success"] == true {
-        Ok(frame["data"].clone())
+        Ok(frame["data"].take())
     } else {
         Err(HarnessError::Protocol(format!(
             "Pi {}: {}",
@@ -348,7 +368,7 @@ impl Harness for PiHarness {
             request.resume = None;
         }
         let process = self.spawn(Path::new(&request.cwd), &args, request.mcp.as_ref())?;
-        let (tx, rx) = mpsc::channel(256);
+        let (tx, rx) = mpsc::channel(8);
         let kill_grace = self.kill_grace;
         let interrupt_grace = self.interrupt_grace;
         tokio::spawn(async move {
@@ -506,7 +526,7 @@ impl Runner {
         self.norm.reset();
         self.submit(text, images, false)
     }
-    async fn bootstrap(&mut self, backlog: &mut Vec<Value>) -> Result<Value, HarnessError> {
+    async fn bootstrap(&mut self, backlog: &mut StartupBacklog) -> Result<Value, HarnessError> {
         // Pi defaults to one-at-a-time. Zeron's pending steers belong together
         // at the next model step. Pi persists this in its global settings, so
         // select it only while no mode is configured: an explicit choice (the
@@ -613,7 +633,7 @@ impl Runner {
         &mut self,
         steering: &mut mpsc::Receiver<crate::SteerMessage>,
     ) -> Result<(), HarnessError> {
-        let mut backlog = vec![];
+        let mut backlog = StartupBacklog::default();
         // Same budget the ACP handshake gave Pi: extensions can start cold.
         let state = tokio::time::timeout(Duration::from_secs(120), self.bootstrap(&mut backlog))
             .await
@@ -644,7 +664,7 @@ impl Runner {
         if let Some(message) = self.lost_context.take() {
             self.emit(AgentEvent::Error { message }).await?;
         }
-        for frame in backlog {
+        for frame in backlog.frames {
             self.frame(frame).await?;
         }
         let images = load_images(&self.request.attachments).await;
@@ -693,7 +713,9 @@ impl Runner {
             }
             tokio::select! {
                 incoming=self.process.next()=>self.frame(incoming?).await?,
-                steer=steering.recv(),if open=>match steer {Some(steer)=>self.queued.push_back(steer),None=>open=false}
+                // Leave additional steers in the engine's bounded mailbox
+                // while Pi is waiting for acceptance of earlier deliveries.
+                steer=steering.recv(),if open && self.queued.len()<32=>match steer {Some(steer)=>self.queued.push_back(steer),None=>open=false}
             }
         }
     }
@@ -958,10 +980,13 @@ impl Runner {
 /// oversized or non-inlinable file (SVG, HEIC, TIFF, ...) must not fail the turn.
 async fn load_images(paths: &[String]) -> Value {
     use base64::Engine;
+    use tokio::io::AsyncReadExt;
+    const INLINE_BYTES: usize = 20 * 1024 * 1024;
     let mut images = vec![];
+    let mut remaining = INLINE_BYTES;
     for path in paths {
         match tokio::fs::metadata(path).await {
-            Ok(meta) if meta.len() <= 20 * 1024 * 1024 => {}
+            Ok(meta) if meta.len() <= remaining as u64 => {}
             Ok(_) => {
                 tracing::debug!(%path, "Pi attachment over inline cap; path ref only");
                 continue;
@@ -971,13 +996,26 @@ async fn load_images(paths: &[String]) -> Value {
                 continue;
             }
         }
-        let bytes = match tokio::fs::read(path).await {
-            Ok(bytes) => bytes,
+        let file = match tokio::fs::File::open(path).await {
+            Ok(file) => file,
             Err(error) => {
                 tracing::warn!(%path, %error, "Pi attachment unreadable; path ref only");
                 continue;
             }
         };
+        let mut bytes = vec![];
+        if let Err(error) = file
+            .take(remaining as u64 + 1)
+            .read_to_end(&mut bytes)
+            .await
+        {
+            tracing::warn!(%path, %error, "Pi attachment unreadable; path ref only");
+            continue;
+        }
+        if bytes.len() > remaining {
+            tracing::debug!(%path, "Pi attachment grew over inline budget; path ref only");
+            continue;
+        }
         let mime = if bytes.starts_with(b"\x89PNG") {
             "image/png"
         } else if bytes.starts_with(b"\xff\xd8\xff") {
@@ -990,6 +1028,7 @@ async fn load_images(paths: &[String]) -> Value {
             tracing::debug!(%path, "Pi attachment is not an inlinable image; path ref only");
             continue;
         };
+        remaining -= bytes.len();
         images.push(json!({"type":"image","data":base64::engine::general_purpose::STANDARD.encode(bytes),"mimeType":mime}));
     }
     Value::Array(images)
@@ -997,7 +1036,51 @@ async fn load_images(paths: &[String]) -> Value {
 
 #[cfg(test)]
 mod tests {
-    use super::load_images;
+    use super::{StartupBacklog, load_images};
+    use serde_json::json;
+
+    #[test]
+    fn startup_backlog_bounds_bursts_and_large_payloads_without_dropping_accepted_events() {
+        let mut backlog = StartupBacklog::default();
+        for sequence in 0..128 {
+            backlog.push(json!({"sequence":sequence})).unwrap();
+        }
+        assert!(backlog.push(json!({"sequence":128})).is_err());
+        assert_eq!(backlog.frames[127]["sequence"], 127);
+        let mut backlog = StartupBacklog::default();
+        backlog
+            .push(json!({"text":"x".repeat(17 * 1024 * 1024)}))
+            .unwrap();
+        assert!(
+            backlog
+                .push(json!({"text":"x".repeat(17 * 1024 * 1024)}))
+                .is_err()
+        );
+        assert_eq!(backlog.frames.len(), 1);
+    }
+
+    #[tokio::test]
+    async fn inline_images_share_one_budget_and_keep_path_fallback_for_large_files() {
+        use std::io::Write;
+        let dir = tempfile::tempdir().unwrap();
+        let mut paths = vec![];
+        for (name, size) in [
+            ("first.png", 11 * 1024 * 1024),
+            ("second.png", 11 * 1024 * 1024),
+            ("small.png", 16),
+        ] {
+            let path = dir.path().join(name);
+            let mut file = std::fs::File::create(&path).unwrap();
+            file.write_all(b"\x89PNG\r\n\x1a\n").unwrap();
+            file.set_len(size).unwrap();
+            paths.push(path.to_string_lossy().into_owned());
+        }
+        let images = load_images(&paths).await;
+        let images = images.as_array().unwrap();
+        assert_eq!(images.len(), 2);
+        assert!(images[0]["data"].as_str().unwrap().len() > 11 * 1024 * 1024);
+        assert!(images[1]["data"].as_str().unwrap().len() < 32);
+    }
 
     #[tokio::test]
     async fn unsupported_or_missing_attachments_do_not_fail_the_turn() {
