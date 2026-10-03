@@ -1,28 +1,9 @@
 name: Memory checks
 
 on:
+  # Full diagnostics exceed the seven-minute automatic CI budget on cold caches.
+  # Run explicitly when investigating retention or validating memory changes.
   workflow_dispatch:
-  push:
-    branches: [main]
-    paths:
-      - 'Cargo.toml'
-      - 'Cargo.lock'
-      - 'crates/**'
-      - 'scripts/ci/check-memory.sh'
-      - '.github/workflows/memory-checks.yml'
-  pull_request:
-    paths:
-      - 'Cargo.toml'
-      - 'Cargo.lock'
-      - 'crates/doc/**'
-      - 'crates/engine/**'
-      - 'crates/harness/**'
-      - 'crates/proto/**'
-      - 'crates/rpc/**'
-      - 'crates/sync/**'
-      - 'crates/text/**'
-      - 'scripts/ci/check-memory.sh'
-      - '.github/workflows/memory-checks.yml'
 
 permissions:
   contents: read

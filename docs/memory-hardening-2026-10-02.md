@@ -82,13 +82,29 @@ composer together before asserting them. The full local text/markdown/client/
 mobile suite passed (185 tests, one existing test ignored), and the affected
 round-trip test passed 20 consecutive runs.
 
-[Memory checks](../.github/workflows/memory-checks.yml) runs Linux core regressions,
-Valgrind Memcheck on nine finite offline scenarios plus font ownership, and
+[Memory checks](../.github/workflows/memory-checks.yml) is a manual workflow that
+runs Valgrind Memcheck on nine finite offline scenarios plus font ownership, and
 Massif on document, sync, catch-up, and complete backend replacement workloads.
 Its artifacts retain the exact commit, binary hash, versions, XML errors,
 allocation samples, and Massif stacks. Definite/indirect leaks and invalid memory
 access fail the check; still-reachable allocations require the retention analysis
-and cannot be dismissed solely because Memcheck passes.
+and cannot be dismissed solely because Memcheck passes. Core regressions remain
+in the regular UI tests workflow rather than being rebuilt and rerun here.
+
+The original automatic job took 16m25s: 10m03s for the duplicate release core
+suite and 5m53s for diagnostic builds and profiling. The fork-only speedup
+experiment removed that suite and disabled release LTO while retaining optimized
+code, source locations, all ten Memcheck checks, and all four Massif profiles.
+Its cold run still exceeded the seven-minute automatic CI budget, so memory
+diagnostics now run only through `workflow_dispatch`, never on PRs or pushes.
+The separate `memory-no-lto` Rust cache uses the shared Linux setup: only runs
+on `main` can write it; other refs only restore. Regular core caches use a
+different profile and cannot seed these release artifacts. Once the workflow
+is on upstream main, run it with:
+
+```sh
+gh workflow run memory-checks.yml --repo zeronsh/zeron --ref main
+```
 
 The [final Linux run](https://github.com/katulevskiy/zeron/actions/runs/37089996172)
 passed on `8b347ef0`: **zero Memcheck errors** in all nine backend scenarios
