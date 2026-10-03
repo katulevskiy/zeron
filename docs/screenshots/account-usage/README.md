@@ -20,6 +20,13 @@ countdowns, and missing/expired reset times with a long account identity, in bot
 dark and light themes. Each PNG has a JSON sidecar with physical client dimensions
 and DPI. `result.txt` is written only after all six captures succeed.
 
+Countdowns stay inline (`Week (3d)`, `Session (2h)`) and use the largest whole
+unit rounded down: days, hours, then minutes; less than a minute reads `<1m`.
+The popover keeps its original width and two-line account rows. Banked resets
+appear as a small reset icon and count beside the account metadata, with an
+explanatory tooltip. Exact reset times remain available on each meter's tooltip;
+expired or missing timestamps leave the label plain.
+
 The helper checks the window's process owner and captures its client area;
 screenshots do not include the desktop or unrelated applications.
 The helper keeps the fixture offscreen without activating it and rejects blank

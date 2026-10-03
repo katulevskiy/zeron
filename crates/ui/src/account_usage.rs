@@ -16,8 +16,8 @@ use zeron_rpc::methods;
 
 use crate::popover;
 use crate::settings::accounts::{
-    self, AccountsSnapshotCache, UsageLevel, render_usage_meter, reports_usage, signs_in,
-    usage_color, usage_level,
+    self, AccountsSnapshotCache, UsageLevel, render_usage_meter_with_label, reports_usage,
+    signs_in, usage_color, usage_level,
 };
 use crate::state::AppState;
 use crate::theme::Theme;
@@ -30,23 +30,22 @@ const POLL_INTERVAL: Duration = Duration::from_secs(5 * 60);
 /// Repaint an open card locally; a ticking countdown needs no provider request.
 const COUNTDOWN_INTERVAL: Duration = Duration::from_secs(30);
 
-/// Round up so a future reset never reads "0m". Expired snapshots must not
+/// Show the largest whole unit, rounding down. Expired snapshots must not
 /// claim the provider has replenished the allowance until a probe confirms it.
 fn reset_countdown(at: DateTime<Utc>, now: DateTime<Utc>) -> String {
-    let millis = at.signed_duration_since(now).num_milliseconds();
+    let remaining = at.signed_duration_since(now);
     if at <= now {
-        return "Reset pending".into();
+        return "pending".into();
     }
-    let minutes = (millis.max(1) + 59_999) / 60_000;
-    let (days, hours, mins) = (minutes / 1440, (minutes / 60) % 24, minutes % 60);
-    let duration = if days > 0 {
-        format!("{days}d {hours}h")
-    } else if hours > 0 {
-        format!("{hours}h {mins}m")
+    if remaining.num_days() > 0 {
+        format!("{}d", remaining.num_days())
+    } else if remaining.num_hours() > 0 {
+        format!("{}h", remaining.num_hours())
+    } else if remaining.num_minutes() > 0 {
+        format!("{}m", remaining.num_minutes())
     } else {
-        format!("{mins}m")
-    };
-    format!("Resets in {duration}")
+        "<1m".into()
+    }
 }
 
 fn banked_resets(count: Option<u32>) -> Option<String> {
@@ -429,6 +428,25 @@ impl AccountUsage {
                 {
                     meta.push(div().child(SharedString::from(reason)).into_any_element());
                 }
+                if let Some(label) = banked_resets(account.available_resets) {
+                    meta.push(
+                        div()
+                            .id(("banked-resets", ix))
+                            .flex()
+                            .items_center()
+                            .gap(px(3.0))
+                            .tooltip(crate::settings::widgets::text_tooltip(format!(
+                                "{label}. Banked usage resets; manage them in your provider's usage settings."
+                            )))
+                            .child(
+                                crate::icons::icon(crate::icons::REFRESH)
+                                    .size(px(12.0))
+                                    .text_color(theme.text_muted),
+                            )
+                            .child(SharedString::from(account.available_resets.unwrap().to_string()))
+                            .into_any_element(),
+                    );
+                }
                 let switch_to = account.clone();
                 popover::menu_row(theme, account.active, format!("account-usage-row-{ix}"))
                     .id(("account-usage-row", ix))
@@ -450,45 +468,29 @@ impl AccountUsage {
                                     .child(email),
                             )
                             .when(!meta.is_empty(), |el| {
-                                el.child(crate::settings::widgets::meta_line(theme, meta))
-                            })
-                            .children(banked_resets(account.available_resets).map(|label| {
-                                div()
-                                    .id(("banked-resets", ix))
-                                    .mt(px(3.0))
-                                    .text_size(crate::typography::ui_rems(11.0))
-                                    .text_color(theme.text_muted)
-                                    .tooltip(crate::settings::widgets::text_tooltip(
-                                        "Banked usage resets. Manage them in your provider's usage settings.",
-                                    ))
-                                    .child(SharedString::from(label))
-                            })),
+                                el.child(crate::settings::widgets::meta_line(theme, meta).flex_nowrap())
+                            }),
                     )
-                    .child(div().flex_none().flex().flex_col().gap(px(5.0)).children(
+                    .child(div().flex_none().flex().flex_col().gap(px(2.0)).children(
                         account.usage_windows.iter().take(2).enumerate().map(
                             |(window_ix, window)| {
+                                let label = window.resets_at.filter(|at| *at > now).map_or_else(
+                                    || window.label.clone(),
+                                    |at| format!("{} ({})", window.label, reset_countdown(at, now)),
+                                );
                                 div()
                                     .id(("account-reset", ix * 2 + window_ix))
                                     .flex()
-                                    .flex_col()
-                                    .child(render_usage_meter(window, theme))
+                                    .child(render_usage_meter_with_label(window, theme, label, 90.0))
                                     .when_some(window.resets_at, |el, at| {
                                         let exact = at
                                             .with_timezone(&Local)
                                             .format("%a, %b %-d at %-I:%M %p %Z");
                                         el.tooltip(crate::settings::widgets::text_tooltip(format!(
-                                            "{} limit resets {exact}",
-                                            window.label
+                                            "{} limit resets {exact}{}",
+                                            window.label,
+                                            if at <= now { " (reset pending)" } else { "" }
                                         )))
-                                        .child(
-                                            div()
-                                                .pl(px(accounts::USAGE_LABEL_WIDTH + 8.0))
-                                                .text_size(crate::typography::ui_rems(10.5))
-                                                .text_color(theme.text_muted)
-                                                .child(SharedString::from(reset_countdown(
-                                                    at, now,
-                                                ))),
-                                        )
                                     })
                             },
                         ),
@@ -630,18 +632,22 @@ mod tests {
         let now: DateTime<Utc> = "2026-10-02T12:00:00Z".parse().unwrap();
         assert_eq!(
             reset_countdown(now + chrono::TimeDelta::nanoseconds(1), now),
-            "Resets in 1m"
+            "<1m"
         );
         for (millis, expected) in [
-            (-1, "Reset pending"),
-            (0, "Reset pending"),
-            (1, "Resets in 1m"),
-            (60_000, "Resets in 1m"),
-            (60_001, "Resets in 2m"),
-            (3_600_000, "Resets in 1h 0m"),
-            (8_040_000, "Resets in 2h 14m"),
-            (288_000_000, "Resets in 3d 8h"),
-            (2_592_000_000, "Resets in 30d 0h"),
+            (-1, "pending"),
+            (0, "pending"),
+            (1, "<1m"),
+            (59_999, "<1m"),
+            (60_000, "1m"),
+            (60_001, "1m"),
+            (3_599_999, "59m"),
+            (3_600_000, "1h"),
+            (8_040_000, "2h"),
+            (86_399_999, "23h"),
+            (86_400_000, "1d"),
+            (288_000_000, "3d"),
+            (2_592_000_000, "30d"),
         ] {
             assert_eq!(
                 reset_countdown(now + chrono::TimeDelta::milliseconds(millis), now),

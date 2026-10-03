@@ -63,7 +63,7 @@ pub fn usage_level(fraction: f32) -> UsageLevel {
 /// Compact account list geometry: every row shares one usage column and one
 /// action slot, so meters and buttons line up down the list however many
 /// accounts there are.
-pub(crate) const USAGE_LABEL_WIDTH: f32 = 52.0;
+const USAGE_LABEL_WIDTH: f32 = 52.0;
 const USAGE_BAR_WIDTH: f32 = 88.0;
 const USAGE_PERCENT_WIDTH: f32 = 34.0;
 const USAGE_COLUMN_WIDTH: f32 = USAGE_LABEL_WIDTH + USAGE_BAR_WIDTH + USAGE_PERCENT_WIDTH + 16.0;
@@ -350,6 +350,16 @@ pub(crate) fn render_usage_meter(
     window: &zeron_proto::AgentUsageWindow,
     theme: &Theme,
 ) -> AnyElement {
+    render_usage_meter_with_label(window, theme, window.label.clone(), USAGE_LABEL_WIDTH)
+}
+
+/// Keep the meter's total width fixed when the composer adds an inline countdown.
+pub(crate) fn render_usage_meter_with_label(
+    window: &zeron_proto::AgentUsageWindow,
+    theme: &Theme,
+    label: String,
+    label_width: f32,
+) -> AnyElement {
     let fraction = window.used_fraction.clamp(0.0, 1.0);
     let level = usage_level(fraction);
     let fill = usage_color(level, theme).opacity(match level {
@@ -365,15 +375,15 @@ pub(crate) fn render_usage_meter(
         .text_size(crate::typography::ui_rems(11.5))
         .child(
             div()
-                .w(px(USAGE_LABEL_WIDTH))
+                .w(px(label_width))
                 .flex_none()
                 .truncate()
                 .text_color(theme.text_muted)
-                .child(SharedString::from(window.label.clone())),
+                .child(SharedString::from(label)),
         )
         .child(
             div()
-                .w(px(USAGE_BAR_WIDTH))
+                .w(px(USAGE_LABEL_WIDTH + USAGE_BAR_WIDTH - label_width))
                 .flex_none()
                 .h(px(4.0))
                 .rounded_full()
