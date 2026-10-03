@@ -659,10 +659,13 @@ impl ImageCache {
     fn insert_loaded(&mut self, key: AttachmentKey, image: CachedAttachmentImage) {
         // Read only raster headers: locally seeded JPEG/WebP/GIF originals
         // must count pixels too, without decoding them on the UI thread.
-        let pixels = image::ImageReader::new(std::io::Cursor::new(&image.image.bytes))
-            .with_guessed_format()
-            .ok()
-            .and_then(|reader| reader.into_dimensions().ok())
+        let pixels = crate::appshots::png_dimensions(&image.image.bytes)
+            .or_else(|| {
+                image::ImageReader::new(std::io::Cursor::new(&image.image.bytes))
+                    .with_guessed_format()
+                    .ok()
+                    .and_then(|reader| reader.into_dimensions().ok())
+            })
             .map_or(0, |(w, h)| (w as usize).saturating_mul(h as usize));
         let bytes = image
             .image

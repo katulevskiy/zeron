@@ -1674,11 +1674,19 @@ async fn http_catchup_crosses_a_contained_checkpoint_and_repairs_causal_gaps() {
 struct JournalSink(crate::DocsStore, RecordingSink);
 #[tokio::test(start_paused = true)]
 async fn reopened_disk_backlog_has_a_bounded_window_and_drains_all_http_pages() {
-    struct ImmediateHttp(Arc<Mutex<Vec<String>>>);
+    struct ImmediateHttp(Arc<Mutex<Vec<String>>>, Arc<tokio::sync::Semaphore>);
     impl ChatTransport for ImmediateHttp {
         fn push(&self, id: String, _: Vec<u8>) -> BoxFuture<'static, Result<String, SyncError>> {
-            lock(&self.0).push(id.clone());
-            Box::pin(async move { Ok(serde_json::json!({"batchId":id,"seq":0}).to_string()) })
+            let attempts = self.0.clone();
+            let gate = self.1.clone();
+            Box::pin(async move {
+                gate.acquire()
+                    .await
+                    .map_err(|_| SyncError::Closed)?
+                    .forget();
+                lock(&attempts).push(id.clone());
+                Ok(serde_json::json!({"batchId":id,"seq":0}).to_string())
+            })
         }
         fn fetch_rows(&self, _: u64) -> BoxFuture<'static, Result<Vec<u8>, SyncError>> {
             Box::pin(async { Err(SyncError::Closed) })
@@ -1698,6 +1706,7 @@ async fn reopened_disk_backlog_has_a_bounded_window_and_drains_all_http_pages() 
         RecordingSink::default(),
     ));
     let attempts = Arc::new(Mutex::new(Vec::new()));
+    let gate = Arc::new(tokio::sync::Semaphore::new(0));
     let (fetch, _) = fetcher(b"");
     let client = ChatClient::connect_with_transport(
         connector(vec![]),
@@ -1706,7 +1715,7 @@ async fn reopened_disk_backlog_has_a_bounded_window_and_drains_all_http_pages() 
         "local",
         0,
         ChatTuning::default(),
-        Some(Arc::new(ImmediateHttp(attempts.clone()))),
+        Some(Arc::new(ImmediateHttp(attempts.clone(), gate.clone()))),
     )
     .await
     .unwrap();
@@ -1719,6 +1728,7 @@ async fn reopened_disk_backlog_has_a_bounded_window_and_drains_all_http_pages() 
             .sum::<usize>()
             <= PENDING_WINDOW_BYTES
     );
+    gate.add_permits(100);
     tokio::time::timeout(Duration::from_secs(30), async {
         while client.stats().pending_pushes != 0 {
             tokio::task::yield_now().await;
