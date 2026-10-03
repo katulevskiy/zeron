@@ -28,7 +28,9 @@ evidence, reproducible growth mechanisms, and the archived before measurements.
   deserializing them. Full requested replay is still proportional to its result.
 * Dropped unary RPC futures and harness requests remove pending registrations.
   Production UI streams use scoped subscriptions. Reused server request IDs
-  abort the previous task rather than orphaning it.
+  abort the previous task rather than orphaning it. Stream and transport queues
+  shrink from 256 to 8 ordered frames; full transcript frames no longer multiply
+  into hundreds of MiB behind a slow reader.
 * File watcher notifications coalesce into one pending kick. Deleted chats
   release UI terminal tabs after registry hydration.
 * User images are decoded with allocation/dimension limits, normalized into

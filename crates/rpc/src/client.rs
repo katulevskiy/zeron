@@ -14,7 +14,7 @@ use crate::{ClientFrame, RpcError, ServerFrame};
 /// the connection reader — transport backpressure instead of unbounded growth
 /// when a consumer stalls behind a fast producer (watch frames every 120ms
 /// during streaming used to pile up whole-transcript payloads here).
-const STREAM_QUEUE_CAP: usize = 256;
+const STREAM_QUEUE_CAP: usize = 8;
 
 enum Pending {
     Call(oneshot::Sender<Result<serde_json::Value, RpcError>>),
@@ -392,8 +392,8 @@ pub async fn connect_ws(url: &str) -> Result<RpcClient, RpcError> {
         .map_err(|_| RpcError::Transport(format!("timed out dialing {url}")))?
         .map_err(|e| RpcError::Transport(e.to_string()))?;
     let (mut sink, mut stream) = ws.split();
-    let (out_tx, mut out_rx) = mpsc::channel::<String>(256);
-    let (in_tx, in_rx) = mpsc::channel::<String>(256);
+    let (out_tx, mut out_rx) = mpsc::channel::<String>(crate::FRAME_QUEUE_CAP);
+    let (in_tx, in_rx) = mpsc::channel::<String>(crate::FRAME_QUEUE_CAP);
     tokio::spawn(async move {
         loop {
             tokio::select! {

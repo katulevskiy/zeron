@@ -186,8 +186,8 @@ async fn serve_ws_socket(stream: TcpStream, service: Arc<dyn RpcService>) {
         }
     };
     let (mut sink, mut ws_stream) = ws.split();
-    let (out_tx, mut out_rx) = mpsc::channel::<String>(256);
-    let (in_tx, in_rx) = mpsc::channel::<String>(256);
+    let (out_tx, mut out_rx) = mpsc::channel::<String>(crate::FRAME_QUEUE_CAP);
+    let (in_tx, in_rx) = mpsc::channel::<String>(crate::FRAME_QUEUE_CAP);
 
     // Pump: socket <-> string channels. Ends when either side closes.
     let pump = tokio::spawn(async move {
