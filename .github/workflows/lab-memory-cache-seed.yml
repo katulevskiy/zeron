@@ -1,5 +1,8 @@
 name: lab-memory-cache-seed
 on:
+  push:
+    branches: [main]
+    paths: ['.github/workflows/lab-memory-cache-seed.yml']
   workflow_dispatch:
     inputs:
       target:
@@ -21,7 +24,7 @@ jobs:
     steps:
       - uses: actions/checkout@11d5960a326750d5838078e36cf38b85af677262 # v4.4.0
         with:
-          ref: ${{ inputs.target }}
+          ref: ${{ inputs.target || '2d9913f2a3b1c731d126bb6affce95c63fa80b5e' }}
       - uses: ./.github/actions/linux-ci
         with:
           rust-cache: memory-no-lto
