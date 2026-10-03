@@ -1380,12 +1380,19 @@ impl AppState {
             .or_else(|| self.default_execution_device());
         let device = device.as_deref();
         let sorted = self.spaces_sorted();
+        // With local execution disabled the fallback is held to the same bar
+        // as the default device: online remotes only, never a silent queue.
+        let now = Utc::now();
         device
             .and_then(|d| sorted.iter().find(|s| s.device_id == d).copied())
             .or_else(|| {
                 sorted
                     .iter()
-                    .find(|s| self.may_execute_on(&s.device_id))
+                    .find(|s| {
+                        self.may_execute_on(&s.device_id)
+                            && (!self.local_execution_disabled
+                                || self.device_online(&s.device_id, now))
+                    })
                     .copied()
             })
             .map(|s| s.id.clone())
@@ -4504,24 +4511,29 @@ mod tests {
         state.selected_space = Some("s1".into());
         assert_eq!(state.effective_device_id().as_deref(), Some("local"));
 
+        // The remote device has never been seen: the local project is
+        // dropped, but NOT retargeted to the offline remote's project — a
+        // silent default there would just queue the send.
         assert!(state.apply_local_execution(true));
         assert!(!state.may_execute_on("local"));
-        assert_eq!(state.selected_space.as_deref(), Some("remote-space"));
-        assert_eq!(state.effective_device_id().as_deref(), Some("remote"));
-
-        // Only an offline remote device (never seen): nothing, never this
-        // device — a silent default there would just queue the send.
-        state.no_project = true;
-        state.selected_space = None;
+        assert_eq!(state.selected_space, None);
         assert_eq!(state.effective_device_id(), None);
         assert_eq!(state.default_execution_device(), None);
 
-        // An online remote device is the default.
+        // Once it is online it is the default, and the flip retargets to it.
         state.devices[1].last_seen_at = Some(Utc::now());
         assert_eq!(state.default_execution_device().as_deref(), Some("remote"));
+        assert!(state.apply_local_execution(false));
+        state.selected_space = Some("s1".into());
+        assert!(state.apply_local_execution(true));
+        assert_eq!(state.selected_space.as_deref(), Some("remote-space"));
+        assert_eq!(state.effective_device_id().as_deref(), Some("remote"));
 
-        // No remote device at all: still nothing.
+        // No remote device at all: nothing, never this device.
         state.devices = vec![device("local", "Workstation")];
+        state.no_project = true;
+        state.selected_space = None;
+        assert_eq!(state.effective_device_id(), None);
         assert_eq!(state.default_execution_device(), None);
     }
 

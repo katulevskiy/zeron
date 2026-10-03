@@ -2409,8 +2409,11 @@ impl EngineRpc {
                 let p: P = parse_params(params)?;
                 // The transition runs on an engine-owned task: a client that
                 // disconnects mid-drain must not leave the policy published
-                // with local work still running.
+                // with local work still running. The ticket is taken here, in
+                // request order, so a change the task picks up late cannot
+                // undo a later request that already ran.
                 let policy = self.local_execution.clone();
+                let ticket = policy.ticket();
                 let sessions = self.sessions.clone();
                 let terminals = self.terminals.clone();
                 let agent_accounts = self.agent_accounts.clone();
@@ -2418,13 +2421,14 @@ impl EngineRpc {
                 let harness_updates = self.harness_updates.clone();
                 let registry = self.registry.clone();
                 tokio::spawn(async move {
-                    let _transition = policy.transition().await;
+                    let transition = policy.transition(ticket).await;
                     let active_chat_ids = sessions.active_chat_ids();
                     let terminals_open = terminals.any_open();
                     let busy = !active_chat_ids.is_empty() || terminals_open;
                     // Never interrupt silently: report the running work and let
-                    // the client ask before retrying with `interrupt`.
-                    if !p.disabled || !busy || p.interrupt {
+                    // the client ask before retrying with `interrupt`. A stale
+                    // request (overtaken by a later one) only reports.
+                    if transition.is_some() && (!p.disabled || !busy || p.interrupt) {
                         policy
                             .set(p.disabled)
                             .map_err(|e| RpcError::Failed(e.to_string()))?;

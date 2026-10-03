@@ -27,8 +27,11 @@ pub struct LocalExecution {
     path: Option<PathBuf>,
     /// Admission for async starts (see [`Self::until_disabled`]).
     starts: Arc<tokio::sync::RwLock<()>>,
-    /// One policy change at a time, drain included (see [`Self::transition`]).
-    transitions: Arc<tokio::sync::Mutex<()>>,
+    /// One policy change at a time, drain included; holds the ticket of the
+    /// latest change that ran (see [`Self::transition`]).
+    transitions: Arc<tokio::sync::Mutex<u64>>,
+    /// Ticket counter: request order, taken before any change is scheduled.
+    tickets: Arc<std::sync::atomic::AtomicU64>,
 }
 
 impl Default for LocalExecution {
@@ -39,6 +42,7 @@ impl Default for LocalExecution {
             path: None,
             starts: Arc::default(),
             transitions: Arc::default(),
+            tickets: Arc::default(),
         }
     }
 }
@@ -69,6 +73,7 @@ impl LocalExecution {
             path: Some(path),
             starts: Arc::default(),
             transitions: Arc::default(),
+            tickets: Arc::default(),
         }
     }
 
@@ -147,10 +152,26 @@ impl LocalExecution {
     /// [`Self::until_disabled`] work has been dropped. They all race the
     /// policy, so this is prompt; nested leases cannot deadlock because each
     /// holder is already being cancelled.
+    /// Request order for policy changes: taken when a request is accepted,
+    /// before its change is scheduled, so that [`Self::transition`] can
+    /// refuse a change that a later request has already overtaken.
+    pub fn ticket(&self) -> u64 {
+        self.tickets
+            .fetch_add(1, std::sync::atomic::Ordering::SeqCst)
+            + 1
+    }
+
     /// Held by a policy change from publish through its drain, so a
     /// re-enable cannot overtake a disable that is still stopping work.
-    pub async fn transition(&self) -> tokio::sync::MutexGuard<'_, ()> {
-        self.transitions.lock().await
+    /// `None` when a later ticket has already run: the caller's change is
+    /// stale and must not be applied (the last accepted request wins).
+    pub async fn transition(&self, ticket: u64) -> Option<tokio::sync::MutexGuard<'_, u64>> {
+        let mut latest = self.transitions.lock().await;
+        if *latest >= ticket {
+            return None;
+        }
+        *latest = ticket;
+        Some(latest)
     }
 
     pub async fn quiesce(&self) {
@@ -222,6 +243,20 @@ mod tests {
             resume: None,
             worktree: None,
         }
+    }
+
+    #[tokio::test]
+    async fn a_change_overtaken_by_a_later_request_is_refused() {
+        let policy = LocalExecution::default();
+        let older = policy.ticket();
+        let newer = policy.ticket();
+        // The newer request reaches the transition first: it runs.
+        assert!(policy.transition(newer).await.is_some());
+        // The older one arrives late: stale, must not run.
+        assert!(policy.transition(older).await.is_none());
+        // Anything accepted after that still runs, in order.
+        let next = policy.ticket();
+        assert!(policy.transition(next).await.is_some());
     }
 
     #[tokio::test]
