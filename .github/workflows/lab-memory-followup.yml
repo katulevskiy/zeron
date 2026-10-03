@@ -1,0 +1,54 @@
+name: Fork memory follow-up validation
+
+# Temporary fork-only validation; this file is excluded from the upstream PR.
+on:
+  pull_request:
+    branches: [main]
+
+permissions:
+  contents: read
+
+concurrency:
+  group: fork-memory-followup-${{ github.ref }}
+  cancel-in-progress: true
+
+env:
+  CARGO_PROFILE_RELEASE_DEBUG: 1
+  CARGO_PROFILE_RELEASE_STRIP: none
+  CARGO_PROFILE_RELEASE_LTO: 'false'
+
+jobs:
+  regressions:
+    runs-on: ubuntu-24.04
+    timeout-minutes: 15
+    steps:
+      - uses: actions/checkout@11d5960a326750d5838078e36cf38b85af677262 # v4.4.0
+      - uses: ./.github/actions/linux-ci
+        with:
+          rust-cache: memory-no-lto
+          save-rust-cache: 'false'
+      - name: Native backend and Pi regressions
+        run: >-
+          cargo test --locked --release -p zeron-doc -p zeron-engine -p zeron-harness
+          --features zeron-harness/native-fixture --lib
+          --test delete_chat_lifecycle --test pi_resume --test pi_rpc
+  memory:
+    runs-on: ubuntu-24.04
+    timeout-minutes: 15
+    steps:
+      - uses: actions/checkout@11d5960a326750d5838078e36cf38b85af677262 # v4.4.0
+      - uses: ./.github/actions/linux-ci
+        with:
+          rust-cache: memory-no-lto
+          save-rust-cache: 'false'
+          apt-cache: valgrind
+          apt-packages: valgrind
+      - name: Full Memcheck and Massif follow-up
+        run: bash scripts/ci/check-memory.sh
+      - name: Upload native memory evidence
+        if: always()
+        uses: actions/upload-artifact@ea165f8d65b6e75b540449e92b4886f43607fa02 # v4.6.2
+        with:
+          name: fork-memory-followup-evidence
+          path: target/memory-evidence
+          if-no-files-found: warn
