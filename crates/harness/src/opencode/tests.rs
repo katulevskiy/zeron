@@ -741,6 +741,99 @@ async fn v2_wire_tool_frames_open_and_resolve_chips() {
 }
 
 #[tokio::test]
+async fn v2_wire_v2_tool_names_reach_exec_chips() {
+    // V2 `shell` and Code Mode `execute` must open `Exec` chips end to end
+    // (the unit tests bypass the `tool_names` map that supplies the runtime name).
+    let mut wire = TurnWire::start_proto(false, true).await;
+    wire.request("/api/model").await;
+    wire.request("/prompt").await;
+    wire.v2("session.execution.started", json!({"sessionID": "fixture"}));
+    wire.v2(
+        "session.step.started",
+        json!({
+            "sessionID": "fixture", "assistantMessageID": "msg_a"
+        }),
+    );
+    wire.v2(
+        "session.tool.input.started",
+        json!({
+            "sessionID": "fixture", "assistantMessageID": "msg_a",
+            "id": "call_1", "name": "shell"
+        }),
+    );
+    wire.v2(
+        "session.tool.called",
+        json!({
+            "sessionID": "fixture", "assistantMessageID": "msg_a",
+            "id": "call_1", "input": {"command": "git status"}
+        }),
+    );
+    wire.v2(
+        "session.tool.input.started",
+        json!({
+            "sessionID": "fixture", "assistantMessageID": "msg_a",
+            "id": "call_2", "name": "execute"
+        }),
+    );
+    wire.v2(
+        "session.tool.called",
+        json!({
+            "sessionID": "fixture", "assistantMessageID": "msg_a",
+            "id": "call_2",
+            "input": {"code": "return await tools.shell({command: \"git diff\"})"}
+        }),
+    );
+    wire.v2(
+        "session.tool.success",
+        json!({
+            "sessionID": "fixture", "assistantMessageID": "msg_a",
+            "id": "call_1", "content": [{"type": "text", "text": "clean"}]
+        }),
+    );
+    wire.v2(
+        "session.tool.success",
+        json!({
+            "sessionID": "fixture", "assistantMessageID": "msg_a",
+            "id": "call_2", "content": [{"type": "text", "text": "diff..."}]
+        }),
+    );
+    wire.v2(
+        "session.execution.succeeded",
+        json!({"sessionID": "fixture"}),
+    );
+
+    let calls = tokio::time::timeout(Duration::from_secs(5), async {
+        let mut calls = Vec::new();
+        loop {
+            match wire.events.recv().await.unwrap().unwrap() {
+                AgentEvent::ToolCall { id, call } => calls.push((id, call)),
+                AgentEvent::Done { .. } => return calls,
+                _ => {}
+            }
+        }
+    })
+    .await
+    .unwrap();
+    assert_eq!(
+        calls,
+        vec![
+            (
+                "fixture:msg_a:call_1".to_owned(),
+                ToolCall::Exec {
+                    command: "git status".to_owned()
+                }
+            ),
+            (
+                "fixture:msg_a:call_2".to_owned(),
+                ToolCall::Exec {
+                    command: "git diff".to_owned()
+                }
+            ),
+        ]
+    );
+}
+
+#[tokio::test]
 async fn v2_execution_failure_and_interrupt_settle_the_turn() {
     let mut wire = TurnWire::start_proto(false, true).await;
     wire.request("/api/model").await;
@@ -1352,6 +1445,122 @@ fn tool_names_type_the_common_calls() {
     let call = oc_tool_call("mystery", &json!({"x": 1}));
     assert!(matches!(&call, ToolCall::Unknown { name, input: Some(_) } if name == "mystery"));
     assert!(!call.is_subagent_spawn());
+}
+
+#[test]
+fn v2_shell_types_like_bash() {
+    // V2 renamed `bash` to `shell` with the same `{command}` input.
+    for name in ["bash", "shell"] {
+        let call = oc_tool_call(name, &json!({"command": "ls -la"}));
+        assert_eq!(
+            call,
+            ToolCall::Exec {
+                command: "ls -la".into()
+            },
+            "{name} should type as Exec"
+        );
+    }
+}
+
+#[test]
+fn codemode_execute_shell_calls_type_as_exec() {
+    // Single nested shell call → the Run chip shows its command.
+    let call = oc_tool_call(
+        "execute",
+        &json!({"code": "return await tools.shell({command: \"echo ok\"})"}),
+    );
+    assert_eq!(
+        call,
+        ToolCall::Exec {
+            command: "echo ok".into()
+        }
+    );
+    // Namespaced and single-quoted forms work too.
+    let call = oc_tool_call(
+        "execute",
+        &json!({"code": "await tools.ns.shell({command: 'git status'})"}),
+    );
+    assert_eq!(
+        call,
+        ToolCall::Exec {
+            command: "git status".into()
+        }
+    );
+    // Parallel calls join so no command is hidden.
+    let call = oc_tool_call(
+        "execute",
+        &json!({"code": "await Promise.all([tools.a.shell({command: \"git status\"}), tools.b.shell({command: \"git diff\"})])"}),
+    );
+    assert_eq!(
+        call,
+        ToolCall::Exec {
+            command: "git status\ngit diff".into()
+        }
+    );
+    // No nested shell call → opaque chip with the source preserved.
+    let call = oc_tool_call(
+        "execute",
+        &json!({"code": "return await tools.read({path: \"a.rs\"})"}),
+    );
+    assert!(matches!(&call, ToolCall::Unknown { name, input: Some(_) } if name == "execute"));
+    assert!(!call.is_subagent_spawn());
+    // Missing `code` → opaque chip, no panic.
+    let call = oc_tool_call("execute", &json!({}));
+    assert!(matches!(&call, ToolCall::Unknown { name, .. } if name == "execute"));
+}
+
+#[test]
+fn codemode_scanner_rejects_lookalikes_and_survives_unicode() {
+    // Identifiers merely containing `shell` must not extract.
+    for code in [
+        "seashell({command: \"whoami\"})",
+        "myshell({command: \"whoami\"})",
+    ] {
+        let call = oc_tool_call("execute", &json!({"code": code}));
+        assert!(
+            matches!(&call, ToolCall::Unknown { name, .. } if name == "execute"),
+            "{code} must not extract a command"
+        );
+    }
+    // Non-string token after `command:` (incl. multibyte) → Unknown, never panic.
+    for code in [
+        "shell({command: é})",
+        "shell({command: 指令})",
+        "shell({command: 42})",
+        "shell({})",
+    ] {
+        let call = oc_tool_call("execute", &json!({"code": code}));
+        assert!(
+            matches!(&call, ToolCall::Unknown { name, .. } if name == "execute"),
+            "{code} must stay opaque"
+        );
+    }
+    // Quoted keys are valid JS — accept them.
+    let call = oc_tool_call("execute", &json!({"code": "shell({\"command\": \"ls\"})"}));
+    assert_eq!(
+        call,
+        ToolCall::Exec {
+            command: "ls".into()
+        }
+    );
+    // Escapes and template literals decode for display.
+    let call = oc_tool_call("execute", &json!({"code": "shell({command: \"a\\nb\"})"}));
+    assert_eq!(
+        call,
+        ToolCall::Exec {
+            command: "a\nb".into()
+        }
+    );
+    let call = oc_tool_call(
+        "execute",
+        &json!({"code": "shell({command: `git status`})"}),
+    );
+    assert_eq!(
+        call,
+        ToolCall::Exec {
+            command: "git status".into()
+        }
+    );
 }
 
 #[test]
