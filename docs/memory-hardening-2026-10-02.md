@@ -47,8 +47,33 @@ Local verification uses Windows x86-64, Rust 1.99.0, release, locked dependencie
 The diagnostic allocator measures **requested live Rust bytes**, excluding RSS,
 native/C allocations, GPU allocations, allocator overhead, and child processes.
 The original baseline binary is retained outside the repository and its SHA-256
-matches the archived JSON. Before/after numbers will be recorded after the final
-diagnostic run.
+matches the archived JSON. [After measurements](performance/memory-hardening-2026-10-02.json)
+record code revision `8204d3a8`, exact source/binary hashes, and all 33 samples.
+
+| Offline fixture | Before | After | Metric |
+| --- | ---: | ---: | --- |
+| 32 MiB outgoing edits while disconnected | 32.03 MiB | 276.7 KiB | Live Rust bytes |
+| 16 MiB terminal output, stalled viewer | 24.45 MiB | 0.99 MiB | Live Rust bytes |
+| Quiet transcript watches dropped | 149.48 MiB | 17.02 MiB | Live Rust bytes |
+| Checkpoint gated while 64 rows catch up | 17.09 MiB | 2.05 MiB | Live Rust bytes |
+| Reopen a 16 MiB journal and append | 32.14 MiB | 192.3 KiB | Peak Rust bytes |
+| 16 MiB outbox loaded plus transport copy | 32.01 MiB | 257.9 KiB | Live Rust bytes |
+
+The sync backlog remains durably queued (128 batches); catch-up reaches cursor
+64 after releasing its checkpoint gate. The outbox comparison deliberately
+uses the old full loader/copy versus the new production window/shared payloads.
+Terminal output outside the bounded ring/replay becomes an explicit gap rather
+than retained backlog. Older UIs do not understand the new gap notice; engine
+and UI should be upgraded together for that notice and parser recovery.
+Full CRDT replacement history remains unchanged (8.06 MiB snapshot for a visible
+64 KiB field), illustrating a remaining protocol-level cost.
+
+Windows regressions pass: engine 346 (one private-fixture test ignored), RPC 18,
+sync 66, harness 299, text 16, and UI 1,461 (five existing tests ignored).
+The unchanged document library's 129 tests also passed during initial validation.
+New tests cover quiet cancellation, ordered/backpressured RPCs, bounded durable
+windows and HTTP drain, rejected-row recovery, lag/exit ordering, large/torn
+journal tails, font destruction, image normalization, and ANSI gap recovery.
 
 [Memory checks](../.github/workflows/memory-checks.yml) runs Linux core regressions,
 Valgrind Memcheck on nine finite offline scenarios plus font ownership, and
@@ -57,6 +82,11 @@ Its artifacts retain the exact commit, binary hash, versions, XML errors,
 allocation samples, and Massif stacks. Definite/indirect leaks and invalid memory
 access fail the check; still-reachable allocations require the retention analysis
 and cannot be dismissed solely because Memcheck passes.
+
+The first Linux run passed core regressions and Memcheck for backend replacement.
+Document operations produced uninitialized-condition reports with stripped
+function symbols. A second run retains symbols and collects every scenario;
+these reports remain under investigation and have not been suppressed.
 
 ## Remaining limits
 
