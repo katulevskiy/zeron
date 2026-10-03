@@ -425,6 +425,14 @@ pub struct DocHost {
     inner: Arc<DocHostInner>,
 }
 
+/// A deletion targets the document and provider generation observed then,
+/// without retaining either owner while asynchronous teardown is queued.
+pub(crate) struct ChatRetirement {
+    chat_id: String,
+    handle: Option<Weak<ChatDocHandle>>,
+    run_id: Option<String>,
+}
+
 /// How a taken queue row reaches the agent.
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
 enum QueueSend {
@@ -1012,9 +1020,14 @@ impl DocHost {
     /// `drain_queue` is a cheap no-op for empty queues and busy agents, which
     /// is why this can afford to be indiscriminate.
     fn spawn_queue_flush_watcher(&self, mut statuses: watch::Receiver<Vec<zeron_proto::Session>>) {
-        let host = self.clone();
+        let weak = Arc::downgrade(&self.inner);
         self.spawn_worker(async move {
             while statuses.changed().await.is_ok() {
+                let Some(inner) = weak.upgrade() else { return };
+                let host = DocHost { inner };
+                // Also catch a startup already in flight when the registry
+                // tombstone arrived. Its Working publication wakes this path.
+                host.retire_deleted_chats().await;
                 let handles: Vec<_> = lock(&host.inner.handles).values().cloned().collect();
                 for handle in handles {
                     host.drain_queue(&handle).await;
@@ -1120,8 +1133,80 @@ impl DocHost {
     pub fn set_workspace(&self, workspace: WorkspaceHost) {
         let chats = workspace.watch_chats();
         if self.inner.workspace.set(workspace).is_ok() {
+            self.spawn_deletion_watcher(chats.clone());
             self.spawn_cutover_watcher(chats);
             self.spawn_migration_sweep();
+        }
+    }
+
+    fn spawn_deletion_watcher(&self, mut chats: watch::Receiver<Vec<zeron_proto::Chat>>) {
+        let weak = Arc::downgrade(&self.inner);
+        self.spawn_worker(async move {
+            while chats.changed().await.is_ok() {
+                chats.borrow_and_update();
+                let Some(inner) = weak.upgrade() else { return };
+                let host = DocHost { inner };
+                host.retire_deleted_chats().await;
+                // No host/session owner survives into the next watch wait.
+            }
+        });
+    }
+
+    async fn retire_deleted_chats(&self) {
+        let ids: Vec<_> = lock(&self.inner.handles).keys().cloned().collect();
+        for chat_id in ids {
+            let retirement = self.capture_chat_retirement(&chat_id);
+            self.retire_deleted_chat(retirement).await;
+        }
+    }
+
+    pub(crate) fn capture_chat_retirement(&self, chat_id: &str) -> ChatRetirement {
+        let handle = lock(&self.inner.handles).get(chat_id).map(Arc::downgrade);
+        let run_id = self.sessions().and_then(|s| s.current_run_id(chat_id));
+        ChatRetirement {
+            chat_id: chat_id.to_owned(),
+            handle,
+            run_id,
+        }
+    }
+
+    pub(crate) async fn retire_deleted_chat(&self, retirement: ChatRetirement) {
+        let Some(workspace) = self.workspace() else {
+            return;
+        };
+        if !workspace.chat_deleted(&retirement.chat_id) {
+            return;
+        }
+        if !self.matches_retirement_handle(&retirement) {
+            return;
+        }
+        if let Some(sessions) = self.sessions() {
+            if let Some(run_id) = &retirement.run_id {
+                if let Err(error) = sessions.interrupt_run(&retirement.chat_id, run_id).await {
+                    tracing::debug!(chat = %retirement.chat_id, %error, "deleted chat interrupt skipped");
+                }
+            }
+            // A replacement run belongs to another generation, and a run
+            // that exceeded the settle wait still owns its writer.
+            if sessions.current_run_id(&retirement.chat_id).is_some() {
+                return;
+            }
+        }
+        // Serialize removal/snapshot deletion against a fresh cold open.
+        let _opening = lock(&self.inner.opening);
+        if workspace.chat_deleted(&retirement.chat_id)
+            && self.matches_retirement_handle(&retirement)
+        {
+            self.purge_chat(&retirement.chat_id);
+        }
+    }
+
+    fn matches_retirement_handle(&self, retirement: &ChatRetirement) -> bool {
+        let handles = lock(&self.inner.handles);
+        match (handles.get(&retirement.chat_id), retirement.handle.as_ref()) {
+            (Some(current), Some(expected)) => Weak::ptr_eq(&Arc::downgrade(current), expected),
+            (None, None) => true,
+            _ => false,
         }
     }
 

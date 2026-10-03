@@ -272,6 +272,17 @@ impl SessionsEngine {
         host.open(chat_id)
     }
 
+    fn ensure_chat_not_deleted(&self, chat_id: &str) -> Result<(), EngineError> {
+        if self
+            .inner
+            .workspace()
+            .is_some_and(|workspace| workspace.chat_deleted(chat_id))
+        {
+            return Err(EngineError::Other("chat was deleted".into()));
+        }
+        Ok(())
+    }
+
     /// Status watch: the full session list, re-sent on every transition.
     pub fn watch_sessions(&self) -> watch::Receiver<Vec<Session>> {
         self.inner.sessions_tx.subscribe()
@@ -419,6 +430,9 @@ impl SessionsEngine {
         mut message_id: Option<String>,
         startup_retry: bool,
     ) -> Result<String, EngineError> {
+        // Delayed delivery to a tombstoned chat must not create an invisible
+        // warm provider/doc after deletion. A not-yet-created chat is valid.
+        self.ensure_chat_not_deleted(chat_id)?;
         // Project-less chats store cwd `~` (the creating device can't know the
         // host's home); expand it here, on the host, where the run spawns.
         request.cwd = crate::repos::expand_home(&request.cwd)
@@ -458,6 +472,7 @@ impl SessionsEngine {
                     message_id: Some(user_id.clone()),
                 };
                 if let Ok(permit) = steer_tx.reserve().await {
+                    self.ensure_chat_not_deleted(chat_id)?;
                     // Commit the reserved slot atomically with the update
                     // marker. An accepted update releases the slot instead, and
                     // the prompt takes the fresh-run path behind the update.
@@ -525,6 +540,8 @@ impl SessionsEngine {
             self.interrupt(chat_id).await?;
         }
 
+        // Recheck after the old run's bounded interrupt/settle await.
+        self.ensure_chat_not_deleted(chat_id)?;
         let harness = self.inner.registry.resolve(harness_id)?;
         let handle = self.doc_handle(chat_id)?;
         let user_id = message_id.unwrap_or_else(new_id);
@@ -684,6 +701,7 @@ impl SessionsEngine {
         message_id: Option<String>,
         issued_at: i64,
     ) -> Result<SteerOutcome, EngineError> {
+        self.ensure_chat_not_deleted(chat_id)?;
         let target = lock(&self.inner.runs)
             .get(chat_id)
             .filter(|h| h.steerable)
@@ -717,6 +735,7 @@ impl SessionsEngine {
         let Ok(permit) = steer_tx.reserve().await else {
             return Ok(SteerOutcome::NotSteerable);
         };
+        self.ensure_chat_not_deleted(chat_id)?;
         let accepted = self.inner.registry.while_update_clear(harness_id, || {
             // Serialize mailbox acceptance with confirmation and Done-time
             // inspection: a fast consumer must never outrun its ledger entry.
@@ -769,14 +788,39 @@ impl SessionsEngine {
     /// `Done{interrupted}` and its streaming entry stamped `aborted`; this waits
     /// (bounded) for that settlement so callers observe a consistent doc.
     pub async fn interrupt(&self, chat_id: &str) -> Result<bool, EngineError> {
-        let target = lock(&self.inner.runs).get(chat_id).map(|h| {
-            (
-                h.run_id.clone(),
-                h.interrupt_token.clone(),
-                h.cancel.clone(),
-                h.pending_inputs.clone(),
-            )
-        });
+        self.interrupt_matching(chat_id, None).await
+    }
+
+    pub(crate) fn current_run_id(&self, chat_id: &str) -> Option<String> {
+        lock(&self.inner.runs)
+            .get(chat_id)
+            .map(|h| h.run_id.clone())
+    }
+
+    pub(crate) async fn interrupt_run(
+        &self,
+        chat_id: &str,
+        run_id: &str,
+    ) -> Result<bool, EngineError> {
+        self.interrupt_matching(chat_id, Some(run_id)).await
+    }
+
+    async fn interrupt_matching(
+        &self,
+        chat_id: &str,
+        expected_run: Option<&str>,
+    ) -> Result<bool, EngineError> {
+        let target = lock(&self.inner.runs)
+            .get(chat_id)
+            .filter(|h| expected_run.is_none_or(|expected| h.run_id == expected))
+            .map(|h| {
+                (
+                    h.run_id.clone(),
+                    h.interrupt_token.clone(),
+                    h.cancel.clone(),
+                    h.pending_inputs.clone(),
+                )
+            });
         let Some((run_id, token, cancel, pending)) = target else {
             return Ok(false);
         };
@@ -3229,6 +3273,38 @@ mod tests {
     // A tagged subagent event that folds to NO parts used to leave its sink
     // dirty forever: the commit branch's guard stayed true on a deadline in
     // the past and the run loop burned a core until real content arrived.
+    #[tokio::test]
+    async fn stale_run_interrupt_does_not_cancel_the_current_provider() {
+        let (_feed, receiver) = mpsc::unbounded_channel();
+        let registry = Arc::new(HarnessRegistry::new());
+        registry.register(Arc::new(FeedHarness {
+            feed: Mutex::new(Some(receiver)),
+        }));
+        let dir = tempfile::tempdir().unwrap();
+        let core =
+            crate::EngineCore::assemble(dir.path(), registry, HarnessId::Mock, None).unwrap();
+        let run_id = core
+            .sessions
+            .dispatch("generation", HarnessId::Mock, request(), None)
+            .await
+            .unwrap();
+        let token = lock(&core.sessions.inner.runs)
+            .get("generation")
+            .unwrap()
+            .interrupt_token
+            .clone();
+        assert!(
+            !core
+                .sessions
+                .interrupt_run("generation", "previous-generation")
+                .await
+                .unwrap()
+        );
+        assert!(core.sessions.is_live("generation", &run_id));
+        assert!(!token.is_cancelled());
+        core.shutdown().await;
+    }
+
     #[tokio::test]
     async fn empty_subagent_events_commit_once_per_window_not_per_tick() {
         use super::*;

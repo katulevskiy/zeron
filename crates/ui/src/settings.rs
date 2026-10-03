@@ -473,6 +473,7 @@ fn commit_background(
     prepared.0.take();
     replace(next, SavePolicy::Immediate, cx);
     remove_managed_new_thread_background(previous.as_ref(), &backgrounds_dir);
+    crate::new_thread_background_effects::clear(cx);
     if current(cx).wallpaper_theme_colors {
         crate::appearance::apply(cx);
     }
@@ -502,6 +503,8 @@ pub fn remove_new_thread_composer_background(cx: &mut App) -> Result<(), String>
         previous.as_ref(),
         &data_dir.join(NEW_THREAD_BACKGROUND_DIR),
     );
+    crate::new_thread_background_effects::clear(cx);
+    wallpaper::preload(cx);
     if current(cx).wallpaper_theme_colors {
         crate::appearance::apply(cx);
     }

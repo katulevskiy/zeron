@@ -111,7 +111,8 @@ pub(crate) fn ensure_color(cx: &mut App) {
         let color = cx
             .background_executor()
             .spawn(async move {
-                let bytes = std::fs::read(path).ok()?;
+                let bytes =
+                    crate::new_thread_background_image::read(std::path::Path::new(&path)).ok()?;
                 let image = crate::new_thread_background_image::decode(&bytes)
                     .ok()?
                     .thumbnail(64, 64)

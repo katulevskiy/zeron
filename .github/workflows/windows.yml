@@ -86,6 +86,8 @@ jobs:
       - uses: ./.github/actions/windows-ci-setup
       - name: Engine unit tests
         run: cargo test --release --locked -p zeron-engine --lib
+      - name: Chat deletion lifecycle tests
+        run: cargo test --release --locked -p zeron-engine --test delete_chat_lifecycle
       - name: Harness catalog and login tests
         run: cargo test --release --locked -p zeron-engine --test codex_catalog --test codex_login_resolution
       - name: Auth integration tests

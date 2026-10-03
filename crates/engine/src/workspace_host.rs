@@ -738,6 +738,12 @@ impl WorkspaceHost {
 
     // ── chat ownership ──────────────────────────────────────────────────────
 
+    /// Known local or remote deletion, distinct from a chat whose create row
+    /// has not reached this device yet.
+    pub(crate) fn chat_deleted(&self, chat_id: &str) -> bool {
+        self.read(|doc| doc.chat_deleted(chat_id))
+    }
+
     /// Writer discipline: the chat's host is its row's `deviceId`. Unknown chats
     /// are claimable — the first run command claims them via [`Self::claim_chat`].
     pub fn is_host(&self, chat_id: &str) -> bool {
@@ -752,7 +758,8 @@ impl WorkspaceHost {
     }
 
     /// Claim-on-first-command: create the chat row under OUR device id when a run
-    /// command arrives for a chat with no row yet. No-op when the row exists.
+    /// command arrives for a chat with no row yet. No-op when the row exists
+    /// or was deleted; a straggling run must not recreate its sidebar entry.
     ///
     /// The claim is a PARTIAL row write (identity/cwd/space only): the command
     /// plane is nudged and outruns the registry channel, so the client's
@@ -764,7 +771,9 @@ impl WorkspaceHost {
     /// is the composer's projectless target; preserve it without minting a
     /// project when the run outruns createChat on the registry channel.
     pub fn claim_chat(&self, chat_id: &str, cwd: Option<&str>) -> Result<(), EngineError> {
-        if self.read(|doc| doc.chat(chat_id))?.is_some() {
+        if self.read(|doc| {
+            Ok::<_, zeron_doc::DocError>(doc.chat(chat_id)?.is_some() || doc.chat_deleted(chat_id))
+        })? {
             return Ok(());
         }
         let space_id = match cwd {

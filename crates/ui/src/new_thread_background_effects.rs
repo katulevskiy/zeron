@@ -3,7 +3,7 @@ use crate::settings::{NewThreadBackgroundAdjustment, NewThreadBackgroundEffect};
 use crate::theme::Theme;
 use gpui::{Pixels, px};
 use std::path::{Path, PathBuf};
-use std::sync::{Arc, Mutex, OnceLock};
+use std::sync::{Arc, Mutex};
 use std::time::Instant;
 
 /// Hold the displayed artwork during loading, then crossfade to the ready image.
@@ -91,6 +91,9 @@ type EffectEntry = (
     (NewThreadBackgroundEffect, bool),
     Option<Arc<gpui::RenderImage>>,
 );
+const EFFECT_CACHE_LIMIT: usize = 2;
+const SOURCE_CACHE_LIMIT: usize = 2;
+const SOURCE_CACHE_BYTES: usize = 64 * 1024 * 1024;
 #[derive(Debug)]
 struct BackgroundLuminance {
     width: u32,
@@ -115,12 +118,21 @@ impl BackgroundLuminance {
                     NewThreadBackgroundEffect::Dither | NewThreadBackgroundEffect::None
                 ),
         );
-        if let Some((_, image)) = effects.iter().find(|(cached, _)| *cached == key) {
-            return image.clone();
+        if let Some(index) = effects.iter().position(|(cached, _)| *cached == key) {
+            let entry = effects.remove(index);
+            let image = entry.1.clone();
+            effects.push(entry);
+            return image;
         }
+        let retired = if effects.len() >= EFFECT_CACHE_LIMIT {
+            effects.remove(0).1
+        } else {
+            None
+        };
         // None marks the single pending job for this source/effect, not a viewport.
         effects.push((key, None));
         drop(effects);
+        retire_images(retired, cx);
         let source = self.clone();
         cx.spawn(async move |cx| {
             let worker = source.clone();
@@ -135,9 +147,14 @@ impl BackgroundLuminance {
                     .unwrap()
                     .iter_mut()
                     .find(|(cached, _)| *cached == key)
+                    && ready.is_none()
                 {
+                    // A key can be evicted and requested again while its old
+                    // worker finishes. Either identical result may fill the
+                    // slot; never replace a result already used for painting.
                     *ready = Some(image);
                 }
+                trim_cache(cx);
                 cx.refresh_windows();
             });
         })
@@ -300,8 +317,128 @@ impl BackgroundLuminance {
 }
 
 type Source = Arc<Mutex<Option<Arc<BackgroundLuminance>>>>;
-type Cache = Vec<(PathBuf, Source)>;
-static CACHE: OnceLock<Mutex<Cache>> = OnceLock::new();
+
+#[derive(Default)]
+struct BackgroundCache {
+    sources: Vec<(PathBuf, Source)>,
+    retired: Vec<Arc<gpui::RenderImage>>,
+    cleanup_running: bool,
+}
+impl gpui::Global for BackgroundCache {}
+
+fn cache(cx: &mut gpui::App) -> &mut BackgroundCache {
+    if cx.try_global::<BackgroundCache>().is_none() {
+        cx.set_global(BackgroundCache::default());
+    }
+    cx.global_mut::<BackgroundCache>()
+}
+
+/// Atlas entries do not follow RenderImage's Arc lifetime. Keep the last Arc
+/// until crossfades, previews, and every window have stopped using the image,
+/// then explicitly release its texture in all windows. The timer also runs
+/// after the final animation frame, when rendering may otherwise go idle.
+fn retire_images(images: impl IntoIterator<Item = Arc<gpui::RenderImage>>, cx: &mut gpui::App) {
+    let state = cache(cx);
+    state.retired.extend(images);
+    if state.retired.is_empty() {
+        return;
+    }
+    // A deferred effect runs after the current window has returned to App.
+    // Free unreferenced pixels immediately instead of accumulating a burst
+    // of replacements until the timer's next tick.
+    cx.defer(|cx| {
+        sweep_retired(cx);
+    });
+    if cache(cx).cleanup_running {
+        return;
+    }
+    cache(cx).cleanup_running = true;
+    cx.spawn(async move |cx| {
+        loop {
+            cx.background_executor()
+                .timer(std::time::Duration::from_millis(250))
+                .await;
+            let done = cx.update(sweep_retired);
+            if done {
+                cx.update(|cx| cache(cx).cleanup_running = false);
+                break;
+            }
+        }
+    })
+    .detach();
+}
+
+fn sweep_retired(cx: &mut gpui::App) -> bool {
+    let mut retired = std::mem::take(&mut cache(cx).retired);
+    retired.retain(|image| {
+        if Arc::strong_count(image) > 1 {
+            true
+        } else {
+            // Called outside a window update so App can see every window.
+            cx.drop_image(image.clone(), None);
+            false
+        }
+    });
+    let done = retired.is_empty();
+    let cache = cache(cx);
+    cache.retired = retired;
+    done
+}
+
+impl BackgroundLuminance {
+    fn retained_bytes(&self) -> usize {
+        self.pixels.len()
+            + self.colors.len() * std::mem::size_of::<[u8; 4]>()
+            + self
+                .effects
+                .lock()
+                .unwrap()
+                .iter()
+                .filter_map(|(_, image)| image.as_ref())
+                .map(|image| image.as_bytes(0).map_or(0, <[u8]>::len))
+                .sum::<usize>()
+    }
+
+    fn retire_effects(&self) -> Vec<Arc<gpui::RenderImage>> {
+        self.effects
+            .lock()
+            .unwrap()
+            .drain(..)
+            .filter_map(|(_, image)| image)
+            .collect()
+    }
+}
+
+fn trim_cache(cx: &mut gpui::App) {
+    let mut retired = Vec::new();
+    let cache = cache(cx);
+    while cache.sources.len() > SOURCE_CACHE_LIMIT
+        || (cache.sources.len() > 1
+            && cache
+                .sources
+                .iter()
+                .filter_map(|(_, source)| source.lock().unwrap().clone())
+                .map(|source| source.retained_bytes())
+                .sum::<usize>()
+                > SOURCE_CACHE_BYTES)
+    {
+        let (_, source) = cache.sources.remove(0);
+        if let Some(source) = source.lock().unwrap().as_ref() {
+            retired.extend(source.retire_effects());
+        }
+    }
+    retire_images(retired, cx);
+}
+
+pub(crate) fn clear(cx: &mut gpui::App) {
+    let mut retired = Vec::new();
+    for (_, source) in std::mem::take(&mut cache(cx).sources) {
+        if let Some(source) = source.lock().unwrap().as_ref() {
+            retired.extend(source.retire_effects());
+        }
+    }
+    retire_images(retired, cx);
+}
 
 fn decode_source(bytes: &[u8]) -> Option<Arc<BackgroundLuminance>> {
     Some(source_from_image(
@@ -316,7 +453,11 @@ fn source_from_image(image: &image::DynamicImage) -> Arc<BackgroundLuminance> {
         width: gray.width(),
         height: gray.height(),
         pixels: gray.into_raw().into_boxed_slice(),
-        colors: proxy.to_rgba8().pixels().map(|pixel| pixel.0).collect(),
+        // Convert directly into the retained colors rather than materializing
+        // another complete RGBA image during every preload.
+        colors: image::GenericImageView::pixels(&proxy)
+            .map(|(_, _, pixel)| pixel.0)
+            .collect(),
         effects: Mutex::new(Vec::new()),
     })
 }
@@ -352,45 +493,50 @@ impl PreloadedArtwork {
         crate::settings::wallpaper_colors::extract(self.0.colors.iter().step_by(stride).copied())
     }
 
-    pub fn install(self, path: &Path) {
-        let mut cache = CACHE.get_or_init(|| Mutex::new(Vec::new())).lock().unwrap();
-        cache.retain(|(key, _)| key != path);
-        cache.push((path.to_path_buf(), Arc::new(Mutex::new(Some(self.0)))));
-        if cache.len() > 4 {
-            cache.remove(0);
+    pub fn install(self, path: &Path, cx: &mut gpui::App) {
+        let mut retired = Vec::new();
+        let sources = &mut cache(cx).sources;
+        if let Some(index) = sources.iter().position(|(key, _)| key == path) {
+            let (_, source) = sources.remove(index);
+            if let Some(source) = source.lock().unwrap().as_ref() {
+                retired.extend(source.retire_effects());
+            }
         }
+        sources.push((path.to_path_buf(), Arc::new(Mutex::new(Some(self.0)))));
+        retire_images(retired, cx);
+        trim_cache(cx);
     }
 }
 
 fn background_luminance(path: &Path, cx: &mut gpui::App) -> Option<Arc<BackgroundLuminance>> {
-    let cache = CACHE.get_or_init(|| Mutex::new(Vec::new()));
-    if let Some(source) = cache
-        .lock()
-        .ok()?
-        .iter()
-        .find_map(|(key, source)| (key == path).then(|| source.clone()))
-    {
+    let sources = &mut cache(cx).sources;
+    if let Some(index) = sources.iter().position(|(key, _)| key == path) {
+        let entry = sources.remove(index);
+        let source = entry.1.clone();
+        sources.push(entry);
         return source.lock().ok()?.clone();
     }
     let pending = Arc::new(Mutex::new(None));
-    {
-        let mut cache = cache.lock().ok()?;
-        cache.push((path.to_path_buf(), pending.clone()));
-        if cache.len() > 4 {
-            cache.remove(0);
-        }
-    }
+    sources.push((path.to_path_buf(), pending.clone()));
+    trim_cache(cx);
     let path = path.to_path_buf();
     cx.spawn(async move |cx| {
         let source = cx
             .background_executor()
             .spawn(async move {
-                let bytes = std::fs::read(path).ok()?;
+                let bytes = crate::new_thread_background_image::read(&path).ok()?;
                 decode_source(&bytes)
             })
             .await;
         cx.update(|cx| {
-            *pending.lock().unwrap() = source;
+            if cache(cx)
+                .sources
+                .iter()
+                .any(|(_, cached)| Arc::ptr_eq(cached, &pending))
+            {
+                *pending.lock().unwrap() = source;
+                trim_cache(cx);
+            }
             cx.refresh_windows();
         });
     })
@@ -683,7 +829,75 @@ mod tests {
                 }
             });
         }
-        assert_eq!(source.effects.lock().unwrap().len(), 7);
+        assert_eq!(source.effects.lock().unwrap().len(), EFFECT_CACHE_LIMIT);
+    }
+
+    #[gpui::test]
+    fn retired_images_wait_for_consumers_then_release_without_another_render(
+        cx: &mut gpui::TestAppContext,
+    ) {
+        let image = artwork();
+        let weak = Arc::downgrade(&image);
+        cx.update(|cx| retire_images([image.clone()], cx));
+        cx.run_until_parked();
+        cx.executor()
+            .advance_clock(std::time::Duration::from_millis(250));
+        cx.run_until_parked();
+        cx.update(|cx| assert_eq!(cache(cx).retired.len(), 1));
+        assert!(weak.upgrade().is_some());
+        drop(image);
+        cx.executor()
+            .advance_clock(std::time::Duration::from_millis(250));
+        cx.run_until_parked();
+        assert!(weak.upgrade().is_none());
+        cx.update(|cx| {
+            assert!(cache(cx).retired.is_empty());
+            assert!(!cache(cx).cleanup_running);
+        });
+    }
+
+    #[gpui::test]
+    fn repeated_wallpaper_replacement_drops_sources_and_retires_displayed_images(
+        cx: &mut gpui::TestAppContext,
+    ) {
+        let image = image::DynamicImage::ImageRgba8(image::RgbaImage::new(8, 8));
+        let path = Path::new("background.png");
+        for _ in 0..20 {
+            let artwork = PreloadedArtwork::load(&image, NewThreadBackgroundEffect::None, false);
+            let source = Arc::downgrade(&artwork.0);
+            let rendered = artwork.0.effects.lock().unwrap()[0].1.clone().unwrap();
+            let weak = Arc::downgrade(&rendered);
+            cx.update(|cx| artwork.install(path, cx));
+            cx.update(clear);
+            assert!(source.upgrade().is_none());
+            drop(rendered);
+            cx.run_until_parked();
+            cx.executor()
+                .advance_clock(std::time::Duration::from_millis(250));
+            cx.run_until_parked();
+            assert!(weak.upgrade().is_none());
+            cx.update(|cx| {
+                assert!(cache(cx).sources.is_empty());
+                assert!(cache(cx).retired.is_empty());
+            });
+        }
+    }
+
+    #[gpui::test]
+    fn source_cache_evicts_by_bytes_before_reaching_the_entry_limit(cx: &mut gpui::TestAppContext) {
+        let large = image::DynamicImage::ImageRgba8(image::RgbaImage::new(2048, 2048));
+        let first = PreloadedArtwork::load(&large, NewThreadBackgroundEffect::None, false);
+        let weak = Arc::downgrade(&first.0);
+        cx.update(|cx| first.install(Path::new("first.png"), cx));
+        let second = PreloadedArtwork::load(&large, NewThreadBackgroundEffect::None, false);
+        cx.update(|cx| second.install(Path::new("second.png"), cx));
+        assert!(weak.upgrade().is_none());
+        cx.update(|cx| {
+            let cache = cache(cx);
+            assert_eq!(cache.sources.len(), 1);
+            let source = cache.sources[0].1.lock().unwrap();
+            assert!(source.as_ref().unwrap().retained_bytes() <= SOURCE_CACHE_BYTES);
+        });
     }
 
     #[test]

@@ -1137,15 +1137,15 @@ impl EngineRpc {
                 // Best-effort teardown of live runs we host for the deleted chats
                 // (the doc rows are already tombstoned; a straggler run would only
                 // write into an orphaned session doc).
-                let sessions = self.sessions.clone();
                 let doc_host = self.doc_host.clone();
-                let chat_ids = deleted.chat_ids;
+                let retirements: Vec<_> = deleted
+                    .chat_ids
+                    .iter()
+                    .map(|chat_id| doc_host.capture_chat_retirement(chat_id))
+                    .collect();
                 tokio::spawn(async move {
-                    for chat_id in chat_ids {
-                        if let Err(err) = sessions.interrupt(&chat_id).await {
-                            tracing::debug!(chat = %chat_id, error = %err, "deleteSpace interrupt skipped");
-                        }
-                        doc_host.purge_chat(&chat_id);
+                    for retirement in retirements {
+                        doc_host.retire_deleted_chat(retirement).await;
                     }
                 });
                 Ok(())
@@ -1193,8 +1193,15 @@ impl EngineRpc {
                 .map_err(failed)
                 .map(drop),
             MutateParams::DeleteChat { chat_id } => {
+                let retirement = self.doc_host.capture_chat_retirement(&chat_id);
                 self.workspace.delete_chat(&chat_id).map_err(failed)?;
-                self.doc_host.purge_chat(&chat_id);
+                // A completed steerable run still owns its warm provider and
+                // writer lease. Settle it before removing the doc, just like
+                // the space cascade, so deletion releases those owners too.
+                let doc_host = self.doc_host.clone();
+                tokio::spawn(async move {
+                    doc_host.retire_deleted_chat(retirement).await;
+                });
                 Ok(())
             }
             MutateParams::RenameDevice { device_id, name } => self

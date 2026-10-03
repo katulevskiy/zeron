@@ -12,7 +12,7 @@ pub(super) fn levels(data: &Value) -> Vec<ReasoningLevel> {
         .collect()
 }
 pub(super) async fn models(process: &mut Process) -> Result<Vec<Model>, HarnessError> {
-    let mut backlog = vec![];
+    let mut backlog = super::StartupBacklog::default();
     let data = process
         .query(json!({"type":"get_available_models"}), &mut backlog)
         .await?;
@@ -39,7 +39,7 @@ pub(super) async fn models(process: &mut Process) -> Result<Vec<Model>, HarnessE
             reasoning_levels: levels(&supported),
             options: thinking_option(&supported),
         });
-        backlog.clear();
+        backlog = super::StartupBacklog::default();
     }
     Ok(result)
 }
