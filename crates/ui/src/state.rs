@@ -1868,8 +1868,10 @@ impl AppState {
     }
 
     /// Where work goes when nothing is picked: this device, or — with local
-    /// execution disabled — the first remote device (online ones first).
-    /// `None` means no remote device is known; callers must not fall back.
+    /// execution disabled — the first ONLINE remote device by name. Offline
+    /// devices are never a silent default (a send there just queues, which
+    /// reads as a hang); they stay available as an explicit pick.
+    /// `None` means no remote device is available; callers must not fall back.
     pub fn default_execution_device(&self) -> Option<String> {
         if !self.local_execution_disabled {
             return self.local_device_id.clone();
@@ -1878,14 +1880,11 @@ impl AppState {
         let mut remote: Vec<&Device> = self
             .devices
             .iter()
-            .filter(|device| self.may_execute_on(&device.id))
+            .filter(|device| {
+                self.may_execute_on(&device.id) && self.device_online(&device.id, now)
+            })
             .collect();
-        remote.sort_by_key(|device| {
-            (
-                !self.device_online(&device.id, now),
-                device.name.to_lowercase(),
-            )
-        });
+        remote.sort_by_key(|device| device.name.to_lowercase());
         remote.first().map(|device| device.id.clone())
     }
 
@@ -4510,11 +4509,19 @@ mod tests {
         assert_eq!(state.selected_space.as_deref(), Some("remote-space"));
         assert_eq!(state.effective_device_id().as_deref(), Some("remote"));
 
-        // No remote device: nothing, never this device.
-        state.devices = vec![device("local", "Workstation")];
+        // Only an offline remote device (never seen): nothing, never this
+        // device — a silent default there would just queue the send.
         state.no_project = true;
         state.selected_space = None;
         assert_eq!(state.effective_device_id(), None);
+        assert_eq!(state.default_execution_device(), None);
+
+        // An online remote device is the default.
+        state.devices[1].last_seen_at = Some(Utc::now());
+        assert_eq!(state.default_execution_device().as_deref(), Some("remote"));
+
+        // No remote device at all: still nothing.
+        state.devices = vec![device("local", "Workstation")];
         assert_eq!(state.default_execution_device(), None);
     }
 

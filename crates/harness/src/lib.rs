@@ -211,6 +211,8 @@ pub(crate) fn local_execution_lease() -> Option<std::sync::RwLockReadGuard<'stat
     (!*lease).then_some(lease)
 }
 
+// Only the unix login-shell snapshot asks this; the lease covers the rest.
+#[cfg_attr(windows, allow(dead_code))]
 pub(crate) fn local_execution_suspended() -> bool {
     local_execution_lease().is_none()
 }

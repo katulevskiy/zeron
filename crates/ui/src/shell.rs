@@ -7774,7 +7774,7 @@ impl Shell {
                 theme.text_muted,
             ),
             None => (
-                "Local execution off · no remote device".into(),
+                "Local execution off · no remote device online".into(),
                 theme.warning,
             ),
         };

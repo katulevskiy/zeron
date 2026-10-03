@@ -2201,12 +2201,6 @@ async fn run_version_command(
         .ok_or_else(|| "command returned no recognizable version".into())
 }
 
-async fn run_command(executable: &Path, args: &[&str], timeout: Duration) -> Result<(), String> {
-    run_command_output(executable, args, timeout)
-        .await
-        .map(drop)
-}
-
 const BREW_UPGRADE_ENV: &[(&str, &str)] = &[
     ("NONINTERACTIVE", "1"),
     ("HOMEBREW_NO_ANALYTICS", "1"),

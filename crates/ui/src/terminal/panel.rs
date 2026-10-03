@@ -810,9 +810,29 @@ impl TerminalPanel {
                 }
 
                 // Stream dropped without an exit — reconnect from afterSeq.
+                // Unless this device just disabled local execution: the engine
+                // killed the PTY and refuses to re-subscribe, so close the tab
+                // out instead of retrying forever (issue #730).
                 let done = this
-                    .update(cx, |panel, _| {
-                        panel.tab_mut(&chat, key).map(|t| t.exited.is_some()).unwrap_or(true)
+                    .update(cx, |panel, cx| {
+                        let local_disabled = {
+                            let state = panel.state.read(cx);
+                            state.local_execution_disabled
+                                && target
+                                    .as_deref()
+                                    .is_none_or(|id| !state.may_execute_on(id))
+                        };
+                        let Some(tab) = panel.tab_mut(&chat, key) else {
+                            return true;
+                        };
+                        if tab.exited.is_none() && local_disabled {
+                            tab.exited = Some(-1);
+                            tab.emulator.feed(
+                                b"\r\n\x1b[90m[local execution disabled on this device]\x1b[0m\r\n",
+                            );
+                            cx.notify();
+                        }
+                        tab.exited.is_some()
                     })
                     .unwrap_or(true);
                 if done {
