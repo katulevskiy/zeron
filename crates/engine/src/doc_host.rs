@@ -57,7 +57,9 @@ pub const QUEUE_EDIT_LEASE_MS: i64 = 60_000;
 /// beyond this (and beyond [`zeron_doc::DOC_LRU_BYTE_BUDGET`]) is evicted
 /// oldest-access-first — reopening from the SQLite snapshot measured within
 /// ~11ms of a warm doc, so the cap trades no perceptible open latency.
-const WARM_DOC_CAP: usize = 12;
+// Keep a small navigation cache. Live views/writers and unsaved publication
+// remain pinned independently; compressed snapshots can hide large heaps.
+const WARM_DOC_CAP: usize = 4;
 
 /// Resident-memory estimate per compressed snapshot byte. Loro snapshots are
 /// columnar+compressed; the in-memory doc plus mirror runs well above the blob
@@ -409,9 +411,7 @@ impl ChatConnectionSnapshot {
             sync_requested,
             stats: client.as_ref().map(|client| client.stats()),
             delivery_live: sync_started
-                && client
-                    .as_ref()
-                    .is_some_and(|client| client.delivery_live()),
+                && client.as_ref().is_some_and(|client| client.delivery_live()),
         }
     }
 
@@ -875,6 +875,21 @@ impl ChatDocHandle {
             *lock(&self.transcript_history) = Default::default();
         } else {
             self.publish_messages_locked();
+        }
+    }
+
+    fn release_unwatched_mirror(&self) {
+        let _import = lock(&self.transcript_import);
+        if self.messages_tx.receiver_count() == 0 {
+            self.mirror_dirty.store(true, Ordering::Release);
+            self.messages_tx.send_if_modified(|snapshot| {
+                if snapshot.entries.is_empty() {
+                    return false;
+                }
+                *snapshot = TranscriptSnapshot::default();
+                true
+            });
+            *lock(&self.transcript_history) = Default::default();
         }
     }
 
@@ -1454,10 +1469,14 @@ impl DocHost {
         // Recover committed outgoing operations even when the snapshot debounce
         // did not run before a crash. Imported updates do not echo as local writes.
         if room_gen >= 2 {
-            for (_, bytes) in self.inner.store.pending_chat_updates(chat_id)? {
-                doc.doc()
-                    .import(&bytes)
-                    .map_err(|e| EngineError::Other(e.to_string()))?;
+            let mut after = 0;
+            loop {
+                let page = self.inner.store.chat_updates_after(chat_id, after, 256 * 1024)?;
+                if page.is_empty() { break; }
+                for (ordinal, bytes) in page {
+                    doc.doc().import(&bytes).map_err(|e| EngineError::Other(e.to_string()))?;
+                    after = ordinal;
+                }
             }
         }
         let doc = Arc::new(doc);
@@ -2204,9 +2223,7 @@ impl DocHost {
                             // Include commits made after the sink's initial
                             // load but before installation. The same lock is
                             // held by the local-update subscription.
-                            for (id, bytes) in host.inner.store.pending_chat_updates(&chat).unwrap_or_default() {
-                                client.enqueue_batch(id, bytes);
-                            }
+                            client.flush_pending();
                             let pending: Vec<(String, Vec<u8>)> =
                                 lock(&handle.chat2_pending_local).clone();
                             for (batch_id, update) in pending {
@@ -2226,7 +2243,7 @@ impl DocHost {
                                 let Some(handle) = checkpoint_weak.upgrade() else { return };
                                 if checkpoint_host.inner.edge_disconnected.load(Ordering::Acquire) { return; }
                                 let known = lock(&handle.chat2).as_ref().is_some_and(|c|c.stats().server_known);
-                                if known && checkpoint_host.inner.store.rejected_chat_updates(&handle.chat_id).is_ok_and(|v| !v.is_empty()) {
+                                if known && checkpoint_host.inner.store.has_rejected_chat_updates(&handle.chat_id).unwrap_or(false) {
                                     checkpoint_host.spawn_chat2_checkpoint(&handle, "durable-rejection");
                                 }
                             }
@@ -2650,13 +2667,15 @@ impl DocHost {
             if *epoch >= crate::chat2_host::CHAT2_DOC_EPOCH || self.inner.config.edge.is_none() {
                 let raw = loro::LoroDoc::new();
                 raw.import(bytes).map_err(|e| e.to_string())?;
-                for (_, update) in self
-                    .inner
-                    .store
-                    .pending_chat_updates(chat_id)
-                    .map_err(|e| e.to_string())?
-                {
-                    raw.import(&update).map_err(|e| e.to_string())?;
+                let mut after = 0;
+                loop {
+                    let page = self.inner.store.chat_updates_after(chat_id, after, 256 * 1024)
+                        .map_err(|e| e.to_string())?;
+                    if page.is_empty() { break; }
+                    for (ordinal, update) in page {
+                        raw.import(&update).map_err(|e| e.to_string())?;
+                        after = ordinal;
+                    }
                 }
                 if !SessionDoc::from_doc(raw)
                     .read_entries()
@@ -2924,6 +2943,11 @@ impl DocHost {
         let _opening = lock(&self.inner.opening);
         let mut by_age: Vec<(i64, String)> = {
             let handles = lock(&self.inner.handles);
+            // Last-receiver drop produces no document commit. Reclaim its
+            // materialized transcript on the idle sweep as well as on writes.
+            for handle in handles.values() {
+                handle.release_unwatched_mirror();
+            }
             handles
                 .values()
                 .map(|h| (h.last_access.load(Ordering::Relaxed), h.chat_id.clone()))

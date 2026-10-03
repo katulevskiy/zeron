@@ -47,6 +47,10 @@ pub async fn serve_connection(
                 tracing::warn!(id = frame.id, "rpc: frame has neither method nor cancel");
                 continue;
             };
+            // Reusing an ID must not orphan the original request's lease/task.
+            if let Some(previous) = running.remove(&frame.id) {
+                previous.abort();
+            }
             let task = tokio::spawn(handle_request(
                 service.clone(),
                 out.clone(),
