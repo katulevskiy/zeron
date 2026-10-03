@@ -74,9 +74,10 @@ pub struct DevicesPage {
     /// Local work the engine reported when asked to disable local execution;
     /// shown for confirmation before it is stopped.
     stop_local_work: Option<Vec<String>>,
-    /// A SetLocalExecution call is in flight: the switch ignores clicks until
-    /// it replies, so two requests can never race each other on the wire.
-    local_execution_pending: bool,
+    /// The SetLocalExecution call in flight, in its own slot so nothing else
+    /// on the page can cancel it: the switch ignores clicks until it replies,
+    /// so two requests can never race each other on the wire.
+    local_execution_task: Option<Task<()>>,
     _observe: Subscription,
 }
 
@@ -91,7 +92,7 @@ impl DevicesPage {
             error: None,
             task: None,
             copy_task: None,
-            local_execution_pending: false,
+            local_execution_task: None,
             stop_local_work: None,
             _observe: observe,
         }
@@ -162,22 +163,21 @@ impl DevicesPage {
     /// running sessions or terminals reports them and changes nothing; the
     /// confirmation retries with `interrupt`.
     fn set_local_execution(&mut self, disabled: bool, interrupt: bool, cx: &mut Context<Self>) {
-        if self.local_execution_pending {
+        if self.local_execution_task.is_some() {
             return;
         }
         let Some(engine) = self.state.read(cx).engine().cloned() else {
             return;
         };
         self.stop_local_work = None;
-        self.local_execution_pending = true;
         let params = serde_json::json!({ "disabled": disabled, "interrupt": interrupt });
-        self.task = Some(cx.spawn(async move |this, cx| {
+        self.local_execution_task = Some(cx.spawn(async move |this, cx| {
             let result = engine
                 .client()
                 .call(methods::SET_LOCAL_EXECUTION, params)
                 .await;
             this.update(cx, |page, cx| {
-                page.local_execution_pending = false;
+                page.local_execution_task = None;
                 match result {
                     Ok(reply) if disabled && reply["disabled"] == false => {
                         let state = page.state.read(cx);
@@ -658,6 +658,69 @@ mod tests {
             format_last_seen(Some(now - TimeDelta::days(2)), now),
             "2d ago"
         );
+    }
+
+    /// One SetLocalExecution on the wire at a time: a second click while the
+    /// first is unanswered sends nothing; the reply (here an error) frees the
+    /// switch again, and nothing else on the page can cancel that reply.
+    #[gpui::test]
+    fn switch_sends_one_policy_request_at_a_time(cx: &mut gpui::TestAppContext) {
+        use gpui::AppContext;
+        let runtime = tokio::runtime::Builder::new_current_thread()
+            .enable_all()
+            .build()
+            .unwrap();
+        let _guard = runtime.enter();
+        let (out, mut requests) = tokio::sync::mpsc::channel(16);
+        let (replies, inbound) = tokio::sync::mpsc::channel(16);
+        let engine =
+            crate::state::EngineHandle::from_test_client(zeron_rpc::RpcClient::new(out, inbound));
+        let state = cx.new(|_| {
+            let mut state = AppState::new();
+            state.set_test_engine(engine);
+            state
+        });
+        let page = cx.new(|cx| DevicesPage::new(state, cx));
+
+        page.update(cx, |page, cx| {
+            page.set_local_execution(true, false, cx);
+            page.set_local_execution(false, false, cx);
+            // Another task on the page must not cancel the pending call.
+            page.task = Some(cx.spawn(async move |_, _| {}));
+        });
+        cx.run_until_parked();
+        let request: serde_json::Value =
+            serde_json::from_str(&requests.try_recv().expect("first click sends")).unwrap();
+        assert_eq!(request["method"], methods::SET_LOCAL_EXECUTION);
+        assert_eq!(request["params"]["disabled"], true);
+        assert!(requests.try_recv().is_err(), "second click must wait for the reply");
+
+        runtime.block_on(async {
+            replies
+                .send(
+                    serde_json::json!({ "id": request["id"], "err": "engine said no" })
+                        .to_string(),
+                )
+                .await
+                .unwrap();
+            tokio::time::timeout(Duration::from_secs(1), async {
+                while replies.capacity() < replies.max_capacity() {
+                    tokio::task::yield_now().await;
+                }
+            })
+            .await
+            .unwrap();
+        });
+        cx.run_until_parked();
+        page.update(cx, |page, cx| {
+            assert!(page.local_execution_task.is_none(), "reply frees the switch");
+            assert!(page.error.is_some());
+            page.set_local_execution(false, false, cx);
+        });
+        cx.run_until_parked();
+        let request: serde_json::Value =
+            serde_json::from_str(&requests.try_recv().expect("next click sends again")).unwrap();
+        assert_eq!(request["params"]["disabled"], false);
     }
 
     #[test]
