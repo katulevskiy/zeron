@@ -4,6 +4,12 @@ on:
   workflow_dispatch:
   push:
     branches: [codex/memory-hardening]
+    paths:
+      - 'Cargo.toml'
+      - 'Cargo.lock'
+      - 'crates/**'
+      - 'scripts/ci/check-memory.sh'
+      - '.github/workflows/memory-checks.yml'
   pull_request:
     paths:
       - 'crates/engine/**'

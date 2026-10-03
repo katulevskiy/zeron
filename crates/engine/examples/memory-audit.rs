@@ -443,7 +443,7 @@ async fn sync_catchup() -> anyhow::Result<()> {
     let connect =
         tokio::spawn(async move { ChatClient::connect(&url, sink, fetcher, "audit", 0).await });
     tokio::time::timeout(Duration::from_secs(10), async {
-        while edge.sent_rows.load(Relaxed) != 64 {
+        while edge.sent_rows.load(Relaxed) == 0 {
             tokio::time::sleep(Duration::from_millis(10)).await;
         }
     })
@@ -452,7 +452,7 @@ async fn sync_catchup() -> anyhow::Result<()> {
     sample(
         "sync-catchup-waiting-checkpoint",
         base,
-        json!({"sentRows":64,"rowPayloadBytes":16 * 1024 * 1024}),
+        json!({"sentRows":edge.sent_rows.load(Relaxed),"plannedRows":64,"rowPayloadBytes":16 * 1024 * 1024}),
     );
     gate.notify_one();
     let client = tokio::time::timeout(Duration::from_secs(10), connect).await???;

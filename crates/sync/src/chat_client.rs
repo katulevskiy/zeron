@@ -255,8 +255,10 @@ impl BinConnector for WsBinConnector {
                 SyncError::WebSocket(e.to_string())
             })?;
             drop(dial_permit);
-            let (out_tx, out_rx) = mpsc::channel(64);
-            let (in_tx, in_rx) = mpsc::channel(64);
+            // Keep payload queues small as well as the actor's prefetch window.
+            // Otherwise a paused checkpoint import still retains 64 large rows.
+            let (out_tx, out_rx) = mpsc::channel(2);
+            let (in_tx, in_rx) = mpsc::channel(2);
             tokio::spawn(async move {
                 let _socket_permit = socket_permit;
                 crate::socket::pump(ws, out_rx, in_tx, WsMessage::Binary, |frame| match frame {
@@ -1230,9 +1232,8 @@ impl Actor {
             // Deadline + shutdown-interruptible: a hung fetch (half-open
             // TCP, stalled link) must neither pin the actor forever nor
             // block `shutdown()`. The fetch is Range-resumable, so the
-            // redial retries from wherever the bytes stopped. The socket is
-            // drained (into the buffer) for the whole fetch so backpressure
-            // can't stall the server's row stream.
+            // fetch retries partial downloads. Prefetch a small row window,
+            // then let transport backpressure hold the remaining rows.
             let fetch = self.fetcher.fetch();
             tokio::pin!(fetch);
             let deadline = tokio::time::sleep(CHECKPOINT_FETCH_DEADLINE);

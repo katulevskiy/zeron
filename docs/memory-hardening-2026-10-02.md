@@ -13,7 +13,7 @@ evidence, reproducible growth mechanisms, and the archived before measurements.
   ACKs refill the window; HTTP fallback drains successive windows. Transport
   copies share payload ownership. Offline history recovery imports bounded pages.
 * Checkpoint catch-up stops reading after 256 KiB / 32 frames while its fetch is
-  pending. Existing bounded socket queues propagate backpressure. Checkpoint
+  pending. Socket queues shrink from 64 to 2 frames to propagate backpressure. Checkpoint
   downloads reject bodies over the server's 32 MiB limit.
 * PTY readers use a 256 KiB queue; output batches cap at 16 KiB. Viewers share
   a 32-event broadcast ring and 1 MiB replay. Slow viewers receive a visible gap
