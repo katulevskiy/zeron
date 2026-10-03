@@ -15,7 +15,7 @@ evidence, reproducible growth mechanisms, and the archived before measurements.
 * Checkpoint catch-up stops reading after 256 KiB / 32 frames while its fetch is
   pending. Socket queues shrink from 64 to 2 frames to propagate backpressure. Checkpoint
   downloads reject bodies over the server's 32 MiB limit.
-* PTY readers use a 256 KiB queue; output batches cap at 16 KiB. Viewers share
+* PTY readers use a 256 KiB queue; output batches flush at 16 KiB. Viewers share
   a 32-event broadcast ring and 1 MiB replay. Slow viewers receive a visible gap
   and parser reset. Closing Windows ConPTY continues draining discarded output
   so bounded backpressure cannot deadlock native cleanup. Subscriber admission
@@ -83,10 +83,30 @@ allocation samples, and Massif stacks. Definite/indirect leaks and invalid memor
 access fail the check; still-reachable allocations require the retention analysis
 and cannot be dismissed solely because Memcheck passes.
 
-The first Linux run passed core regressions and Memcheck for backend replacement.
-Document operations produced uninitialized-condition reports with stripped
-function symbols. A second run retains symbols and collects every scenario;
-these reports remain under investigation and have not been suppressed.
+The [final Linux run](https://github.com/katulevskiy/zeron/actions/runs/37089996172)
+passed on `8b347ef0`: **zero Memcheck errors** in all nine backend scenarios
+and the font lifetime test, with all four Massif profiles completed. Linux
+library regressions passed: engine 382 (two existing tests ignored), harness
+315, RPC 18, sync 67, text 16. The
+[native evidence summary](performance/memory-valgrind-2026-10-02.json)
+records versions, binary/XML/profile hashes, allocator samples, and test counts.
+The CI artifact contains the unstripped binary and complete native traces.
+
+Earlier document runs reported ten uninitialized conditions at
+`DocHost::open_local`. Replaying the exact binary with precise definedness checks
+reproduced them. Disassembly showed a read of the absent chat row's `room_gen`
+stack storage. Extracting just the routing scalar inside an explicit workspace
+branch removes that read and releases the row's strings/config before document
+loading. The final run uses ordinary Memcheck definedness checks; no error
+suppression was added. Changes after its measured revision only format Rust,
+finish documentation, and replace temporary fork CI wiring with main/PR wiring.
+
+Massif's useful-heap peaks (including native SQLite allocations, excluding
+stacks) are 56.48 MiB for the document fixture, 3.95 MiB for disconnected sync,
+2.73 MiB for checkpoint catch-up, and 383.3 KiB for empty backend replacement.
+Document peaks remain dominated by Loro storage; the disconnected sync peak
+includes SQLite's cache. These fixture peaks are not process RSS or a guarantee
+for a production account.
 
 ## Remaining limits
 

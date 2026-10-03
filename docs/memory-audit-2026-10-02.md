@@ -7,8 +7,8 @@ retains the original diagnostic source/binary hashes; the example has since
 been adapted to exercise the bounded production paths.
 
 Audited upstream `main` at **`1c83cda221bd18a3b55ea49e5b25ec2c148955bc`**,
-application version **0.2.102**. Audit branch:
-`codex/memory-leak-audit`. The original checkout's uncommitted picker work was
+application version **0.2.102**. The initial investigation used branch
+`codex/memory-leak-audit`; fixes are on `codex/memory-hardening`. The original checkout's uncommitted picker work was
 preserved; this audit uses a separate worktree.
 
 Experiments and library tests were executed at `69e64ef5`. Upstream advanced
@@ -55,9 +55,10 @@ made during this audit**. A report from a build without this commit may be that
 same problem. A report from current main can still be any of the application
 retention paths below.
 
-This branch adds an offline diagnostic example and this report. It does not
-change production memory policies. Native Linux/macOS profiling and an actual
-reporter's workload remain necessary to attribute the reported 4 GB case.
+The initial investigation added an offline diagnostic example and this report,
+without changing production memory policies. The linked follow-up now records
+production fixes and Linux native profiling. Native macOS profiling and an
+actual reporter's workload remain necessary to attribute the reported 4 GB case.
 
 ## Scope and evidence
 

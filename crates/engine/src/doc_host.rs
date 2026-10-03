@@ -1474,10 +1474,17 @@ impl DocHost {
         if room_gen >= 2 {
             let mut after = 0;
             loop {
-                let page = self.inner.store.chat_updates_after(chat_id, after, 256 * 1024)?;
-                if page.is_empty() { break; }
+                let page = self
+                    .inner
+                    .store
+                    .chat_updates_after(chat_id, after, 256 * 1024)?;
+                if page.is_empty() {
+                    break;
+                }
                 for (ordinal, bytes) in page {
-                    doc.doc().import(&bytes).map_err(|e| EngineError::Other(e.to_string()))?;
+                    doc.doc()
+                        .import(&bytes)
+                        .map_err(|e| EngineError::Other(e.to_string()))?;
                     after = ordinal;
                 }
             }
@@ -2672,9 +2679,14 @@ impl DocHost {
                 raw.import(bytes).map_err(|e| e.to_string())?;
                 let mut after = 0;
                 loop {
-                    let page = self.inner.store.chat_updates_after(chat_id, after, 256 * 1024)
+                    let page = self
+                        .inner
+                        .store
+                        .chat_updates_after(chat_id, after, 256 * 1024)
                         .map_err(|e| e.to_string())?;
-                    if page.is_empty() { break; }
+                    if page.is_empty() {
+                        break;
+                    }
                     for (ordinal, update) in page {
                         raw.import(&update).map_err(|e| e.to_string())?;
                         after = ordinal;

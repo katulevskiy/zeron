@@ -3,7 +3,7 @@ name: Memory checks
 on:
   workflow_dispatch:
   push:
-    branches: [codex/memory-hardening]
+    branches: [main]
     paths:
       - 'Cargo.toml'
       - 'Cargo.lock'
@@ -12,7 +12,12 @@ on:
       - '.github/workflows/memory-checks.yml'
   pull_request:
     paths:
+      - 'Cargo.toml'
+      - 'Cargo.lock'
+      - 'crates/doc/**'
       - 'crates/engine/**'
+      - 'crates/harness/**'
+      - 'crates/proto/**'
       - 'crates/rpc/**'
       - 'crates/sync/**'
       - 'crates/text/**'
@@ -38,17 +43,9 @@ jobs:
       - uses: ./.github/actions/linux-ci
         with:
           rust-cache: memory
+          save-rust-cache: 'true'
           apt-cache: valgrind
           apt-packages: valgrind
-      # Fork push runs need a dependency cache too, including failed diagnostic
-      # runs. GitHub scopes caches to the repository; PR runs only restore.
-      - uses: Swatinem/rust-cache@6323deb102c322ba6fcbdcafc7e3dddab59af2b6 # v2.9.2
-        with:
-          prefix-key: ci-linux-v1
-          shared-key: memory
-          add-job-id-key: false
-          save-if: ${{ github.event_name == 'push' }}
-          cache-on-failure: true
       - name: Core regression tests
         run: cargo test --locked --release -p zeron-engine -p zeron-rpc -p zeron-sync -p zeron-harness -p zeron-text --lib
       - name: Valgrind Memcheck and Massif

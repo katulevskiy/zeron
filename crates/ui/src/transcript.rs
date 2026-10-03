@@ -5440,7 +5440,11 @@ impl Transcript {
     fn protected_attachment_keys(&self, cx: &Context<Self>) -> HashSet<(String, String)> {
         let devices = self.attachment_device_ids(cx);
         let mut keys = std::collections::HashSet::new();
-        for row in self.rows.iter().filter(|row| self.rendered_rows.contains(&row.id)) {
+        for row in self
+            .rows
+            .iter()
+            .filter(|row| self.rendered_rows.contains(&row.id))
+        {
             // Generated images use bounded LRU retention, not history-wide protection.
             if let RowKind::User { attachments, .. } = &row.kind {
                 for att in attachments.iter() {

@@ -277,10 +277,16 @@ mod tests {
     #[test]
     fn user_jpeg_preview_is_normalized_bounded_and_charged_for_pixels() {
         let mut encoded = Cursor::new(Vec::new());
-        image::DynamicImage::new_rgb8(3072, 128).write_to(&mut encoded, image::ImageFormat::Jpeg).unwrap();
-        let media = decode_attachment_image(encoded.into_inner(), "image/jpeg", 24 * 1024 * 1024).unwrap();
+        image::DynamicImage::new_rgb8(3072, 128)
+            .write_to(&mut encoded, image::ImageFormat::Jpeg)
+            .unwrap();
+        let media =
+            decode_attachment_image(encoded.into_inner(), "image/jpeg", 24 * 1024 * 1024).unwrap();
         assert_eq!(media.width, 2048.0);
-        assert_eq!(image::guess_format(&media.image.bytes).unwrap(), image::ImageFormat::Png);
+        assert_eq!(
+            image::guess_format(&media.image.bytes).unwrap(),
+            image::ImageFormat::Png
+        );
         assert!(media.bytes >= media.width as usize * media.height as usize * 8);
         assert!(decode_attachment_image(vec![0; 10], "image/jpeg", 9).is_err());
     }
