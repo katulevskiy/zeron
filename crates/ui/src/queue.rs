@@ -1460,7 +1460,10 @@ impl Composer {
                         composer.attachments.insert(composer.current_key.clone(), loaded_attachments);
                         composer.appshots.insert(composer.current_key.clone(), loaded_appshots);
                         composer.focus_pending = true;
-                        composer.input.update(cx, |input, cx| input.set_text(text, cx));
+                        composer.input.update(cx, |input, cx| {
+                            input.chips_long_pastes = false;
+                            input.set_text(text, cx);
+                        });
                         composer.start_queue_edit_renewal(engine.clone(), cx);
                     }
                     Ok(reply)
@@ -1536,6 +1539,7 @@ impl Composer {
         self.input.update(cx, |input, cx| {
             input.cancel_dictation();
             input.read_only = false;
+            input.chips_long_pastes = true;
             cx.notify();
         });
         self.queue_edit_task = None;

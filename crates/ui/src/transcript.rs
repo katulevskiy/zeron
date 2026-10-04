@@ -3258,8 +3258,12 @@ pub struct Transcript {
     copied_message_clear: Option<Task<()>>,
     /// Transcript attachment being viewed full-size (click a user thumbnail).
     attachment_preview: Option<crate::attachments::PreviewImage>,
+    /// A sent message's paste pill, open in the full-text viewer.
+    paste_view: Option<crate::badges::MessageBadge>,
+    paste_view_focus: gpui::FocusHandle,
     /// Focused while the lightbox is open so Escape reaches it.
     attachment_preview_focus: gpui::FocusHandle,
+    /// Where focus returns when the lightbox or paste viewer closes.
     attachment_preview_return_focus: Option<gpui::FocusHandle>,
     /// Mermaid fences drawn as diagrams in settled Markdown blocks. Each
     /// row's media handler requests its fences while laying out, so only
@@ -3550,6 +3554,8 @@ impl Transcript {
             copied_message: None,
             copied_message_clear: None,
             attachment_preview: None,
+            paste_view: None,
+            paste_view_focus: cx.focus_handle(),
             attachment_preview_focus: cx.focus_handle(),
             attachment_preview_return_focus: None,
             diagrams: Rc::default(),
@@ -6649,11 +6655,24 @@ impl Transcript {
                             .gap(px(6.0))
                             .pb(px(6.0))
                             .children(badges.iter().enumerate().map(|(bix, badge)| {
-                                crate::badges::render(
+                                let pill = crate::badges::render(
                                     SharedString::from(format!("{}#badge{bix}", row.id)),
                                     badge,
                                     &theme,
-                                )
+                                );
+                                if badge.full.is_empty() {
+                                    return pill.into_any_element();
+                                }
+                                let open = badge.clone();
+                                pill.cursor_pointer()
+                                    .on_click(cx.listener(move |this, _, window, cx| {
+                                        cx.stop_propagation();
+                                        this.attachment_preview_return_focus = window.focused(cx);
+                                        this.paste_view = Some(open.clone());
+                                        window.focus(&this.paste_view_focus, cx);
+                                        cx.notify();
+                                    }))
+                                    .into_any_element()
                             })),
                     );
                 }
@@ -9272,6 +9291,25 @@ impl Render for Transcript {
             ))
             .child(content)
             .child(rail);
+        if let Some(pill) = self.paste_view.clone() {
+            let weak = cx.weak_entity();
+            return root.child(crate::pasted::viewer(
+                window.viewport_size(),
+                &pill,
+                &self.paste_view_focus,
+                move |window, cx| {
+                    if let Ok(focus) = weak.update(cx, |this, cx| {
+                        this.paste_view = None;
+                        cx.notify();
+                        this.attachment_preview_return_focus.take()
+                    }) && let Some(focus) = focus
+                    {
+                        window.focus(&focus, cx);
+                    }
+                },
+                cx,
+            ));
+        }
         // Full-size viewer for a clicked user-bubble thumbnail
         // (AttachmentPreviewDialog: bare lightbox, click closes).
         if let Some(preview) = self.attachment_preview.clone() {
