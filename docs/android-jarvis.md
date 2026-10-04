@@ -199,72 +199,104 @@ errors, and recovery actions remain when relevant. Launch routes are consumed
 only by a resumed activity: Android's assistant task must not lose its settings
 or conversation request to a hidden Zeron activity.
 
-During an active call, tap the camera, capture a picture in the phone's camera
-app, and confirm it. **Photo added** means the execution host adopted the image
-message. Ask about it aloud; Codex's visual analysis becomes context for Jarvis.
-If Codex is already working, the image stays on the normal message queue and the
-overlay says **Photo queued**, preserving the existing work. Analysis may take a
-few seconds. The photo and its inspection request are normal, persistent image
-attachments in the same Zeron voice chat.
+### Circular camera and uninterrupted photo delivery
 
-The system camera owns capture through `ACTION_IMAGE_CAPTURE` and `EXTRA_OUTPUT`.
-Zeron requests no camera or storage permission. A non-exported bridge grants
-read/write access to one private FileProvider cache URI, then revokes that grant
-and deletes the capture file. EXIF-aware decoding limits the longest edge to
-1280 pixels; adaptive JPEG compression limits the attachment to 768,000 bytes.
-Re-encoding removes camera/location metadata. The existing Zeron attachment
-transport delivers the image to the selected execution host. Its Codex thread
-analyzes the image and automatically forwards that result into V3's voice
-context. No raw image or public `conversation.item.create` event is sent over
-the audio data channel. This uses the existing ChatGPT subscription/Codex
-connection, with no separate API key or image service.
+During an active call, tap the camera icon. The purple orb grows into a circular
+live CameraX preview inside the same dimmed assistant window; six iris blades
+open after the first actual frame. Tap the 64dp shutter once. There is no camera
+app, confirmation screen, activity handoff, microphone pause, or upload wait.
+The camera returns to the orb as soon as its JPEG is saved, while the session
+encodes and delivers the photo asynchronously. Mute, speaker, and hang-up remain
+available throughout. Back closes the camera first; another Back ends the overlay.
+Animations honor Android's reduced-motion setting, and the completed iris is
+removed so it cannot obscure the viewfinder if a rendering frame stalls.
 
-The inspection prompt asks for factual visible details and relevant readable
-text, permits only the image viewer, forbids other tools/actions, and treats
-image content as untrusted context.
-Local submission is not mistaken for host adoption. Failed transfers report a
-safe error; a 30-second unconfirmed submission reports **Photo pending** and asks
-the user to check the conversation before retrying. There is no automatic retry.
+Zeron now asks for CAMERA permission once, on the explicit camera action, through
+its non-exported permission activity. It still requests no storage or draw-over-
+other-apps permission and no screen context. CameraX is bound to the assistant's
+visible lifecycle only. Home, lock, minimize, hang-up, navigation, or session
+destruction unbinds its own camera use cases. Stale provider/capture callbacks
+cannot re-open the preview or deliver into a successor call. The camera provider
+can initialize during an active voice call, but no camera opens until the user
+requests it. Devices without a rear camera fall back to their front camera.
 
-Microphone capture pauses while the camera/photo submission is active and
-resumes according to the current user mute setting. A call-generation and random
-capture token are checked before encoding and again before submission, preventing
-late captures from reaching a replacement call, including after process restart.
-Camera-bridge rotation retains a single delivery job. Home, lock, call termination,
-or navigation away revokes ownership. Once a photo has been submitted, it remains
-an ordinary chat attachment even if the call ends; capture-file cleanup does not
-delete that submitted attachment. The camera button is unavailable before the
-call becomes active and while a photo is being submitted.
+CameraX uses zero-shutter-lag capture where supported, its minimize-latency
+fallback otherwise, flash off, and a preferred 1280x960 still size. The encoder
+honors image orientation, strips camera/location metadata, limits the longest
+edge to 1280 pixels, and bounds JPEG bytes to 384,000 (one upload chunk). Files
+stay in private cache until delivery finishes, then are deleted. Cancelled late
+captures are deleted; old orphan captures are cleaned when camera setup begins.
+Three independent photo deliveries may be pending; duplicate shutter taps are
+ignored during capture. Preview loading, capture, encoding, upload, and adoption
+never alter microphone mute or audio focus.
 
-References: [Codex V3 context append implementation](https://github.com/openai/codex/blob/afb436df8b70bb5bc57b86d9a3e829968988cd21/codex-rs/codex-api/src/endpoint/realtime_websocket/methods_frameless_bidi.rs)
-and [Android camera intents](https://developer.android.com/guide/components/intents-common#Camera).
+The stuck **Photo added** call had two causes in the previous design. It handed
+control to a separate camera activity and locally paused capture. More critically,
+`RuntimeConfig::can_route` rejects every nonempty `RunRequest.attachments`,
+replacing the parked Codex process and its V3 bridge when the photo is sent.
+Android now uploads through the existing `CoreClient.uploadAttachment` to the
+captured call's execution host first. Only after that host confirms an absolute
+local path does it send the usual image-path trailer, with **no duplicate
+RunRequest attachments**, to the existing conversation. The current host can
+route that text into the same warm process, preserving the live voice lease;
+no desktop-host upgrade is required.
 
-Validation for the current overlay/photo implementation:
+**Photo added** means the host adopted the context message, not that vision
+analysis has finished. **Photo queued** preserves an existing turn. The image
+viewer reads the confirmed host file, and Codex's analysis automatically becomes
+V3 voice context. The prompt allows the image viewer only and treats image
+contents as untrusted. Upload failure, stale ownership, malformed/pending paths,
+and unconfirmed adoption do not claim success or trigger an automatic retry.
+Photo notices clear after two seconds; a stale success cannot mask a stopped
+call's Start/recovery controls. Once submitted, the uploaded photo and context
+remain part of the conversation; cancelling local capture does not erase them.
 
-- All 280 JVM tests pass, including attachment intent and queue policy,
-  correlated host adoption, upload failure, stale ownership, cancellation,
-  timeout without retry, and camera mute precedence.
-- Seven Android instrumentation tests cover native camera capture into the
-  production private-URI contract, image decoding/encoding and provider
-  isolation, real JNI audio cleanup, assistant protection/ownership, and
-  accessible control placement. The emulator camera test starts a fresh capture
-  task and waits for input-service commands to finish before moving on.
-- Actual power-button invocation over light and dark Android Settings shows a
-  transparent `VOICE_INTERACTION` window with `DIM_BEHIND` and no `BLUR_BEHIND`.
-  The framework still reports disabled screen context `3`. At 200% system text
-  scale, recovery text and bottom controls remain visible and reachable. The
-  settings action opens Jarvis settings on repeated invocations with an existing
-  stopped Zeron task.
-- Screenshots in `docs/screenshots/android-jarvis-assistant-minimal/` distinguish
-  actual system invocations from an active-call presentation fixture. Native
-  capture uses the emulator's virtual camera.
-- Lint retains its 12 existing errors and 248 warnings. The update APK retains
-  the existing signing certificate (SHA-256
-  `ca8b677131bd3beed4986da25ce3110fe34144fb1bef136d5633fd65a697e903`).
+Connection setup also overlaps local WebRTC SDP/ICE gathering with execution-host
+startup/probing. Permission and native preparation still precede both, ownership
+and heartbeats attach before waiting for a slow offer, and microphone activation
+still waits for valid negotiation and confirmation. Cancelling or failing either
+branch closes media and cleans the remote attempt. This removes their former
+serial delay; network/provider startup still takes time. Debug logs expose only
+stage names and elapsed milliseconds (`JarvisConnection`, `JarvisCamera`).
 
-Physical-phone camera variants and the full signed-in Android capture/upload
-lifecycle remain unverified. Signed-in Codex/V3 vision behavior was verified
-separately on the actual provider connection, as described below.
+Validation:
+
+- 281 JVM tests pass, including upload-before-submit ordering, call replacement,
+  exact host adoption, failed/unconfirmed delivery, queue policy, cancellation,
+  malformed paths, and user mute precedence.
+- Eight Rust voice-session tests pass, including a two-party rendezvous that
+  proves setup overlaps while microphone activation waits for confirmation,
+  cancellation, and heartbeat expiry during a stalled offer.
+- The engine's remote voice regression sends a landed photo path into the
+  persistent Codex runtime, verifies the same run/thread, no realtime stop, and
+  a valid media-report acknowledgement afterward. It uses an offline Codex
+  fixture; provider recognition is the separate live check below.
+- Seven Android instrumentation tests cover CameraX capture while actual JNI
+  WebRTC microphone recording remains active during preview/capture/encoding,
+  real assistant-window camera streaming over Settings, Back closing camera
+  without dismissing the session, native audio cleanup, image encoding/provider
+  isolation, assistant protections, and accessible controls.
+- The real assistant camera also streams at 200% system font size; screenshot
+  review confirms the circle, shutter, settings and camera-close actions remain
+  reachable. This is a call-free camera fixture over Settings, not a signed-in
+  call at that text scale.
+- The emulator measured roughly 260–340ms shutter-to-saved callback and about
+  310–520ms including test-side JPEG encoding. These are virtual-camera timings,
+  not physical-phone or end-to-end connection measurements.
+- Both Android native core ABIs are rebuilt; lint retains 12 existing errors and
+  248 warnings. Signing certificate SHA-256 remains
+  `ca8b677131bd3beed4986da25ce3110fe34144fb1bef136d5633fd65a697e903`.
+- `docs/screenshots/android-jarvis-circle/` distinguishes the live-audio camera
+  fixture from actual assistant camera invocation over Settings. Neither is a
+  full signed-in Android provider call. The earlier minimal-overlay screenshots
+  remain historical evidence, including the 200% text-scale check.
+
+Physical-phone camera behavior, full signed-in Android capture/upload/audio
+round-trip, and actual connection latency remain unverified on the phone.
+
+References: [CameraX preview](https://developer.android.com/media/camera/camerax/preview),
+[zero-shutter-lag and fallback](https://developer.android.com/media/camera/camerax/take-photo/zsl),
+and [Codex V3 context append](https://github.com/openai/codex/blob/afb436df8b70bb5bc57b86d9a3e829968988cd21/codex-rs/codex-api/src/endpoint/realtime_websocket/methods_frameless_bidi.rs).
 
 ### V3 provider rejection correction
 
@@ -288,8 +320,8 @@ Its V3 sideband automatically appended that analysis to the voice context. When
 asked about the image, Jarvis's final voice transcript correctly described the
 purple triangle and white background, without a provider error or call closure.
 
-Android now uses the existing Zeron attachment escort and normal queued send to
-reach that same Codex thread. Zeron's current Codex harness presents attachments
+The Android image-path context targets that same Codex thread after the host
+file upload completes, as described above. Zeron's current Codex harness presents attachments
 as local file paths in the prompt; the inspection prompt explicitly permits
 opening that file with the image viewer. A second live check used precisely this
 text-only attachment trailer and the production inspection prompt, without a

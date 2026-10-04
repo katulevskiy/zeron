@@ -31,11 +31,11 @@ class JarvisAssistantSession(context: Context) : VoiceInteractionSession(context
     private val scope = CoroutineScope(SupervisorJob() + Dispatchers.Main.immediate)
     private val model get() = (context.applicationContext as ZeronApplication).model
     private var view: ComposeView? = null
-    private var cameraGeneration: Long? = null
-    private var cameraToken: String? = null
-    private var cameraOpen = false
-    private val _cameraBusy = MutableStateFlow(false)
-    val cameraBusy = _cameraBusy.asStateFlow()
+    private val photoJobs = mutableMapOf<String, Job>()
+    private val _uploading = MutableStateFlow(0)
+    val uploading = _uploading.asStateFlow()
+    internal val camera = JarvisOverlayCamera(context, this, ::deliverPhoto, ::showNotice)
+    private var cameraPermission = false
     private var startJob: Job? = null
     private var shown = false
     private var keepCall = false
@@ -82,11 +82,15 @@ class JarvisAssistantSession(context: Context) : VoiceInteractionSession(context
         }
         scope.launch {
             model.jarvis.state.collect {
-                cameraGeneration?.takeIf { !model.jarvis.owns(it) }?.let {
-                    cameraGeneration = null
-                    cameraToken = null
-                    cameraOpen = false
-                    _cameraBusy.value = false
+                if (shown && it.call?.phase == uniffi.zeron_core.VoiceCallPhase.ACTIVE) camera.warmUp()
+                if (!it.live) {
+                    camera.close()
+                    photoJobs.values.toList().forEach { job -> job.cancel() }
+                    photoJobs.clear()
+                    _uploading.value = 0
+                    // A stale success must never hide recovery/start controls
+                    // after a call has closed, even during an activity handoff.
+                    if (_notice.value?.startsWith("Photo ") == true) _notice.value = null
                 }
             }
         }
@@ -126,10 +130,6 @@ class JarvisAssistantSession(context: Context) : VoiceInteractionSession(context
             return
         }
         model.jarvis.showAssistant(this)
-        if (cameraGeneration != null && cameraOpen) {
-            scope.launch { yield(); hide() }
-            return
-        }
         if (permissionGeneration != null) {
             // Another hardware invocation must not cover the pending Android
             // permission dialog or create a second request.
@@ -141,6 +141,7 @@ class JarvisAssistantSession(context: Context) : VoiceInteractionSession(context
     }
     fun startJarvis() {
         if (!shown || !model.jarvis.assistantVisible || startJob?.isActive == true) return
+        if (context.getSystemService(KeyguardManager::class.java).isKeyguardLocked) return
         _notice.value = null
         if (!model.onboarded.value) {
             _notice.value = "Open Zeron to finish setup before using Jarvis."
@@ -164,42 +165,78 @@ class JarvisAssistantSession(context: Context) : VoiceInteractionSession(context
     fun dismiss() {
         keepCall = false
         permissionGeneration = null
-        cameraGeneration = null
-        cameraToken = null
-        _cameraBusy.value = false
+        cameraPermission = false
+        cancelCameraForNavigation()
         model.jarvis.dismissConsent()
         model.jarvis.stop()
         hide()
     }
     private fun cancelCameraForNavigation() {
-        cameraGeneration?.let { model.jarvis.pauseForCamera(it, false) }
-        cameraGeneration = null
-        cameraToken = null
-        cameraOpen = false
-        _cameraBusy.value = false
+        camera.close()
+        photoJobs.values.toList().forEach { it.cancel() }
+        photoJobs.clear()
+        _uploading.value = 0
     }
     fun minimize() { cancelCameraForNavigation(); keepCall = true; hide() }
     fun capturePhoto() {
-        if (!shown || permissionGeneration != null || _cameraBusy.value ||
+        if (!shown || permissionGeneration != null || photoJobs.size >= 3 ||
             model.jarvis.state.value.call?.phase != uniffi.zeron_core.VoiceCallPhase.ACTIVE) return
-        val id = model.jarvis.currentCallId ?: return
-        cameraGeneration = id
-        val token = java.util.UUID.randomUUID().toString()
-        cameraToken = token
-        cameraOpen = true
-        _cameraBusy.value = true
+        if (camera.state.value.open) { camera.close(); return }
         _notice.value = null
-        model.jarvis.pauseForCamera(id, true)
+        if (androidx.core.content.ContextCompat.checkSelfPermission(context, android.Manifest.permission.CAMERA) == android.content.pm.PackageManager.PERMISSION_GRANTED) {
+            camera.open()
+            return
+        }
+        val id = model.jarvis.currentCallId ?: return
+        permissionGeneration = id
+        cameraPermission = true
         try {
-            startAssistantActivity(Intent(context, JarvisAssistantCameraActivity::class.java)
-                .putExtra("generation", id).putExtra("capture", token))
-            // As with permissions, this assistant window must not cover the
-            // camera app. Retain only this call's lease while capture is open.
+            startAssistantActivity(Intent(context, JarvisAssistantPermissionActivity::class.java)
+                .putExtra("generation", id).putExtra("camera", true))
+            // Only the one-time platform permission dialog needs a bridge;
+            // the call and its microphone keep their existing lease.
             hide()
-        } catch (_: Exception) { finishCamera(id, token, "Couldn't open the camera.") }
+        } catch (_: Exception) {
+            permissionGeneration = null; cameraPermission = false
+            showNotice("Allow camera access in Android Settings to take a photo.")
+        }
+    }
+    fun takePhoto() { if (shown && model.jarvis.state.value.live) camera.shutter() }
+    fun closeCamera() { camera.close() }
+    private fun deliverPhoto(file: java.io.File) {
+        val id = model.jarvis.currentCallId
+        if (!shown || id == null || photoJobs.size >= 3) { file.delete(); return }
+        val token = java.util.UUID.randomUUID().toString()
+        val job = scope.launch(start = CoroutineStart.LAZY) {
+            try {
+                val result = model.jarvis.addPhoto(id, file) { shown && photoJobs.containsKey(token) }
+                if (model.jarvis.owns(id) && shown) showNotice(result)
+            } catch (e: CancellationException) { throw e }
+            catch (e: sh.zeron.android.voice.VoicePhotoException) {
+                if (model.jarvis.owns(id) && shown) showNotice(e.reason.message)
+            } catch (_: Exception) {
+                if (model.jarvis.owns(id) && shown) showNotice("Couldn't add the photo. Your voice call is still active.")
+            } finally {
+                file.delete()
+                photoJobs.remove(token)
+                _uploading.value = photoJobs.size
+            }
+        }
+        photoJobs[token] = job
+        _uploading.value = photoJobs.size
+        job.start()
+    }
+    private var noticeJob: Job? = null
+    private fun showNotice(message: String) {
+        noticeJob?.cancel()
+        _notice.value = message
+        if (message == "Photo added" || message == "Photo queued") noticeJob = scope.launch {
+            delay(2_000)
+            if (_notice.value == message) _notice.value = null
+        }
     }
     fun enableCallNotification() {
-        if (android.os.Build.VERSION.SDK_INT < 33 || !shown || permissionGeneration != null || cameraGeneration != null) return
+        if (android.os.Build.VERSION.SDK_INT < 33 || !shown || permissionGeneration != null) return
         val id = model.jarvis.currentCallId ?: return
         permissionGeneration = id
         try {
@@ -229,26 +266,24 @@ class JarvisAssistantSession(context: Context) : VoiceInteractionSession(context
         shown = false
         startJob?.cancel()
         registry.currentState = Lifecycle.State.CREATED
+        if (permissionGeneration == null) cancelCameraForNavigation()
         // A permission activity may temporarily hide this window. Retain only
         // that in-flight generation's visibility lease until its result.
-        if (permissionGeneration == null && cameraGeneration == null) model.jarvis.hideAssistant(this, keepCall)
+        if (permissionGeneration == null) model.jarvis.hideAssistant(this, keepCall)
     }
     override fun onTaskFinished(intent: Intent, taskId: Int) {
         trace("assistant task finished")
-        if (intent.component?.className in listOf(JarvisAssistantPermissionActivity::class.java.name,
-                JarvisAssistantCameraActivity::class.java.name)) return
+        if (intent.component?.className == JarvisAssistantPermissionActivity::class.java.name) return
         super.onTaskFinished(intent, taskId)
     }
     private fun closeSystemUi() {
         // hide() doesn't deliver onHide again when the window is already
         // hidden for a permission dialog. Revoke that lease explicitly on
         // Home/lock so a later permission result cannot open a hidden mic.
-        if (shown || permissionGeneration != null || cameraGeneration != null) {
+        if (shown || permissionGeneration != null) {
             permissionGeneration = null
-            cameraGeneration = null
-            cameraToken = null
-            cameraOpen = false
-            _cameraBusy.value = false
+            cameraPermission = false
+            cancelCameraForNavigation()
             keepCall = false
             startJob?.cancel()
             model.jarvis.hideAssistant(this, false)
@@ -256,10 +291,11 @@ class JarvisAssistantSession(context: Context) : VoiceInteractionSession(context
         hide()
     }
     override fun onCloseSystemDialogs() { trace("close system dialogs"); closeSystemUi() }
+    override fun onBackPressed() { if (camera.state.value.open) camera.close() else dismiss() }
     override fun onLockscreenShown() { closeSystemUi() }
     override fun onDestroy() {
-        cameraGeneration = null
-        cameraToken = null
+        camera.dispose()
+        cancelCameraForNavigation()
         permissionGeneration = null
         model.jarvis.hideAssistant(this, keepCall)
         if (current?.get() === this) current = null
@@ -269,9 +305,11 @@ class JarvisAssistantSession(context: Context) : VoiceInteractionSession(context
         viewModelStore.clear()
         super.onDestroy()
     }
-    private fun resumePermission(id: Long) {
+    private fun resumePermission(id: Long, granted: Boolean) {
         trace("permission result")
         if (permissionGeneration != id) return
+        val wasCamera = cameraPermission
+        cameraPermission = false
         permissionGeneration = null
         refreshNotificationPermission()
         if (context.getSystemService(KeyguardManager::class.java).isKeyguardLocked) {
@@ -279,38 +317,14 @@ class JarvisAssistantSession(context: Context) : VoiceInteractionSession(context
             return
         }
         if (!shown) show(Bundle().apply { putBoolean(RESUME, true) }, 0)
-    }
-    private fun ownsCamera(id: Long, token: String) = cameraGeneration == id && cameraToken == token
-    private fun resumeCamera(id: Long, token: String) {
-        if (!ownsCamera(id, token) || !model.jarvis.owns(id)) return
-        cameraOpen = false
-        if (context.getSystemService(KeyguardManager::class.java).isKeyguardLocked) {
-            closeSystemUi()
-            return
-        }
-        if (!shown) show(Bundle().apply { putBoolean(RESUME, true) }, 0)
-    }
-    private fun finishCamera(id: Long, token: String, message: String?) {
-        if (!ownsCamera(id, token)) return
-        resumeCamera(id, token)
-        cameraGeneration = null
-        cameraToken = null
-        cameraOpen = false
-        _cameraBusy.value = false
-        model.jarvis.pauseForCamera(id, false)
-        if (!model.jarvis.owns(id)) return
-        _notice.value = message
-        if (message == "Photo added" || message == "Photo queued") scope.launch {
-            delay(3_000)
-            if (model.jarvis.owns(id) && _notice.value == message) _notice.value = null
+        if (wasCamera && model.jarvis.owns(id)) {
+            if (granted && shown) camera.open()
+            else showNotice("Camera access denied. You can keep talking to Jarvis.")
         }
     }
     companion object {
         private const val RESUME = "sh.zeron.android.jarvis.RESUME"
         private var current: WeakReference<JarvisAssistantSession>? = null
-        fun permissionFinished(id: Long) { current?.get()?.resumePermission(id) }
-        fun ownsCamera(id: Long, token: String) = current?.get()?.ownsCamera(id, token) == true
-        fun cameraReturned(id: Long, token: String) { current?.get()?.resumeCamera(id, token) }
-        fun cameraFinished(id: Long, token: String, message: String?) { current?.get()?.finishCamera(id, token, message) }
+        fun permissionFinished(id: Long, granted: Boolean = false) { current?.get()?.resumePermission(id, granted) }
     }
 }

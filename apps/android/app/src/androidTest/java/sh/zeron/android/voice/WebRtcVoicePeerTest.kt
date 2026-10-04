@@ -4,6 +4,17 @@ import android.Manifest
 import android.content.Intent
 import android.media.AudioManager
 import androidx.test.ext.junit.runners.AndroidJUnit4
+import androidx.activity.compose.setContent
+import androidx.compose.foundation.background
+import androidx.compose.foundation.layout.*
+import androidx.compose.runtime.*
+import androidx.compose.ui.Modifier
+import androidx.compose.ui.graphics.Color
+import androidx.compose.ui.viewinterop.AndroidView
+import androidx.test.runner.lifecycle.ActivityLifecycleMonitorRegistry
+import androidx.test.runner.lifecycle.Stage
+import sh.zeron.android.voice.assistant.*
+import uniffi.zeron_core.*
 import androidx.test.platform.app.InstrumentationRegistry
 import kotlinx.coroutines.*
 import org.junit.Assert.*
@@ -92,6 +103,7 @@ class WebRtcVoicePeerTest {
                 assertEquals(initial, audio.activeRecordingConfigurations.size)
                 media.setMuted(false)
                 media.levels(true)
+                if (it == 1) captureInCircleWhileAudioRemainsActive(media, audio, initial, instrumentation)
             } finally {
                 media.close()
                 media.close() // teardown is idempotent
@@ -121,6 +133,57 @@ class WebRtcVoicePeerTest {
         }
         assertEquals(before, audio.mode)
         assertEquals(0, failures)
+    }
+
+    private suspend fun captureInCircleWhileAudioRemainsActive(
+        media: WebRtcVoicePeer, audio: AudioManager, initial: Int,
+        instrumentation: android.app.Instrumentation,
+    ) {
+        val context = instrumentation.targetContext
+        instrumentation.uiAutomation.grantRuntimePermission(context.packageName, Manifest.permission.CAMERA)
+        var activity: MainActivity? = null
+        instrumentation.runOnMainSync { activity = ActivityLifecycleMonitorRegistry.getInstance().getActivitiesInStage(Stage.RESUMED).filterIsInstance<MainActivity>().firstOrNull() }
+        val screen = checkNotNull(activity)
+        val captured = CompletableDeferred<java.io.File>()
+        lateinit var camera: JarvisOverlayCamera
+        val state = JarvisState(live = true, call = VoiceCallState(VoiceCallPhase.ACTIVE, VoiceOrb.LISTENING,
+            "camera-audio-test", VoiceCallWork.IDLE, false, false, "Keep talking while taking a photo", null, null, .2f, 0f, emptyList()))
+        try {
+            instrumentation.runOnMainSync {
+                camera = JarvisOverlayCamera(context, screen, { captured.complete(it) }, { captured.completeExceptionally(IllegalStateException(it)) })
+                screen.setContent {
+                    val preview by camera.state.collectAsState()
+                    Box(Modifier.fillMaxSize().background(Color(0xFF151518))) {
+                        JarvisAssistantContent(state, false, null, null, false, true, camera = preview,
+                            cameraPreview = { AndroidView(factory = { androidx.camera.view.PreviewView(it).also(camera::attach) }, modifier = Modifier.fillMaxSize()) }) {
+                            if (it == AssistantAction.Shutter) camera.shutter()
+                        }
+                    }
+                }
+                camera.open()
+            }
+            withTimeout(15_000) { while (!camera.state.value.ready) { assertTrue("Voice recording must continue while the camera loads", audio.activeRecordingConfigurations.size > initial); delay(50) } }
+            delay(400) // let the first-frame iris opening settle
+            instrumentation.uiAutomation.takeScreenshot().let { bitmap ->
+                java.io.File(context.filesDir, "jarvis-circle-camera-test.png").outputStream().use { bitmap.compress(android.graphics.Bitmap.CompressFormat.PNG, 100, it) }
+                bitmap.recycle()
+            }
+            val start = android.os.SystemClock.elapsedRealtime()
+            instrumentation.runOnMainSync { camera.shutter(); camera.shutter() /* no duplicate */ }
+            withTimeout(10_000) { while (!captured.isCompleted) { assertTrue("Shutter must not stop microphone capture", audio.activeRecordingConfigurations.size > initial); delay(20) } }
+            val file = captured.await()
+            try {
+                assertTrue(file.length() > 0)
+                val jpeg = VoicePhotoEncoder.encode(file, 768_000)
+                assertNotNull(android.graphics.BitmapFactory.decodeByteArray(jpeg, 0, jpeg.size))
+                assertFalse(camera.state.value.open)
+                assertTrue("Audio still records after capture/encoding", audio.activeRecordingConfigurations.size > initial)
+                media.levels(true)
+                android.util.Log.i("JarvisCameraTest", "shutter_to_saved_ms=${android.os.SystemClock.elapsedRealtime() - start}")
+            } finally { file.delete() }
+        } finally {
+            instrumentation.runOnMainSync { camera.dispose(); screen.setContent { Box(Modifier.fillMaxSize()) } }
+        }
     }
 
     private open class Observer : SdpObserver {

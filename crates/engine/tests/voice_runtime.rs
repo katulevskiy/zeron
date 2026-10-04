@@ -973,6 +973,7 @@ async fn remote_voice_full_control_flow_and_idempotent_prepare_without_host_audi
             .join("codex-package/codex-resources/voice/bin/codex-voice-host"),
     )
     .unwrap();
+    std::fs::write(temp.path().join("codex-package/conversation-only"), "1").unwrap();
     let client = zeron_rpc::memory_client(core.rpc_service());
     let request = wire::Prepare {
         attempt_key: wire::AttemptKey::new(),
@@ -1069,6 +1070,70 @@ async fn remote_voice_full_control_flow_and_idempotent_prepare_without_host_audi
     })
     .await
     .unwrap();
+    // Android uploads the bytes first, then sends the confirmed local path
+    // in the normal image trailer. A nonempty RunRequest.attachments restarts
+    // a parked runtime, so the context send must NOT carry it a second time.
+    let path = temp.path().join("codex-package/landed-photo.jpg");
+    std::fs::write(&path, "benign fixture image").unwrap();
+    let mut image_request = core.sessions.last_request(&prepared.chat_id).unwrap();
+    let before = core
+        .sessions
+        .start_idle(&prepared.chat_id, image_request.clone())
+        .await
+        .unwrap();
+    image_request.prompt = format!(
+        "Inspect this voice photo with the image viewer.\n\nAttached images (local files — open them to view):\n- {}",
+        path.display()
+    );
+    image_request.attachments.clear();
+    let after = core
+        .sessions
+        .dispatch(
+            &prepared.chat_id,
+            HarnessId::Codex,
+            image_request,
+            Some("voice-photo-context".into()),
+        )
+        .await
+        .unwrap();
+    assert_eq!(
+        before, after,
+        "Photo context must reuse the existing runtime and V3 bridge"
+    );
+    tokio::time::timeout(std::time::Duration::from_secs(3), async {
+        loop {
+            let text = std::fs::read_to_string(temp.path().join("codex-package/voice-wire.jsonl"))
+                .unwrap();
+            if text.contains("landed-photo.jpg") {
+                assert_eq!(
+                    text.lines()
+                        .filter(|s| s.contains("\"method\": \"thread/start\""))
+                        .count(),
+                    1
+                );
+                assert!(!text.contains("thread/realtime/stop"));
+                break;
+            }
+            tokio::time::sleep(std::time::Duration::from_millis(10)).await;
+        }
+    })
+    .await
+    .unwrap();
+    let _: wire::Ack = client
+        .call_as(
+            methods::REPORT_VOICE_MEDIA_V2,
+            envelope(
+                serde_json::to_value(wire::Report {
+                    lease: prepared.lease.clone(),
+                    sequence: 1,
+                    muted: false,
+                    state: wire::MediaState::Ready,
+                })
+                .unwrap(),
+            ),
+        )
+        .await
+        .expect("Voice lease must remain valid after the photo turn");
     drop(owner);
     tokio::time::sleep(std::time::Duration::from_millis(400)).await;
     assert!(

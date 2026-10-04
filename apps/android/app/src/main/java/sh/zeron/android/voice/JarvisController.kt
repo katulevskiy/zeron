@@ -30,6 +30,7 @@ class JarvisController(private val app: Application, private val model: AppModel
     private var client: CoreClient? = null
     private var identity = ""
     private var call: VoiceCall? = null
+    private var callHostId: String? = null
     private var media: AndroidVoiceMedia? = null
     private var permission: Pair<Long, CompletableDeferred<Boolean>>? = null
     private val _permissionRequest = MutableStateFlow<Long?>(null)
@@ -144,8 +145,10 @@ class JarvisController(private val app: Application, private val model: AppModel
         val client = client ?: return
         if (generation.live || !canStart || !host.online) return
         selectHost(host.id)
+        callHostId = host.id
         assistantCall = requestedFromAssistant
         val id = generation.begin()
+        val connectionStarted = android.os.SystemClock.elapsedRealtime()
         _state.value = JarvisState(live = true, host = host.name)
         mediaVisible = true
         model.feedback.both(Haptic.Confirm, Cue.Open)
@@ -158,6 +161,8 @@ class JarvisController(private val app: Application, private val model: AppModel
                 scope.launch {
                     if (!generation.accepts(id)) return@launch
                     val since = _state.value.activeSince ?: if (state.phase == VoiceCallPhase.ACTIVE) android.os.SystemClock.elapsedRealtime() else null
+                    if (_state.value.activeSince == null && since != null && model.isDebuggable)
+                        android.util.Log.d("JarvisConnection", "active elapsed_ms=${since - connectionStarted}")
                     _state.value = _state.value.copy(call = state, activeSince = since)
                     if (state.voices.isNotEmpty()) _voices.value = state.voices
                 }
@@ -205,46 +210,42 @@ class JarvisController(private val app: Application, private val model: AppModel
         media?.toggleSpeaker()
     }
 
-    fun pauseForCamera(id: Long, paused: Boolean) {
-        if (!owns(id)) return
-        media?.pauseForCamera(paused)
-        // Re-acknowledge the current user mute setting before capture resumes.
-        // Camera return must never undo a user mute from the notification.
-        if (!paused) call?.setMuted(_state.value.muted)
-    }
 
     internal suspend fun addPhoto(id: Long, file: java.io.File, canDeliver: () -> Boolean): String {
         if (!owns(id) || !canDeliver() || _state.value.call?.phase != VoiceCallPhase.ACTIVE) throw VoicePhotoException(VoicePhotoException.Reason.ENDED)
         val core = client ?: throw VoicePhotoException(VoicePhotoException.Reason.ENDED)
         val chat = _state.value.call?.chatId ?: throw VoicePhotoException(VoicePhotoException.Reason.ENDED)
+        val host = callHostId ?: throw VoicePhotoException(VoicePhotoException.Reason.ENDED)
         val jpeg = withContext(Dispatchers.IO) {
-            try { VoicePhotoEncoder.encode(file, 768_000) }
+            // One bounded upload chunk, without blocking the live microphone.
+            try { VoicePhotoEncoder.encode(file, 384_000) }
             catch (e: CancellationException) { throw e }
             catch (e: VoicePhotoException) { throw e }
             catch (_: Exception) { throw VoicePhotoException(VoicePhotoException.Reason.READ) }
         }
         if (!owns(id) || !canDeliver() || core !== client) throw VoicePhotoException(VoicePhotoException.Reason.ENDED)
-        val handle = core.openSession(chat)
+        val handle = withContext(Dispatchers.IO) { core.openSession(chat) }
         return try {
             VoicePhotoTransfer(
-                active = { owns(id) && canDeliver() && core === client && _state.value.call?.chatId == chat },
-                submit = { bytes ->
-                    // The normal attachment path escorts bytes to the selected
-                    // host and records the photo in this same voice chat.
-                    when (val result = handle.send(voicePhotoRequest(bytes, "jarvis-photo-${java.util.UUID.randomUUID()}.jpg"))) {
+                active = { owns(id) && canDeliver() && core === client && callHostId == host && _state.value.call?.chatId == chat },
+                upload = { bytes -> withContext(Dispatchers.IO) {
+                    core.uploadAttachment(host, "jarvis-photo-${java.util.UUID.randomUUID()}.jpg", bytes, null)
+                } },
+                submit = { path ->
+                    when (val result = withContext(Dispatchers.IO) { currentCoroutineContext().ensureActive(); handle.send(voicePhotoRequest(path)) }) {
                         is SendOutcome.Started -> VoicePhotoReceipt(result.messageId, false)
                         is SendOutcome.Steered -> VoicePhotoReceipt(result.messageId, false)
                         is SendOutcome.Queued -> VoicePhotoReceipt(result.queueId, true)
                     }
                 },
-                progress = { receipt ->
+                progress = { receipt -> withContext(Dispatchers.IO) {
                     val pending = handle.composer().pendingSends.firstOrNull { it.messageId == receipt.id }
                     when {
                         pending?.state == SendState.FAILED -> VoicePhotoProgress.FAILED
                         pending == null && handle.messageText(receipt.id) != null -> VoicePhotoProgress.ADOPTED
                         else -> VoicePhotoProgress.PENDING
                     }
-                },
+                } },
             ).add(jpeg)
         } catch (e: CancellationException) { throw e }
         catch (e: VoicePhotoException) { throw e }
@@ -267,6 +268,7 @@ class JarvisController(private val app: Application, private val model: AppModel
         call?.stop(); call?.destroy(); call = null
         JarvisService.end(app)
         assistantCall = false
+        callHostId = null
         val host = _state.value.host
         _state.value = JarvisState(host = host, error = reason?.let { message(it, host) }, endReason = reason)
     }

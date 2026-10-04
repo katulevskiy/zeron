@@ -211,6 +211,14 @@ pub async fn run(
             elapsed_ms = started.elapsed().as_millis() as u64,
             "remote voice stage"
         );
+        // Host startup/probing and local SDP/ICE gathering are independent.
+        // Permission is already resolved and capture stays muted. Scope owns
+        // the offer task, so cancellation/failure closes media and aborts it.
+        let (offer_tx, offer_rx) = tokio::sync::oneshot::channel();
+        let offer_media = media.clone();
+        scope.tasks.push(tokio::spawn(async move {
+            let _ = offer_tx.send(offer_media.offer().await);
+        }));
         let prepared: wire::Prepared = call(
             control.as_ref(),
             methods::PREPARE_VOICE_V2,
@@ -318,7 +326,9 @@ pub async fn run(
             elapsed_ms = started.elapsed().as_millis() as u64,
             "remote voice stage"
         );
-        let offer = media.offer().await?;
+        // Ownership/heartbeats are attached before awaiting a slow offer;
+        // neither SDP nor a host reservation alone authorizes microphone use.
+        let offer = offer_rx.await.map_err(|_| VoiceRejection::Protocol)??;
         let negotiation_id = wire::AttemptKey::new();
         tracing::info!(
             stage = "negotiate",
@@ -511,6 +521,111 @@ mod tests {
     }
     fn config() -> zeron_proto::ChatConfig {
         serde_json::from_value(json!({"harness":"codex","sandbox":"danger-full-access"})).unwrap()
+    }
+    struct ParallelControl {
+        inner: Arc<Control>,
+        rendezvous: Arc<tokio::sync::Barrier>,
+    }
+    #[async_trait]
+    impl VoiceControlTransport for ParallelControl {
+        async fn call(
+            &self,
+            method: &str,
+            payload: Value,
+            seconds: u64,
+        ) -> Result<Value, VoiceRejection> {
+            if method == methods::PREPARE_VOICE_V2 {
+                self.rendezvous.wait().await;
+            }
+            self.inner.call(method, payload, seconds).await
+        }
+        async fn own(
+            &self,
+            lease: &wire::Lease,
+        ) -> Result<BoxStream<'static, Result<VoiceEvent, VoiceRejection>>, VoiceRejection>
+        {
+            self.inner.own(lease).await
+        }
+    }
+    struct ParallelMedia {
+        inner: Arc<Media>,
+        control: Arc<Control>,
+        rendezvous: Arc<tokio::sync::Barrier>,
+    }
+    #[async_trait]
+    impl VoiceMediaEndpoint for ParallelMedia {
+        async fn prepare(&self) -> Result<(), VoiceRejection> {
+            self.inner.prepare().await
+        }
+        async fn offer(&self) -> Result<wire::Sdp, VoiceRejection> {
+            self.rendezvous.wait().await;
+            self.inner.offer().await
+        }
+        async fn apply_answer(&self, answer: wire::Sdp) -> Result<(), VoiceRejection> {
+            self.inner.apply_answer(answer).await
+        }
+        async fn set_muted(&self, value: bool) -> Result<(), VoiceRejection> {
+            assert!(
+                self.control
+                    .calls
+                    .lock()
+                    .unwrap()
+                    .iter()
+                    .any(|m| m == methods::CONFIRM_VOICE_MEDIA_V2),
+                "Parallel setup must never activate audio before ownership confirmation"
+            );
+            self.inner.set_muted(value).await
+        }
+        async fn levels(&self) -> Result<(u16, u16), VoiceRejection> {
+            self.inner.levels().await
+        }
+        fn close(&self) {
+            self.inner.close();
+        }
+    }
+    #[tokio::test]
+    async fn host_preparation_and_offer_overlap_but_activation_waits_for_confirmation() {
+        let rendezvous = Arc::new(tokio::sync::Barrier::new(2));
+        let inner = control(true);
+        let control = Arc::new(ParallelControl {
+            inner: inner.clone(),
+            rendezvous: rendezvous.clone(),
+        });
+        let media = Arc::new(ParallelMedia {
+            inner: Arc::new(Media {
+                prepared: AtomicBool::new(false),
+                closed: AtomicBool::new(false),
+                block: false,
+            }),
+            control: inner.clone(),
+            rendezvous,
+        });
+        let (events, mut rx) = mpsc::channel(8);
+        let (_mute, muted) = watch::channel(false);
+        let cancel = CancellationToken::new();
+        let task = tokio::spawn(run(
+            control,
+            media.clone(),
+            config(),
+            None,
+            cancel.clone(),
+            events,
+            muted,
+        ));
+        // The previous sequential flow deadlocks at the two-party rendezvous.
+        assert!(matches!(
+            tokio::time::timeout(Duration::from_secs(2), rx.recv())
+                .await
+                .unwrap(),
+            Some(VoiceEvent::Levels { .. })
+        ));
+        cancel.cancel();
+        task.await.unwrap().unwrap();
+        assert!(media.inner.closed.load(Ordering::SeqCst));
+        tokio::task::yield_now().await;
+        let calls = inner.calls.lock().unwrap();
+        assert!(calls.iter().any(|m| m == methods::STOP_VOICE_V2));
+        assert!(calls.iter().any(|m| m == methods::CANCEL_VOICE_ATTEMPT_V2));
     }
     #[tokio::test]
     async fn incompatible_host_never_requests_microphone() {

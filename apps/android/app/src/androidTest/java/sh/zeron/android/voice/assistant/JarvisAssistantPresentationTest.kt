@@ -44,7 +44,7 @@ class JarvisAssistantPresentationTest {
         fun show(busy: Boolean) = instrumentation.runOnMainSync {
             screen.setContent {
                 Box(Modifier.fillMaxSize().background(Color(0xFF151518))) {
-                    JarvisAssistantContent(state, false, null, null, busy, true, action::set)
+                    JarvisAssistantContent(state, false, null, null, busy, true, onAction = action::set)
                 }
             }
         }

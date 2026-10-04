@@ -23,7 +23,7 @@ import sh.zeron.android.voice.JarvisState
 import sh.zeron.android.voice.VoiceHost
 import uniffi.zeron_core.*
 
-internal enum class AssistantAction { Close, Settings, Start, Consent, Mute, Speaker, Minimize, Camera, MicrophoneSettings, CodexSettings, Notification, Conversation, Setup }
+internal enum class AssistantAction { Close, Settings, Start, Consent, Mute, Speaker, Minimize, Camera, Shutter, CloseCamera, MicrophoneSettings, CodexSettings, Notification, Conversation, Setup }
 
 @Composable
 fun JarvisAssistantOverlay(model: AppModel, session: JarvisAssistantSession) {
@@ -33,8 +33,14 @@ fun JarvisAssistantOverlay(model: AppModel, session: JarvisAssistantSession) {
     val preparing by session.preparing.collectAsState()
     val notice by session.notice.collectAsState()
     val notifications by session.notifications.collectAsState()
-    val cameraBusy by session.cameraBusy.collectAsState()
-    JarvisAssistantContent(state, preparing, notice, consent, cameraBusy, notifications) { action ->
+    val uploading by session.uploading.collectAsState()
+    val camera by session.camera.state.collectAsState()
+    JarvisAssistantContent(state, preparing, notice, consent, uploading >= 3, notifications,
+        camera = camera, uploading = uploading,
+        cameraPreview = { androidx.compose.ui.viewinterop.AndroidView(
+            factory = { androidx.camera.view.PreviewView(it).also(session.camera::attach) },
+            modifier = Modifier.fillMaxSize(),
+        ) }) { action ->
         when (action) {
             AssistantAction.Close -> session.dismiss()
             AssistantAction.Settings -> session.openApp("jarvis-settings")
@@ -44,6 +50,8 @@ fun JarvisAssistantOverlay(model: AppModel, session: JarvisAssistantSession) {
             AssistantAction.Speaker -> controller.toggleSpeaker()
             AssistantAction.Minimize -> session.minimize()
             AssistantAction.Camera -> session.capturePhoto()
+            AssistantAction.Shutter -> session.takePhoto()
+            AssistantAction.CloseCamera -> session.closeCamera()
             AssistantAction.MicrophoneSettings -> session.openMicrophoneSettings()
             AssistantAction.CodexSettings -> session.openApp("agents")
             AssistantAction.Notification -> session.enableCallNotification()
@@ -63,6 +71,9 @@ internal fun JarvisAssistantContent(
     consent: VoiceHost?,
     cameraBusy: Boolean,
     notifications: Boolean,
+    camera: OverlayCameraState = OverlayCameraState(),
+    uploading: Int = 0,
+    cameraPreview: @Composable () -> Unit = {},
     onAction: (AssistantAction) -> Unit,
 ) {
     ZeronTheme(Appearance(ThemeMode.Dark)) {
@@ -79,11 +90,9 @@ internal fun JarvisAssistantContent(
                         Button(onClick = { onAction(AssistantAction.Consent) }) { Text("Continue") }
                         TextButton(onClick = { onAction(AssistantAction.Close) }) { Text("Cancel") }
                     } else {
-                        JarvisOrb(if (state.muted) VoiceOrb.MUTED else state.call?.orb ?: VoiceOrb.IDLE,
-                            state.call?.microphone ?: 0f, state.call?.speaker ?: 0f, Modifier.size(184.dp),
-                            tint = Color(0xFF8B7CF6))
+                        JarvisCameraStage(state, camera, cameraPreview, onAction)
                         val status = when {
-                            cameraBusy -> "Adding photo…"
+                            uploading > 0 -> "Sending photo…"
                             preparing -> "Preparing…"
                             state.muted -> "Microphone muted"
                             state.call?.work == VoiceCallWork.AWAITING_INPUT -> "Needs your input"
@@ -92,7 +101,7 @@ internal fun JarvisAssistantContent(
                             else -> null
                         }
                         status?.let { Text(it, color = scheme.onSurface, modifier = Modifier.semantics { liveRegion = LiveRegionMode.Polite }) }
-                        (notice ?: state.error)?.let { Text(it, color = if (notice?.startsWith("Photo ") == true) scheme.onSurface else scheme.error,
+                        (state.error ?: notice?.takeIf { state.live || !it.startsWith("Photo ") })?.let { Text(it, color = if (notice?.startsWith("Photo ") == true) scheme.onSurface else scheme.error,
                             modifier = Modifier.semantics { liveRegion = LiveRegionMode.Polite }) }
                         state.call?.caption?.takeLast(240)?.takeIf { it.isNotBlank() }?.let {
                             Text(it, color = scheme.onSurface, modifier = Modifier.semantics { liveRegion = LiveRegionMode.Polite })
@@ -117,7 +126,7 @@ internal fun JarvisAssistantContent(
                                 TextButton(onClick = { onAction(AssistantAction.Conversation) }) { Text("Open conversation") }
                             }
                         } else if (!preparing) {
-                            if (notice == null) Button(onClick = { onAction(AssistantAction.Start) }) { Text("Start Jarvis") }
+                            Button(onClick = { onAction(AssistantAction.Start) }) { Text("Start Jarvis") }
                             if (state.endReason == VoiceEndReason.MICROPHONE_DENIED) TextButton(onClick = { onAction(AssistantAction.MicrophoneSettings) }) { Text("Microphone permissions") }
                             if (state.endReason in listOf(VoiceEndReason.SIGN_IN_REQUIRED, VoiceEndReason.HOST_INCOMPATIBLE)) {
                                 TextButton(onClick = { onAction(AssistantAction.CodexSettings) }) { Text("Set up Codex") }
@@ -136,7 +145,7 @@ internal fun JarvisAssistantContent(
                         FilledTonalIconButton(onClick = { onAction(AssistantAction.Camera) },
                             enabled = state.live && state.call?.phase == VoiceCallPhase.ACTIVE && !cameraBusy && consent == null,
                             modifier = Modifier.size(48.dp)) {
-                            Icon(Icons.Default.PhotoCamera, "Take photo for Jarvis")
+                            Icon(if (camera.open) Icons.Default.Close else Icons.Default.PhotoCamera, if (camera.open) "Close camera" else "Take photo for Jarvis")
                         }
                     }
                 }

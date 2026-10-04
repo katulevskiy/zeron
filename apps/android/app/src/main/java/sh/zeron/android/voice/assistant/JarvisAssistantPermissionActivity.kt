@@ -14,9 +14,9 @@ import kotlinx.coroutines.launch
 class JarvisAssistantPermissionActivity : ComponentActivity() {
     private var generation = 0L
     private val permission = registerForActivityResult(ActivityResultContracts.RequestPermission()) { granted ->
-        if (!intent.getBooleanExtra("notification", false))
+        if (!intent.getBooleanExtra("notification", false) && !intent.getBooleanExtra("camera", false))
             (application as ZeronApplication).existingModel?.jarvis?.completePermission(generation, granted)
-        JarvisAssistantSession.permissionFinished(generation)
+        JarvisAssistantSession.permissionFinished(generation, granted)
         finish()
     }
     override fun onCreate(savedInstanceState: Bundle?) {
@@ -38,7 +38,7 @@ class JarvisAssistantPermissionActivity : ComponentActivity() {
         }
         if (savedInstanceState == null) permission.launch(
             if (intent.getBooleanExtra("notification", false) && android.os.Build.VERSION.SDK_INT >= 33)
-                Manifest.permission.POST_NOTIFICATIONS else Manifest.permission.RECORD_AUDIO)
+                Manifest.permission.POST_NOTIFICATIONS else if (intent.getBooleanExtra("camera", false)) Manifest.permission.CAMERA else Manifest.permission.RECORD_AUDIO)
     }
 }
 

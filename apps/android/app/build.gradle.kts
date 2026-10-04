@@ -69,8 +69,8 @@ android {
         applicationId = "sh.zeron.android"
         minSdk = 29
         targetSdk = 37
-        versionCode = 1
-        versionName = "0.2.102-jarvis-assistant"
+        versionCode = 2
+        versionName = "0.2.102-jarvis-circle"
         testInstrumentationRunner = "androidx.test.runner.AndroidJUnitRunner"
         ndk { abiFilters += listOf("arm64-v8a", "x86_64") }
     }
@@ -123,6 +123,9 @@ tasks.named("preBuild") { dependsOn(buildCore, genIcons, fetchProot, fetchRootfs
 dependencies {
     implementation(project(":runtime"))
     implementation(libs.webrtc)
+    implementation(libs.androidx.camera.camera2)
+    implementation(libs.androidx.camera.lifecycle)
+    implementation(libs.androidx.camera.view)
     implementation(libs.androidx.core.ktx)
     implementation(libs.androidx.core.splashscreen)
     implementation(libs.androidx.activity.compose)

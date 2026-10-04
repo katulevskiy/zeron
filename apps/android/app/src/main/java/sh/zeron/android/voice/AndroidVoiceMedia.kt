@@ -17,6 +17,7 @@ class AndroidVoiceMedia(
     private var call = WeakReference<VoiceCall>(null)
     private val jobs = mutableMapOf<ULong, Job>()
     private var closed = false
+    private val started = android.os.SystemClock.elapsedRealtime()
     private val mute = VoiceMute()
     private val peer = WebRtcVoicePeer(context, failure)
     private val route = VoiceAudioRoute(context, failure)
@@ -27,6 +28,8 @@ class AndroidVoiceMedia(
         scope.launch {
             if (request.operation == VoiceMediaOperation.CLOSE) { close(); return@launch }
             if (closed) { complete(request, VoiceMediaFailure.UNAVAILABLE); return@launch }
+            if (request.operation != VoiceMediaOperation.LEVELS && context.applicationInfo.flags and android.content.pm.ApplicationInfo.FLAG_DEBUGGABLE != 0)
+                android.util.Log.d("JarvisConnection", "${request.operation.name.lowercase()} elapsed_ms=${android.os.SystemClock.elapsedRealtime() - started}")
             if (jobs.size >= 4) { failure(); return@launch }
             val job = scope.launch(start = CoroutineStart.LAZY) {
                 try {
@@ -71,10 +74,6 @@ class AndroidVoiceMedia(
 
     fun toggleSpeaker() { if (!closed) route.toggleSpeaker() }
 
-    fun pauseForCamera(paused: Boolean) {
-        mute.cameraPaused = paused
-        if (paused && !closed) peer.muteLocally()
-    }
 
     fun close() {
         if (closed) return

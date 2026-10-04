@@ -45,14 +45,4 @@ class VoicePolicyTest {
         assertEquals("1:01:01", voiceElapsed(3661))
     }
 
-    @Test fun cameraPauseCannotBeUndoneByLateUnmuteAndPreservesUserMute() {
-        val mute = VoiceMute()
-        mute.cameraPaused = true
-        assertTrue(mute.effective(false))
-        mute.request(true)
-        mute.cameraPaused = false
-        assertTrue(mute.effective(false))
-        mute.request(false)
-        assertFalse(mute.effective(false))
-    }
 }
