@@ -147,10 +147,12 @@ assistant stops calls that originated through the assistant.
 The top-level `VoiceInteractionService` only registers with Android. Selecting it
 never boots an engine or opens the microphone; `ZeronApplication` initializes the
 native model/fonts on first actual app/overlay use. Both system-bound voice
-services require `BIND_VOICE_INTERACTION`. No accessibility service, overlay
-permission, hotword service, or screen capture is added. Both the registration and
-session disable `SHOW_WITH_ASSIST | SHOW_WITH_SCREENSHOT`; underlying app text,
-URLs, and screenshots are not requested or sent. Locked invocations cannot start
+services require `BIND_VOICE_INTERACTION`. There is no draw-over-other-apps
+permission or hotword service. Screen capture and accessibility control are
+separate, optional experimental capabilities described below. By default both
+screen-context flags are disabled; opting into screen context allows assistant
+screenshots. `SHOW_WITH_ASSIST` remains disabled: Jev's UI structure comes from
+the separately enabled accessibility service. Locked invocations cannot start
 a new call. On Android 10/11, which require an assistant recognition component,
 ordinary system dictation is delegated to an installed speech provider instead of
 being sent through Jarvis. Newer Android retains its original recognizer.
@@ -186,7 +188,8 @@ OpenAI conversation remain unverified on hardware.
 Power hold now shows transparent, bottom-aligned content over Android's
 full-screen dim layer (`FLAG_DIM_BEHIND`, dim amount 0.76). There is no rounded
 card, background fill, or underlying-app blur. The current app stays visible;
-Zeron does not capture or read it. The overlay's orb uses Zeron purple
+Zeron captures or reads it only through the separately enabled screen features
+described below. The overlay's orb uses Zeron purple
 `#8B7CF6`; the ordinary in-app orb retains its existing appearance. Overlay
 text and controls use a dark palette in either phone theme so they remain
 readable over the dimmed screen.
@@ -213,7 +216,7 @@ removed so it cannot obscure the viewfinder if a rendering frame stalls.
 
 Zeron now asks for CAMERA permission once, on the explicit camera action, through
 its non-exported permission activity. It still requests no storage or draw-over-
-other-apps permission and no screen context. CameraX is bound to the assistant's
+other-apps permission. Screen context requires its separate opt-in. CameraX is bound to the assistant's
 visible lifecycle only. Home, lock, minimize, hang-up, navigation, or session
 destruction unbinds its own camera use cases. Stale provider/capture callbacks
 cannot re-open the preview or deliver into a successor call. The camera provider
@@ -334,3 +337,118 @@ work. A directly submitted image waits for its exact host-adopted user message
 rather than claiming success when the local send method returns. These
 submission/ownership semantics are covered by the added JVM tests; the signed-in
 provider image-to-voice behavior is the separate live result above.
+
+
+## Experimental screen context and Jev phone control
+
+This fork adds three independent experiments without pausing the voice call:
+
+1. In **Jarvis settings → Phone screen**, enable **Screen context**. Invoke
+   Jarvis over another app, tap the screen icon, then **Share screenshot**.
+   A fresh assistant screenshot can be used without accessibility access;
+   subsequent on-demand captures use Android's accessibility screenshot API.
+   Android 14+ captures the underlying application window, excluding Jarvis.
+   Android 11–13 hides the assistant before display capture. Android 10 can
+   use an invocation screenshot or MediaProjection.
+2. Tap **Start live screen sharing**, accept Android's capture dialog, and
+   choose **Entire screen** to follow app changes (or a single app to restrict
+   capture). Local capture keeps just one frame, sampled at up to four frames
+   per second. Changed screenshots are forwarded through the existing landed
+   image/Codex vision path at most once every two seconds, with one transfer
+   in flight. Busy/queued work delays delivery and conflates to the latest
+   frame instead of building a screenshot backlog. This is periodic vision
+   context, not a Realtime video stream. The assistant's own animation is not
+   forwarded; live delivery pauses while that overlay is open. Stop sharing
+   from the screen controls or its ongoing Android notification.
+3. For interaction, choose **This phone** as Jarvis's execution device, enable
+   **Phone control**, enter your own TypeSafe Jev key, and use **Test key**.
+   Enable **Jarvis phone control** under Android Accessibility. During a call,
+   tap the screen icon and **Enable control for this call**. Open the app you
+   want to work in and give Jarvis a task, such as “open Display in Settings,”
+   “put this exact text in the search field,” or “tap x=400 y=800.” The overlay
+   hides before input so it cannot intercept taps; voice remains active.
+   **Try with Jev** in the settings screen returns to the preceding app before
+   running the supplied goal. Stop control in Jarvis or the call notification.
+   If Android restricts accessibility for the sideloaded APK, allow restricted
+   settings in Zeron's App info menu before enabling the service.
+
+The Jev key is entered on the phone, masked in a secure dialog, and encrypted
+using an Android Keystore AES-GCM key. It is not passed to Codex, the guest,
+chat prompts, model contexts, logs, source files, or build configuration. App
+backup remains disabled. API calls go only to TypeSafe's official
+`https://api.typesafe.ai/v1/systemone`; no third-party Jev proxy is used.
+
+GPT/Codex plans tasks and supplies exact text. The phone reads bounded visible
+accessibility elements, labels, supported actions and physical screen bounds.
+Jev is text-only: it selects the operation and speculative per-operation
+candidate target in one request. Only the selected target head is validated
+and executed. Screenshots go to GPT/Codex for visual understanding; unsupported
+canvas controls can use visually grounded coordinate taps, not invented targets.
+
+The design follows the primary-source patterns in
+[Browser Use's Jev Ultrafast](https://github.com/browser-use/jev-ultrafast),
+[jev-bot](https://github.com/stoopid-computers/jev-bot), and
+[TypeSafe's speculative fan-out](https://docs.typesafe.ai/patterns/fan-out).
+It does not copy their reported latency claims to Android.
+
+A per-call loopback bridge lets the existing on-phone Codex exec tool request
+state, screenshot, bounded Jev subtasks, coordinate taps/swipes and revocation.
+It binds only `127.0.0.1`, uses a random 256-bit capability, rejects browser
+Origins, and serializes input. No LAN port or persistent control token is
+exposed. Its instructions are appended to the existing voice chat as plain
+text with no RunRequest attachments, preserving the warm Codex voice runtime.
+Screenshot files are private, bounded to the latest five, and removed on
+revocation. The Jev key never leaves the Android key store except the official
+HTTPS Authorization header. Remote desktop-hosted Jarvis can receive screen
+images, but cannot use this local interaction bridge in this initial experiment.
+
+Control checks the call generation, settings and unlocked state. Decisions
+must contain exactly the offered choices with finite probabilities/confidence;
+uncertain or malformed output produces no input. Before execution, the screen
+fingerprint/age, target identity, current label/value/role and bounds are
+rechecked. Android's node cache is cleared once per snapshot on Android 13+;
+older versions refresh each node. Stale selections can replan within the
+bounded decision budget without executing input. There are at most eight
+requests per subtask and a stall check; a model's DONE is explicitly
+`done_unverified` until GPT independently inspects the outcome. Screen text is
+untrusted context. Password fields and Zeron's own application are excluded
+from control observations. Secure windows remain protected from capture.
+
+Screen sharing and control stop on hang-up, lock, identity change, or process
+loss. Disabling accessibility stops interaction; screen sharing has its own
+separate stop control. Changing preferences does not silently start capture or
+input, and neither feature restarts automatically after process death.
+
+Platform references:
+
+- [AccessibilityService](https://developer.android.com/reference/android/accessibilityservice/AccessibilityService)
+- [MediaProjection consent and lifecycle](https://developer.android.com/media/grow/media-projection)
+- [TypeSafe request/answer contract](https://docs.typesafe.ai/api)
+- [Jev text-only model limits](https://docs.typesafe.ai/models)
+
+Validation for the screen experiment (API 35 emulator):
+
+- 285 JVM tests pass, including malformed/uncertain decision rejection,
+  speculative target selection and stale/rotated/out-of-bounds input checks.
+- The final voice instrumentation suite passes (13 reported tests, with the two
+  optional live-provider/planner checks skipped and verified separately).
+  Real Android tests cover
+  clicks, typing, coordinate gestures, scrolling/Home/Back, password redaction,
+  secure screenshot rejection, system-panel occlusion, encrypted BYOK and bridge
+  authentication/revocation. Optional live-provider checks need a private runtime
+  credential; no provider credential is part of either APK.
+- Actual MediaProjection consent/capture receives changing frames while the
+  negotiated JNI microphone remains active, and stopping capture releases its
+  resources without interrupting the microphone.
+- A live Jev request selected and executed the intended native Android button
+  in 560 ms, with its changed UI independently verified.
+- A real GPT/Codex CLI planner used the production native bridge handler and
+  Jev to enter `pizza` and select `Mark complete` in the test fixture. Both
+  outcomes were verified; Jev's two decisions took 208 ms and 111 ms in the final
+  run. The test uses a fixture call state, not a signed-in voice session.
+- Signed APK includes ARM64 and x86_64 and matches the previous update signing
+  certificate. Decompressed APK contents have no embedded Jev credential.
+- Lint still reports 12 pre-existing errors outside this feature. Physical-phone
+  testing, signed-in V3 voice-to-control execution and model delivery of live
+  screenshots remain to be verified on the user's device. These are changed
+  screenshots delivered periodically, not a native real-time video model feed.

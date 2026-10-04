@@ -170,6 +170,8 @@ fun JarvisSettings(model: AppModel, onBack: () -> Unit) {
     }) }) { padding ->
         Column(Modifier.fillMaxSize().padding(padding).verticalScroll(rememberScrollState()).padding(24.dp), verticalArrangement = Arrangement.spacedBy(12.dp)) {
             sh.zeron.android.voice.assistant.JarvisAssistantSetup()
+            sh.zeron.android.voice.screen.JarvisScreenSettings(controller)
+            HorizontalDivider()
             Text("Execution device", style = MaterialTheme.typography.titleLarge)
             Text("Choose where Codex runs Jarvis and its tools. Audio uses this phone's microphone and speaker.")
             if (hosts.isEmpty()) Text("No compatible device is available yet. Install and sign in to Codex under Settings → Coding agents on this phone, or connect a desktop running Zeron with remote voice enabled.")

@@ -11,11 +11,19 @@ import sh.zeron.android.ZeronApplication
 class JarvisAssistantService : VoiceInteractionService() {
     override fun onReady() {
         super.onReady()
-        // Disable both kinds of screen context even when the OS supplies flags
-        // for a hardware invocation. Jarvis receives microphone audio only.
-        setDisabledShowContext(VoiceInteractionSession.SHOW_WITH_ASSIST or VoiceInteractionSession.SHOW_WITH_SCREENSHOT)
+        current = java.lang.ref.WeakReference(this)
+        updateContext()
+    }
+    private fun updateContext() {
+        val enabled = getSharedPreferences("jarvis-screen", 0).getBoolean("context", false)
+        setDisabledShowContext(VoiceInteractionSession.SHOW_WITH_ASSIST or if (enabled) 0 else VoiceInteractionSession.SHOW_WITH_SCREENSHOT)
+    }
+    companion object {
+        private var current: java.lang.ref.WeakReference<JarvisAssistantService>? = null
+        fun refreshContext() { current?.get()?.updateContext(); JarvisAssistantSession.refreshContext() }
     }
     override fun onShutdown() {
+        if (current?.get() === this) current = null
         (application as ZeronApplication).existingModel?.jarvis?.assistantDisabled()
         super.onShutdown()
     }

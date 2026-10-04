@@ -23,11 +23,13 @@ import sh.zeron.android.voice.JarvisState
 import sh.zeron.android.voice.VoiceHost
 import uniffi.zeron_core.*
 
-internal enum class AssistantAction { Close, Settings, Start, Consent, Mute, Speaker, Minimize, Camera, Shutter, CloseCamera, MicrophoneSettings, CodexSettings, Notification, Conversation, Setup }
+internal enum class AssistantAction { Close, Settings, Start, Consent, Mute, Speaker, Minimize, Camera, Shutter, CloseCamera, Screen, MicrophoneSettings, CodexSettings, Notification, Conversation, Setup }
 
 @Composable
 fun JarvisAssistantOverlay(model: AppModel, session: JarvisAssistantSession) {
     val controller = model.jarvis
+    var screenControls by remember { mutableStateOf(false) }
+    if (screenControls) sh.zeron.android.voice.screen.ScreenControlsDialog(controller) { screenControls = false }
     val state by controller.state.collectAsState()
     val consent by controller.consentRequest.collectAsState()
     val preparing by session.preparing.collectAsState()
@@ -43,6 +45,7 @@ fun JarvisAssistantOverlay(model: AppModel, session: JarvisAssistantSession) {
         ) }) { action ->
         when (action) {
             AssistantAction.Close -> session.dismiss()
+            AssistantAction.Screen -> { screenControls = true }
             AssistantAction.Settings -> session.openApp("jarvis-settings")
             AssistantAction.Start -> session.startJarvis()
             AssistantAction.Consent -> controller.acceptConsent()
@@ -138,6 +141,9 @@ internal fun JarvisAssistantContent(
                         verticalAlignment = Alignment.CenterVertically) {
                         FilledTonalIconButton(onClick = { onAction(AssistantAction.Settings) }, modifier = Modifier.size(48.dp)) {
                             Icon(Icons.Default.Settings, "Jarvis settings")
+                        }
+                        if (state.live) FilledTonalIconButton(onClick = { onAction(AssistantAction.Screen) }, modifier = Modifier.size(48.dp)) {
+                            Icon(Icons.Default.ScreenShare, "Screen context and phone control")
                         }
                         if (state.live) IconButton(onClick = { onAction(AssistantAction.Minimize) }, modifier = Modifier.size(48.dp)) {
                             Icon(Icons.Default.KeyboardArrowDown, "Keep call in background", tint = scheme.onSurface)

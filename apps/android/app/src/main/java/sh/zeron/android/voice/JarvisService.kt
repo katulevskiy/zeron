@@ -24,7 +24,7 @@ class JarvisService : Service() {
         if (android.os.Build.VERSION.SDK_INT >= 30) startForeground(ID, notification(false), ServiceInfo.FOREGROUND_SERVICE_TYPE_MICROPHONE)
         else startForeground(ID, notification(false))
         ready.value = -1
-        scope.launch { controller.state.collect { state ->
+        scope.launch { combine(controller.state, controller.screen.state) { state, _ -> state }.collect { state ->
             if (state.live) manager.notify(ID, notification(state.muted))
         } }
     }
@@ -33,7 +33,7 @@ class JarvisService : Service() {
         val open = Intent(this, MainActivity::class.java).putExtra("route", "jarvis")
         fun action(name: String, code: Int) = PendingIntent.getService(this, code,
             Intent(this, JarvisService::class.java).setAction(name).putExtra("generation", generation), PendingIntent.FLAG_IMMUTABLE or PendingIntent.FLAG_UPDATE_CURRENT)
-        return NotificationCompat.Builder(this, CHANNEL)
+        val builder = NotificationCompat.Builder(this, CHANNEL)
             .setSmallIcon(android.R.drawable.ic_btn_speak_now)
             .setContentTitle(if (muted) "Jarvis · microphone muted" else "Jarvis call")
             .setContentText("Tap to return to the call")
@@ -41,14 +41,16 @@ class JarvisService : Service() {
             .setOngoing(true).setSilent(true).setCategory(NotificationCompat.CATEGORY_CALL)
             .setVisibility(NotificationCompat.VISIBILITY_PRIVATE)
             .addAction(0, if (muted) "Unmute" else "Mute", action(MUTE, 1))
-            .addAction(0, "Hang up", action(STOP, 2)).build()
+            .addAction(0, "Hang up", action(STOP, 2))
+        if (controller.screen.state.value.controlling) builder.addAction(0, "Stop phone control", action(STOP_CONTROL, 3))
+        return builder.build()
     }
 
     override fun onStartCommand(intent: Intent?, flags: Int, startId: Int): Int {
         val id = intent?.getLongExtra("generation", 0) ?: 0
         if (intent?.action == null && controller.owns(id)) { generation = id; ready.value = id }
         if (controller.state.value.live) getSystemService(NotificationManager::class.java).notify(ID, notification(controller.state.value.muted))
-        if (controller.owns(id)) when (intent?.action) { MUTE -> controller.toggleMute(); STOP -> controller.stop() }
+        if (controller.owns(id)) when (intent?.action) { MUTE -> controller.toggleMute(); STOP -> controller.stop(); STOP_CONTROL -> controller.screen.stopControl() }
         if (!controller.state.value.live) stopSelf()
         return START_NOT_STICKY
     }
@@ -65,6 +67,7 @@ class JarvisService : Service() {
         private const val CHANNEL = "jarvis-calls"
         private const val ID = 7001
         private const val MUTE = "sh.zeron.android.jarvis.MUTE"
+        private const val STOP_CONTROL = "sh.zeron.android.jarvis.STOP_CONTROL"
         private const val STOP = "sh.zeron.android.jarvis.STOP"
         private val ready = MutableStateFlow(0L)
         suspend fun ensureStarted(context: Context, generation: Long) {

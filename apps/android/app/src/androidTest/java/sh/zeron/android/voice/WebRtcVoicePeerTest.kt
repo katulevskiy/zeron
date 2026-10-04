@@ -103,6 +103,7 @@ class WebRtcVoicePeerTest {
                 assertEquals(initial, audio.activeRecordingConfigurations.size)
                 media.setMuted(false)
                 media.levels(true)
+                if (it == 0) sh.zeron.android.voice.screen.verifyProjectionWithLiveMicrophone(audio, initial)
                 if (it == 1) captureInCircleWhileAudioRemainsActive(media, audio, initial, instrumentation)
             } finally {
                 media.close()

@@ -36,7 +36,7 @@ fun JarvisAssistantSetup() {
     }) { Text(if (selected) "Default assistant settings" else "Use Zeron as default assistant") }
     Text("Then set press and hold power button to Digital assistant in your phone's gesture or side-button settings. You can also use the corner-swipe or hold-home assistant gesture where supported. The exact gesture depends on your phone.")
     TextButton(onClick = { launch(Intent(Settings.ACTION_SETTINGS)) }) { Text("Open phone gesture settings") }
-    Text("Jarvis opens only when invoked. It doesn't listen for a wake word or read the screen underneath. Unlock your phone before starting a call.", style = MaterialTheme.typography.bodySmall)
+    Text("Jarvis opens when invoked. Screen context and phone control require separate opt-ins below. Unlock your phone before starting a call.", style = MaterialTheme.typography.bodySmall)
     error?.let { Text(it, color = MaterialTheme.colorScheme.error) }
     HorizontalDivider()
 }

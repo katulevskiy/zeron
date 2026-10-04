@@ -69,8 +69,8 @@ android {
         applicationId = "sh.zeron.android"
         minSdk = 29
         targetSdk = 37
-        versionCode = 2
-        versionName = "0.2.102-jarvis-circle"
+        versionCode = 3
+        versionName = "0.2.102-jarvis-screen"
         testInstrumentationRunner = "androidx.test.runner.AndroidJUnitRunner"
         ndk { abiFilters += listOf("arm64-v8a", "x86_64") }
     }

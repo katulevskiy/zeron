@@ -25,6 +25,8 @@ data class JarvisState(
 /** Application-owned, single-generation call: navigation and screen locking keep it alive. */
 class JarvisController(private val app: Application, private val model: AppModel) {
     private val scope = CoroutineScope(SupervisorJob() + Dispatchers.Main.immediate)
+    val screen by lazy { sh.zeron.android.voice.screen.ScreenController(app, model) }
+    internal val isPhoneHost get() = callHostId != null && callHostId == client?.deviceId()
     private val prefs = app.getSharedPreferences("jarvis", 0)
     private val generation = VoiceGeneration()
     private var client: CoreClient? = null
@@ -211,7 +213,7 @@ class JarvisController(private val app: Application, private val model: AppModel
     }
 
 
-    internal suspend fun addPhoto(id: Long, file: java.io.File, canDeliver: () -> Boolean): String {
+    internal suspend fun addPhoto(id: Long, file: java.io.File, screenImage: Boolean = false, canDeliver: () -> Boolean): String {
         if (!owns(id) || !canDeliver() || _state.value.call?.phase != VoiceCallPhase.ACTIVE) throw VoicePhotoException(VoicePhotoException.Reason.ENDED)
         val core = client ?: throw VoicePhotoException(VoicePhotoException.Reason.ENDED)
         val chat = _state.value.call?.chatId ?: throw VoicePhotoException(VoicePhotoException.Reason.ENDED)
@@ -232,7 +234,7 @@ class JarvisController(private val app: Application, private val model: AppModel
                     core.uploadAttachment(host, "jarvis-photo-${java.util.UUID.randomUUID()}.jpg", bytes, null)
                 } },
                 submit = { path ->
-                    when (val result = withContext(Dispatchers.IO) { currentCoroutineContext().ensureActive(); handle.send(voicePhotoRequest(path)) }) {
+                    when (val result = withContext(Dispatchers.IO) { currentCoroutineContext().ensureActive(); handle.send(if (screenImage) voiceScreenRequest(path) else voicePhotoRequest(path)) }) {
                         is SendOutcome.Started -> VoicePhotoReceipt(result.messageId, false)
                         is SendOutcome.Steered -> VoicePhotoReceipt(result.messageId, false)
                         is SendOutcome.Queued -> VoicePhotoReceipt(result.queueId, true)
@@ -253,6 +255,26 @@ class JarvisController(private val app: Application, private val model: AppModel
         finally { handle.destroy() }
     }
 
+    internal suspend fun canStreamScreen(id: Long): Boolean {
+        if (!owns(id) || _state.value.call?.phase != VoiceCallPhase.ACTIVE || _state.value.call?.work != VoiceCallWork.IDLE) return false
+        val core = client ?: return false
+        val chat = _state.value.call?.chatId ?: return false
+        return withContext(Dispatchers.IO) {
+            val handle = core.openSession(chat)
+            try { owns(id) && core === client && handle.composer().pendingSends.isEmpty() }
+            finally { handle.destroy() }
+        }
+    }
+    internal suspend fun sendContext(id: Long, text: String) {
+        check(owns(id) && _state.value.call?.phase == VoiceCallPhase.ACTIVE)
+        val core = client ?: error("Call ended")
+        val chat = _state.value.call?.chatId ?: error("Call ended")
+        val handle = withContext(Dispatchers.IO) { core.openSession(chat) }
+        try { withContext(Dispatchers.IO) {
+            currentCoroutineContext().ensureActive(); check(owns(id) && core === client)
+            handle.send(SendRequest(text, emptyList(), null, BusyPolicy.QUEUE))
+        } } finally { handle.destroy() }
+    }
     fun stop() {
         if (generation.live) model.feedback.both(Haptic.Confirm, Cue.Close)
         finish(null)
@@ -260,6 +282,7 @@ class JarvisController(private val app: Application, private val model: AppModel
 
     private fun finish(reason: VoiceEndReason?) {
         if (!generation.end()) return
+        screen.stop()
         permission?.second?.complete(false)
         permission = null
         _permissionRequest.value = null

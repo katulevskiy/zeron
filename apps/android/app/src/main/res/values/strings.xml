@@ -1,4 +1,5 @@
 <?xml version="1.0" encoding="utf-8"?>
 <resources>
     <string name="app_name">Zeron</string>
+    <string name="jarvis_accessibility_description">Lets Jarvis inspect visible controls and perform requested taps, typing, scrolling and navigation during an explicitly enabled phone control session. Add your Jev key in Jarvis settings. You can stop control at any time.</string>
 </resources>

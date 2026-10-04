@@ -61,7 +61,7 @@ class JarvisAssistantSession(context: Context) : VoiceInteractionSession(context
         savedState.performAttach()
         savedState.performRestore(null)
         registry.currentState = Lifecycle.State.CREATED
-        setDisabledShowContext(SHOW_WITH_ASSIST or SHOW_WITH_SCREENSHOT)
+        updateScreenContext()
         current = WeakReference(this)
         scope.launch {
             model.jarvis.permissionRequest.collect { id ->
@@ -95,6 +95,10 @@ class JarvisAssistantSession(context: Context) : VoiceInteractionSession(context
             }
         }
     }
+    private fun updateScreenContext() {
+        setDisabledShowContext(SHOW_WITH_ASSIST or if (model.jarvis.screen.settings.contextEnabled.value) 0 else SHOW_WITH_SCREENSHOT)
+    }
+    override fun onHandleScreenshot(screenshot: android.graphics.Bitmap?) { model.jarvis.screen.acceptAssist(screenshot) }
     override fun onCreateContentView(): View {
         window.window?.apply {
             addFlags(WindowManager.LayoutParams.FLAG_DIM_BEHIND)
@@ -130,6 +134,7 @@ class JarvisAssistantSession(context: Context) : VoiceInteractionSession(context
             return
         }
         model.jarvis.showAssistant(this)
+        updateScreenContext()
         if (permissionGeneration != null) {
             // Another hardware invocation must not cover the pending Android
             // permission dialog or create a second request.
@@ -292,7 +297,7 @@ class JarvisAssistantSession(context: Context) : VoiceInteractionSession(context
     }
     override fun onCloseSystemDialogs() { trace("close system dialogs"); closeSystemUi() }
     override fun onBackPressed() { if (camera.state.value.open) camera.close() else dismiss() }
-    override fun onLockscreenShown() { closeSystemUi() }
+    override fun onLockscreenShown() { model.jarvis.screen.stop(); closeSystemUi() }
     override fun onDestroy() {
         camera.dispose()
         cancelCameraForNavigation()
@@ -325,6 +330,8 @@ class JarvisAssistantSession(context: Context) : VoiceInteractionSession(context
     companion object {
         private const val RESUME = "sh.zeron.android.jarvis.RESUME"
         private var current: WeakReference<JarvisAssistantSession>? = null
+        fun refreshContext() { current?.get()?.updateScreenContext() }
+        fun hideForControl() { current?.get()?.takeIf { it.shown }?.minimize() }
         fun permissionFinished(id: Long, granted: Boolean = false) { current?.get()?.resumePermission(id, granted) }
     }
 }
