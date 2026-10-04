@@ -19,6 +19,10 @@ final class SessionViewController: UIViewController, UIGestureRecognizerDelegate
     private var shown = SessionChrome()
     private let openedAt = CACurrentMediaTime()
     private var reportedOpen = false
+    private lazy var ellipsisItem = UIBarButtonItem(image: UIImage(systemName: "ellipsis"), menu: sessionMenu())
+    private let sideChatsButton = UIButton(type: .system)
+    private lazy var sideChatsItem = UIBarButtonItem(customView: sideChatsButton)
+    private var sideChatsToken: AnyObject?
 
     init(app: AppModel, chatId: String) {
         self.app = app
@@ -39,12 +43,20 @@ final class SessionViewController: UIViewController, UIGestureRecognizerDelegate
         }
         navigationItem.largeTitleDisplayMode = .never
         navigationItem.titleView = titleView
-        navigationItem.rightBarButtonItem = UIBarButtonItem(image: UIImage(systemName: "ellipsis"), menu: sessionMenu())
+        navigationItem.rightBarButtonItems = [ellipsisItem]
+        sideChatsButton.addAction(UIAction { [weak self] _ in self?.presentSideChats() }, for: .touchUpInside)
+        sideChatsToken = app.observe { [weak self] in self?.updateSideChatsButton() }
+        updateSideChatsButton()
 
         list.frame = view.bounds
         list.autoresizingMask = [.flexibleWidth, .flexibleHeight]
         list.accessibilityIdentifier = "transcript"
         list.imageLoader = { [weak self] ref, iv in self?.source.loadImage(ref, into: iv) }
+        // The fork seam's "Forked from …" link: open the source chat.
+        list.onOpenChat = { [weak self] id in
+            guard let self, id != self.chatId else { return }
+            self.router?.openSession(id)
+        }
         // Hidden while following (the runway glide and tail spring travel).
         list.onDistanceFromBottom = { [weak self] d in
             guard let self else { return }
@@ -521,6 +533,54 @@ final class SessionViewController: UIViewController, UIGestureRecognizerDelegate
                 },
             ])
         }])
+    }
+
+    /// The branch button: present once the chat has side chats, tinted when
+    /// one is working or waiting, with the count beside the glyph.
+    private func updateSideChatsButton() {
+        let children = app.children(of: chatId)
+        guard !children.isEmpty else {
+            navigationItem.rightBarButtonItems = [ellipsisItem]
+            return
+        }
+        let working = children.contains { $0.status == .working }
+        let awaiting = children.contains { $0.status == .awaiting }
+        let tone = working ? StatusTone.working : awaiting ? StatusTone.input : Palette.secondary
+        var config = UIButton.Configuration.plain()
+        config.image = UIImage(systemName: "arrow.triangle.branch", withConfiguration: UIImage.SymbolConfiguration(pointSize: 15, weight: .medium))
+        config.imagePadding = 4
+        config.contentInsets = NSDirectionalEdgeInsets(top: 6, leading: 6, bottom: 6, trailing: 8)
+        config.baseForegroundColor = tone
+        var title = AttributedString("\(children.count)")
+        title.font = Fonts.ui(.sansMedium, 13)
+        title.foregroundColor = tone
+        config.attributedTitle = title
+        sideChatsButton.configuration = config
+        sideChatsButton.accessibilityLabel = "Side chats"
+        sideChatsButton.accessibilityValue = "\(children.count)"
+        sideChatsButton.accessibilityIdentifier = "side-chats"
+        navigationItem.rightBarButtonItems = [ellipsisItem, sideChatsItem]
+    }
+
+    private func presentSideChats() {
+        let sheet = SideChatsSheetController(app: app, parentId: chatId, currentChatId: chatId)
+        let nav = UINavigationController(rootViewController: sheet)
+        nav.navigationBar.titleTextAttributes = [.font: Fonts.ui(.sansSemibold, 17), .foregroundColor: Palette.text]
+        nav.navigationBar.tintColor = Palette.text
+        sheet.navigationItem.rightBarButtonItem = UIBarButtonItem(systemItem: .done, primaryAction: UIAction { [weak nav] _ in nav?.dismiss(animated: true) })
+        if traitCollection.horizontalSizeClass == .regular {
+            // iPad: a popover off the branch button, over the transcript.
+            nav.modalPresentationStyle = .popover
+            nav.popoverPresentationController?.barButtonItem = sideChatsItem
+            nav.preferredContentSize = CGSize(width: 380, height: 520)
+        } else {
+            nav.modalPresentationStyle = .pageSheet
+            if let sheet = nav.sheetPresentationController {
+                sheet.detents = [.medium(), .large()]
+                sheet.prefersGrabberVisible = true
+            }
+        }
+        present(nav, animated: true)
     }
 }
 

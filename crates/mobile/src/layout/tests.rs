@@ -545,6 +545,43 @@ fn running_subagent_shows_a_spinner_after_its_spawn_resolves() {
     assert!(failed.display(0).unwrap().runs.iter().any(|r| r.color == display::ColorRole::Danger), "failed subagent is tinted danger");
 }
 
+/// The fork seam is tappable: its chip carries a `zeron://chat/<id>` link,
+/// so the host can open the source chat.
+#[test]
+fn fork_marker_links_to_source_chat() {
+    use zeron_doc::parts::{MessagePart, MessageStatus};
+    use zeron_doc::schema::{MessageRole, SessionMessageEntry};
+    let mut w = worker(390.0);
+    w.input = TranscriptInput {
+        entries: vec![Arc::new(SessionMessageEntry {
+            id: "m0".into(),
+            role: MessageRole::System,
+            parts: vec![MessagePart::Fork {
+                id: "fork".into(),
+                source_chat_id: "chat-veil".into(),
+                source_title: "Streaming veil on transcript rows".into(),
+            }],
+            created_at: 0,
+            device_id: String::new(),
+            status: Some(MessageStatus::Complete),
+            continuation_of: None,
+            duration_ms: None,
+        })],
+        ..Default::default()
+    };
+    let frame = w.pass();
+    assert_eq!(frame.row_count(), 1);
+    assert!(matches!(frame.placement(0).unwrap().kind, RowKind::Chip));
+    let d = frame.display(0).unwrap();
+    assert!(
+        d.copy_text.contains("Forked from Streaming veil"),
+        "chip copy: {}",
+        d.copy_text
+    );
+    assert_eq!(d.links.len(), 1, "one link hit over the chip");
+    assert_eq!(d.links[0].url, "zeron://chat/chat-veil");
+}
+
 #[test]
 fn links_get_hit_regions() {
     for md in [

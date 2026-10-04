@@ -593,6 +593,30 @@ fn short(host: &str, now: i64, prompt: &str, reply: &str) -> Vec<SessionMessageE
     ]
 }
 
+/// A forked side chat: the fork seam the engine writes, then its own turn.
+fn side(
+    host: &str,
+    now: i64,
+    source_id: &str,
+    source_title: &str,
+    prompt: &str,
+    reply: &str,
+) -> Vec<SessionMessageEntry> {
+    let mut entries = vec![entry(
+        "m0",
+        MessageRole::System,
+        host,
+        now - 150_000,
+        vec![MessagePart::Fork {
+            id: "fork".into(),
+            source_chat_id: source_id.into(),
+            source_title: source_title.into(),
+        }],
+    )];
+    entries.extend(short(host, now, prompt, reply));
+    entries
+}
+
 /// Fixture transcript for a demo chat (`None` = starts empty).
 pub(crate) fn fixture(chat_id: &str, host: &str, last_activity: i64) -> Vec<SessionMessageEntry> {
     let now = last_activity;
@@ -622,9 +646,11 @@ pub(crate) fn fixture(chat_id: &str, host: &str, last_activity: i64) -> Vec<Sess
             "Draft the launch post outline.",
             "## Outline\n\n1. Why a phone viewport\n2. The CRDT under the hood\n3. What's next",
         ),
-        "chat-side" => short(
+        "chat-side" => side(
             host,
             now,
+            "chat-veil",
+            "Streaming veil on transcript rows",
             "What EMA window does the veil use?",
             "α = 0.2 over inter-append gaps, seeded from the first two chunks.",
         ),

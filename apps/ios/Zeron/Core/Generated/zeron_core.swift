@@ -1032,6 +1032,13 @@ public protocol CoreClientProtocol: AnyObject, Sendable {
     func searchFiles(deviceId: String, chatId: String?, spaceId: String?, query: String) async throws  -> [FileMatch]
     
     /**
+     * The same search including side chats and agent-spawned child chats —
+     * the mobile clients group those under "Side chats", so a query is the
+     * only way to reach them.
+     */
+    func searchIncludingChildren(query: String, limit: UInt32)  -> [SearchHit]
+    
+    /**
      * An already-open session.
      */
     func session(chatId: String)  -> SessionHandle?
@@ -1679,6 +1686,22 @@ open func searchFiles(deviceId: String, chatId: String?, spaceId: String?, query
             liftFunc: FfiConverterSequenceTypeFileMatch.lift,
             errorHandler: FfiConverterTypeCoreError_lift
         )
+}
+    
+    /**
+     * The same search including side chats and agent-spawned child chats —
+     * the mobile clients group those under "Side chats", so a query is the
+     * only way to reach them.
+     */
+open func searchIncludingChildren(query: String, limit: UInt32) -> [SearchHit]  {
+    return try!  FfiConverterSequenceTypeSearchHit.lift(try! rustCall() {
+        uniffiCallStatus in
+    uniffi_zeron_mobile_fn_method_coreclient_search_including_children(
+            self.uniffiCloneHandle(),
+        FfiConverterString.lower(query),
+        FfiConverterUInt32.lower(limit),uniffiCallStatus
+    )
+})
 }
     
     /**
@@ -13232,6 +13255,9 @@ private let initializationResult: InitializationResult = {
         return InitializationResult.apiChecksumMismatch
     }
     if (uniffi_zeron_mobile_checksum_method_coreclient_search_files() != 31096) {
+        return InitializationResult.apiChecksumMismatch
+    }
+    if (uniffi_zeron_mobile_checksum_method_coreclient_search_including_children() != 42362) {
         return InitializationResult.apiChecksumMismatch
     }
     if (uniffi_zeron_mobile_checksum_method_coreclient_session() != 12772) {

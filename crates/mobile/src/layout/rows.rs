@@ -413,10 +413,28 @@ impl RowBuilder {
                             let gap = gap_for(&rows, false);
                             rows.push(Placed { core: Arc::new(chip_row(ctx, &entry.id, id, "exclamationmark.triangle", ColorRole::Danger, message)), gap });
                         }
-                        MessagePart::Fork { id, source_title, .. } => {
+                        MessagePart::Fork {
+                            id,
+                            source_chat_id,
+                            source_title,
+                        } => {
                             let gap = gap_for(&rows, false);
                             let text = format!("Forked from {source_title}");
-                            rows.push(Placed { core: Arc::new(chip_row(ctx, &entry.id, id, "arrow.triangle.branch", ColorRole::TextTertiary, &text)), gap });
+                            // Tapping the chip opens the source chat (the Swift host
+                            // routes the `zeron://chat/<id>` URL).
+                            let url = format!("zeron://chat/{source_chat_id}");
+                            rows.push(Placed {
+                                core: Arc::new(chip_row_link(
+                                    ctx,
+                                    &entry.id,
+                                    id,
+                                    "arrow.triangle.branch",
+                                    ColorRole::TextTertiary,
+                                    &text,
+                                    &url,
+                                )),
+                                gap,
+                            });
                         }
                         _ => {}
                     }
@@ -571,10 +589,50 @@ fn prepare_user_text(ctx: &mut Ctx, body: &str, style: super::style::Resolved, l
     }
 }
 
-fn chip_row(ctx: &mut Ctx, entry_id: &str, part_id: &str, icon: &'static str, color: ColorRole, text: &str) -> RowCore {
+fn chip_row(
+    ctx: &mut Ctx,
+    entry_id: &str,
+    part_id: &str,
+    icon: &'static str,
+    color: ColorRole,
+    text: &str,
+) -> RowCore {
+    chip_row_parts(ctx, entry_id, part_id, icon, color, text, None)
+}
+
+/// A chip whose text is tappable: `url` becomes a link hit over the label
+/// (the fork marker's "Forked from …" opens the source chat).
+fn chip_row_link(
+    ctx: &mut Ctx,
+    entry_id: &str,
+    part_id: &str,
+    icon: &'static str,
+    color: ColorRole,
+    text: &str,
+    url: &str,
+) -> RowCore {
+    chip_row_parts(ctx, entry_id, part_id, icon, color, text, Some(url))
+}
+
+fn chip_row_parts(
+    ctx: &mut Ctx,
+    entry_id: &str,
+    part_id: &str,
+    icon: &'static str,
+    color: ColorRole,
+    text: &str,
+    url: Option<&str>,
+) -> RowCore {
     let (size, lh) = TYPE.small;
     let style = ctx.typo.style(Family::Sans, Weight::Medium, false, size);
     let lh = ctx.typo.px(lh);
+    let mut label = prepare_plain(ctx, text, style, lh, if color == ColorRole::Danger { ColorRole::Danger } else { ColorRole::TextSecondary }, WhiteSpace::Normal);
+    if let Some(url) = url {
+        label.links.push(url.to_owned());
+        if let Some(paint) = label.paints.first_mut() {
+            paint.link = Some(0);
+        }
+    }
     RowCore {
         key: row_key(&format!("{entry_id}#{part_id}")),
         version: next_version(),
@@ -583,7 +641,7 @@ fn chip_row(ctx: &mut Ctx, entry_id: &str, part_id: &str, icon: &'static str, co
         content: Content::Chip(Chip {
             icon,
             color,
-            text: prepare_plain(ctx, text, style, lh, if color == ColorRole::Danger { ColorRole::Danger } else { ColorRole::TextSecondary }, WhiteSpace::Normal),
+            text: label,
         }),
         copy_text: text.to_owned(),
     }

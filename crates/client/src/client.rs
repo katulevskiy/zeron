@@ -706,6 +706,12 @@ impl Client {
         self.workspace().search(query, limit)
     }
 
+    /// Search including child chats — side chats never list in the mobile
+    /// sidebar, so the mobile search is their only discovery surface.
+    pub fn search_including_children(&self, query: &str, limit: usize) -> Vec<SearchHit> {
+        self.workspace().search_including_children(query, limit)
+    }
+
     // ── workspace writes ───────────────────────────────────────────────────
 
     /// Mint a chat row (born on chat2: `roomGen: 2`). The row is written

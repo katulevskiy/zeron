@@ -206,6 +206,17 @@ impl CoreClient {
             .collect()
     }
 
+    /// The same search including side chats and agent-spawned child chats —
+    /// the mobile clients group those under "Side chats", so a query is the
+    /// only way to reach them.
+    pub fn search_including_children(&self, query: String, limit: u32) -> Vec<SearchHit> {
+        self.client
+            .search_including_children(&query, limit as usize)
+            .iter()
+            .map(Into::into)
+            .collect()
+    }
+
     pub fn connectivity(&self) -> Connectivity {
         self.client.connectivity().into()
     }

@@ -103,6 +103,16 @@ fn front_page_mirrors_the_desktop_sidebar() {
 
     let hits = client.search("scroll", 5);
     assert_eq!(hits[0].session.id, "chat-ios-scroll");
+    // Side chats stay out of the top-level scope; the mobile clients use the
+    // child-inclusive variant and group the hits themselves under "Side chats".
+    assert!(
+        !client
+            .search("timing", 5)
+            .iter()
+            .any(|h| h.session.id == "chat-side")
+    );
+    let hits = client.search_including_children("timing", 5);
+    assert_eq!(hits[0].session.id, "chat-side");
 }
 
 #[test]

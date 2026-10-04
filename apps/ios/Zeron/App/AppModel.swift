@@ -12,6 +12,13 @@ final class AppModel {
         var sectionSessions: [String: [SessionRowVM]] = [:]
     }
 
+    /// Search hits split by where they live: the main list, or a chat's
+    /// own side chats (invisible to the front page, shown as a group).
+    struct SearchResults {
+        var sessions: [SessionRowVM] = []
+        var sideChats: [SessionRowVM] = []
+    }
+
     struct LiveCounts: Equatable {
         var working = 0
         var awaiting = 0
@@ -401,10 +408,25 @@ final class AppModel {
         id == "archived" ? archived : frontPage.sectionSessions[id] ?? []
     }
 
-    func search(_ query: String) -> [SessionRowVM] {
+    /// A chat's side chats (forks and agent-spawned children), recency
+    /// order. They never list on the front page; the session's branch button
+    /// and search are their surfaces.
+    func children(of parentId: String) -> [SessionRowVM] {
+        (client?.childSessions(parentId: parentId) ?? []).filter { !$0.archived }.map(Self.vm)
+    }
+
+    func search(_ query: String) -> SearchResults {
         let q = query.trimmingCharacters(in: .whitespaces)
-        guard let client, !q.isEmpty else { return frontPage.sessions }
-        return client.search(query: q, limit: 60).map { Self.vm($0.session) }
+        guard let client, !q.isEmpty else { return SearchResults(sessions: frontPage.sessions) }
+        var out = SearchResults()
+        for hit in client.searchIncludingChildren(query: q, limit: 60) {
+            if hit.session.parentChatId == nil {
+                out.sessions.append(Self.vm(hit.session))
+            } else {
+                out.sideChats.append(Self.vm(hit.session))
+            }
+        }
+        return out
     }
 
 

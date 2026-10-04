@@ -21,6 +21,9 @@ class SessionListController: UIViewController, UICollectionViewDelegate {
     var reorderable = false
     /// The Archived list: rows offer Unarchive instead of Archive / Pin / Move.
     var archivedRows = false
+    /// Side-chat sheets: rows offer Rename / Archive only — children live
+    /// outside the front page's sections, and pinning is top-level only.
+    var compactActions = false
     /// The session open beside this list (iPad sidebar): drawn as current.
     var currentChatId: String? {
         didSet {
@@ -222,7 +225,7 @@ class SessionListController: UIViewController, UICollectionViewDelegate {
     }
 
     private func leadingSwipe(_ path: IndexPath) -> UISwipeActionsConfiguration? {
-        guard !archivedRows, let id = sessionId(path), let vm = sessions[id] else { return nil }
+        guard !archivedRows, !compactActions, let id = sessionId(path), let vm = sessions[id] else { return nil }
         let pin = UIContextualAction(style: .normal, title: vm.pinned ? "Unpin" : "Pin") { [weak self] _, _, done in
             self?.app.setPinned(id, !vm.pinned)
             done(true)
@@ -249,6 +252,7 @@ class SessionListController: UIViewController, UICollectionViewDelegate {
         }
         archive.image = UIImage(systemName: "archivebox.fill")
         archive.backgroundColor = Palette.secondary
+        if compactActions { return UISwipeActionsConfiguration(actions: [archive]) }
         let move = UIContextualAction(style: .normal, title: "Move") { [weak self] _, view, done in
             self?.presentMoveMenu(id, from: view)
             done(true)
@@ -269,6 +273,12 @@ class SessionListController: UIViewController, UICollectionViewDelegate {
                 return UIMenu(children: [
                     UIAction(title: "Unarchive", image: UIImage(systemName: "tray.and.arrow.up")) { _ in self.app.unarchive(id) },
                     UIAction(title: "Rename…", image: UIImage(systemName: "pencil")) { _ in self.rename(id) },
+                ])
+            }
+            if self.compactActions {
+                return UIMenu(children: [
+                    UIAction(title: "Rename…", image: UIImage(systemName: "pencil")) { _ in self.rename(id) },
+                    UIAction(title: "Archive", image: UIImage(systemName: "archivebox"), attributes: .destructive) { _ in self.app.archive(id) },
                 ])
             }
             return UIMenu(children: [
@@ -349,7 +359,10 @@ class SessionsViewController: SessionListController {
 
     override func buildSections() -> [(id: String, header: String?, folders: [FolderRowVM], sessions: [SessionRowVM])] {
         if !query.trimmingCharacters(in: .whitespaces).isEmpty {
-            return [("results", nil, [], app.search(query))]
+            let results = app.search(query)
+            var out: [(id: String, header: String?, folders: [FolderRowVM], sessions: [SessionRowVM])] = [("results", nil, [], results.sessions)]
+            if !results.sideChats.isEmpty { out.append(("side-chats", "Side chats", [], results.sideChats)) }
+            return out
         }
         var out: [(id: String, header: String?, folders: [FolderRowVM], sessions: [SessionRowVM])] = []
         for f in app.frontPage.folders {
@@ -516,6 +529,9 @@ final class SearchViewController: SessionListController, UISearchResultsUpdating
     }
 
     override func buildSections() -> [(id: String, header: String?, folders: [FolderRowVM], sessions: [SessionRowVM])] {
-        [("results", nil, [], app.search(query))]
+        let results = app.search(query)
+        var out: [(id: String, header: String?, folders: [FolderRowVM], sessions: [SessionRowVM])] = [("results", nil, [], results.sessions)]
+        if !results.sideChats.isEmpty { out.append(("side-chats", "Side chats", [], results.sideChats)) }
+        return out
     }
 }

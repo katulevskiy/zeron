@@ -171,6 +171,46 @@ final class SessionFlowTests: XCTestCase {
         snapshot(app, "link-opened")
     }
 
+    /// The branch button lists a chat's side chats; opening one shows the
+    /// fork seam, and tapping the seam returns to the source chat.
+    func testSideChatsSheetAndForkSeam() {
+        let app = launch(["-route", "chat:chat-veil"])
+        XCTAssertTrue(app.scrollViews["transcript"].waitForExistence(timeout: 10))
+        let branch = app.buttons["side-chats"]
+        XCTAssertTrue(branch.waitForExistence(timeout: 10), "branch button appears for a chat with side chats")
+        XCTAssertEqual(branch.value as? String, "1")
+        branch.tap()
+        XCTAssertTrue(app.navigationBars["Side chats"].waitForExistence(timeout: 5))
+        let row = app.cells["session-chat-side"]
+        XCTAssertTrue(row.waitForExistence(timeout: 5))
+        snapshot(app, "side-chats-sheet")
+        row.tap()
+        // The side chat's transcript opens with the tappable fork seam.
+        let seam = app.staticTexts["Forked from Streaming veil on transcript rows"]
+        XCTAssertTrue(seam.waitForExistence(timeout: 10))
+        snapshot(app, "fork-seam")
+        let link = app.descendants(matching: .any).matching(NSPredicate(format: "identifier == 'transcript-link' AND value CONTAINS 'chat-veil'")).firstMatch
+        XCTAssertTrue(link.waitForExistence(timeout: 5), "fork seam link exposed")
+        link.tap()
+        XCTAssertTrue(seam.waitForNonExistence(timeout: 5), "the seam jumped back to the source chat")
+        snapshot(app, "back-at-source")
+    }
+
+    /// Search finds side chats the front page never lists, grouped under
+    /// their own "Side chats" header.
+    func testSearchFindsSideChats() {
+        let app = launch()
+        XCTAssertTrue(app.staticTexts["Sessions"].waitForExistence(timeout: 10))
+        app.tabBars.buttons["Search"].tap()
+        let field = app.searchFields.firstMatch
+        XCTAssertTrue(field.waitForExistence(timeout: 5))
+        field.tap()
+        field.typeText("timing")
+        XCTAssertTrue(app.staticTexts["Side chats"].waitForExistence(timeout: 5), "side-chat group header")
+        XCTAssertTrue(app.cells["session-chat-side"].waitForExistence(timeout: 5))
+        snapshot(app, "search-side-chats")
+    }
+
     /// Settings turns notifications on (system prompt), and tapping a
     /// session notification opens that session. The notification is sent
     /// from the host (`xcrun simctl push`, same payload as the edge) once the

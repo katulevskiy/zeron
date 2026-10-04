@@ -237,7 +237,19 @@ impl WorkspaceSnapshot {
     /// Case-insensitive search over titles, project names, branches and
     /// previews. Every whitespace-separated term must match some field.
     /// Active sessions rank above archived ones; ties break by recency.
+    /// Top-level chats only (the desktop sidebar's scope).
     pub fn search(&self, query: &str, limit: usize) -> Vec<SearchHit> {
+        self.search_scope(query, limit, false)
+    }
+
+    /// The same search including child chats (side chats and agent-spawned
+    /// workers). Mobile clients surface these as their own "Side chats"
+    /// group, since they never appear in the main list.
+    pub fn search_including_children(&self, query: &str, limit: usize) -> Vec<SearchHit> {
+        self.search_scope(query, limit, true)
+    }
+
+    fn search_scope(&self, query: &str, limit: usize, include_children: bool) -> Vec<SearchHit> {
         let terms: Vec<String> = query.split_whitespace().map(|t| t.to_lowercase()).collect();
         if terms.is_empty() {
             return Vec::new();
@@ -245,7 +257,7 @@ impl WorkspaceSnapshot {
         let mut hits: Vec<SearchHit> = self
             .sessions
             .values()
-            .filter(|row| row.parent_chat_id.is_none())
+            .filter(|row| include_children || row.parent_chat_id.is_none())
             .filter_map(|row| score_row(row, &terms).map(|(score, field)| (row, score, field)))
             .map(|(row, score, field)| SearchHit {
                 session: row.clone(),

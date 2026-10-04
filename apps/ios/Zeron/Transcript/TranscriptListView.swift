@@ -38,6 +38,9 @@ final class TranscriptListView: UIScrollView, RowViewDelegate, UIScrollViewDeleg
     var onFollowChange: ((Bool) -> Void)?
     var onDistanceFromBottom: ((CGFloat) -> Void)?
     var imageLoader: ((String, UIImageView) -> Void)?
+    /// An in-transcript chat link (`zeron://chat/<id>`): the fork seam opens
+    /// the chat it was forked from.
+    var onOpenChat: ((String) -> Void)?
 
     // MARK: Runway (desktop transcript.rs `OwnTurnAnchor`)
     //
@@ -570,6 +573,12 @@ final class TranscriptListView: UIScrollView, RowViewDelegate, UIScrollViewDeleg
     }
 
     func rowView(_ view: RowView, open url: URL) {
+        // Chat links (the fork seam) route through the shell, not Safari.
+        if url.scheme == "zeron", url.host == "chat" {
+            let id = url.path.trimmingCharacters(in: CharacterSet(charactersIn: "/"))
+            if !id.isEmpty { onOpenChat?(id.removingPercentEncoding ?? id) }
+            return
+        }
         guard let vc = findViewController() else { return }
         if url.scheme == "http" || url.scheme == "https" {
             let safari = SFSafariViewController(url: url)
