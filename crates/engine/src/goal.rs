@@ -73,6 +73,9 @@ pub struct Observation {
     pub queue_has_rows: bool,
     /// The pending round's prompt row is still in the queue.
     pub own_row_queued: bool,
+    /// That row is held because sending it failed; nothing will deliver it
+    /// until the user acts.
+    pub round_send_failed: bool,
     pub round_outcome: RoundOutcome,
     /// A subagent spawned in the round is still running.
     pub subagents_running: bool,
@@ -114,6 +117,8 @@ fn stop(status: GoalStatus, kind: GoalReasonKind, message: impl Into<String>) ->
 pub fn decide(goal: &Goal, obs: &Observation) -> Action {
     match goal.status {
         GoalStatus::Paused | GoalStatus::BudgetLimited | GoalStatus::Complete => Action::Wait,
+        // Written by a newer host: never drive a state this build can't read.
+        GoalStatus::Unknown => Action::Wait,
         GoalStatus::Verifying => match &goal.pending {
             Some(p) if p.kind == GoalPendingKind::Verify && !obs.verifier_live => {
                 Action::RestartVerification { round: p.round }
@@ -159,6 +164,13 @@ fn decide_active(goal: &Goal, obs: &Observation) -> Action {
         }
         Some(p) if p.kind == GoalPendingKind::Turn => {
             if obs.own_row_queued {
+                if obs.round_send_failed {
+                    return stop(
+                        GoalStatus::Paused,
+                        GoalReasonKind::TurnFailed,
+                        "The round's prompt could not be sent to the agent. Resume to retry.",
+                    );
+                }
                 return Action::Wait; // the queue drain delivers it
             }
             match obs.round_outcome {
@@ -594,6 +606,7 @@ mod tests {
             session_errored: false,
             queue_has_rows: false,
             own_row_queued: false,
+            round_send_failed: false,
             round_outcome: RoundOutcome::NotStarted,
             subagents_running: false,
             read_only_chat: false,

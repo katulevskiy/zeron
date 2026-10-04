@@ -290,6 +290,7 @@ async fn a_read_only_chat_records_the_goal_but_never_pursues_it() {
         .queue_command(
             "ro",
             SessionCommandPayload::Goal {
+                issuer: None,
                 command: GoalCommand::Set {
                     objective: "Look around".into(),
                     limits: Default::default(),
@@ -441,6 +442,118 @@ async fn the_token_budget_stops_the_goal_before_paying_for_another_verifier() {
         1,
         "no verifier after the budget was gone"
     );
+}
+
+#[tokio::test]
+async fn agents_cannot_loop_their_own_chat_or_touch_a_persons_goal() {
+    // Hold every turn open (the event sender is never dropped) so goals sit
+    // still while commands are tried.
+    let rig = rig_with(Arc::new(|_, _, out, _| std::mem::forget(out)));
+    let set = |objective: &str| GoalCommand::Set {
+        objective: objective.into(),
+        limits: GoalLimits::default(),
+        replace: true,
+    };
+    // An agent can't put its own chat into a loop.
+    rig.env.goal_command_as(CHAT, set("Keep myself busy"), CHAT);
+    stays_false(
+        || rig.env.goal(CHAT).is_some(),
+        Duration::from_millis(400),
+        "an agent's goal on its own chat",
+    )
+    .await;
+
+    // A person's goal: no agent can pause, replace or clear it.
+    rig.env.set_goal(CHAT, "The person's objective");
+    wait_for(|| rig.env.goal(CHAT).is_some(), "the person's goal").await;
+    let original = goal_of(&rig);
+    assert_eq!(original.set_by_agent, None);
+    for command in [GoalCommand::Pause, set("Say hi"), GoalCommand::Clear] {
+        rig.env.goal_command_as(CHAT, command, "side-chat");
+    }
+    stays_false(
+        || {
+            rig.env
+                .goal(CHAT)
+                .is_none_or(|g| g.id != original.id || g.status == GoalStatus::Paused)
+        },
+        Duration::from_millis(500),
+        "an agent changing a person's goal",
+    )
+    .await;
+
+    // An agent-set goal records its setter; only that agent manages it.
+    rig.env.goal_command(CHAT, GoalCommand::Clear);
+    wait_for(|| rig.env.goal(CHAT).is_none(), "the person clears it").await;
+    rig.env
+        .goal_command_as(CHAT, set("Supervised work"), "boss");
+    wait_for(|| rig.env.goal(CHAT).is_some(), "the agent's goal").await;
+    assert_eq!(goal_of(&rig).set_by_agent.as_deref(), Some("boss"));
+    rig.env
+        .goal_command_as(CHAT, GoalCommand::Pause, "another-agent");
+    stays_false(
+        || {
+            rig.env
+                .goal(CHAT)
+                .is_some_and(|g| g.status == GoalStatus::Paused)
+        },
+        Duration::from_millis(400),
+        "a different agent pausing it",
+    )
+    .await;
+    rig.env.goal_command_as(CHAT, GoalCommand::Pause, "boss");
+    wait_status(&rig, GoalStatus::Paused).await;
+}
+
+#[tokio::test]
+async fn a_round_that_cannot_be_sent_pauses_the_goal_instead_of_looping() {
+    let rig = rig();
+    // A chat on a harness this engine doesn't have (uninstalled or disabled):
+    // every attempt to send its round prompt fails.
+    let chat = "unsendable";
+    rig.env
+        .core
+        .workspace
+        .create_chat(
+            chat,
+            Some("space-main"),
+            None,
+            Some(zeron_proto::ChatConfig {
+                harness: zeron_proto::HarnessId::Codex,
+                model: None,
+                reasoning: None,
+                model_options: Default::default(),
+                sandbox: SandboxLevel::WorkspaceWrite,
+            }),
+            None,
+        )
+        .unwrap();
+    rig.env.set_goal(chat, "Never deliverable");
+    wait_for(
+        || {
+            rig.env
+                .goal(chat)
+                .is_some_and(|g| g.status == GoalStatus::Paused)
+        },
+        "the goal pauses on the failed send",
+    )
+    .await;
+    let goal = rig.env.goal(chat).unwrap();
+    assert_eq!(
+        goal.reason.as_ref().unwrap().kind,
+        GoalReasonKind::TurnFailed
+    );
+    // Paused, not retrying: the goal and its queue stay still.
+    let settled = rig.env.goal(chat).unwrap().updated_at;
+    stays_false(
+        || {
+            rig.env.goal(chat).is_some_and(|g| g.updated_at != settled)
+                || !rig.env.runs.lock().unwrap().is_empty()
+        },
+        Duration::from_millis(800),
+        "retrying the failed send on its own",
+    )
+    .await;
 }
 
 #[tokio::test]
@@ -656,6 +769,85 @@ async fn pausing_or_clearing_while_the_verifier_runs_cancels_it() {
         "the second verifier to be cancelled",
     )
     .await;
+}
+
+/// The controller hooks (turn completed, queue-flush watcher, status change)
+/// all end in `goal_tick`. Hammer it from several threads while verdicts land:
+/// whenever one of those ticks falls between a verifier returning and its
+/// verdict being applied, it must see a verification still in flight, not
+/// start a second one for the same round.
+#[tokio::test(flavor = "multi_thread", worker_threads = 4)]
+async fn a_tick_between_a_verdict_returning_and_being_applied_starts_no_second_verifier() {
+    use std::sync::atomic::{AtomicBool, Ordering};
+
+    const ROUNDS: usize = 20;
+    let rig = rig();
+    for n in 1..ROUNDS {
+        rig.ask.push(FakeReply::After(
+            Duration::from_millis(3),
+            Box::new(FakeReply::Result(not_satisfied(&format!("step {n}")))),
+        ));
+    }
+    rig.ask.push(FakeReply::After(
+        Duration::from_millis(3),
+        Box::new(FakeReply::Result(pass())),
+    ));
+
+    let host = rig.env.core.doc_host.clone();
+    let handle = host.open(CHAT).unwrap();
+    let done = Arc::new(AtomicBool::new(false));
+    let hammers: Vec<_> = (0..6)
+        .map(|_| {
+            let (host, handle, done) = (host.clone(), handle.clone(), done.clone());
+            tokio::spawn(async move {
+                while !done.load(Ordering::Acquire) {
+                    host.goal_tick(&handle).await;
+                    tokio::task::yield_now().await;
+                }
+            })
+        })
+        .collect();
+
+    rig.env.set_goal(CHAT, "Verify every step once");
+    wait_for(
+        || {
+            rig.env
+                .goal(CHAT)
+                .is_some_and(|g| matches!(g.status, GoalStatus::Complete | GoalStatus::Paused))
+        },
+        "the goal to finish",
+    )
+    .await;
+    done.store(true, Ordering::Release);
+    for hammer in hammers {
+        hammer.await.unwrap();
+    }
+    // A late second verifier would still be asking; give it room to show up.
+    tokio::time::sleep(Duration::from_millis(100)).await;
+
+    let goal = goal_of(&rig);
+    assert_eq!(goal.status, GoalStatus::Complete, "{:?}", goal.reason);
+    let rounds: Vec<u32> = rig
+        .ask
+        .calls()
+        .iter()
+        .map(|c| {
+            let at = c.spec.prompt.find("round ").map_or(0, |i| i + 6);
+            c.spec.prompt[at..]
+                .chars()
+                .take_while(char::is_ascii_digit)
+                .collect::<String>()
+                .parse()
+                .unwrap_or(0)
+        })
+        .collect();
+    assert_eq!(
+        rig.ask.calls().len(),
+        ROUNDS,
+        "one verifier per round, got rounds {rounds:?}"
+    );
+    assert_eq!(goal.iteration as usize, ROUNDS);
+    assert_eq!(goal.verdicts.len(), ROUNDS);
 }
 
 // ── restart recovery ───────────────────────────────────────────────────────

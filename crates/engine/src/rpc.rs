@@ -159,6 +159,9 @@ struct AskRefParams {
 struct SubmitAskParams {
     chat_id: String,
     ask_id: String,
+    /// The ask's submission secret (`ZERON_ASK_TOKEN`); missing is refused.
+    #[serde(default)]
+    token: String,
     result: serde_json::Value,
 }
 
@@ -1348,6 +1351,29 @@ const LOGIN_TUNNEL_TTL: Duration = Duration::from_secs(15 * 60);
 /// ControlRpc methods that honor `targetDeviceId` (feature-inventory §2.1). Extend this
 /// list (plus [`is_stream_method`] for streams) to make more of the surface
 /// device-addressable — the handlers themselves need no changes.
+/// Methods only a process on this machine may call. They are never served to
+/// relay clients (other devices on the account): a child ask's verdict comes
+/// from its own chat's MCP server, never from across the relay.
+pub(crate) fn local_only(method: &str) -> bool {
+    matches!(method, methods::GET_ASK_SPEC | methods::SUBMIT_ASK_RESULT)
+}
+
+/// The engine's RPC surface as served to relay clients: everything but the
+/// [`local_only`] methods.
+pub struct RelayRpc(pub std::sync::Arc<EngineRpc>);
+
+#[async_trait]
+impl RpcService for RelayRpc {
+    async fn handle(&self, method: &str, params: serde_json::Value) -> Result<RpcReply, RpcError> {
+        if local_only(method) {
+            return Err(RpcError::Failed(format!(
+                "{method} is only available on the chat's own machine"
+            )));
+        }
+        self.0.handle(method, params).await
+    }
+}
+
 fn forwardable(method: &str) -> bool {
     matches!(
         method,
@@ -1397,6 +1423,8 @@ fn forwardable(method: &str) -> bool {
             | methods::SEARCH_WORKSPACE_FILES
             | methods::READ_WORKSPACE_IMAGE
             | methods::READ_WORKSPACE_FILE
+            | methods::DELETE_WORKSPACE_ENTRY
+            | methods::MOVE_WORKSPACE_ENTRY
             | methods::WRITE_WORKSPACE_FILE
             | methods::WATCH_WORKSPACE_FILES
             | methods::CREATE_WORKTREE
@@ -1920,7 +1948,7 @@ impl RpcService for EngineRpc {
                     .doc_host
                     .asks()
                     .ok_or_else(|| RpcError::Failed("asks are not available".into()))?;
-                RpcReply::value(&asks.submit(&p.chat_id, &p.ask_id, p.result))
+                RpcReply::value(&asks.submit(&p.chat_id, &p.ask_id, &p.token, p.result))
             }
             methods::FORK_SIDE_CHAT => {
                 #[derive(Deserialize)]
@@ -3078,6 +3106,24 @@ impl RpcService for EngineRpc {
                 .map_err(RpcError::from)?;
                 RpcReply::value(&file)
             }
+            methods::DELETE_WORKSPACE_ENTRY => {
+                let request: zeron_proto::DeleteWorkspaceEntryRequest = parse_params(params)?;
+                let outcome = self
+                    .workspace_files
+                    .delete_entry(request)
+                    .await
+                    .map_err(RpcError::from)?;
+                RpcReply::value(&outcome)
+            }
+            methods::MOVE_WORKSPACE_ENTRY => {
+                let request: zeron_proto::MoveWorkspaceEntryRequest = parse_params(params)?;
+                let outcome = self
+                    .workspace_files
+                    .move_entry(request)
+                    .await
+                    .map_err(RpcError::from)?;
+                RpcReply::value(&outcome)
+            }
             methods::WRITE_WORKSPACE_FILE => {
                 let request: zeron_proto::WriteWorkspaceFileRequest = parse_params(params)?;
                 let outcome = tokio::time::timeout(
@@ -3879,6 +3925,8 @@ mod tests {
         assert!(forwardable(methods::SEARCH_WORKSPACE_FILES));
         assert!(forwardable(methods::READ_WORKSPACE_FILE));
         assert!(forwardable(methods::READ_WORKSPACE_IMAGE));
+        assert!(forwardable(methods::DELETE_WORKSPACE_ENTRY));
+        assert!(forwardable(methods::MOVE_WORKSPACE_ENTRY));
         assert!(forwardable(methods::WRITE_WORKSPACE_FILE));
         assert!(forwardable(methods::WATCH_WORKSPACE_FILES));
         assert!(forwardable(methods::WATCH_WORKSPACE_GIT_STATUS));

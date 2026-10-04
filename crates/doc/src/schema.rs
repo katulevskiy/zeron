@@ -415,8 +415,10 @@ impl SessionDoc {
         Ok(true)
     }
 
-    /// Marks a hidden child-ask chat (`ask` primitive): its id. Boot recovery
-    /// never auto-resumes such a chat — nobody is waiting for its answer.
+    /// Marks a hidden child-ask chat (`ask` primitive). Only its presence
+    /// matters; the engine writes a fixed marker, never the ask's id or
+    /// token. Boot recovery never auto-resumes such a chat — nobody is
+    /// waiting for its answer.
     pub fn ask_child(&self) -> Option<String> {
         match self.doc.get_map("meta").get("askChild") {
             Some(loro::ValueOrContainer::Value(LoroValue::String(s))) => Some(s.to_string()),
@@ -2374,6 +2376,7 @@ mod goal_tests {
             id: "c1".into(),
             payload: crate::SessionCommandPayload::Goal {
                 command: GoalCommand::Pause,
+                issuer: None,
             },
             issued_by: "dev".into(),
             issued_at: 1,

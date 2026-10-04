@@ -31,18 +31,28 @@ instructions in the stored prompt for agents.
 
 ### Parent links
 
-A chat created through `create_chat` records the creating chat as its parent:
-`Chat.parent_chat_id` (proto) ⇄ `parentChatId` on the registry/workspace chat
-row (`Mutate createChat { parentChatId? }` → `WorkspaceHost::create_chat_with_parent`).
-Chats with a parent cannot create chats through MCP, including batch creation
-or an explicit parent override. A side chat cannot be selected as a parent;
-only one level of side chats is supported.
+`create_chat` and each request in `create_chats` accept `kind`:
 
-The default is the origin chat (`ZERON_CHAT_ID`); an explicit `parent` argument
-(id, prefix, or title) overrides it. `list_chats { parent }` returns a chat's
-children, and every chat summary carries `parentChatId`. The field is additive
-and serde-defaulted: rows written by older engines read as parentless, and a
-dangling id (parent deleted) is tolerated rather than cascaded.
+| Input | Placement |
+| --- | --- |
+| `kind: "chat"` | Standalone session, visible in the left **Sessions** sidebar; no `parentChatId` is written. |
+| `kind: "side"` | Child of the explicit `parent` or origin chat. Requires one of those. |
+| Kind omitted, origin or parent supplied | Child, preserving the previous default. |
+| Kind omitted, no origin or parent | Standalone, preserving terminal usage. |
+
+`kind: "chat"` with a nonempty `parent`, `kind: "side"` without an origin/parent,
+and unknown kinds fail before any writes. Empty `parent` uses the default.
+The creation result includes the effective `kind`, `chatId`, `deviceId`,
+`project` and `parentChatId`. Kind is derived from the parent; it is not persisted.
+
+Children record `Chat.parent_chat_id` (proto) ⇄ `parentChatId` on the registry
+row (`Mutate createChat { parentChatId? }`). Chats with a parent cannot create
+chats through MCP, including standalone and batch creation or an explicit parent
+override. A side chat cannot be selected as a parent; only one level is supported.
+
+For children, `parent` (id, prefix, or title) overrides the origin (`ZERON_CHAT_ID`).
+`list_chats { parent }` returns children, and chat summaries carry `parentChatId`.
+Rows from older engines read as parentless; a dangling parent id is tolerated.
 
 The left sidebar hides chats that have a parent: `AppState::visible_chats`
 (the Sessions list, project tabs, jump slots) and the Archived section both
@@ -89,7 +99,7 @@ the transcript draws it as "This chat was forked from <title>". `parentChatId`
 defaults to the source; a side chat's own fork button passes its parent so
 the copy lists as a sibling. The file explorer's footer lists a chat's
 **Subagents** (its spawn chips) and **Chats** (its children: forks and
-`create_chat` spawns) and opens either in the right pane.
+`kind: "side"` spawns) and opens either in the right pane.
 
 ## Tools
 
@@ -102,8 +112,8 @@ name (default: the local engine's device).
 | `whoami`           | `LocalDevice`, `EngineInfo`, origin chat summary          |
 | `list_devices`     | `WatchDevices` snapshot                                   |
 | `list_projects`    | `WatchSpaces` snapshot                                    |
-| `list_harnesses`   | `ListHarnesses`                                           |
-| `list_models`      | `ListModels {harness}`                                    |
+| `list_harnesses`   | `ListHarnesses {targetDeviceId?}`                          |
+| `list_models`      | `ListModels {harness, targetDeviceId?}`                                    |
 | `list_chats`       | `WatchChats` + `WatchSessions` snapshots (status merged)  |
 | `get_chat`         | above + `WatchDocMessages` opening frame (pending input)  |
 | `create_chat`      | `Mutate createChat` (+ `renameChat`; optional first send) |
@@ -161,6 +171,74 @@ edge. A brand-new chat has no session row until the host picks the run up, so
 the wait keeps waiting in that case rather than reporting the unstarted run as
 done (this was the one bug the first live run found).
 
+## Selecting a host and project
+
+`list_projects {device?}` filters by device id or exact name; without arguments
+it lists all projects. `list_harnesses {device?}` and
+`list_models {harness, device?}` query the selected host with `targetDeviceId`;
+without `device` they retain the local engine catalogs.
+
+For creation, project alone determines the host. Device alone creates a session
+without a project on that device. With both, the project is resolved **within**
+the selected device, and a project id belonging to another device is rejected.
+Neither argument means a projectless session on the local engine. Repeated names
+or paths are errors with candidate ids and devices; use ids from discovery.
+
+Before writing, creation checks the chosen engine's harness catalog, chooses
+its available default (Claude Code when available, otherwise the first available
+non-mock harness), and validates any explicit model against that host's catalog.
+An explicit harness must be offered, installed and enabled. Catalog failures,
+including model lookup failures, are returned with the device id; there is no
+fallback to the local catalog. A successful remote query checks reachability;
+`lastSeenAt` alone does not establish that an engine is online.
+
+Discover and launch a standalone session:
+
+```text
+list_devices {}
+list_projects { device: "<device-id>" }
+list_harnesses { device: "<device-id>" }
+list_models { device: "<device-id>", harness: "codex" }
+create_chat {
+  kind: "chat",
+  device: "<device-id>",
+  project: "<project-id>",
+  harness: "codex",
+  model: "<model-id from that host's catalog>",
+  title: "Implement feature",
+  prompt: "Implement the feature...",
+  wait: false
+}
+```
+
+Without a project (the host uses its home directory unless `cwd` is given):
+
+```json
+{"kind":"chat", "device":"<device-id>", "harness":"codex", "prompt":"Reply with pong", "wait":true}
+```
+
+A mixed `create_chats` batch, with an origin chat or explicit top-level parent:
+
+```json
+{
+  "requests": [
+    {"kind":"chat", "device":"<device-id>", "project":"<project-id>", "title":"Feature", "prompt":"Implement the feature"},
+    {"kind":"side", "parent":"<parent-chat-id>", "project":"<project-id>", "prompt":"Review the API"}
+  ]
+}
+```
+
+The first prompt and later sends use durable chat commands drained by the host.
+Transcript reads target the chat's host; session status comes from the shared
+registry. Sends remember the session and existing message ids on the MCP connection before
+sending, so a subsequent `wait_for_turn` after `wait:false` waits for that send,
+even before a session row appears. A separate MCP server has no send baseline
+and reports the chat's current posture. Creation records the send time before dispatching its first
+prompt. If completion arrives before the transcript, the wait allows the new
+assistant response to arrive within the **same timeout**. A previous response
+is never substituted for a missing response to a new send. An unfinished
+transcript or missing response at the deadline returns `timedOut`.
+
 ## Goals
 
 `set_goal {objective, chat?, max_rounds?, token_budget?, time_budget_seconds?,
@@ -173,11 +251,21 @@ when it returns (the result says `queued`). `get_goal` returns the goal with its
 verdict history, budgets and stop reason, or `null`.
 
 Trust rules: there is **no tool that completes a goal** — only the verifier
-child chat can. An agent also cannot `pause_goal`, `resume_goal` or `clear_goal`
-the goal that is verifying *its own* chat, nor replace it with `set_goal
-replace=true`: ending that loop is the user's decision, not a way out of
-verification. It can read it, set a goal on its own chat when it has none, and
-manage goals of other chats it supervises.
+child chat can. Goal commands from these tools carry the calling chat as their
+issuer, and the chat's host applies narrower rules to them than to a person's
+(`agent_goal_permission`), so relaying a request through another chat changes
+nothing:
+
+- an agent cannot give **its own chat** a goal, and sets at most the default
+  number of rounds;
+- a goal still in play can be paused, resumed, replaced or cleared only by the
+  agent that set it, so **no agent can change a goal a person set** (a finished
+  goal may be cleared or followed by a new one);
+- only a person extends a goal **past its limit**.
+
+The tools check the same rules before queuing, so a refusal returns at once with
+its reason. A process that bypasses the tools and writes commands to the engine's
+local port directly is outside this model (see the ask profile below).
 
 ## The ask profile
 
@@ -188,7 +276,16 @@ server lists only `whoami`, `get_chat` and `read_chat` plus the run-scoped
 `GetAskSpec`; a non-object schema travels under a `result` key). `submit_result`
 posts to `SubmitAskResult`: an accepted result completes the ask, a rejected one
 returns the path-level violations as an error result so the model repairs and calls
-again (three repair rounds, then the ask fails). Both RPCs are IPC-only.
+again (three repair rounds, then the ask fails).
+
+Only the child's own server can answer. The engine also puts a per-ask secret in
+that server's environment (`ZERON_ASK_TOKEN`), keeps it in memory (never in the
+synced doc, where `meta.askChild` is a bare marker), and refuses any
+`SubmitAskResult` without it. Both RPCs are machine-local: the device relay refuses
+them, so another device on the account cannot answer for a verifier. The token
+guards against a stray or curious process that learned the ids; a process running
+as the same OS user can still read another process's environment, so it is not a
+sandbox boundary.
 
 ## Parallel side chats
 
@@ -229,3 +326,16 @@ BIN=target/debug/zeron
 against a live daemon returns the assistant's `pong` in a few seconds; archive
 the chat afterwards with `archive_chat`. Unit tests (`cargo test -p zeron-mcp`)
 drive the whole tool set against an in-memory stub `RpcService`.
+
+An isolated stdio instance is available with
+`cargo run -p zeron-engine --example mcp_standalone_smoke`. It provides a temporary
+project, an origin coordinator and a scripted `codex` adapter (`smoke-1`) returning
+`pong`. Discover its ids with the list tools, create `kind: "chat"` with a prompt
+and `wait: true`, then check `read_chat`, `send_message` and a mixed batch. The
+profile is removed on exit. This checks MCP dispatch and engine execution without
+changing your running app's sessions or requiring provider credentials.
+
+The `mcp_standalone_session_executes_on_the_selected_device` test in
+`device_routing` additionally runs two engines with a shared registry and device
+relay, verifies execution on the selected host (and absence of execution on the
+caller), and retrieves responses through MCP.

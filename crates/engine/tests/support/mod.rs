@@ -178,7 +178,27 @@ impl Env {
     pub fn goal_command(&self, chat: &str, command: zeron_proto::GoalCommand) {
         self.core
             .doc_host
-            .queue_command(chat, zeron_doc::SessionCommandPayload::Goal { command })
+            .queue_command(
+                chat,
+                zeron_doc::SessionCommandPayload::Goal {
+                    command,
+                    issuer: None,
+                },
+            )
+            .expect("queue goal command");
+    }
+
+    /// A goal command as the agent in `agent` sends it through its tools.
+    pub fn goal_command_as(&self, chat: &str, command: zeron_proto::GoalCommand, agent: &str) {
+        self.core
+            .doc_host
+            .queue_command(
+                chat,
+                zeron_doc::SessionCommandPayload::Goal {
+                    command,
+                    issuer: Some(agent.into()),
+                },
+            )
             .expect("queue goal command");
     }
 

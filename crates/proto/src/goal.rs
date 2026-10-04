@@ -40,6 +40,10 @@ pub enum GoalStatus {
     Complete,
     /// A round / token / time cap was reached. Resumable (extends the cap).
     BudgetLimited,
+    /// A value from a newer host this build doesn't know. Decoding it here
+    /// keeps the rest of the transcript frame readable.
+    #[serde(other)]
+    Unknown,
 }
 
 impl GoalStatus {
@@ -81,6 +85,10 @@ pub enum GoalReasonKind {
     Restarted,
     /// The verifier passed.
     Verified,
+    /// A value from a newer host this build doesn't know. Decoding it here
+    /// keeps the rest of the transcript frame readable.
+    #[serde(other)]
+    Unknown,
 }
 
 #[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
@@ -100,6 +108,10 @@ pub enum VerdictOutcome {
     NotSatisfied,
     /// No verdict: the verifier itself failed.
     Failed,
+    /// A value from a newer host this build doesn't know. Decoding it here
+    /// keeps the rest of the transcript frame readable.
+    #[serde(other)]
+    Unknown,
 }
 
 /// One verifier judgement (or failure) at a round boundary.
@@ -134,6 +146,10 @@ pub enum GoalPendingKind {
     Turn,
     /// The round's turn finished; the verifier is judging it.
     Verify,
+    /// A value from a newer host this build doesn't know. Decoding it here
+    /// keeps the rest of the transcript frame readable.
+    #[serde(other)]
+    Unknown,
 }
 
 /// The controller's ledger: what the active goal is waiting for. Persisted so
@@ -200,6 +216,11 @@ pub struct Goal {
     pub verdicts: Vec<GoalVerdict>,
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub pending: Option<GoalPending>,
+    /// The agent chat that set this goal through its tools; `None` when a
+    /// person set it (and for goals written before this field). Only that
+    /// same agent may change it later; no agent may change a person's goal.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub set_by_agent: Option<String>,
 }
 
 fn default_max_rounds() -> u32 {
@@ -331,22 +352,24 @@ impl Goal {
             reason: None,
             verdicts: Vec::new(),
             pending: None,
+            set_by_agent: None,
         })
     }
 
     /// Round cap after any "resume past the cap" extensions.
     pub fn effective_max_rounds(&self) -> u32 {
-        self.max_rounds.saturating_mul(1 + self.extensions)
+        self.max_rounds
+            .saturating_mul(self.extensions.saturating_add(1))
     }
 
     pub fn effective_token_budget(&self) -> Option<u64> {
         self.token_budget
-            .map(|n| n.saturating_mul(u64::from(1 + self.extensions)))
+            .map(|n| n.saturating_mul(u64::from(self.extensions.saturating_add(1))))
     }
 
     pub fn effective_time_budget_seconds(&self) -> Option<u64> {
         self.time_budget_seconds
-            .map(|n| n.saturating_mul(u64::from(1 + self.extensions)))
+            .map(|n| n.saturating_mul(u64::from(self.extensions.saturating_add(1))))
     }
 
     /// Agent + verifier tokens.
@@ -497,6 +520,69 @@ pub enum GoalEventKind {
     Complete,
     BudgetLimited,
     VerifierFailed,
+    /// A value from a newer host this build doesn't know. Decoding it here
+    /// keeps the rest of the transcript frame readable.
+    #[serde(other)]
+    Unknown,
+}
+
+/// What an agent may do to `target_chat`'s goal through its tools. People
+/// (the composer, the tray) are not checked; agents get a narrower set so a
+/// prompt-injected agent cannot start unbounded loops or talk its way out of
+/// a goal a person set, directly or by relaying through another chat:
+///
+/// - no goal on its own chat, and at most the default round count;
+/// - a goal still in play changes only by the agent that set it, so nothing
+///   an agent sends touches a person's goal (a finished one may be cleared);
+/// - only a person extends a goal past its limit.
+pub fn agent_goal_permission(
+    command: &GoalCommand,
+    current: Option<&Goal>,
+    agent: &str,
+    target_chat: &str,
+) -> Result<(), String> {
+    let set_by_agent = |goal: &Goal| goal.set_by_agent.as_deref() == Some(agent);
+    let ask_user = "Only whoever set this goal can change it; ask the user.";
+    match command {
+        GoalCommand::Set { limits, .. } => {
+            if agent == target_chat {
+                return Err(
+                    "An agent can't give its own chat a goal; ask the user to set it.".into(),
+                );
+            }
+            if limits
+                .max_rounds
+                .is_some_and(|n| n > GOAL_DEFAULT_MAX_ROUNDS)
+            {
+                return Err(format!(
+                    "An agent can set at most {GOAL_DEFAULT_MAX_ROUNDS} rounds; a person can allow more."
+                ));
+            }
+            match current {
+                Some(goal) if goal.status != GoalStatus::Complete && !set_by_agent(goal) => {
+                    Err(ask_user.into())
+                }
+                _ => Ok(()),
+            }
+        }
+        GoalCommand::Clear => match current {
+            Some(goal) if goal.status != GoalStatus::Complete && !set_by_agent(goal) => {
+                Err(ask_user.into())
+            }
+            _ => Ok(()),
+        },
+        GoalCommand::Pause => match current {
+            Some(goal) if !set_by_agent(goal) => Err(ask_user.into()),
+            _ => Ok(()),
+        },
+        GoalCommand::Resume => match current {
+            Some(goal) if !set_by_agent(goal) => Err(ask_user.into()),
+            Some(goal) if goal.status == GoalStatus::BudgetLimited => {
+                Err("Only a person can extend a goal past its limit.".into())
+            }
+            _ => Ok(()),
+        },
+    }
 }
 
 impl MessageOrigin {
@@ -511,6 +597,7 @@ impl MessageOrigin {
             GoalEventKind::Complete => format!("Goal complete after {round} round(s)"),
             GoalEventKind::BudgetLimited => "Goal stopped at its limit".to_owned(),
             GoalEventKind::VerifierFailed => format!("Round {round}: verifier failed"),
+            GoalEventKind::Unknown => "Goal updated".to_owned(),
         };
         if detail.trim().is_empty() {
             head
@@ -526,6 +613,84 @@ mod tests {
 
     fn goal() -> Goal {
         Goal::new("g1", "Ship the thing", &GoalLimits::default(), 10).unwrap()
+    }
+
+    #[test]
+    fn agents_get_a_narrower_set_of_goal_actions_than_people() {
+        let set = |max_rounds: Option<u32>| GoalCommand::Set {
+            objective: "x".into(),
+            limits: GoalLimits {
+                max_rounds,
+                ..Default::default()
+            },
+            replace: true,
+        };
+        let person_goal = goal();
+        let mut agent_goal = goal();
+        agent_goal.set_by_agent = Some("boss".into());
+        let mut limited = agent_goal.clone();
+        limited.status = GoalStatus::BudgetLimited;
+        let mut done = goal();
+        done.status = GoalStatus::Complete;
+        let allowed = |cmd: &GoalCommand, cur: Option<&Goal>, agent: &str| {
+            agent_goal_permission(cmd, cur, agent, "worker").is_ok()
+        };
+
+        // No goal on its own chat, and no more than the default rounds.
+        assert!(agent_goal_permission(&set(None), None, "worker", "worker").is_err());
+        assert!(allowed(&set(None), None, "boss"));
+        assert!(allowed(&set(Some(GOAL_DEFAULT_MAX_ROUNDS)), None, "boss"));
+        assert!(!allowed(
+            &set(Some(GOAL_DEFAULT_MAX_ROUNDS + 1)),
+            None,
+            "boss"
+        ));
+
+        // A person's goal is out of reach for every agent, whatever it relays.
+        for cmd in [
+            set(None),
+            GoalCommand::Pause,
+            GoalCommand::Resume,
+            GoalCommand::Clear,
+        ] {
+            assert!(!allowed(&cmd, Some(&person_goal), "boss"), "{cmd:?}");
+            assert!(!allowed(&cmd, Some(&agent_goal), "other-agent"), "{cmd:?}");
+        }
+        // The agent that set a goal manages it...
+        for cmd in [
+            set(None),
+            GoalCommand::Pause,
+            GoalCommand::Resume,
+            GoalCommand::Clear,
+        ] {
+            assert!(allowed(&cmd, Some(&agent_goal), "boss"), "{cmd:?}");
+        }
+        // ...but only a person extends it past its limit.
+        assert!(!allowed(&GoalCommand::Resume, Some(&limited), "boss"));
+        // A finished goal may be cleared or followed by a new one by anyone.
+        assert!(allowed(&GoalCommand::Clear, Some(&done), "boss"));
+        assert!(allowed(&set(None), Some(&done), "boss"));
+    }
+
+    #[test]
+    fn values_from_a_newer_host_decode_as_unknown() {
+        let mut value = serde_json::to_value(goal()).unwrap();
+        value["status"] = "someFutureStatus".into();
+        value["reason"] = serde_json::json!({"kind": "someFutureReason", "message": "m"});
+        let decoded: Goal = serde_json::from_value(value).unwrap();
+        assert_eq!(decoded.status, GoalStatus::Unknown);
+        assert_eq!(decoded.reason.unwrap().kind, GoalReasonKind::Unknown);
+        for (raw, want) in [
+            ("pass", VerdictOutcome::Pass),
+            ("later", VerdictOutcome::Unknown),
+        ] {
+            let outcome: VerdictOutcome = serde_json::from_value(raw.into()).unwrap();
+            assert_eq!(outcome, want);
+        }
+        let event: GoalEventKind = serde_json::from_value("later".into()).unwrap();
+        assert_eq!(event, GoalEventKind::Unknown);
+        let pending: GoalPendingKind = serde_json::from_value("later".into()).unwrap();
+        assert_eq!(pending, GoalPendingKind::Unknown);
     }
 
     #[test]

@@ -12,7 +12,7 @@ use std::time::Duration;
 use serde::Deserialize;
 use serde_json::{Value, json};
 use zeron_doc::SessionCommandPayload;
-use zeron_proto::{Chat, Goal, GoalCommand, GoalLimits, GoalStatus};
+use zeron_proto::{Chat, Goal, GoalCommand, GoalLimits, GoalStatus, agent_goal_permission};
 
 use crate::tools::{ToolDef, Tools};
 
@@ -125,23 +125,22 @@ impl Tools {
     }
 
     pub(crate) async fn set_goal(&self, args: SetGoalArgs) -> anyhow::Result<Value> {
-        let (chat, own) = self.goal_target(args.chat.as_deref()).await?;
+        let (chat, _) = self.goal_target(args.chat.as_deref()).await?;
         let objective = args.objective.trim().to_owned();
-        if args.replace && own {
-            anyhow::bail!(
-                "you cannot replace the goal that is verifying your own chat; ask the user"
-            );
-        }
+        let limits = GoalLimits {
+            max_rounds: args.max_rounds,
+            token_budget: args.token_budget,
+            time_budget_seconds: args.time_budget_seconds,
+        };
+        // The host's own validation, answered now instead of after the wait.
+        Goal::new("check", &objective, &limits, 0).map_err(|e| anyhow::anyhow!("{e}"))?;
         let command = GoalCommand::Set {
             objective: objective.clone(),
-            limits: GoalLimits {
-                max_rounds: args.max_rounds,
-                token_budget: args.token_budget,
-                time_budget_seconds: args.time_budget_seconds,
-            },
+            limits,
             replace: args.replace,
         };
         let before = self.zeron.goal(&chat.id).await.ok().flatten();
+        self.check_agent_permission(&command, before.as_ref(), &chat)?;
         let command_id = self.queue_goal(&chat, command).await?;
         let applied = self
             .await_goal(&chat, |goal| {
@@ -172,8 +171,9 @@ impl Tools {
     }
 
     pub(crate) async fn clear_goal(&self, args: GoalChatArgs) -> anyhow::Result<Value> {
-        let (chat, own) = self.goal_target(args.chat.as_deref()).await?;
-        refuse_own(own, "clear")?;
+        let (chat, _) = self.goal_target(args.chat.as_deref()).await?;
+        let current = self.zeron.goal(&chat.id).await.ok().flatten();
+        self.check_agent_permission(&GoalCommand::Clear, current.as_ref(), &chat)?;
         let command_id = self.queue_goal(&chat, GoalCommand::Clear).await?;
         let cleared = self.await_cleared(&chat).await;
         Ok(json!({ "chatId": chat.id, "commandId": command_id, "cleared": cleared }))
@@ -185,13 +185,9 @@ impl Tools {
         command: GoalCommand,
         done: impl Fn(&Goal) -> bool,
     ) -> anyhow::Result<Value> {
-        let (chat, own) = self.goal_target(args.chat.as_deref()).await?;
-        let verb = match command {
-            GoalCommand::Pause => "pause",
-            GoalCommand::Resume => "resume",
-            _ => "change",
-        };
-        refuse_own(own, verb)?;
+        let (chat, _) = self.goal_target(args.chat.as_deref()).await?;
+        let current = self.zeron.goal(&chat.id).await.ok().flatten();
+        self.check_agent_permission(&command, current.as_ref(), &chat)?;
         let command_id = self.queue_goal(&chat, command).await?;
         let goal = self.await_goal(&chat, done).await;
         Ok(json!({
@@ -203,8 +199,11 @@ impl Tools {
     }
 
     async fn queue_goal(&self, chat: &Chat, command: GoalCommand) -> anyhow::Result<String> {
+        // Marked as an agent's: the host applies the agent goal rules to it.
+        // A server with no origin chat is a person's own tooling.
+        let issuer = self.zeron.origin().chat_id.clone();
         self.zeron
-            .queue_command(&chat.id, &SessionCommandPayload::Goal { command })
+            .queue_command(&chat.id, &SessionCommandPayload::Goal { command, issuer })
             .await
     }
 
@@ -238,13 +237,23 @@ impl Tools {
     }
 }
 
-fn refuse_own(own: bool, verb: &str) -> anyhow::Result<()> {
-    anyhow::ensure!(
-        !own,
-        "you cannot {verb} the goal that is verifying your own chat — only the user can. \
-         Finish the work; the verifier decides when it is done."
-    );
-    Ok(())
+impl Tools {
+    /// The host's agent goal rules (`agent_goal_permission`), checked before
+    /// queuing so a refusal comes back at once with its reason. The host
+    /// enforces the same rules on the command regardless.
+    fn check_agent_permission(
+        &self,
+        command: &GoalCommand,
+        current: Option<&Goal>,
+        chat: &Chat,
+    ) -> anyhow::Result<()> {
+        match self.zeron.origin().chat_id.as_deref() {
+            Some(agent) => {
+                agent_goal_permission(command, current, agent, &chat.id).map_err(anyhow::Error::msg)
+            }
+            None => Ok(()),
+        }
+    }
 }
 
 #[cfg(test)]

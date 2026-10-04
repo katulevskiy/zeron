@@ -14,6 +14,12 @@ use serde::{Deserialize, Serialize};
 /// `submit_result`).
 pub const ASK_ID_ENV: &str = "ZERON_ASK_ID";
 
+/// Environment variable carrying the ask's submission secret, set beside
+/// [`ASK_ID_ENV`]. The engine keeps it in memory only (never in the synced
+/// doc) and accepts `SubmitAskResult` only with it, so knowing a chat and ask
+/// id is not enough to answer for the verifier.
+pub const ASK_TOKEN_ENV: &str = "ZERON_ASK_TOKEN";
+
 /// One schema violation, located by a JSON-Pointer-style path
 /// (`/items/2/name`; the empty path is the root).
 #[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]

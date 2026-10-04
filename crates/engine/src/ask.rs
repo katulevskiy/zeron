@@ -365,8 +365,23 @@ pub fn validate_result(schema: &Value, value: &Value) -> Result<(), Vec<SchemaVi
 
 // ── the engine-backed implementation ───────────────────────────────────────
 
+/// What a child-ask chat's `meta.askChild` holds: presence alone marks it.
+const ASK_CHILD_MARKER: &str = "ask";
+
+/// Byte comparison that doesn't stop at the first difference, so response
+/// timing reveals nothing about how much of a guessed token was right.
+fn constant_time_eq(a: &[u8], b: &[u8]) -> bool {
+    let mut diff = u8::from(a.len() != b.len());
+    for (x, y) in a.iter().zip(b) {
+        diff |= x ^ y;
+    }
+    diff == 0
+}
+
 struct AskState {
     ask_id: String,
+    /// The submission secret handed only to the child's MCP server.
+    token: String,
     schema: Value,
     description: String,
     max_repairs: u32,
@@ -413,13 +428,29 @@ impl AskService {
 
     /// The `submit_result` tool call: validate, and either accept (the ask's
     /// waiter wakes) or answer with the violations to repair.
-    pub fn submit(&self, chat_id: &str, ask_id: &str, result: Value) -> AskSubmitReply {
+    pub fn submit(
+        &self,
+        chat_id: &str,
+        ask_id: &str,
+        token: &str,
+        result: Value,
+    ) -> AskSubmitReply {
         let Some(state) = lock(&self.live).get(chat_id).cloned() else {
             return rejected("No result is being collected from this chat any more.", 0);
         };
         let mut state = lock(&state);
         if state.ask_id != ask_id {
             return rejected("This result was meant for a different request.", 0);
+        }
+        // Only the child's own MCP server holds the token: a process that
+        // merely learned the ids (the worker's shell, another device) can't
+        // answer for the verifier.
+        if !constant_time_eq(state.token.as_bytes(), token.as_bytes()) {
+            tracing::warn!(chat = %chat_id, "ask submission without the ask's token refused");
+            return rejected(
+                "This result was not submitted by the request's own chat.",
+                0,
+            );
         }
         if state.accepted.is_some() {
             return AskSubmitReply {
@@ -547,9 +578,11 @@ impl AskService {
 
         let child_id = new_id();
         let ask_id = new_id();
+        // Two v4 UUIDs: 244 random bits, held in memory and the child's env.
+        let token = format!("{}{}", new_id(), new_id()).replace('-', "");
         let mcp = self
             .sessions
-            .ask_mcp_server(&child_id, &ask_id)
+            .ask_mcp_server(&child_id, &ask_id, &token)
             .ok_or_else(|| {
                 AskError::Setup(
                     "the engine serves no IPC port, so submit_result is unreachable".into(),
@@ -581,10 +614,13 @@ impl AskService {
             .doc_host
             .open(&child_id)
             .map_err(|e| AskError::Setup(e.to_string()))?;
-        let _ = handle.doc().set_ask_child(&ask_id);
+        // A marker, not the id: the synced doc must not carry what a
+        // submission is checked against.
+        let _ = handle.doc().set_ask_child(ASK_CHILD_MARKER);
 
         let state = Arc::new(Mutex::new(AskState {
             ask_id: ask_id.clone(),
+            token,
             schema: spec.result_schema.clone(),
             description: spec.result_description.clone(),
             max_repairs: spec.max_repairs,

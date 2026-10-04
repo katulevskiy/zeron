@@ -581,6 +581,11 @@ pub struct ChatDocHandle {
     /// explicit prompt or queue send resumes it; incidental doc/status changes
     /// must not turn Cancel into "send the next row".
     queue_paused: AtomicBool,
+    /// The queue is frozen because sending its head failed (not by a Stop or
+    /// restart recovery). Nothing automatic may thaw it — retrying a send that
+    /// keeps failing would loop doc writes with no backoff. A successful send
+    /// or a deliberate user action (send, goal resume) clears it.
+    queue_send_failed: AtomicBool,
     /// Serializes goal-mode decisions and mutations for this chat (commands,
     /// controller ticks, verdicts). Never held across a verifier run.
     goal_lock: tokio::sync::Mutex<()>,
@@ -1591,6 +1596,7 @@ impl DocHost {
             command_drain_lock: tokio::sync::Mutex::new(()),
             steered_rows: Mutex::new(Vec::new()),
             queue_paused: AtomicBool::new(recovered_queue_pending),
+            queue_send_failed: AtomicBool::new(false),
             goal_lock: tokio::sync::Mutex::new(()),
             goal_live: AtomicBool::new(doc.goal().is_some_and(|g| g.status.is_running())),
             goal_tokens: AtomicU64::new(0),
@@ -4113,10 +4119,12 @@ impl DocHost {
             if let Err(err) = self.dispatch_queued(handle, &item, send).await {
                 tracing::warn!(chat = %handle.chat_id, error = %err, "queued send failed");
                 handle.queue_paused.store(true, Ordering::Release);
+                handle.queue_send_failed.store(true, Ordering::Release);
                 let _ = handle.doc.insert_queued(0, &item);
                 handle.publish_queue();
                 return;
             }
+            handle.queue_send_failed.store(false, Ordering::Release);
         }
     }
 
@@ -5372,8 +5380,9 @@ impl DocHost {
                 self.interrupt_and_pause_queue(sessions, handle).await?;
                 Ok((SessionCommandStatus::Applied, None))
             }
-            SessionCommandPayload::Goal { command } => {
-                self.apply_goal_command(handle, command).await
+            SessionCommandPayload::Goal { command, issuer } => {
+                self.apply_goal_command(handle, command, issuer.as_deref())
+                    .await
             }
             SessionCommandPayload::RespondInput {
                 request_id,

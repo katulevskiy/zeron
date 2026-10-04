@@ -31,9 +31,11 @@ AskBackend::ask(parent_chat, AskSpec { prompt, result_schema, … }, cancel)
    requester's own parent when the requester is itself a child, so nesting stays one
    level), same project, cwd and — by default — harness/model as the requester,
    overridable per ask; titled up front so the auto-titler stays away; marked
-   `meta.askChild` so boot recovery never revives it;
-3. injects a **run-scoped MCP server** (`ZERON_ASK_ID`, see `docs/mcp.md`) that
-   offers `read_chat`, `get_chat`, `whoami` and `submit_result`;
+   `meta.askChild` (a bare marker, not the ask id) so boot recovery never revives it;
+3. injects a **run-scoped MCP server** (`ZERON_ASK_ID` and a per-ask secret,
+   `ZERON_ASK_TOKEN`, see `docs/mcp.md`) that offers `read_chat`, `get_chat`,
+   `whoami` and `submit_result`; submissions without the secret, or arriving over
+   the device relay, are refused;
 4. prompts the child (the task, then a fixed "answer through `submit_result`, there
    is no person here" epilogue) and waits for its turn;
 5. validates each submission against the schema. A violating one is answered, as the
@@ -169,6 +171,17 @@ the next action and the budget. A **verifier failure of any kind (timeout, crash
 output, a question it cannot ask) pauses the goal with the reason shown — it never
 retries on its own**, so infrastructure errors cannot loop. Resume is the retry.
 
+**One verification per round.** A verification is keyed by `(goal id, round)` and its
+marker (the controller's in-process run entry) is created under the chat's controller
+lock *together with* the `verifying` ledger write, and removed under the same lock only
+after the verdict has been applied. So there is no instant at which the ledger says
+`verifying` while nothing is registered: a tick that lands while a returned verdict is
+still waiting for the lock sees a verification in flight and waits, and asking to start
+the same `(goal, round)` again is a no-op. (Before this, the entry was dropped when the
+verifier returned and the verdict applied afterwards, and a tick in between judged the
+round a second time.) Restart recovery is unchanged: the registry is per-process, so a
+`verifying` goal found at boot has no entry and is judged again.
+
 ### Safeguards ZCode lacks
 
 * **Round cap** (default 25, per goal) → `budgetLimited`.
@@ -181,7 +194,8 @@ retries on its own**, so infrastructure errors cannot loop. Resume is the retry.
   with "no progress".
 * **Idempotence:** a round prompt is keyed `goal-<id>-r<n>`; re-sending is a no-op
   if it is queued or already in the transcript, so a restart, a lost row or a double
-  tick never double-continues.
+  tick never double-continues. Verifications are idempotent the same way, per
+  `(goal, round)`.
 
 ### Restart and recovery
 
@@ -241,8 +255,10 @@ are the defaults in the UI and `max_rounds` / `token_budget` /
 `time_budget_seconds` on the MCP `set_goal`.
 
 **MCP**: `get_goal`, `set_goal`, `pause_goal`, `resume_goal`, `clear_goal`
-(`docs/mcp.md`). No tool completes a goal, and an agent cannot pause, resume, clear or
-replace the goal verifying its own chat.
+(`docs/mcp.md`). No tool completes a goal. Agent-issued goal commands are checked on
+the host: no goal on the agent's own chat, at most the default rounds, a goal changes
+only by whoever set it (so never a person's goal), and only a person extends a goal
+past its limit.
 
 **Mobile**: out of scope here. The additive types (`Goal`, `MessageOrigin`,
 `TranscriptUpdate.goal`) live in `zeron-proto` / `zeron-doc` for the follow-up.
@@ -283,7 +299,8 @@ cargo test -p zeron-mcp
 cargo test -p zeron-ui --lib goal_panel
 ```
 
-Live: `ZERON_HARNESS=mock ZERON_MOCK_GOAL=1 ZERON_MOCK_DELAY_MS=400`, then
+Live (debug builds only; release builds ignore `ZERON_MOCK_GOAL`):
+`ZERON_HARNESS=mock ZERON_MOCK_GOAL=1 ZERON_MOCK_DELAY_MS=400`, then
 `/goal Make the build green` in a chat. The mock turns add checklist items and run a
 command; the engine's scripted verifier says "not satisfied" twice and then passes.
 

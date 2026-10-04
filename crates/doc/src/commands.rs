@@ -59,6 +59,11 @@ pub enum SessionCommandPayload {
     },
     Goal {
         command: GoalCommand,
+        /// The agent chat that issued it through its tools; absent when a
+        /// person did (the composer's `/goal`, the tray). The host gives agents
+        /// a narrower set of goal actions than people.
+        #[serde(default, skip_serializing_if = "Option::is_none")]
+        issuer: Option<String>,
     },
 }
 
