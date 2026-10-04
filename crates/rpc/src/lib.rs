@@ -33,6 +33,21 @@ pub use server::{ipc_token, serve_connection, serve_ws_listener, serve_ws_listen
 /// RPC method names — single source of truth for both ends.
 /// Full surface: docs/research/feature-inventory.md §2.
 pub mod methods {
+    pub const VOICE_CAPABILITIES_V2: &str = "VoiceCapabilitiesV2";
+    pub const PREPARE_VOICE_V2: &str = "PrepareVoiceV2";
+    pub const OWN_VOICE_V2: &str = "OwnVoiceV2";
+    pub const NEGOTIATE_VOICE_V2: &str = "NegotiateVoiceV2";
+    pub const CONFIRM_VOICE_MEDIA_V2: &str = "ConfirmVoiceMediaV2";
+    pub const REPORT_VOICE_MEDIA_V2: &str = "ReportVoiceMediaV2";
+    pub const STOP_VOICE_V2: &str = "StopVoiceV2";
+    pub const CANCEL_VOICE_ATTEMPT_V2: &str = "CancelVoiceAttemptV2";
+    // Ephemeral local voice; never relay-forwardable.
+    pub const VOICE_ELIGIBILITY: &str = "VoiceEligibility";
+    pub const START_VOICE: &str = "StartVoice";
+    pub const OWN_VOICE: &str = "OwnVoice";
+    pub const APPEND_VOICE: &str = "AppendVoice";
+    pub const MUTE_VOICE: &str = "MuteVoice";
+    pub const STOP_VOICE: &str = "StopVoice";
     pub const WATCH_PREVIEWS: &str = "WatchPreviews";
     pub const LIST_HARNESSES: &str = "ListHarnesses";
     pub const CANCEL_INSTALL: &str = "CancelInstall";
@@ -175,6 +190,8 @@ pub mod methods {
     pub const READ_WORKSPACE_IMAGE: &str = "ReadWorkspaceImage";
     pub const READ_WORKSPACE_FILE: &str = "ReadWorkspaceFile";
     pub const READ_WORKSPACE_BYTES: &str = "ReadWorkspaceBytes";
+    pub const MOVE_WORKSPACE_ENTRY: &str = "MoveWorkspaceEntry";
+    pub const DELETE_WORKSPACE_ENTRY: &str = "DeleteWorkspaceEntry";
     pub const WRITE_WORKSPACE_FILE: &str = "WriteWorkspaceFile";
     pub const WATCH_WORKSPACE_FILES: &str = "WatchWorkspaceFiles";
     pub const CREATE_WORKTREE: &str = "CreateWorktree";

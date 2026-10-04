@@ -258,7 +258,9 @@ class AppModel(private val app: Application) {
 
     val isDemo: Boolean get() = _client.value?.isDemo() == true
     private var refreshScheduled = false
-    private var foreground = false
+    var foreground = false
+        private set
+    val jarvis by lazy { sh.zeron.android.voice.JarvisController(app, this) }
     private var booted = false
 
     /** The engine the current client speaks for, and who it is (a changed key → a new client). */
@@ -677,6 +679,7 @@ class AppModel(private val app: Application) {
         return try {
             val client = CoreClient(config, credentials, listener)
             _client.value = client
+            jarvis.bind(client)
             lastDraft = storedDraft()
             refreshWorkspace()
             client.preloadSessions()
@@ -698,6 +701,7 @@ class AppModel(private val app: Application) {
     }
 
     private fun dropClient() {
+        jarvis.bind(null)
         _client.value?.shutdown()
         _client.value = null
         _workspace.value = null
@@ -750,6 +754,7 @@ class AppModel(private val app: Application) {
         val client = _client.value ?: return
         val snapshot = client.workspace()
         _workspace.value = snapshot
+        jarvis.refreshHosts()
         observeSessions(snapshot, announce)
     }
 
@@ -782,6 +787,7 @@ class AppModel(private val app: Application) {
 
     fun onForeground() {
         foreground = true
+        jarvis.mediaVisible = true
         feedback.setForeground(true)
         // What happened while away was already announced by a notification: start from what is on screen.
         sessionTransitions.reset()
@@ -792,6 +798,7 @@ class AppModel(private val app: Application) {
 
     fun onBackground() {
         foreground = false
+        jarvis.mediaVisible = false
         feedback.setForeground(false)
         _client.value?.onBackground()
     }

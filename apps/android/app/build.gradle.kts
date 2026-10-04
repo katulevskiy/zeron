@@ -70,7 +70,8 @@ android {
         minSdk = 29
         targetSdk = 37
         versionCode = 1
-        versionName = "0.2.97"
+        versionName = "0.2.102-jarvis"
+        testInstrumentationRunner = "androidx.test.runner.AndroidJUnitRunner"
         ndk { abiFilters += listOf("arm64-v8a", "x86_64") }
     }
 
@@ -121,6 +122,7 @@ tasks.named("preBuild") { dependsOn(buildCore, genIcons, fetchProot, fetchRootfs
 
 dependencies {
     implementation(project(":runtime"))
+    implementation(libs.webrtc)
     implementation(libs.androidx.core.ktx)
     implementation(libs.androidx.core.splashscreen)
     implementation(libs.androidx.activity.compose)
@@ -143,6 +145,8 @@ dependencies {
     testImplementation(libs.junit)
     // android.jar's org.json is a stub under unit tests; the Agents parsers need the real one.
     testImplementation(libs.org.json)
+    androidTestImplementation("androidx.test:runner:1.7.0")
+    androidTestImplementation("androidx.test.ext:junit:1.3.0")
 }
 
 kotlin {

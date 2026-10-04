@@ -409,9 +409,7 @@ impl ChatConnectionSnapshot {
             sync_requested,
             stats: client.as_ref().map(|client| client.stats()),
             delivery_live: sync_started
-                && client
-                    .as_ref()
-                    .is_some_and(|client| client.delivery_live()),
+                && client.as_ref().is_some_and(|client| client.delivery_live()),
         }
     }
 
@@ -662,6 +660,20 @@ impl ChatDocHandle {
 
     pub fn chat_id(&self) -> &str {
         &self.chat_id
+    }
+
+    pub(crate) fn commit_voice(
+        &self,
+        transcript: &zeron_proto::voice::VoiceTranscript,
+    ) -> Result<Option<String>, EngineError> {
+        let _owner = lock(&self.transcript_import);
+        zeron_doc::voice::commit_voice_transcript(
+            &self.doc,
+            transcript,
+            &self.device_id,
+            chrono::Utc::now().timestamp_millis(),
+        )
+        .map_err(EngineError::from)
     }
 
     pub fn doc(&self) -> &SessionDoc {
@@ -5531,6 +5543,29 @@ impl DocHost {
     /// actually created. Reuse guard: a chat whose row already points inside a
     /// linked worktree of the same repo keeps it — a duplicate Run (client retry
     /// after a lost ack, ledger reset) must not mint a second checkout.
+    pub(crate) async fn prepare_voice_worktree(
+        &self,
+        chat: &str,
+        spec: &zeron_proto::WorktreeSpec,
+    ) -> Result<(), EngineError> {
+        let (cwd, fresh) = self.materialize_worktree(chat, spec).await?;
+        if let Some(ws) = self.workspace() {
+            ws.set_chat_cwd(chat, &cwd)?;
+            if let Some(worktree) = fresh.as_ref() {
+                ws.set_chat_branch(chat, &worktree.branch)?;
+            }
+        }
+        if spec.space_id.is_some() {
+            self.complete_worktree_setup_handoff(
+                &format!("voice-prepare:{chat}"),
+                chat,
+                spec,
+                fresh.as_ref(),
+            );
+        }
+        Ok(())
+    }
+
     async fn materialize_worktree(
         &self,
         chat_id: &str,

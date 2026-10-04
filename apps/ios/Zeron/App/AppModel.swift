@@ -17,6 +17,7 @@ final class AppModel {
         var awaiting = 0
     }
 
+    @MainActor lazy var voice = RemoteVoiceController(app: self)
     private(set) var client: CoreClient?
     private(set) var frontPage = FrontPage()
     private(set) var archived: [SessionRowVM] = []
@@ -198,7 +199,8 @@ final class AppModel {
     }
 
     /// The user signing out: this device forgets the account's local docs.
-    func signOut() {
+    @MainActor func signOut() {
+        voice.stop()
         forgetOnSignOut = true
         onSignOut?()
     }
@@ -208,7 +210,8 @@ final class AppModel {
     /// keeps a different account out of it.
     private var forgetOnSignOut = false
 
-    func signOutLocally() {
+    @MainActor func signOutLocally() {
+        voice.stop()
         client?.shutdown()
         client = nil
         Credentials.clearStored()

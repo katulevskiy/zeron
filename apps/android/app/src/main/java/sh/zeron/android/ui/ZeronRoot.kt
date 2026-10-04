@@ -74,6 +74,7 @@ fun ZeronRoot(model: AppModel) {
     val appearance by model.appearance.collectAsState()
     ZeronTheme(appearance) {
         ProvideFeedback(model.feedback) {
+            sh.zeron.android.voice.JarvisPrompts(model)
             Surface(Modifier.fillMaxSize(), color = MaterialTheme.colorScheme.background) {
                 val client by model.client.collectAsState()
                 val onboarded by model.onboarded.collectAsState()
@@ -154,6 +155,8 @@ private fun NavController.back() {
 private fun NavController.openRoute(route: String) {
     val nav = this
     when {
+        route == "jarvis" || route == "jarvis-settings" -> nav.navigate(route) { launchSingleTop = true }
+        route == "jarvis-preview" && nav.graph.findNode("jarvis-preview") != null -> nav.open(route)
         route == "new" -> nav.open(Routes.NEW)
         route == "search" -> nav.open(Routes.SEARCH)
         route == "agents" -> nav.open(Routes.AGENTS)
@@ -208,8 +211,12 @@ private fun MainNav(model: AppModel) {
     }
     // NavHost's default is a 700 ms fade in and out: a page that starts transparent and takes most of a second to
     // arrive does not feel instant, however fast it composed. Short fades keep the cross-dissolve and lose the wait.
+    val jarvisLive by model.jarvis.live.collectAsState()
+    val destination by nav.currentBackStackEntryFlow.collectAsState(initial = null)
+    Column(Modifier.fillMaxSize()) {
     NavHost(
         nav,
+        modifier = Modifier.weight(1f),
         startDestination = Routes.HOME,
         enterTransition = { fadeIn(tween(NAV_FADE_IN_MS)) },
         exitTransition = { fadeOut(tween(NAV_FADE_OUT_MS)) },
@@ -217,6 +224,9 @@ private fun MainNav(model: AppModel) {
         popExitTransition = { fadeOut(tween(NAV_FADE_OUT_MS)) },
     ) {
         composable(Routes.HOME) { Home(model, nav) }
+        composable("jarvis") { sh.zeron.android.voice.JarvisScreen(model, onBack = { nav.back() }) }
+        composable("jarvis-settings") { sh.zeron.android.voice.JarvisSettings(model, onBack = { nav.back() }) }
+        if (model.isDebuggable) composable("jarvis-preview") { sh.zeron.android.voice.JarvisScreen(model, onBack = { nav.back() }, preview = true) }
         composable(Routes.CHAT, arguments = listOf(navArgument("subagents") { defaultValue = "false" })) { entry ->
             val id = entry.arguments?.getString("id") ?: return@composable
             val subagents = entry.arguments?.getString("subagents") == "true"
@@ -277,6 +287,8 @@ private fun MainNav(model: AppModel) {
         if (model.isDebuggable) composable(Routes.BADGES) { entry ->
             BadgePreviewScreen(model, entry.arguments?.getString("mode").orEmpty(), onBack = { nav.back() })
         }
+    }
+    if (jarvisLive && destination?.destination?.route != "jarvis") sh.zeron.android.voice.JarvisCompact(model)
     }
 }
 
@@ -355,6 +367,7 @@ private fun HomeChrome(model: AppModel, nav: NavHostController, tab: MutableStat
             val live by model.liveSubagents.collectAsState()
             val summary = remember(workspace, live) { workspace?.let { liveSummary(it, live) } }
             NewSessionBar(summary, onClick = { nav.open(Routes.NEW) })
+            sh.zeron.android.voice.JarvisEntry(model)
         }
         FloatingNavBar(
             listOf(

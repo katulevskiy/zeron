@@ -6,8 +6,8 @@
 //! ([`CursorHarness`]), and opencode over its own HTTP/SSE server protocol
 //! ([`OpencodeHarness`] — what the opencode desktop app speaks). The shared
 //! [`AcpHarness`] remains ONLY for agents built ground-up on ACP — Devin
-//! (`devin acp`), Grok (`grok agent stdio`) and Hermes (`hermes acp`) — plus
-//! pi via the community `pi-acp` adapter until a native driver exists.
+//! (`devin acp`), Grok (`grok agent stdio`) Hermes (`hermes acp`) and
+//! Antigravity. Pi uses native JSONL RPC ([`PiHarness`]).
 //! Adapter-mediated ACP for claude/codex/cursor was retired — and opencode's
 //! ACP layer with it: the adapters held prompt turns open for background
 //! work the CLIs themselves settle eagerly (and opencode's settles on the
@@ -30,6 +30,12 @@ pub enum HarnessError {
     NotInstalled(String),
     #[error("harness protocol error: {0}")]
     Protocol(String),
+    #[error("JSON-RPC rejection {code}: {message}")]
+    Rpc {
+        code: i64,
+        message: String,
+        data: Option<serde_json::Value>,
+    },
     /// A managed adapter install (npm) failed; carries npm's own output so
     /// the cause is diagnosable from the chat error alone.
     #[error("adapter install failed: {0}")]
@@ -48,6 +54,7 @@ pub struct SteerMessage {
 
 /// Host-side controls handed to a run: input-request bridge + steering mailbox.
 pub struct RunControls {
+    pub realtime: Option<codex::realtime::RealtimeControls>,
     /// Shared execution gate held until the harness has shut down and reaped
     /// its subprocess, including when the host drops the event stream. Each
     /// detached session task must retain this lease through its cleanup.
@@ -159,6 +166,15 @@ pub trait Harness: Send + Sync {
         ))
     }
 
+    /// Bootstrap without a synthetic user prompt; providers opt in explicitly.
+    async fn start_idle(
+        &self,
+        _request: RunRequest,
+        _controls: RunControls,
+    ) -> Result<BoxStream<'static, Result<AgentEvent, HarnessError>>, HarnessError> {
+        Err(HarnessError::Protocol("idle runtime unsupported".into()))
+    }
+
     /// Run one (persistent) session; the stream ends with `AgentEvent::Done`.
     async fn run(
         &self,
@@ -172,6 +188,7 @@ pub(crate) mod adapter_install;
 pub mod archive_install;
 mod catalog;
 mod catalog_failure;
+pub(crate) mod code_signature;
 pub mod redact;
 pub use catalog_failure::{CatalogFailure, CatalogFailureCode};
 pub mod claude;
@@ -183,6 +200,7 @@ pub(crate) mod jsonrpc;
 pub mod mock;
 mod model_context;
 pub mod opencode;
+pub mod pi;
 pub mod process;
 mod scratch;
 pub mod shell_env;
@@ -390,6 +408,7 @@ pub use claude::ClaudeHarness;
 pub use codex::CodexHarness;
 pub use cursor::CursorHarness;
 pub use opencode::OpencodeHarness;
+pub use pi::PiHarness;
 
 // ---------------------------------------------------------------------------
 // Child lifecycle (shared by the codex and ACP harnesses)

@@ -183,6 +183,9 @@ final class SidebarViewController: UIViewController, UISearchResultsUpdating {
     private let list: SessionsViewController
     private let nav: UINavigationController
     private let search = UISearchController(searchResultsController: nil)
+    private var voiceBar: VoiceBarItem?
+    private var voiceToken: AnyObject?
+    private var workspaceToken: AnyObject?
 
     var currentChatId: String? {
         get { list.currentChatId }
@@ -233,6 +236,19 @@ final class SidebarViewController: UIViewController, UISearchResultsUpdating {
         list.navigationItem.rightBarButtonItem = nil
         list.toolbarItems = [settings, options, .flexibleSpace(), compose]
         nav.isToolbarHidden = false
+        // Voice beside compose, once a host can run it.
+        let voiceBar = VoiceBarItem(app: app, host: self)
+        self.voiceBar = voiceBar
+        let syncVoice = { [weak self, weak voiceBar] in
+            guard let self, let voiceBar else { return }
+            let items = voiceBar.visible ? [settings, options, .flexibleSpace(), voiceBar.item, compose] : [settings, options, .flexibleSpace(), compose]
+            if self.list.toolbarItems?.count != items.count {
+                self.list.setToolbarItems(items, animated: self.view.window != nil)
+            }
+        }
+        voiceToken = app.voice.observe(syncVoice)
+        workspaceToken = app.observe(syncVoice)
+        syncVoice()
 
         // A hairline between the sidebar and the main column.
         let edge = UIView()

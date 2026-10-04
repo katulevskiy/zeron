@@ -189,7 +189,7 @@ fn locate(id: HarnessId) -> Found {
         Codex => crate::CodexHarness::new().executable_path(),
         Cursor => crate::CursorHarness::new().executable_path(),
         Opencode => crate::OpencodeHarness::new().executable_path(),
-        Pi => crate::AcpHarness::pi().executable_path(),
+        Pi => crate::PiHarness::new().executable_path(),
         Grok => crate::AcpHarness::grok().executable_path(),
         Hermes => crate::AcpHarness::hermes().executable_path(),
         Devin => crate::AcpHarness::devin().executable_path(),

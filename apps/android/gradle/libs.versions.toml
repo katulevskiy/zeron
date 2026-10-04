@@ -13,6 +13,7 @@ browser = "1.10.0"
 coreSplashscreen = "1.2.0"
 junit = "4.13.2"
 orgJson = "20240303"
+webrtc = "150.7871.01"
 
 [libraries]
 androidx-core-ktx = { group = "androidx.core", name = "core-ktx", version.ref = "coreKtx" }
@@ -35,6 +36,8 @@ kotlinx-coroutines-android = { group = "org.jetbrains.kotlinx", name = "kotlinx-
 jna = { group = "net.java.dev.jna", name = "jna", version.ref = "jna" }
 junit = { group = "junit", name = "junit", version.ref = "junit" }
 org-json = { group = "org.json", name = "json", version.ref = "orgJson" }
+
+webrtc = { group = "io.github.webrtc-sdk", name = "android", version.ref = "webrtc" }
 
 [plugins]
 android-application = { id = "com.android.application", version.ref = "agp" }

@@ -177,6 +177,16 @@ fun SettingsScreen(model: AppModel, onOpen: (String) -> Unit) {
                 }
             }
         }
+        section("Voice")
+        item {
+            Column(Modifier.padding(horizontal = 16.dp)) {
+                SegmentedListItem(onClick = tapAction { onOpen("jarvis-settings") },
+                    shapes = segmentedShapes(0, 1),
+                    colors = ListItemDefaults.segmentedColors(containerColor = cardColor()),
+                    supportingContent = { Text("Talk with Codex · device and voice") },
+                    trailingContent = { ZIcon(ZIcons.ChevronRight, null, Modifier.size(20.dp)) }) { Text("Jarvis") }
+            }
+        }
         section("Feedback")
         item {
             Column(Modifier.padding(horizontal = 16.dp)) {

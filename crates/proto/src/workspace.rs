@@ -31,7 +31,12 @@ pub mod capabilities {
     ];
 
     pub fn current() -> Vec<String> {
-        CURRENT.iter().map(|value| (*value).to_string()).collect()
+        let mut capabilities: Vec<String> =
+            CURRENT.iter().map(|value| (*value).to_string()).collect();
+        if std::env::var("ZERON_REMOTE_VOICE").as_deref() == Ok("1") {
+            capabilities.push(crate::voice::remote::CAPABILITY.into());
+        }
+        capabilities
     }
 }
 

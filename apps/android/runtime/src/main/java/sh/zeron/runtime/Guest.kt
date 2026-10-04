@@ -77,6 +77,8 @@ internal class Guest(private val context: Context, private val paths: RuntimePat
         "ZERON_DATA_DIR=$GUEST_HOME/${if (server == null) ".zeron" else ".zeron-dev"}",
         "ZERON_DEVICE_NAME=$deviceName",
         "ZERON_DEVICE_PLATFORM=android",
+        // The phone supplies native WebRTC audio to its Codex orchestrator.
+        "ZERON_REMOTE_VOICE=1",
         "ZERON_NO_LOGIN_SHELL=1",
         "ZERON_PROJECTS_DIR=$PROJECTS_ROOT",
         "ZERON_IPC_PORT=$IPC_PORT",

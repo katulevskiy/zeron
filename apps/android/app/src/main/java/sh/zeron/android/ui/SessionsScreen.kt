@@ -175,7 +175,7 @@ fun SessionsScreen(model: AppModel, onOpen: (String) -> Unit) {
         ) {
             LazyColumn(
                 state = list,
-                contentPadding = PaddingValues(top = WindowInsets.statusBars.asPaddingValues().calculateTopPadding() + 8.dp, bottom = 200.dp),
+                contentPadding = PaddingValues(top = WindowInsets.statusBars.asPaddingValues().calculateTopPadding() + 8.dp, bottom = 260.dp),
                 modifier = Modifier.fillMaxSize(),
             ) {
                 item("header") {

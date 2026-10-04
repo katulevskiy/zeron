@@ -23,20 +23,20 @@ ROOT="$(cd "$(dirname "$0")/../.." && pwd)"
 OUT="${1:-$ROOT/target/android-runtime}"
 CACHE="$OUT/cache/termux"
 REPO="${TERMUX_REPO:-https://packages.termux.dev/apt/termux-main}"
-PROOT_VERSION=5.1.107.95
+PROOT_VERSION=5.1.107.96
 
 # name version arch sha256 — from dists/stable/main/binary-<arch>/Packages.
 PINS=(
-  "proot $PROOT_VERSION aarch64 0a1b3d0f6ef76436c5ed924cd8e8f5a6b7186e99e1650eb2d9bc734e218a74cb"
-  "libtalloc 2.4.3 aarch64 ac81ad623d74c209718b9f3acb2dd702cc8a88c431e820d212229910b4db29da"
+  "proot $PROOT_VERSION aarch64 8199dca06dccb693ec09fb1759e3e1ad08b4863f0c11c612f89c20bd9ecdc1a0"
+  "libtalloc 2.5.0 aarch64 556591f43bb773ad8777e1a29522640866a55f95dab71914418b94a8c58ad5a7"
   "libandroid-shmem 0.7 aarch64 0da3a24d558b93c92bcf8d611e0826a99ff96e396b148e6cdf33b47c47c57ff6"
-  "proot $PROOT_VERSION x86_64 f63ce9bd0d38715eae0163a3772f3395913587444c7ce7232091c6d359afe3c3"
-  "libtalloc 2.4.3 x86_64 7ca2eaae2e53b28228a01301bc410b62845403d6317c25b8e0a7f40681de0628"
+  "proot $PROOT_VERSION x86_64 77ea45540071ca543adda2b51aca2bc3761c52904d013fd0890682288eff9455"
+  "libtalloc 2.5.0 x86_64 b8c6d95f20075dc1f9ec6573575b2444e8d526e48e0d8d6d5cf4e071e6e06530"
   "libandroid-shmem 0.7 x86_64 ffa9e4c87467b158b148d0ff92dda796aa038276c2075af3269cdcdb06f25797"
 )
 # The source Termux built that deb from (termux-packages packages/proot/build.sh).
 PROOT_SRC_URL="https://github.com/termux/proot/archive/v$PROOT_VERSION.zip"
-PROOT_SRC_SHA256=dbb50381c2f0b5c342bdf3d3467d80c21d2a4677d9dadd14159fa3b32f11b319
+PROOT_SRC_SHA256=75f654fe60dea92dabff2bf083ae8bfe4f91baa6a1a374786a6bf391015eebaa
 
 die() { echo "error: $*" >&2; exit 1; }
 for tool in curl sha256sum ar tar xz unzip patch make; do
@@ -152,7 +152,8 @@ for arch in aarch64 x86_64; do
   for pin in "${PINS[@]}"; do
     read -r name version parch sha <<<"$pin"
     [[ "$parch" == "$arch" ]] || continue
-    extract_deb "$(fetch_deb "$name" "$version" "$parch" "$sha")" "$work/$name"
+    deb="$(fetch_deb "$name" "$version" "$parch" "$sha")" || exit 1
+    extract_deb "$deb" "$work/$name"
   done
 
   usr="data/data/com.termux/files/usr"

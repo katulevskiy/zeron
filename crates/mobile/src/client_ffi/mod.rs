@@ -15,6 +15,8 @@ mod demo_host;
 mod session;
 mod subagents;
 mod tools;
+mod voice;
+pub use voice::*;
 mod types;
 
 use std::sync::Arc;
