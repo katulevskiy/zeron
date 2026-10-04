@@ -22,14 +22,20 @@ class VoicePhotoEncoderTest {
         val uri = FileProvider.getUriForFile(context, "${context.packageName}.files", file)
         val intent = sh.zeron.android.voice.assistant.JarvisCameraContract().createIntent(context, uri)
         val camera = checkNotNull(intent.resolveActivity(context.packageManager))
+        fun shell(command: String) = android.os.ParcelFileDescriptor.AutoCloseInputStream(
+            instrumentation.uiAutomation.executeShellCommand(command)
+        ).use { it.readBytes() }
+        // This test owns a fresh capture task, not a restored camera preview.
+        shell("am force-stop ${camera.packageName}")
         instrumentation.uiAutomation.grantRuntimePermission(camera.packageName, android.Manifest.permission.CAMERA)
         fun descendants(root: android.view.accessibility.AccessibilityNodeInfo?): List<android.view.accessibility.AccessibilityNodeInfo> =
             if (root == null) emptyList() else listOf(root) + (0 until root.childCount).flatMap { descendants(root.getChild(it)) }
         fun tap(label: String) {
             val until = System.currentTimeMillis() + 10_000
+            var retryAt = System.currentTimeMillis() + 1500
             while (System.currentTimeMillis() < until) {
                 val node = descendants(instrumentation.uiAutomation.rootInActiveWindow).firstOrNull {
-                    it.contentDescription?.toString() == label || it.text?.toString() == label
+                    it.isEnabled && (it.contentDescription?.toString() == label || it.text?.toString() == label)
                 }
                 if (node != null) {
                     val bounds = android.graphics.Rect().also { node.getBoundsInScreen(it) }
@@ -41,6 +47,12 @@ class VoicePhotoEncoderTest {
                     )).use { it.readBytes() }
                     return
                 }
+                // The emulator camera publishes its shutter before its cold
+                // preview is ready. Retry only while that control is present;
+                // a completed capture replaces it with the review controls.
+                if (label == "Done" && System.currentTimeMillis() >= retryAt && descendants(instrumentation.uiAutomation.rootInActiveWindow).any {
+                    it.isEnabled && it.contentDescription?.toString() == "Shutter"
+                }) { tap("Shutter"); retryAt = System.currentTimeMillis() + 1500 }
                 Thread.sleep(50)
             }
             error("Camera control missing: $label")
@@ -60,7 +72,7 @@ class VoicePhotoEncoderTest {
         } finally {
             context.revokeUriPermission(uri, android.content.Intent.FLAG_GRANT_READ_URI_PERMISSION or android.content.Intent.FLAG_GRANT_WRITE_URI_PERMISSION)
             file.delete()
-            instrumentation.uiAutomation.executeShellCommand("input keyevent 4").close()
+            shell("input keyevent 4")
         }
     }
 

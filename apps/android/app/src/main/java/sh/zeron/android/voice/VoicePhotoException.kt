@@ -7,7 +7,6 @@ internal class VoicePhotoException(val reason: Reason) : Exception(reason.messag
         READ("Couldn't read the camera photo. Take another picture."),
         BUSY("A photo is already being added. Please wait."),
         SIZE("The photo is too large for this connection. Take another picture."),
-        TRANSPORT("Couldn't send the photo over the voice connection. Try again."),
-        REJECTED("Jarvis couldn't accept this photo. Try a new call."),
+        TRANSFER("Couldn't deliver the photo to Jarvis. Check the conversation before retrying."),
     }
 }

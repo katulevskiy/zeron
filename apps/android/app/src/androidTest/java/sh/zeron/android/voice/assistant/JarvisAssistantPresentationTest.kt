@@ -26,7 +26,7 @@ class JarvisAssistantPresentationTest {
     @Test fun minimalLiveStageHasAccessibleCornerActionsAndNoExtraLabels() {
         val instrumentation = InstrumentationRegistry.getInstrumentation()
         val context = instrumentation.targetContext
-        instrumentation.uiAutomation.executeShellCommand("input keyevent 4").close()
+        android.os.ParcelFileDescriptor.AutoCloseInputStream(instrumentation.uiAutomation.executeShellCommand("input keyevent 4")).use { it.readBytes() }
         instrumentation.runOnMainSync {
             context.startActivity(Intent(context, MainActivity::class.java).addFlags(Intent.FLAG_ACTIVITY_NEW_TASK).putExtra("demo", true))
         }

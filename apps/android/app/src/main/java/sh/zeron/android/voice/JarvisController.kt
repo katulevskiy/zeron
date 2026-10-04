@@ -213,18 +213,43 @@ class JarvisController(private val app: Application, private val model: AppModel
         if (!paused) call?.setMuted(_state.value.muted)
     }
 
-    internal suspend fun addPhoto(id: Long, file: java.io.File) {
-        if (!owns(id) || _state.value.call?.phase != VoiceCallPhase.ACTIVE) throw VoicePhotoException(VoicePhotoException.Reason.ENDED)
-        val endpoint = media ?: throw VoicePhotoException(VoicePhotoException.Reason.ENDED)
+    internal suspend fun addPhoto(id: Long, file: java.io.File, canDeliver: () -> Boolean): String {
+        if (!owns(id) || !canDeliver() || _state.value.call?.phase != VoiceCallPhase.ACTIVE) throw VoicePhotoException(VoicePhotoException.Reason.ENDED)
+        val core = client ?: throw VoicePhotoException(VoicePhotoException.Reason.ENDED)
+        val chat = _state.value.call?.chatId ?: throw VoicePhotoException(VoicePhotoException.Reason.ENDED)
         val jpeg = withContext(Dispatchers.IO) {
-            try { VoicePhotoEncoder.encode(file, endpoint.maxPhotoBytes) }
+            try { VoicePhotoEncoder.encode(file, 768_000) }
             catch (e: CancellationException) { throw e }
             catch (e: VoicePhotoException) { throw e }
             catch (_: Exception) { throw VoicePhotoException(VoicePhotoException.Reason.READ) }
         }
-        if (!owns(id) || endpoint !== media) throw VoicePhotoException(VoicePhotoException.Reason.ENDED)
-        endpoint.addPhoto(jpeg)
-        if (!owns(id)) throw VoicePhotoException(VoicePhotoException.Reason.ENDED)
+        if (!owns(id) || !canDeliver() || core !== client) throw VoicePhotoException(VoicePhotoException.Reason.ENDED)
+        val handle = core.openSession(chat)
+        return try {
+            VoicePhotoTransfer(
+                active = { owns(id) && canDeliver() && core === client && _state.value.call?.chatId == chat },
+                submit = { bytes ->
+                    // The normal attachment path escorts bytes to the selected
+                    // host and records the photo in this same voice chat.
+                    when (val result = handle.send(voicePhotoRequest(bytes, "jarvis-photo-${java.util.UUID.randomUUID()}.jpg"))) {
+                        is SendOutcome.Started -> VoicePhotoReceipt(result.messageId, false)
+                        is SendOutcome.Steered -> VoicePhotoReceipt(result.messageId, false)
+                        is SendOutcome.Queued -> VoicePhotoReceipt(result.queueId, true)
+                    }
+                },
+                progress = { receipt ->
+                    val pending = handle.composer().pendingSends.firstOrNull { it.messageId == receipt.id }
+                    when {
+                        pending?.state == SendState.FAILED -> VoicePhotoProgress.FAILED
+                        pending == null && handle.messageText(receipt.id) != null -> VoicePhotoProgress.ADOPTED
+                        else -> VoicePhotoProgress.PENDING
+                    }
+                },
+            ).add(jpeg)
+        } catch (e: CancellationException) { throw e }
+        catch (e: VoicePhotoException) { throw e }
+        catch (_: Exception) { throw VoicePhotoException(VoicePhotoException.Reason.TRANSFER) }
+        finally { handle.destroy() }
     }
 
     fun stop() {

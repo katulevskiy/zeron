@@ -200,88 +200,105 @@ only by a resumed activity: Android's assistant task must not lose its settings
 or conversation request to a hidden Zeron activity.
 
 During an active call, tap the camera, capture a picture in the phone's camera
-app, and confirm it. Once **Photo added** appears, ask about it aloud. The photo
-is added to the current call's model context; this does not create a persistent
-picture attachment in the Zeron conversation. Sending it does not interrupt
-speech with an automatic new model response.
+app, and confirm it. **Photo added** means the execution host adopted the image
+message. Ask about it aloud; Codex's visual analysis becomes context for Jarvis.
+If Codex is already working, the image stays on the normal message queue and the
+overlay says **Photo queued**, preserving the existing work. Analysis may take a
+few seconds. The photo and its inspection request are normal, persistent image
+attachments in the same Zeron voice chat.
 
 The system camera owns capture through `ACTION_IMAGE_CAPTURE` and `EXTRA_OUTPUT`.
 Zeron requests no camera or storage permission. A non-exported bridge grants
 read/write access to one private FileProvider cache URI, then revokes that grant
-and deletes the temporary photo. EXIF-aware decoding limits the longest edge
-to 1280 pixels; adaptive JPEG compression fits the negotiated WebRTC/SCTP
-message limit. Re-encoding removes camera/location metadata. The existing,
-authenticated `oai-events` channel carries a `conversation.item.create` user
-message with `input_image`. Zeron reports success only after the matching server
-item acknowledgement, with a bounded timeout and no unbounded send queue.
+and deletes the capture file. EXIF-aware decoding limits the longest edge to
+1280 pixels; adaptive JPEG compression limits the attachment to 768,000 bytes.
+Re-encoding removes camera/location metadata. The existing Zeron attachment
+transport delivers the image to the selected execution host. Its Codex thread
+analyzes the image and automatically forwards that result into V3's voice
+context. No raw image or public `conversation.item.create` event is sent over
+the audio data channel. This uses the existing ChatGPT subscription/Codex
+connection, with no separate API key or image service.
 
-Microphone capture pauses while the camera/photo delivery is active and resumes
-according to the current user mute setting. A call-generation and random capture
-token prevent a late camera result from reaching a replacement call, including
-after process restart. Camera-bridge rotation retains a single delivery job.
-Home, lock, call termination, or navigation away revokes ownership and discards
-late results. The camera button is unavailable before the call becomes active
-and while a photo is being added.
+The inspection prompt asks for factual visible details and relevant readable
+text, permits only the image viewer, forbids other tools/actions, and treats
+image content as untrusted context.
+Local submission is not mistaken for host adoption. Failed transfers report a
+safe error; a 30-second unconfirmed submission reports **Photo pending** and asks
+the user to check the conversation before retrying. There is no automatic retry.
 
-References: [OpenAI Realtime image inputs](https://developers.openai.com/api/docs/guides/realtime-conversations#image-inputs)
+Microphone capture pauses while the camera/photo submission is active and
+resumes according to the current user mute setting. A call-generation and random
+capture token are checked before encoding and again before submission, preventing
+late captures from reaching a replacement call, including after process restart.
+Camera-bridge rotation retains a single delivery job. Home, lock, call termination,
+or navigation away revokes ownership. Once a photo has been submitted, it remains
+an ordinary chat attachment even if the call ends; capture-file cleanup does not
+delete that submitted attachment. The camera button is unavailable before the
+call becomes active and while a photo is being submitted.
+
+References: [Codex V3 context append implementation](https://github.com/openai/codex/blob/afb436df8b70bb5bc57b86d9a3e829968988cd21/codex-rs/codex-api/src/endpoint/realtime_websocket/methods_frameless_bidi.rs)
 and [Android camera intents](https://developer.android.com/guide/components/intents-common#Camera).
 
-Validation for this update:
+Validation for the current overlay/photo implementation:
 
-- All 276 JVM tests passed, including correlated photo acknowledgements,
-  rejection/close handling, message limits, and camera mute precedence.
-- All seven Android instrumentation tests passed on Android 15 x86_64. They
-  include native camera capture into the production private-URI contract,
-  bounded image decoding/encoding and provider isolation, a real JNI WebRTC
-  photo/acknowledgement exchange with a local peer, microphone/audio cleanup,
-  assistant protection/ownership checks, and accessible control placement.
+- All 280 JVM tests pass, including attachment intent and queue policy,
+  correlated host adoption, upload failure, stale ownership, cancellation,
+  timeout without retry, and camera mute precedence.
+- Seven Android instrumentation tests cover native camera capture into the
+  production private-URI contract, image decoding/encoding and provider
+  isolation, real JNI audio cleanup, assistant protection/ownership, and
+  accessible control placement. The emulator camera test starts a fresh capture
+  task and waits for input-service commands to finish before moving on.
 - Actual power-button invocation over light and dark Android Settings shows a
   transparent `VOICE_INTERACTION` window with `DIM_BEHIND` and no `BLUR_BEHIND`.
   The framework still reports disabled screen context `3`. At 200% system text
   scale, recovery text and bottom controls remain visible and reachable. The
-  settings action opened Jarvis settings correctly on repeated invocations with
-  an existing stopped Zeron task.
+  settings action opens Jarvis settings on repeated invocations with an existing
+  stopped Zeron task.
 - Screenshots in `docs/screenshots/android-jarvis-assistant-minimal/` distinguish
-  actual system invocations (the emulator is not signed in to ChatGPT) from an
-  active-call caption/control presentation fixture. The fixture is not evidence
-  of a provider conversation. Native capture was exercised with the emulator's
-  virtual camera. An initial emulator RenderThread crash with the software GPU
-  was resolved for validation by using SwiftShader with Vulkan disabled.
-- Lint retains the same 12 existing errors outside voice; this update adds no
-  lint findings. The update APK retains the existing signing certificate
-  (SHA-256 `ca8b677131bd3beed4986da25ce3110fe34144fb1bef136d5633fd65a697e903`).
+  actual system invocations from an active-call presentation fixture. Native
+  capture uses the emulator's virtual camera.
+- Lint retains its 12 existing errors and 248 warnings. The update APK retains
+  the existing signing certificate (SHA-256
+  `ca8b677131bd3beed4986da25ce3110fe34144fb1bef136d5633fd65a697e903`).
 
-Physical-phone camera variants, assistant/camera lifecycle behavior on other
-Android versions, and signed-in provider image recognition remain unverified.
-The emulator checks native capture, encoding, UI, call policy, and local media
-transport separately; it cannot exercise the entire signed-in capture-to-vision
-flow or camera-return ownership during a real provider call.
+Physical-phone camera variants and the full signed-in Android capture/upload
+lifecycle remain unverified. Signed-in Codex/V3 vision behavior was verified
+separately on the actual provider connection, as described below.
 
-### Android photo message sizing correction
+### V3 provider rejection correction
 
-The original photo limit allowed for Base64 and JSON overhead, but Android's
-`org.json.JSONStringer` additionally escapes every forward slash. Base64 image
-data contains slashes, so the serialized message could exceed the negotiated
-SCTP limit even when the JPEG itself fit. The resulting pre-send exception was
-hidden by the generic camera-delivery error. JVM tests missed the difference:
-their standalone `org.json` dependency does not apply Android's slash escaping.
+The earlier data-channel implementation used the public Realtime API's
+`conversation.item.create`/`input_image` format. A real signed-in Codex 0.159.2
+V3 call rejected it with `invalid_value`, parameter `type`: **Invalid value:
+'conversation.item.create'**. Codex forwarded this as `thread/realtime/error`
+and closed the call. A `session.context.append` image part was also rejected
+because V3 requires text there. The confirmed Android JSON slash-escaping size
+bug fixed in `542da350` was real, but fixing it did not solve this protocol
+mismatch. The direct photo data-channel sender and its simulated-ACK tests have
+now been removed.
 
-The photo event now removes that optional JSON escape before its final UTF-8
-size check. Protocol constants, UUIDs, and Base64 are the only string values in
-this message; literal forward slashes are valid JSON and decode to identical
-image bytes. The original JPEG, Base64, message-size, queue, and correlated
-acknowledgement bounds remain enforced. Camera read, size, transport, call-end,
-and provider rejection failures now have distinct safe messages. Logs contain
-only the bounded failure category, never provider payloads or image data.
+Live validation used an ephemeral local Codex thread, a fresh headless WebRTC
+peer, synthetic silent audio, and a generated image; no physical microphone,
+private user photo, new API key, or messages to other chats were involved.
+The supported route submitted the image as a normal `localImage` input to the
+same Codex thread during its active V3 call. Codex's completed analysis was
+**The image shows a solid purple triangle pointing upward on a white background.**
+Its V3 sideband automatically appended that analysis to the voice context. When
+asked about the image, Jarvis's final voice transcript correctly described the
+purple triangle and white background, without a provider error or call closure.
 
-An Android-runtime regression with a full-budget, slash-heavy image failed on
-`77c5e2cb` with **The photo is too large for this connection**, and passes with
-this correction. The JNI WebRTC test now encodes and transmits a full valid JPEG
-larger than 16 KiB and decodes it at the receiving peer before acknowledging it;
-it no longer substitutes a four-byte JPEG marker. All 276 JVM and eight Android
-instrumentation tests pass. Lint retains its 12 existing errors and 248 warnings.
+Android now uses the existing Zeron attachment escort and normal queued send to
+reach that same Codex thread. Zeron's current Codex harness presents attachments
+as local file paths in the prompt; the inspection prompt explicitly permits
+opening that file with the image viewer. A second live check used precisely this
+text-only attachment trailer and the production inspection prompt, without a
+`localImage` input. Codex inspected the file and reported a solid purple triangle
+on white with no visible text. V3 automatically received that result and spoke
+the correct description while the call remained active.
 
-No physical phone was connected during this correction. This reproduces and
-fixes a concrete Android pre-send failure consistent with the reported generic
-error; signed-in provider image acceptance and the user's exact failed photo
-remain unverified on their phone.
+A queued image never interrupts existing
+work. A directly submitted image waits for its exact host-adopted user message
+rather than claiming success when the local send method returns. These
+submission/ownership semantics are covered by the added JVM tests; the signed-in
+provider image-to-voice behavior is the separate live result above.

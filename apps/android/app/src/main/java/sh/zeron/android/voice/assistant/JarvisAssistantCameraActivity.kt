@@ -36,7 +36,7 @@ class JarvisAssistantCameraActivity : ComponentActivity() {
         JarvisAssistantSession.cameraReturned(generation, capture)
         if (captured) {
             val controller = (application as ZeronApplication).existingModel?.jarvis
-            if (controller?.owns(generation) == true && JarvisAssistantSession.ownsCamera(generation, capture)) delivery.send(controller, generation, file)
+            if (controller?.owns(generation) == true && JarvisAssistantSession.ownsCamera(generation, capture)) delivery.send(controller, generation, capture, file)
             else finish()
         } else {
             JarvisAssistantSession.cameraFinished(generation, capture, null)
@@ -103,16 +103,15 @@ internal class JarvisCameraContract : ActivityResultContracts.TakePicture() {
 class JarvisPhotoDelivery : ViewModel() {
     val result = MutableStateFlow<String?>(null)
     private var started = false
-    internal fun send(controller: JarvisController, id: Long, file: File) {
+    internal fun send(controller: JarvisController, id: Long, capture: String, file: File) {
         if (started) return
         started = true
         viewModelScope.launch {
             result.value = try {
-                controller.addPhoto(id, file)
-                "Photo added"
+                controller.addPhoto(id, file) { JarvisAssistantSession.ownsCamera(id, capture) }
             } catch (_: CancellationException) {
                 currentCoroutineContext().ensureActive()
-                "Jarvis didn't confirm the photo. Try again."
+                "Photo pending — check the conversation before retrying."
             }
             catch (e: VoicePhotoException) {
                 // Only log our bounded classification, never a provider error

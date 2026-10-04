@@ -9,8 +9,7 @@ import kotlin.math.max
 import kotlin.math.roundToInt
 
 /** EXIF-aware, bounded decoding. Re-encoding also drops location/camera metadata.
- * Images fit the negotiated SCTP message size rather than filling an unbounded
- * data-channel queue. Call off the UI thread. */
+ * Images fit a bounded attachment budget. Call off the UI thread. */
 internal object VoicePhotoEncoder {
     fun encode(file: File, maxBytes: Int): ByteArray {
         require(file.length() in 1..32L * 1024 * 1024) { "Couldn't read the camera photo." }

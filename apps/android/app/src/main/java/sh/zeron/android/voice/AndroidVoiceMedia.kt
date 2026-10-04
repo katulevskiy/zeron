@@ -75,11 +75,6 @@ class AndroidVoiceMedia(
         mute.cameraPaused = paused
         if (paused && !closed) peer.muteLocally()
     }
-    internal val maxPhotoBytes get() = peer.maxPhotoBytes
-    internal suspend fun addPhoto(jpeg: ByteArray) {
-        check(!closed)
-        peer.addPhoto(jpeg)
-    }
 
     fun close() {
         if (closed) return

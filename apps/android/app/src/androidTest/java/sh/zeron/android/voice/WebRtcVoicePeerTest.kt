@@ -22,7 +22,7 @@ class WebRtcVoicePeerTest {
         // startActivitySync waits for an idle event queue; the live assistant
         // orb can continuously repaint. Wait for the actual resumed activity
         // instead, and dismiss any previous system overlay before this test.
-        instrumentation.uiAutomation.executeShellCommand("input keyevent 4").close()
+        android.os.ParcelFileDescriptor.AutoCloseInputStream(instrumentation.uiAutomation.executeShellCommand("input keyevent 4")).use { it.readBytes() }
         instrumentation.runOnMainSync {
             context.startActivity(Intent(context, MainActivity::class.java)
                 .addFlags(Intent.FLAG_ACTIVITY_NEW_TASK).putExtra("demo", true))
@@ -66,24 +66,7 @@ class WebRtcVoicePeerTest {
                     override fun onRemoveStream(stream: MediaStream) = Unit
                     override fun onDataChannel(channel: DataChannel) {
                         data = channel
-                        channel.registerObserver(object : DataChannel.Observer {
-                            override fun onBufferedAmountChange(previous: Long) = Unit
-                            override fun onStateChange() = Unit
-                            override fun onMessage(buffer: DataChannel.Buffer) {
-                                val bytes = ByteArray(buffer.data.remaining()).also { buffer.data.get(it) }
-                                val event = org.json.JSONObject(bytes.toString(Charsets.UTF_8))
-                                val item = event.getJSONObject("item")
-                                val content = item.getJSONArray("content").getJSONObject(0)
-                                assertEquals("input_image", content.getString("type"))
-                                val jpeg = java.util.Base64.getDecoder().decode(content.getString("image_url").substringAfter(','))
-                                val image = checkNotNull(android.graphics.BitmapFactory.decodeByteArray(jpeg, 0, jpeg.size))
-                                assertTrue(image.width > 0 && image.height > 0)
-                                image.recycle()
-                                val reply = org.json.JSONObject().put("type", "conversation.item.added")
-                                    .put("item", org.json.JSONObject().put("id", item.getString("id"))).toString().toByteArray()
-                                channel.send(DataChannel.Buffer(java.nio.ByteBuffer.wrap(reply), false))
-                            }
-                        })
+
                     }
                     override fun onRenegotiationNeeded() = Unit
                 })
@@ -101,20 +84,6 @@ class WebRtcVoicePeerTest {
                 media.applyAnswer(checkNotNull(peer.localDescription).description)
                 assertEquals("Negotiation must not capture", initial, audio.activeRecordingConfigurations.size)
                 media.setMuted(true)
-                // Exercise a full, valid camera-size photo, not the former
-                // four-byte marker that missed Android JSON size inflation.
-                val photo = java.io.File(context.cacheDir, "webrtc-photo-test.jpg")
-                val bitmap = android.graphics.Bitmap.createBitmap(1280, 960, android.graphics.Bitmap.Config.ARGB_8888)
-                try {
-                    val random = java.util.Random(123)
-                    val pixels = IntArray(bitmap.width * bitmap.height) { android.graphics.Color.rgb(random.nextInt(256), random.nextInt(256), random.nextInt(256)) }
-                    bitmap.setPixels(pixels, 0, bitmap.width, 0, 0, bitmap.width, bitmap.height)
-                    photo.outputStream().use { bitmap.compress(android.graphics.Bitmap.CompressFormat.JPEG, 95, it) }
-                    val jpeg = VoicePhotoEncoder.encode(photo, media.maxPhotoBytes)
-                    assertTrue("Must cover photo fragmentation beyond 16 KiB", jpeg.size > 16_384)
-                    media.addPhoto(jpeg)
-                } finally { bitmap.recycle(); photo.delete() }
-                assertEquals("Adding acknowledged photo context must not open the mic", initial, audio.activeRecordingConfigurations.size)
                 media.setMuted(false)
                 withTimeout(5_000) { while (audio.activeRecordingConfigurations.size <= initial) delay(50) }
                 media.muteLocally()

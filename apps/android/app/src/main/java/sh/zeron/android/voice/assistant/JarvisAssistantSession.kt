@@ -300,7 +300,7 @@ class JarvisAssistantSession(context: Context) : VoiceInteractionSession(context
         model.jarvis.pauseForCamera(id, false)
         if (!model.jarvis.owns(id)) return
         _notice.value = message
-        if (message == "Photo added") scope.launch {
+        if (message == "Photo added" || message == "Photo queued") scope.launch {
             delay(3_000)
             if (model.jarvis.owns(id) && _notice.value == message) _notice.value = null
         }

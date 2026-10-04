@@ -92,7 +92,7 @@ internal fun JarvisAssistantContent(
                             else -> null
                         }
                         status?.let { Text(it, color = scheme.onSurface, modifier = Modifier.semantics { liveRegion = LiveRegionMode.Polite }) }
-                        (notice ?: state.error)?.let { Text(it, color = if (notice == "Photo added") scheme.onSurface else scheme.error,
+                        (notice ?: state.error)?.let { Text(it, color = if (notice?.startsWith("Photo ") == true) scheme.onSurface else scheme.error,
                             modifier = Modifier.semantics { liveRegion = LiveRegionMode.Polite }) }
                         state.call?.caption?.takeLast(240)?.takeIf { it.isNotBlank() }?.let {
                             Text(it, color = scheme.onSurface, modifier = Modifier.semantics { liveRegion = LiveRegionMode.Polite })

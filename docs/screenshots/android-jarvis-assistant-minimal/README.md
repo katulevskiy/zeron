@@ -10,6 +10,7 @@ These are Android 15 emulator captures, not the user-provided phone images.
   captions, purple orb, mute/route/hang-up and settings/minimize/camera placement;
   it is not a signed-in call or evidence of provider image recognition.
 
-Native capture into Zeron's private photo URI and the real WebRTC photo/ack path
-are covered separately by the Android instrumentation suite. See
+Native capture into Zeron's private photo URI and WebRTC audio lifecycle are
+covered separately by the Android instrumentation suite. Attachment delivery
+regressions and a live Codex vision-to-voice check are documented in
 [`android-jarvis.md`](../../android-jarvis.md) for validation limits.
