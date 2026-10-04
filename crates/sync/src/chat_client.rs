@@ -58,7 +58,7 @@ const QUOTA_RETRY: Duration = Duration::from_secs(5);
 /// batchId to retire) — the silent replay-forever wedge, again. Enforced at
 /// enqueue: a batch the server can never accept must not enter the replay
 /// queue.
-pub const MAX_PUSH_BYTES: usize = 1024 * 1024 - 4096;
+pub use zeron_proto::chat2_limits::MAX_PUSH_BYTES;
 pub const PENDING_WINDOW_BYTES: usize = 256 * 1024;
 pub const PENDING_WINDOW_BATCHES: usize = 32;
 const CHECKPOINT_BUFFER_BYTES: usize = 256 * 1024;
@@ -294,6 +294,8 @@ struct Shared {
     refresh_completed: u64,
     pending: VecDeque<PendingPush>,
     paged_outbox: bool,
+    /// Dirty only on durable publication/ACK/rejection or an explicit disk nudge.
+    outbox_changed: bool,
     /// Last hello/probe view of the server log (checkpoint-policy inputs).
     server: Option<wire::StateHeader>,
     /// Set by a transient (`quota`) rejection: re-push at this instant
@@ -331,7 +333,7 @@ struct Shared {
 }
 
 fn refill_pending(shared: &mut Shared, sink: &dyn ChatDocSink) -> Result<(), String> {
-    if !shared.paged_outbox {
+    if !shared.paged_outbox || !shared.outbox_changed {
         return Ok(());
     }
     let count = shared.pending.len();
@@ -339,7 +341,9 @@ fn refill_pending(shared: &mut Shared, sink: &dyn ChatDocSink) -> Result<(), Str
     if count >= PENDING_WINDOW_BATCHES || bytes >= PENDING_WINDOW_BYTES {
         return Ok(());
     }
-    for (batch_id, payload) in sink.pending_window()?.unwrap_or_default() {
+    let window = sink.pending_window()?.unwrap_or_default();
+    shared.outbox_changed = false;
+    for (batch_id, payload) in window {
         if shared.pending.iter().any(|p| p.batch_id == batch_id) {
             continue;
         }
@@ -731,6 +735,7 @@ impl ChatClient {
         }
         {
             let mut shared = lock(&self.shared);
+            shared.outbox_changed = true;
             // The durable store owns excess payloads. Failed writes remain
             // resident and retryable: a RAM target must never discard edits.
             if !(durable && shared.paged_outbox)
@@ -748,6 +753,7 @@ impl ChatClient {
 
     /// Wake the durable outbox reader without copying persisted payloads.
     pub fn flush_pending(&self) {
+        lock(&self.shared).outbox_changed = true;
         let _ = self.nudge.try_send(());
     }
 
@@ -1419,11 +1425,12 @@ impl Actor {
                     } else {
                         None
                     };
+                    let outbox_boundary = matches!(frame.kind, frame_type::ACK | frame_type::ERROR);
                     if !self.handle_frame(frame) {
                         return SessionEnd::Reconnect;
                     }
                     let paged_outbox = lock(&self.shared).paged_outbox;
-                    if paged_outbox
+                    if paged_outbox && outbox_boundary
                         && !self.push_pending(&mut pipe, &mut in_flight).await
                     {
                         return SessionEnd::Reconnect;
@@ -1597,6 +1604,7 @@ impl Actor {
                                     let mut sh = lock(&shared);
                                     if sink.acknowledge_update(b).is_ok() {
                                         sh.pending.retain(|p| p.batch_id != b);
+                                        sh.outbox_changed = true;
                                         acknowledged += 1;
                                     }
                                     // Contiguity rule (see handle_frame ACK): an
@@ -1906,6 +1914,7 @@ impl Actor {
                 let mut shared = lock(&self.shared);
                 if self.sink.acknowledge_update(&ack.batch_id).is_ok() {
                     shared.pending.retain(|p| p.batch_id != ack.batch_id);
+                    shared.outbox_changed = true;
                 } else {
                     shared.retry_at = Some(tokio::time::Instant::now() + QUOTA_RETRY);
                 }
@@ -1976,6 +1985,7 @@ impl Actor {
                         let mut shared = lock(&self.shared);
                         let before = shared.pending.len();
                         shared.pending.retain(|p| p.batch_id != batch_id);
+                        shared.outbox_changed = true;
                         let dropped = before != shared.pending.len();
                         drop(shared);
                         if dropped {

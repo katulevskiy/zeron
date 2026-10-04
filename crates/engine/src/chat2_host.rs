@@ -120,7 +120,6 @@ impl ChatDocSink for EngineChatSink {
                 &self.chat_id,
                 zeron_sync::chat_client::PENDING_WINDOW_BATCHES,
                 zeron_sync::chat_client::PENDING_WINDOW_BYTES,
-                zeron_sync::chat_client::MAX_PUSH_BYTES,
             )
             .map(Some)
             .map_err(|e| e.to_string())
@@ -345,11 +344,11 @@ impl CheckpointFetcher for EdgeCheckpointFetcher {
                 loop {
                     match stream.chunk().await {
                         Ok(Some(chunk)) => {
-                            const MAX_CHECKPOINT_BYTES: usize = 32 * 1024 * 1024;
+                            use zeron_proto::chat2_limits::MAX_CHECKPOINT_BYTES;
                             if got.len().saturating_add(chunk.len()) > MAX_CHECKPOINT_BYTES {
-                                return Err(SyncError::Protocol(
-                                    "checkpoint exceeds 32 MiB".into(),
-                                ));
+                                return Err(SyncError::Protocol(format!(
+                                    "checkpoint exceeds {MAX_CHECKPOINT_BYTES} bytes"
+                                )));
                             }
                             got.extend_from_slice(&chunk);
                         }

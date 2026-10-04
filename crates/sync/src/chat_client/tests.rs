@@ -1747,12 +1747,7 @@ async fn reopened_disk_backlog_has_a_bounded_window_and_drains_all_http_pages() 
 impl ChatDocSink for JournalSink {
     fn pending_window(&self) -> Result<Option<Vec<(String, Vec<u8>)>>, String> {
         self.0
-            .pending_chat_updates_window(
-                "impaired",
-                PENDING_WINDOW_BATCHES,
-                PENDING_WINDOW_BYTES,
-                MAX_PUSH_BYTES,
-            )
+            .pending_chat_updates_window("impaired", PENDING_WINDOW_BATCHES, PENDING_WINDOW_BYTES)
             .map(Some)
             .map_err(|e| e.to_string())
     }
@@ -2532,5 +2527,131 @@ async fn http_repairs_socket_gap_without_clearing_a_newer_gap() {
     assert!(client.catch_up_completed(ticket));
     assert!(client.delivery_live(), "HTTP alone must restore delivery");
     assert_eq!(client.stats().cursor, 4);
+    client.shutdown().await;
+}
+
+struct CountedJournalSink {
+    journal: JournalSink,
+    reads: std::sync::atomic::AtomicUsize,
+}
+impl ChatDocSink for CountedJournalSink {
+    fn pending_window(&self) -> Result<Option<Vec<(String, Vec<u8>)>>, String> {
+        self.reads
+            .fetch_add(1, std::sync::atomic::Ordering::Relaxed);
+        self.journal.pending_window()
+    }
+    fn persist_update(&self, id: &str, bytes: &[u8]) -> Result<(), String> {
+        self.journal.persist_update(id, bytes)
+    }
+    fn acknowledge_update(&self, id: &str) -> Result<(), String> {
+        self.journal.acknowledge_update(id)
+    }
+    fn apply_row(&self, bytes: &[u8], cursor: u64) -> RowImportOutcome {
+        self.journal.apply_row(bytes, cursor)
+    }
+    fn apply_checkpoint(&self, bytes: &[u8], cursor: u64) -> Result<(), String> {
+        self.journal.apply_checkpoint(bytes, cursor)
+    }
+    fn contains_frontier(&self, bytes: &[u8]) -> bool {
+        self.journal.contains_frontier(bytes)
+    }
+    fn advance_cursor(&self, cursor: u64) {
+        self.journal.advance_cursor(cursor)
+    }
+}
+
+#[tokio::test(start_paused = true)]
+async fn unrelated_frames_do_not_reload_empty_or_partial_durable_windows() {
+    let dir = tempfile::tempdir().unwrap();
+    let sink = Arc::new(CountedJournalSink {
+        journal: JournalSink(
+            crate::DocsStore::open(dir.path()).unwrap(),
+            RecordingSink::default(),
+        ),
+        reads: std::sync::atomic::AtomicUsize::new(0),
+    });
+    let (pipe, mut end) = pipe_pair();
+    let server = tokio::spawn(async move {
+        serve_join(&mut end, serde_json::json!({"headSeq":0,"seqFloor":0,"checkpointSeq":0,"checkpointSize":0,"rowCount":0,"rowBytes":0}), &[], vec![], false).await;
+        end
+    });
+    let (fetch, _) = fetcher(b"");
+    let client = ChatClient::connect_with_tuned(
+        connector(vec![pipe]),
+        sink.clone(),
+        fetch,
+        "dev-a",
+        0,
+        ChatTuning::default(),
+    )
+    .await
+    .unwrap();
+    let mut end = server.await.unwrap();
+    for seq in [1, 2] {
+        if seq == 2 {
+            client.enqueue_batch("local".into(), b"local bytes".to_vec());
+            let push = expect_kind(&mut end, frame_type::PUSH).await;
+            assert_eq!(push.header["batchId"], "local");
+        }
+        let before = sink.reads.load(std::sync::atomic::Ordering::Relaxed);
+        for _ in 0..100 {
+            send(
+                &end,
+                frame_type::PRESENCE,
+                serde_json::json!({"device":"other","at":1}),
+                &[],
+            )
+            .await;
+        }
+        send(
+            &end,
+            frame_type::ROW,
+            serde_json::json!({"seq":seq,"device":"other","batchId":format!("remote-{seq}")}),
+            b"remote",
+        )
+        .await;
+        tokio::time::timeout(Duration::from_secs(1), async {
+            while client.stats().cursor < seq {
+                tokio::task::yield_now().await;
+            }
+        })
+        .await
+        .unwrap();
+        assert_eq!(
+            sink.reads.load(std::sync::atomic::Ordering::Relaxed),
+            before,
+            "incoming rows/presence must not refill an unchanged outbox"
+        );
+    }
+    send(
+        &end,
+        frame_type::ACK,
+        serde_json::json!({"batchId":"local","seq":3}),
+        &[],
+    )
+    .await;
+    tokio::time::timeout(Duration::from_secs(1), async {
+        while client.stats().cursor < 3 {
+            tokio::task::yield_now().await;
+        }
+    })
+    .await
+    .unwrap();
+    assert!(
+        sink.journal
+            .0
+            .pending_chat_updates("impaired")
+            .unwrap()
+            .is_empty()
+    );
+    sink.journal
+        .0
+        .enqueue_chat_update("impaired", "external", b"outside actor")
+        .unwrap();
+    client.flush_pending();
+    assert_eq!(
+        expect_kind(&mut end, frame_type::PUSH).await.header["batchId"],
+        "external"
+    );
     client.shutdown().await;
 }

@@ -188,12 +188,7 @@ fn outbox() -> anyhow::Result<()> {
         json!({"durablePayloadBytes":16 * 1024 * 1024}),
     );
     let pending: Vec<(String, Arc<[u8]>)> = store
-        .pending_chat_updates_window(
-            "audit",
-            32,
-            256 * 1024,
-            zeron_sync::chat_client::MAX_PUSH_BYTES,
-        )?
+        .pending_chat_updates_window("audit", 32, 256 * 1024)?
         .into_iter()
         .map(|(id, bytes)| (id, bytes.into()))
         .collect();
@@ -225,7 +220,6 @@ impl ChatDocSink for AuditSink {
                 "audit",
                 zeron_sync::chat_client::PENDING_WINDOW_BATCHES,
                 zeron_sync::chat_client::PENDING_WINDOW_BYTES,
-                zeron_sync::chat_client::MAX_PUSH_BYTES,
             )
             .map(Some)
             .map_err(|e| e.to_string())

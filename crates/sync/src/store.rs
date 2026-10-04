@@ -74,6 +74,10 @@ const MIGRATIONS: &[&str] = &[
     CREATE TABLE sync_job_clock (id INTEGER PRIMARY KEY CHECK(id=1), value INTEGER NOT NULL) STRICT;
     INSERT INTO sync_job_clock VALUES (1,0);",
     "ALTER TABLE chat_sync_jobs ADD COLUMN cursor TEXT NOT NULL DEFAULT '';",
+    // One-time classification for rows written before insert-time classification.
+    // 1044480 is the protocol maxPushBytes when this migration was introduced.
+    "UPDATE chat_outbox SET needs_checkpoint=1 WHERE length(bytes)>1044480;
+     CREATE INDEX chat_outbox_pending ON chat_outbox(doc_id,needs_checkpoint,ordinal);",
 ];
 
 /// SQLite-backed store under a data directory (`{data_dir}/docs.sqlite3`).
@@ -122,8 +126,8 @@ impl DocsStore {
         bytes: &[u8],
     ) -> Result<(), StoreError> {
         let result = self.conn().execute(
-            "INSERT OR IGNORE INTO chat_outbox(doc_id,batch_id,bytes) VALUES (?1,?2,?3)",
-            params![doc_id, batch_id, bytes],
+            "INSERT OR IGNORE INTO chat_outbox(doc_id,batch_id,bytes,needs_checkpoint) VALUES (?1,?2,?3,?4)",
+            params![doc_id, batch_id, bytes, bytes.len() > zeron_proto::chat2_limits::MAX_PUSH_BYTES],
         );
         if result.is_err() {
             self.failed_publications
@@ -185,14 +189,9 @@ impl DocsStore {
         doc_id: &str,
         max_batches: usize,
         max_bytes: usize,
-        max_row_bytes: usize,
     ) -> Result<Vec<(String, Vec<u8>)>, StoreError> {
         store_blocking(|| {
             let conn = self.conn();
-            conn.execute(
-                "UPDATE chat_outbox SET needs_checkpoint=1 WHERE doc_id=?1 AND length(bytes)>?2 AND needs_checkpoint=0",
-                params![doc_id, max_row_bytes as i64],
-            )?;
             let mut statement = conn.prepare(
                 "SELECT batch_id,bytes,length(bytes) FROM chat_outbox WHERE doc_id=?1 AND needs_checkpoint=0 ORDER BY ordinal LIMIT ?2",
             )?;
@@ -330,8 +329,8 @@ impl DocsStore {
         {
             for bytes in updates {
                 tx.execute(
-                    "INSERT INTO chat_outbox(doc_id,batch_id,bytes) VALUES (?1,?2,?3)",
-                    params![doc_id, uuid::Uuid::new_v4().to_string(), bytes],
+                    "INSERT INTO chat_outbox(doc_id,batch_id,bytes,needs_checkpoint) VALUES (?1,?2,?3,?4)",
+                    params![doc_id, uuid::Uuid::new_v4().to_string(), bytes, bytes.len() > zeron_proto::chat2_limits::MAX_PUSH_BYTES],
                 )?;
             }
         }
@@ -901,12 +900,17 @@ mod publication_failure_tests {
     fn bounded_windows_preserve_order_and_keep_rejected_rows_for_recovery() {
         let dir = tempfile::tempdir().unwrap();
         let store = DocsStore::open(dir.path()).unwrap();
-        for (id, size) in [("first", 4), ("large", 12), ("third", 4), ("fourth", 4)] {
+        for (id, size) in [
+            ("first", 4),
+            ("large", zeron_proto::chat2_limits::MAX_PUSH_BYTES + 1),
+            ("third", 4),
+            ("fourth", 4),
+        ] {
             store
                 .enqueue_chat_update("chat", id, &vec![b'x'; size])
                 .unwrap();
         }
-        let window = store.pending_chat_updates_window("chat", 32, 8, 8).unwrap();
+        let window = store.pending_chat_updates_window("chat", 32, 8).unwrap();
         assert_eq!(
             window.iter().map(|(id, _)| id.as_str()).collect::<Vec<_>>(),
             ["first", "third"]
@@ -926,13 +930,70 @@ mod publication_failure_tests {
                 sizes.push(bytes.len());
             }
         }
-        assert_eq!(sizes, [4, 12, 4, 4]);
+        assert_eq!(
+            sizes,
+            [4, zeron_proto::chat2_limits::MAX_PUSH_BYTES + 1, 4, 4]
+        );
         store.acknowledge_chat_update("chat", "first").unwrap();
         assert_eq!(
-            store.pending_chat_updates_window("chat", 1, 8, 8).unwrap()[0].0,
+            store.pending_chat_updates_window("chat", 1, 8).unwrap()[0].0,
             "third"
         );
         assert_eq!(store.rejected_chat_updates("chat").unwrap()[0].0, "large");
+    }
+
+    #[test]
+    fn legacy_oversized_rows_are_classified_once_and_window_reads_never_write() {
+        let dir = tempfile::tempdir().unwrap();
+        let store = DocsStore::open(dir.path()).unwrap();
+        let max = zeron_proto::chat2_limits::MAX_PUSH_BYTES;
+        {
+            let conn = store.conn();
+            conn.execute(
+                "INSERT INTO chat_outbox(doc_id,batch_id,bytes) VALUES ('legacy','oversized',?1)",
+                params![vec![0u8; max + 1]],
+            )
+            .unwrap();
+            conn.execute(
+                "INSERT INTO chat_outbox(doc_id,batch_id,bytes) VALUES ('legacy','legal',?1)",
+                params![vec![0u8; max]],
+            )
+            .unwrap();
+            conn.execute(
+                "DELETE FROM schema_migrations WHERE version=?1",
+                params![MIGRATIONS.len() as i64],
+            )
+            .unwrap();
+            conn.execute_batch("DROP INDEX chat_outbox_pending")
+                .unwrap();
+        }
+        drop(store);
+        let store = DocsStore::open(dir.path()).unwrap();
+        assert_eq!(
+            store.rejected_chat_updates("legacy").unwrap()[0].0,
+            "oversized"
+        );
+        // query_only rejects UPDATE statements even when no rows match.
+        // Window reads must remain valid without any SQLite write permission.
+        store.conn().execute_batch("PRAGMA query_only=ON").unwrap();
+        for _ in 0..3 {
+            let window = store
+                .pending_chat_updates_window("legacy", 32, 256 * 1024)
+                .unwrap();
+            assert_eq!(window.len(), 1);
+            assert_eq!(window[0].0, "legal");
+        }
+        store.conn().execute_batch("PRAGMA query_only=OFF").unwrap();
+        store
+            .initialize_chat_outbox("seed", &[vec![0; max + 1]])
+            .unwrap();
+        assert!(
+            store
+                .pending_chat_updates_window("seed", 32, 256 * 1024)
+                .unwrap()
+                .is_empty()
+        );
+        assert!(store.has_rejected_chat_updates("seed").unwrap());
     }
 
     #[test]
