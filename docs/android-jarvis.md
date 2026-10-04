@@ -97,3 +97,12 @@ signed-in Android-to-OpenAI conversation still require device testing.
   Screenshots are in `docs/screenshots/android-jarvis/`.
 - The installed Android 16.1 emulator image crashed in its own compositor
   (`hasReadColorBufferDma`); Android 16 runtime coverage remains unverified.
+- Codex v0.160.0 installed successfully through the app's Coding agents page
+  inside the Android guest. A real Jarvis start then returned the expected
+  ChatGPT sign-in requirement and released its microphone foreground service.
+
+When rebuilding an APK to update an existing debug installation, keep the
+same `ANDROID_USER_HOME` and debug keystore as that installation. This host's
+PR #700 build used the XDG Android directory (`~/.config/.android`), whereas
+Gradle's unset default may select a different `~/.android` key. The delivered
+trial APK uses the original #700 signing certificate so it can update that app.
