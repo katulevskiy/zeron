@@ -19,8 +19,24 @@ class WebRtcVoicePeerTest {
     @Before fun foreground() {
         val instrumentation = InstrumentationRegistry.getInstrumentation()
         val context = instrumentation.targetContext
-        instrumentation.startActivitySync(Intent(context, MainActivity::class.java)
-            .addFlags(Intent.FLAG_ACTIVITY_NEW_TASK).putExtra("demo", true))
+        // startActivitySync waits for an idle event queue; the live assistant
+        // orb can continuously repaint. Wait for the actual resumed activity
+        // instead, and dismiss any previous system overlay before this test.
+        instrumentation.uiAutomation.executeShellCommand("input keyevent 4").close()
+        instrumentation.runOnMainSync {
+            context.startActivity(Intent(context, MainActivity::class.java)
+                .addFlags(Intent.FLAG_ACTIVITY_NEW_TASK).putExtra("demo", true))
+        }
+        var resumed = false
+        val deadline = System.currentTimeMillis() + 10_000
+        while (!resumed && System.currentTimeMillis() < deadline) {
+            instrumentation.runOnMainSync {
+                resumed = androidx.test.runner.lifecycle.ActivityLifecycleMonitorRegistry.getInstance()
+                    .getActivitiesInStage(androidx.test.runner.lifecycle.Stage.RESUMED).any { it is MainActivity }
+            }
+            if (!resumed) Thread.sleep(50)
+        }
+        assertTrue("MainActivity must be resumed for Android's microphone/audio-focus policy", resumed)
         instrumentation.uiAutomation.grantRuntimePermission(context.packageName, Manifest.permission.RECORD_AUDIO)
     }
     @Test fun negotiationCannotCaptureUntilActivatedAndCloseReleasesDevices() = runBlocking {

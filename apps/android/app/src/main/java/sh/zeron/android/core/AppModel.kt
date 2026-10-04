@@ -798,7 +798,7 @@ class AppModel(private val app: Application) {
 
     fun onBackground() {
         foreground = false
-        jarvis.mediaVisible = false
+        jarvis.mediaVisible = jarvis.assistantVisible
         feedback.setForeground(false)
         _client.value?.onBackground()
     }

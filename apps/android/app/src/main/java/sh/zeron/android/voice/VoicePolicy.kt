@@ -14,6 +14,7 @@ class VoiceGeneration {
     var live = false
         private set
     fun begin(): Long { check(!live); live = true; return ++generation }
+    val current: Long? get() = generation.takeIf { live }
     fun accepts(id: Long) = live && id == generation
     fun end(): Boolean {
         if (!live) return false

@@ -15,6 +15,10 @@
     <!-- Session alerts (finished, needs input, failed) while the app is in the background; asked once, in context. -->
     <uses-permission android:name="android.permission.POST_NOTIFICATIONS" />
 
+    <!-- Explicit speech-provider discovery for the Android 10/11 legacy
+         recognizer contract; newer Android keeps its existing provider. -->
+    <queries><intent><action android:name="android.speech.RecognitionService" /></intent></queries>
+
     <application
         android:name=".ZeronApplication"
         android:allowBackup="false"
@@ -61,6 +65,22 @@
                 <data android:mimeType="*/*" />
             </intent-filter>
         </activity>
+        <!-- System-owned assistant window; no draw-over-other-apps permission. -->
+        <service android:name=".voice.assistant.JarvisAssistantService"
+            android:label="Zeron Jarvis" android:exported="true"
+            android:permission="android.permission.BIND_VOICE_INTERACTION">
+            <intent-filter><action android:name="android.service.voice.VoiceInteractionService" /></intent-filter>
+            <meta-data android:name="android.voice_interaction" android:resource="@xml/jarvis_assistant" />
+        </service>
+        <service android:name=".voice.assistant.JarvisAssistantSessionService"
+            android:exported="true" android:permission="android.permission.BIND_VOICE_INTERACTION" />
+        <service android:name=".voice.assistant.JarvisRecognitionService"
+            android:exported="true" android:permission="android.permission.RECORD_AUDIO" />
+        <activity android:name=".voice.assistant.JarvisAssistantPermissionActivity"
+            android:exported="false" android:excludeFromRecents="true"
+            android:taskAffinity="" android:theme="@style/Theme.Zeron.AssistantPermission" />
+        <activity android:name=".voice.assistant.JarvisAssistantSettingsActivity"
+            android:exported="true" android:excludeFromRecents="true" />
         <service android:name=".voice.JarvisService" android:exported="false" android:foregroundServiceType="microphone" />
         <receiver
             android:name=".core.TransferActionReceiver"

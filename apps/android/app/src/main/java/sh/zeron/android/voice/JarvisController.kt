@@ -47,7 +47,35 @@ class JarvisController(private val app: Application, private val model: AppModel
     val selectedHost = _selectedHost.asStateFlow()
     private val _selectedVoice = MutableStateFlow<String?>(null)
     val selectedVoice = _selectedVoice.asStateFlow()
+    private var assistantOwner: Any? = null
+    private val _assistantPresentation = MutableStateFlow(false)
+    val assistantPresentation = _assistantPresentation.asStateFlow()
+    private var requestedFromAssistant = false
+    private var assistantCall = false
+    val assistantVisible get() = assistantOwner != null
+    private val canStart get() = model.foreground || assistantVisible
     var mediaVisible = true
+
+    /** Only the system-bound session holds this visibility lease; role alone
+     * never authorizes a background microphone start. Stale sessions cannot
+     * revoke the lease of a newer overlay. */
+    fun showAssistant(owner: Any) { assistantOwner = owner; _assistantPresentation.value = true; mediaVisible = true }
+    fun hideAssistant(owner: Any, keepCall: Boolean) {
+        if (assistantOwner !== owner) return
+        assistantOwner = null
+        _assistantPresentation.value = false
+        if (requestedFromAssistant) dismissConsent()
+        if (generation.live && !keepCall) stop()
+        mediaVisible = model.foreground
+    }
+    fun assistantDisabled() {
+        assistantOwner = null
+        _assistantPresentation.value = false
+        if (requestedFromAssistant) dismissConsent()
+        if (assistantCall) stop()
+        mediaVisible = model.foreground
+    }
+    val currentCallId get() = generation.current
     fun owns(id: Long) = generation.accepts(id)
     fun stopIfOwned(id: Long) { if (owns(id)) stop() }
 
@@ -83,15 +111,19 @@ class JarvisController(private val app: Application, private val model: AppModel
     }
 
     /** The consent precedes both the call and the platform microphone prompt. */
-    fun requestStart() {
-        if (generation.live) { model.pendingRoute.value = "jarvis"; return }
+    fun requestStart() = requestStart(false)
+    fun requestStartFromAssistant() { if (assistantVisible) requestStart(true) }
+    private fun requestStart(assistant: Boolean) {
+        if (generation.live) { if (!assistant) model.pendingRoute.value = "jarvis"; return }
+        if (!canStart) return
+        requestedFromAssistant = assistant
         refreshHosts()
         val host = startHost(_hosts.value, _selectedHost.value)
         if (host == null) {
             _state.value = JarvisState(error = if (_hosts.value.none { it.online })
                 "Jarvis needs an online Zeron device with Codex voice. Install and sign in to Codex on this phone, or choose a compatible desktop."
                 else "Choose the device Jarvis should run on.")
-            model.pendingRoute.value = "jarvis-settings"
+            if (!assistant) model.pendingRoute.value = "jarvis-settings"
             return
         }
         if (!prefs.getBoolean("$identity.consent", false)) _consentRequest.value = host
@@ -102,7 +134,7 @@ class JarvisController(private val app: Application, private val model: AppModel
         val host = _consentRequest.value ?: return
         _consentRequest.value = null
         prefs.edit().putBoolean("$identity.consent", true).apply()
-        start(host)
+        if (!requestedFromAssistant || assistantVisible) start(host)
     }
 
     fun dismissConsent() { _consentRequest.value = null }
@@ -110,8 +142,9 @@ class JarvisController(private val app: Application, private val model: AppModel
 
     private fun start(host: VoiceHost) {
         val client = client ?: return
-        if (generation.live || !model.foreground || !host.online) return
+        if (generation.live || !canStart || !host.online) return
         selectHost(host.id)
+        assistantCall = requestedFromAssistant
         val id = generation.begin()
         _state.value = JarvisState(live = true, host = host.name)
         mediaVisible = true
@@ -135,17 +168,17 @@ class JarvisController(private val app: Application, private val model: AppModel
         }
         try {
             call = client.startVoice(host.id, _selectedVoice.value, endpoint, listener).also(endpoint::attach)
-            model.pendingRoute.value = "jarvis"
+            if (!assistantCall) model.pendingRoute.value = "jarvis"
         } catch (_: Exception) { finish(VoiceEndReason.HOST_UNAVAILABLE) }
     }
 
     private suspend fun askPermission(id: Long): Boolean {
-        if (!generation.accepts(id) || !model.foreground) return false
+        if (!generation.accepts(id) || !canStart) return false
         if (ContextCompat.checkSelfPermission(app, Manifest.permission.RECORD_AUDIO) == PackageManager.PERMISSION_GRANTED) return true
         val reply = CompletableDeferred<Boolean>()
         permission = id to reply
         _permissionRequest.value = id
-        return try { reply.await() && generation.accepts(id) && model.foreground }
+        return try { reply.await() && generation.accepts(id) && canStart }
         finally {
             if (permission?.first == id) permission = null
             if (_permissionRequest.value == id) _permissionRequest.value = null
@@ -186,6 +219,7 @@ class JarvisController(private val app: Application, private val model: AppModel
         media?.close(); media = null
         call?.stop(); call?.destroy(); call = null
         JarvisService.end(app)
+        assistantCall = false
         val host = _state.value.host
         _state.value = JarvisState(host = host, error = reason?.let { message(it, host) }, endReason = reason)
     }

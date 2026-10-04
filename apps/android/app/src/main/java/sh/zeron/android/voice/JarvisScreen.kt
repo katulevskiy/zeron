@@ -38,21 +38,22 @@ fun JarvisPrompts(model: AppModel) {
     LaunchedEffect(state.call?.phase) {
         if (state.call?.phase == VoiceCallPhase.ACTIVE) notifications.askOnce()
     }
+    val assistant by controller.assistantPresentation.collectAsState()
     var launched by rememberSaveable { mutableStateOf<Long?>(null) }
     val launcher = rememberLauncherForActivityResult(ActivityResultContracts.RequestPermission()) { granted ->
         launched?.let { controller.completePermission(it, granted) }
         launched = null
     }
     val requested by controller.permissionRequest.collectAsState()
-    LaunchedEffect(requested, launched) {
-        requested?.takeIf { launched == null }?.let { id ->
+    LaunchedEffect(requested, launched, assistant) {
+        requested?.takeIf { launched == null && !assistant }?.let { id ->
             launched = id
             controller.permissionLaunched(id)
             launcher.launch(Manifest.permission.RECORD_AUDIO)
         }
     }
     val host by controller.consentRequest.collectAsState()
-    host?.let { target ->
+    host?.takeIf { !assistant }?.let { target ->
         AlertDialog(onDismissRequest = controller::dismissConsent,
             title = { Text("Talk with Jarvis") },
             text = { Text("Your phone sends live microphone audio to OpenAI. Codex on ${target.name} runs Jarvis, uses your ChatGPT voice allowance, and saves the conversation in its Zeron chat. Jarvis can use your connected agents and tools. You can mute or hang up at any time.") },
@@ -168,6 +169,7 @@ fun JarvisSettings(model: AppModel, onBack: () -> Unit) {
         IconButton(onClick = onBack) { Icon(Icons.AutoMirrored.Filled.ArrowBack, "Back") }
     }) }) { padding ->
         Column(Modifier.fillMaxSize().padding(padding).verticalScroll(rememberScrollState()).padding(24.dp), verticalArrangement = Arrangement.spacedBy(12.dp)) {
+            sh.zeron.android.voice.assistant.JarvisAssistantSetup()
             Text("Execution device", style = MaterialTheme.typography.titleLarge)
             Text("Choose where Codex runs Jarvis and its tools. Audio uses this phone's microphone and speaker.")
             if (hosts.isEmpty()) Text("No compatible device is available yet. Install and sign in to Codex under Settings → Coding agents on this phone, or connect a desktop running Zeron with remote voice enabled.")

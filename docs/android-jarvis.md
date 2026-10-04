@@ -106,3 +106,77 @@ same `ANDROID_USER_HOME` and debug keystore as that installation. This host's
 PR #700 build used the XDG Android directory (`~/.config/.android`), whereas
 Gradle's unset default may select a different `~/.android` key. The delivered
 trial APK uses the original #700 signing certificate so it can update that app.
+
+## Default digital assistant and system overlay
+
+In **Zeron Settings → Jarvis → Android assistant**, tap **Use Zeron as default
+assistant**. In Android's **Digital assistant app** screen, tap **Default digital
+assistant app**, select **Zeron**, and confirm. The setup page shows whether Zeron
+holds the assistant role and lets you return to that system picker to change it.
+Android's assistant role is not requestable with `createRequestRoleIntent` on
+AOSP/Pixel, so this button opens `ACTION_VOICE_INPUT_SETTINGS` directly.
+
+Configure your phone's assistant gesture. On Pixel, **Android Settings → System →
+Gestures → Press and hold power button → Digital assistant** routes a power-button
+hold to Zeron. Other manufacturers put this under gestures, side button, or
+buttons; corner-swipe/hold-home assistant invocation also works where supported.
+Zeron cannot change a manufacturer's hardware-button assignment itself.
+
+From an unlocked home screen or another app, invoke that gesture. Android shows
+Jarvis in a system assistant window above the current screen and starts the
+configured voice call. A cold invocation boots the existing configured phone
+runtime and waits for voice-host discovery. Repeated invocations attach to the
+same live call. Finish Zeron's first-run setup and configure/sign in to the chosen
+Codex host first; failures stay in the overlay with setup/retry controls.
+
+The first call's audio/tool consent appears inside the overlay. A separate
+non-exported translucent activity handles Android microphone permission. The
+assistant window hides during that prompt (otherwise it would cover it), then
+returns with the result. Permission requests carry the call generation across
+rotation; cancellation, timeout, logout, and stale callbacks cannot restart a
+call. The microphone foreground service starts only after microphone permission.
+
+The overlay includes the shared orb, status, captions, mute, audio route, hang-up,
+settings, and conversation controls. **Close**, outside tap, or Back dismisses the
+overlay and ends its displayed call. **Keep call in background** explicitly keeps
+the existing foreground call; its notification and another assistant invocation
+let you return. Enable notification access in the overlay for background controls.
+Opening the full app explicitly also keeps an existing call. Changing the default
+assistant stops calls that originated through the assistant.
+
+The top-level `VoiceInteractionService` only registers with Android. Selecting it
+never boots an engine or opens the microphone; `ZeronApplication` initializes the
+native model/fonts on first actual app/overlay use. Both system-bound voice
+services require `BIND_VOICE_INTERACTION`. No accessibility service, overlay
+permission, hotword service, or screen capture is added. Both the registration and
+session disable `SHOW_WITH_ASSIST | SHOW_WITH_SCREENSHOT`; underlying app text,
+URLs, and screenshots are not requested or sent. Locked invocations cannot start
+a new call. On Android 10/11, which require an assistant recognition component,
+ordinary system dictation is delegated to an installed speech provider instead of
+being sent through Jarvis. Newer Android retains its original recognizer.
+
+Primary platform references:
+- [VoiceInteractionService](https://developer.android.com/reference/android/service/voice/VoiceInteractionService)
+- [VoiceInteractionSession](https://developer.android.com/reference/android/service/voice/VoiceInteractionSession)
+- [Assistant role behavior](https://android.googlesource.com/platform/packages/modules/Permission/+/refs/heads/main/PermissionController/src/com/android/permissioncontroller/role/ui/behavior/AssistantRoleUiBehavior.java)
+- [Microphone foreground-service exemptions](https://developer.android.com/develop/background-work/services/fgs/restrictions-bg-start#wiu-restrictions)
+- [Pixel gestures](https://support.google.com/pixelphone/answer/7443425)
+
+### Assistant validation
+
+Android 15 x86_64 emulator, with the actual system role qualification and picker
+(no qualification bypass): selected Zeron, configured the power-button hold for
+assistant, invoked with `input keyevent --longpress 26` over Android Settings and
+home, and verified the underlying activity stayed in front beneath the overlay.
+The live framework reports disabled screen context `3` (assist + screenshot).
+Cold invocation, per-account consent, visible microphone prompt, denial/recovery,
+grant, native Codex sign-in-required result, foreground-service cleanup, and Back
+were exercised. Pressing Home during the microphone prompt cancelled the pending
+call and removed its permission task without reopening the overlay or starting
+the microphone service. All 272 JVM tests and four Android instrumentation tests
+(two real JNI audio tests and two assistant policy/manifest tests) passed. Lint
+retains the same 12 pre-existing errors outside voice; no assistant lint errors. Screenshots are in `docs/screenshots/android-jarvis-assistant/`,
+including light mode with 200% font scale. Real JNI audio tests remain independent
+of provider credentials. The legacy Android 10/11 dictation delegate, individual
+manufacturer gestures, physical-device acoustics/Bluetooth, and a signed-in
+OpenAI conversation remain unverified on hardware.
