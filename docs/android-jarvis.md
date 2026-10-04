@@ -180,3 +180,47 @@ including light mode with 200% font scale. Real JNI audio tests remain independe
 of provider credentials. The legacy Android 10/11 dictation delegate, individual
 manufacturer gestures, physical-device acoustics/Bluetooth, and a signed-in
 OpenAI conversation remain unverified on hardware.
+
+### Frosted assistant surface
+
+The assistant follows the **phone's system light/dark theme**, independently of
+Zeron's app appearance preference. A rounded light or dark glass surface lets
+the current app show through. Captions, status and icons remain sharp, with
+opaque call-control buttons and stronger action/error colors for contrast.
+
+On Android 12+ the assistant requests the supported system **blur behind** API
+(`FLAG_BLUR_BEHIND`, `setBlurBehindRadius`, 24 dp converted to pixels). Android's
+compositor blurs the app beneath the full assistant window; Compose does not
+blur assistant content, take a screenshot, or read screen context. The glass
+tint is 78% opaque with blur. On older devices, unsupported GPUs, or when Android
+disables blur (including battery saving), it becomes 90% opaque with a slightly
+stronger scrim. Both paths retain translucency. A cross-window blur listener
+updates this immediately and is removed when the window detaches or the session
+is destroyed. See the [Android blur API](https://developer.android.com/reference/android/view/WindowManager.LayoutParams#setBlurBehindRadius(int))
+and [runtime blur listener](https://developer.android.com/reference/android/view/WindowManager#addCrossWindowBlurEnabledListener(java.util.function.Consumer%3Cjava.lang.Boolean%3E)).
+
+Validation for this surface update:
+
+- Android 15 emulator reports blur supported and enabled. Actual power-button
+  invocation over Settings showed blurred underlying content and sharp Jarvis
+  UI. The live assistant window reported `BLUR_BEHIND`, radius 63 px at 420 dpi.
+- Switching the system blur setting off while the overlay remained open removed
+  the flag/radius and immediately strengthened its translucent tint. Re-enabling
+  blur restored the glass effect. Light/dark system theme changes also updated
+  the open overlay; 200% text remained readable with reachable controls.
+- The added platform instrumentation test exercises real enable/disable
+  callbacks, window attributes, and listener cleanup. All five instrumentation
+  tests passed, including the existing JNI audio and assistant policy tests.
+  All 272 JVM tests passed. Lint retains the same 12 existing errors outside
+  voice; this update introduces no lint findings.
+- Worst-case composited white/black underlays give normal text at least 8.32:1,
+  text actions/errors at least 4.84:1, and filled control labels at least 8:1.
+- Screenshots in `docs/screenshots/android-jarvis-assistant/` include light/dark
+  frosted surfaces and both disabled-blur fallback themes.
+- The update APK retains the existing trial's signing certificate (SHA-256
+  `ca8b677131bd3beed4986da25ce3110fe34144fb1bef136d5633fd65a697e903`).
+
+Physical-phone compositor appearance, unsupported-GPU hardware, and Android
+10/11 remain untested for this update. The emulator was not signed in to ChatGPT;
+it exercised the native sign-in-required result and cleanup, while the local
+JNI tests covered audio without provider credentials.

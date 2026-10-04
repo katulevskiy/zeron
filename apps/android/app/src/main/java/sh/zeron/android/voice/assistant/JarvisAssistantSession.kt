@@ -31,6 +31,9 @@ class JarvisAssistantSession(context: Context) : VoiceInteractionSession(context
     private val scope = CoroutineScope(SupervisorJob() + Dispatchers.Main.immediate)
     private val model get() = (context.applicationContext as ZeronApplication).model
     private var view: ComposeView? = null
+    private var glass: JarvisAssistantGlass? = null
+    private val _blurred = MutableStateFlow(false)
+    val blurred = _blurred.asStateFlow()
     private var startJob: Job? = null
     private var shown = false
     private var keepCall = false
@@ -79,6 +82,11 @@ class JarvisAssistantSession(context: Context) : VoiceInteractionSession(context
     override fun onCreateContentView(): View {
         window.window?.apply {
             clearFlags(WindowManager.LayoutParams.FLAG_DIM_BEHIND)
+            glass?.close()
+            glass = JarvisAssistantGlass(this) {
+                _blurred.value = it
+                trace("window blur: $it")
+            }
             decorView.setViewTreeLifecycleOwner(this@JarvisAssistantSession)
             decorView.setViewTreeSavedStateRegistryOwner(this@JarvisAssistantSession)
             decorView.setViewTreeViewModelStoreOwner(this@JarvisAssistantSession)
@@ -203,6 +211,8 @@ class JarvisAssistantSession(context: Context) : VoiceInteractionSession(context
     override fun onCloseSystemDialogs() { trace("close system dialogs"); closeSystemUi() }
     override fun onLockscreenShown() { closeSystemUi() }
     override fun onDestroy() {
+        glass?.close()
+        glass = null
         permissionGeneration = null
         model.jarvis.hideAssistant(this, keepCall)
         if (current?.get() === this) current = null
