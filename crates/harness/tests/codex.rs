@@ -1628,7 +1628,7 @@ async fn bypass_is_yolo_and_accepts_everything() {
     assert_eq!(
         text,
         "policy:never:danger-full-access:type:dangerFullAccess\
-         |301:accept|302:accept|303:accept|304:accept|305:accept"
+         |301:accept|302:accept|303:accept|304:accept|305:accept|306:accept|307:accept|308:accept"
     );
     assert!(asked.is_empty());
 }
@@ -1643,10 +1643,10 @@ async fn ask_mode_asks_codex_to_ask_and_honours_once_deny_and_always() {
     assert_eq!(
         text,
         "policy:untrusted:danger-full-access:type:dangerFullAccess\
-         |301:accept|302:accept|303:decline|304:accept|305:accept",
+         |301:accept|302:accept|303:decline|304:accept|305:accept|306:accept|307:accept|308:accept",
         "the second identical curl rides the Always-allow rule"
     );
-    assert_eq!(asked.len(), 4, "{asked:?}");
+    assert_eq!(asked.len(), 5, "{asked:?}");
     assert!(
         asked[0]
             .id
@@ -1666,6 +1666,7 @@ async fn ask_mode_asks_codex_to_ask_and_honours_once_deny_and_always() {
             zeron_proto::policy::APPROVAL_DENY.into(),
         ]
     );
+    assert!(!asked[0].question.contains("zsh"));
     assert!(asked[1].question.contains("curl https://example.com"));
     assert!(
         asked[3].question.contains("src/a.rs"),
@@ -1680,7 +1681,7 @@ async fn auto_mode_runs_dev_commands_asks_risky_and_refuses_destructive() {
     assert_eq!(
         text,
         "policy:untrusted:danger-full-access:type:dangerFullAccess\
-         |301:accept|302:decline|303:decline|304:accept|305:decline"
+         |301:accept|302:decline|303:decline|304:accept|305:decline|306:accept|307:accept|308:decline"
     );
     assert_eq!(asked.len(), 2, "only the two curls ask: {asked:?}");
     assert!(asked.iter().all(|q| q.question.contains("curl")));
@@ -1699,7 +1700,7 @@ async fn accept_edits_allows_project_edits_and_sandboxes_natively() {
     assert_eq!(
         text,
         "policy:untrusted:workspace-write:networkAccess:false,type:workspaceWrite\
-         |301:decline|302:decline|303:decline|304:accept|305:decline"
+         |301:decline|302:decline|303:decline|304:accept|305:decline|306:accept|307:accept|308:decline"
     );
     assert!(
         !asked.iter().any(|q| q.question.contains("a.rs")),
@@ -1717,7 +1718,7 @@ async fn plan_mode_is_read_only_and_refuses_edits() {
     assert_eq!(
         text,
         "policy:untrusted:read-only:networkAccess:true,type:readOnly\
-         |301:decline|302:decline|303:decline|304:decline|305:decline"
+         |301:decline|302:decline|303:decline|304:decline|305:decline|306:accept|307:accept|308:decline"
     );
     assert!(asked.is_empty(), "{asked:?}");
 }

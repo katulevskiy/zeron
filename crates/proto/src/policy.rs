@@ -20,13 +20,13 @@ pub enum PermissionMode {
     /// Safe actions are allowed, risky ones ask, destructive ones are
     /// refused; standing rules decide first.
     Auto,
-    /// Reading and editing inside the workspace are allowed; commands and
-    /// anything outside the workspace ask.
+    /// Reads, read-only commands, and workspace edits are allowed; other
+    /// commands and edits outside the workspace ask.
     AcceptEdits,
-    /// Reading is allowed; everything else asks.
+    /// Reads and read-only commands are allowed; everything else asks.
     Ask,
     /// Read-only: the agent investigates and proposes a plan; edits and
-    /// commands are refused until the plan is approved.
+    /// other commands are refused until the plan is approved.
     Plan,
 }
 
@@ -52,9 +52,11 @@ impl PermissionMode {
     pub fn description(self) -> &'static str {
         match self {
             PermissionMode::Bypass => "Runs everything without asking",
-            PermissionMode::Auto => "Safe actions run, risky ones ask, destructive ones are refused",
-            PermissionMode::AcceptEdits => "Edits in the project run; commands ask",
-            PermissionMode::Ask => "Asks before every edit and command",
+            PermissionMode::Auto => {
+                "Safe actions run, risky ones ask, destructive ones are refused"
+            }
+            PermissionMode::AcceptEdits => "Reads and project edits run; other commands ask",
+            PermissionMode::Ask => "Reads run; edits and other commands ask",
             PermissionMode::Plan => "Read-only: proposes a plan before changing anything",
         }
     }
@@ -217,7 +219,11 @@ fn sandbox_rank(sandbox: SandboxMode) -> u8 {
 }
 
 pub fn stricter_sandbox(a: SandboxMode, b: SandboxMode) -> SandboxMode {
-    if sandbox_rank(a) >= sandbox_rank(b) { a } else { b }
+    if sandbox_rank(a) >= sandbox_rank(b) {
+        a
+    } else {
+        b
+    }
 }
 
 fn default_true() -> bool {
@@ -373,9 +379,14 @@ mod tests {
     #[test]
     fn unsupported_modes_explain_themselves() {
         let bypass = PolicyCaps::bypass_only();
-        assert_eq!(bypass.unsupported_reason("Cursor", PermissionMode::Bypass), None);
         assert_eq!(
-            bypass.unsupported_reason("Cursor", PermissionMode::Ask).as_deref(),
+            bypass.unsupported_reason("Cursor", PermissionMode::Bypass),
+            None
+        );
+        assert_eq!(
+            bypass
+                .unsupported_reason("Cursor", PermissionMode::Ask)
+                .as_deref(),
             Some("Cursor runs without asking — it can only bypass permissions")
         );
         assert_eq!(
@@ -393,7 +404,10 @@ mod tests {
             some.refusal("Codex", PermissionMode::Plan).as_deref(),
             Some("Codex can't run in Plan mode. Pick Bypass permissions or Ask for it.")
         );
-        assert_eq!(PolicyCaps::all_modes().refusal("Claude", PermissionMode::Auto), None);
+        assert_eq!(
+            PolicyCaps::all_modes().refusal("Claude", PermissionMode::Auto),
+            None
+        );
     }
 
     #[test]
@@ -410,7 +424,11 @@ mod tests {
         assert_eq!(bare, "approval:n1");
         assert_eq!(approval_rule(&bare), None);
         assert_eq!(approval_rule("q-sync"), None);
-        assert!(approval_answer_is_always(&[APPROVAL_ALLOW_ALWAYS.to_string()]));
-        assert!(!approval_answer_is_always(&[APPROVAL_ALLOW_ONCE.to_string()]));
+        assert!(approval_answer_is_always(&[
+            APPROVAL_ALLOW_ALWAYS.to_string()
+        ]));
+        assert!(!approval_answer_is_always(&[
+            APPROVAL_ALLOW_ONCE.to_string()
+        ]));
     }
 }

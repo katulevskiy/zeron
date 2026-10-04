@@ -185,10 +185,16 @@ fn decide_attended(policy: &AgentPolicy, action: &Action, workspace: &Path) -> D
         },
         PermissionMode::Ask => match action.kind {
             ActionKind::Read => Decision::Allow,
+            ActionKind::Exec if action.command.as_deref().is_some_and(read_only_command) => {
+                Decision::Allow
+            }
             _ => Decision::Ask,
         },
         PermissionMode::AcceptEdits => match action.kind {
             ActionKind::Read => Decision::Allow,
+            ActionKind::Exec if action.command.as_deref().is_some_and(read_only_command) => {
+                Decision::Allow
+            }
             ActionKind::Edit if inside() => Decision::Allow,
             _ => Decision::Ask,
         },
@@ -886,7 +892,7 @@ mod tests {
         );
         assert_eq!(
             decide_in(PermissionMode::AcceptEdits, &Action::exec("Bash", "ls")),
-            Decision::Ask
+            Decision::Allow
         );
     }
 

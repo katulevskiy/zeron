@@ -372,14 +372,17 @@ case "$turnline" in
     emit "{\"method\":\"item/agentMessage/delta\",\"params\":{\"itemId\":\"m1\",\"delta\":\"|$1:$verdict\"}}"
   }
   here=$(pwd)
-  approve 301 item/commandExecution/requestApproval '{"threadId":"th-1","turnId":"t-1","itemId":"c1","startedAtMs":1,"command":"cargo test"}'
-  approve 302 item/commandExecution/requestApproval '{"threadId":"th-1","turnId":"t-1","itemId":"c2","startedAtMs":1,"command":"curl https://example.com"}'
-  approve 303 item/commandExecution/requestApproval '{"threadId":"th-1","turnId":"t-1","itemId":"c3","startedAtMs":1,"command":"git push --force origin main"}'
+  approve 301 item/commandExecution/requestApproval '{"threadId":"th-1","turnId":"t-1","itemId":"c1","startedAtMs":1,"command":"/bin/zsh -lc '\''cargo test'\''"}'
+  approve 302 item/commandExecution/requestApproval '{"threadId":"th-1","turnId":"t-1","itemId":"c2","startedAtMs":1,"command":"/bin/zsh -lc '\''curl https://example.com'\''"}'
+  approve 303 item/commandExecution/requestApproval '{"threadId":"th-1","turnId":"t-1","itemId":"c3","startedAtMs":1,"command":["/bin/bash","-lc","git push --force origin main"]}'
   # The real app server announces the patch's item before asking about it;
   # the request itself names only the item.
   emit "{\"method\":\"item/started\",\"params\":{\"threadId\":\"th-1\",\"item\":{\"id\":\"f1\",\"type\":\"fileChange\",\"status\":\"inProgress\",\"changes\":[{\"path\":\"$here/src/a.rs\",\"kind\":{\"type\":\"update\"},\"diff\":\"\"}]}}}"
   approve 304 item/fileChange/requestApproval '{"threadId":"th-1","turnId":"t-1","itemId":"f1","startedAtMs":1}'
-  approve 305 item/commandExecution/requestApproval '{"threadId":"th-1","turnId":"t-1","itemId":"c5","startedAtMs":1,"command":"curl https://example.com"}'
+  approve 305 item/commandExecution/requestApproval '{"threadId":"th-1","turnId":"t-1","itemId":"c5","startedAtMs":1,"command":["/bin/bash","-lc","curl https://example.com"]}'
+  approve 306 item/commandExecution/requestApproval '{"threadId":"th-1","turnId":"t-1","itemId":"c6","command":"/bin/zsh -lc '\''cat a.txt'\''"}'
+  approve 307 item/commandExecution/requestApproval '{"threadId":"th-1","turnId":"t-1","itemId":"c7","command":["/bin/bash","-lc","git status | head -n 1"]}'
+  approve 308 item/commandExecution/requestApproval '{"threadId":"th-1","turnId":"t-1","itemId":"c8","command":"/bin/zsh -lc '\''rm -rf /outside'\''"}'
   emit '{"method":"turn/completed","params":{"turn":{"id":"t-1"}}}'
   ;;
 
