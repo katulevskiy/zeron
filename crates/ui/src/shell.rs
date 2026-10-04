@@ -10126,6 +10126,9 @@ impl Shell {
             self.reduced_motion,
             frame_time,
         );
+        crate::new_thread_background_effects::flush_unused(
+            window, new_thread_background_setting.is_some(), cx,
+        );
         let dock_frame =
             self.composer_dock
                 .borrow_mut()
@@ -12367,6 +12370,11 @@ impl Render for Shell {
         for files in hidden_explorers {
             files.update(cx, |files, cx| files.suspend_tree_interactions(cx));
         }
+        crate::new_thread_background_effects::flush_unused(
+            window,
+            settings::current(cx).new_thread_composer_background.is_some(),
+            cx,
+        );
         settings::wallpaper::preload(cx);
         self.navigation_focus
             .remember(&self.shortcut_focus, window, cx);
