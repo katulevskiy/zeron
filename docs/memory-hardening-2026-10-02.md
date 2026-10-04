@@ -5,6 +5,11 @@ Branch `codex/memory-hardening` starts from upstream main
 The [comprehensive baseline audit](memory-audit-2026-10-02.md) records source
 evidence, reproducible growth mechanisms, and the archived before measurements.
 
+The [contributor follow-up](memory-followup-2026-10-03.md) adds permanent
+deleted-chat/provider teardown, wallpaper and link lifetime budgets, and a
+measured scalar history lookup. Its Linux evidence and remaining limits are
+recorded separately from the Windows/native results below.
+
 ## Changes
 
 * Chat sync retains a 256 KiB / 32-batch window over its durable SQLite outbox.

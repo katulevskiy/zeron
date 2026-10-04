@@ -2,7 +2,7 @@
 //! Run each scenario in a separate process; this counts requested live Rust
 //! allocations, not RSS, allocator metadata, native allocations, or GPU memory.
 //! cargo run --release --locked -p zeron-engine --example memory-audit -- SCENARIO
-//! Scenarios: docs, journal, outbox, rpc, terminal, history, sync, sync-catchup, engine.
+//! Scenarios: docs, journal, outbox, rpc, terminal, history, sync, sync-catchup, engine, message-lookup.
 
 use std::alloc::{GlobalAlloc, Layout, System};
 use std::sync::Arc;
@@ -639,8 +639,9 @@ fn main() -> anyhow::Result<()> {
             "sync" => sync().await,
             "sync-catchup" => sync_catchup().await,
             "engine" => engine().await,
+            "message-lookup" => message_lookup(),
             _ => anyhow::bail!(
-                "Choose docs, journal, outbox, rpc, terminal, history, sync, sync-catchup, or engine"
+                "Choose docs, journal, outbox, rpc, terminal, history, sync, sync-catchup, engine, or message-lookup"
             ),
         }
     })
@@ -662,6 +663,53 @@ async fn engine() -> anyhow::Result<()> {
         drop(core);
         tokio::time::sleep(Duration::from_millis(200)).await;
         sample("engine-after-shutdown", base, json!({"cycle":cycle}));
+    }
+    Ok(())
+}
+
+// Compare the exact former idempotency read with the scalar lookup over the
+// same document. CRDT history and publication remain unchanged by this test.
+fn message_lookup() -> anyhow::Result<()> {
+    for count in [8, 32, 128] {
+        let doc = zeron_doc::SessionDoc::init("lookup")?;
+        for i in 0..count {
+            doc.push_message(&zeron_doc::SessionMessageEntry {
+                id: format!("message-{i}"),
+                role: zeron_doc::MessageRole::User,
+                parts: vec![zeron_doc::MessagePart::Text {
+                    id: "text".into(),
+                    text: "x".repeat(256_000),
+                }],
+                created_at: i,
+                device_id: "host".into(),
+                status: Some(zeron_doc::MessageStatus::Complete),
+                continuation_of: None,
+                duration_ms: None,
+            })?;
+        }
+        for legacy in [true, false] {
+            let base = baseline();
+            let start = std::time::Instant::now();
+            for _ in 0..8 {
+                let exists = if legacy {
+                    doc.read_entries()?
+                        .iter()
+                        .any(|entry| entry.id == "missing")
+                } else {
+                    doc.has_message("missing")
+                };
+                assert!(!std::hint::black_box(exists));
+            }
+            sample(
+                if legacy {
+                    "message-lookup-full-history"
+                } else {
+                    "message-lookup-scalar"
+                },
+                base,
+                json!({"entries":count, "textBytes":count * 256_000, "iterations":8, "elapsedNs":start.elapsed().as_nanos()}),
+            );
+        }
     }
     Ok(())
 }

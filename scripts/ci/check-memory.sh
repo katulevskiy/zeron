@@ -14,7 +14,7 @@ binary=target/release/examples/memory-audit
 sha256sum "$binary" > "$output/binary.sha256"
 cp "$binary" "$output/memory-audit"
 failures=0
-for scenario in engine docs journal outbox rpc terminal history sync sync-catchup; do
+for scenario in engine docs journal outbox rpc terminal history sync sync-catchup message-lookup; do
   if ! timeout 300 valgrind --error-exitcode=97 --leak-check=full \
     --show-leak-kinds=definite,indirect --errors-for-leak-kinds=definite,indirect \
     --track-origins=yes --num-callers=30 --xml=yes \

@@ -47,7 +47,9 @@ jobs:
           apt-cache: valgrind
           apt-packages: valgrind
       - name: Core regression tests
-        run: cargo test --locked --release -p zeron-engine -p zeron-rpc -p zeron-sync -p zeron-harness -p zeron-text --lib
+        run: cargo test --locked --release -p zeron-doc -p zeron-engine -p zeron-rpc -p zeron-sync -p zeron-harness -p zeron-text --lib
+      - name: Deleted-chat provider and restart regressions
+        run: cargo test --locked --release -p zeron-engine --test chat_deletion -- --test-threads=1
       - name: Valgrind Memcheck and Massif
         run: bash scripts/ci/check-memory.sh
       - name: Upload memory evidence
