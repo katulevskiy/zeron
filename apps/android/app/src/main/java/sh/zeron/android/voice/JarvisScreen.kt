@@ -197,7 +197,7 @@ fun JarvisSettings(model: AppModel, onBack: () -> Unit) {
 
 /** Same Rust geometry as desktop and iOS; frames pause with lifecycle/reduced motion. */
 @Composable
-fun JarvisOrb(orb: VoiceOrb, microphone: Float, speaker: Float, modifier: Modifier = Modifier) {
+fun JarvisOrb(orb: VoiceOrb, microphone: Float, speaker: Float, modifier: Modifier = Modifier, tint: Color? = null) {
     val renderer = remember { OrbRenderer(OrbPreset.HERO, orb) }
     DisposableEffect(renderer) { onDispose { renderer.destroy() } }
     val owner = LocalLifecycleOwner.current
@@ -214,7 +214,11 @@ fun JarvisOrb(orb: VoiceOrb, microphone: Float, speaker: Float, modifier: Modifi
     val dark = MaterialTheme.colorScheme.background.red < 0.5f
     Canvas(modifier.clearAndSetSemantics { contentDescription = "Jarvis ${orb.name.lowercase().replace('_', ' ')}" }) {
         val scale = size.minDimension / frame.size
-        fun color(white: Float, alpha: Float): Color { val v = if (dark) white else 1f - white; return Color(v, v, v, alpha) }
+        fun color(white: Float, alpha: Float): Color {
+            if (tint != null) return tint.copy(alpha = (alpha * 1.8f).coerceIn(0f, 1f))
+            val v = if (dark) white else 1f - white
+            return Color(v, v, v, alpha)
+        }
         val lines = frame.lines
         var i = 0
         while (i + 6 < lines.size) {

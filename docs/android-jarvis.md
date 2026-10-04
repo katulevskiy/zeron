@@ -181,46 +181,78 @@ of provider credentials. The legacy Android 10/11 dictation delegate, individual
 manufacturer gestures, physical-device acoustics/Bluetooth, and a signed-in
 OpenAI conversation remain unverified on hardware.
 
-### Frosted assistant surface
+### Minimal assistant overlay and camera context
 
-The assistant follows the **phone's system light/dark theme**, independently of
-Zeron's app appearance preference. A rounded light or dark glass surface lets
-the current app show through. Captions, status and icons remain sharp, with
-opaque call-control buttons and stronger action/error colors for contrast.
+Power hold now shows transparent, bottom-aligned content over Android's
+full-screen dim layer (`FLAG_DIM_BEHIND`, dim amount 0.76). There is no rounded
+card, background fill, or underlying-app blur. The current app stays visible;
+Zeron does not capture or read it. The overlay's orb uses Zeron purple
+`#8B7CF6`; the ordinary in-app orb retains its existing appearance. Overlay
+text and controls use a dark palette in either phone theme so they remain
+readable over the dimmed screen.
 
-On Android 12+ the assistant requests the supported system **blur behind** API
-(`FLAG_BLUR_BEHIND`, `setBlurBehindRadius`, 24 dp converted to pixels). Android's
-compositor blurs the app beneath the full assistant window; Compose does not
-blur assistant content, take a screenshot, or read screen context. The glass
-tint is 78% opaque with blur. On older devices, unsupported GPUs, or when Android
-disables blur (including battery saving), it becomes 90% opaque with a slightly
-stronger scrim. Both paths retain translucency. A cross-window blur listener
-updates this immediately and is removed when the window detaches or the session
-is destroyed. See the [Android blur API](https://developer.android.com/reference/android/view/WindowManager.LayoutParams#setBlurBehindRadius(int))
-and [runtime blur listener](https://developer.android.com/reference/android/view/WindowManager#addCrossWindowBlurEnabledListener(java.util.function.Consumer%3Cjava.lang.Boolean%3E)).
+The Jarvis title, close icon, host label, persistent listening/status text, and
+instructional footer are removed. Settings sits at bottom left, camera at
+bottom right, and the background-call action is an icon between them. Mute,
+audio route, and hang-up controls remain. Captions, consent, transient progress,
+errors, and recovery actions remain when relevant. Launch routes are consumed
+only by a resumed activity: Android's assistant task must not lose its settings
+or conversation request to a hidden Zeron activity.
 
-Validation for this surface update:
+During an active call, tap the camera, capture a picture in the phone's camera
+app, and confirm it. Once **Photo added** appears, ask about it aloud. The photo
+is added to the current call's model context; this does not create a persistent
+picture attachment in the Zeron conversation. Sending it does not interrupt
+speech with an automatic new model response.
 
-- Android 15 emulator reports blur supported and enabled. Actual power-button
-  invocation over Settings showed blurred underlying content and sharp Jarvis
-  UI. The live assistant window reported `BLUR_BEHIND`, radius 63 px at 420 dpi.
-- Switching the system blur setting off while the overlay remained open removed
-  the flag/radius and immediately strengthened its translucent tint. Re-enabling
-  blur restored the glass effect. Light/dark system theme changes also updated
-  the open overlay; 200% text remained readable with reachable controls.
-- The added platform instrumentation test exercises real enable/disable
-  callbacks, window attributes, and listener cleanup. All five instrumentation
-  tests passed, including the existing JNI audio and assistant policy tests.
-  All 272 JVM tests passed. Lint retains the same 12 existing errors outside
-  voice; this update introduces no lint findings.
-- Worst-case composited white/black underlays give normal text at least 8.32:1,
-  text actions/errors at least 4.84:1, and filled control labels at least 8:1.
-- Screenshots in `docs/screenshots/android-jarvis-assistant/` include light/dark
-  frosted surfaces and both disabled-blur fallback themes.
-- The update APK retains the existing trial's signing certificate (SHA-256
-  `ca8b677131bd3beed4986da25ce3110fe34144fb1bef136d5633fd65a697e903`).
+The system camera owns capture through `ACTION_IMAGE_CAPTURE` and `EXTRA_OUTPUT`.
+Zeron requests no camera or storage permission. A non-exported bridge grants
+read/write access to one private FileProvider cache URI, then revokes that grant
+and deletes the temporary photo. EXIF-aware decoding limits the longest edge
+to 1280 pixels; adaptive JPEG compression fits the negotiated WebRTC/SCTP
+message limit. Re-encoding removes camera/location metadata. The existing,
+authenticated `oai-events` channel carries a `conversation.item.create` user
+message with `input_image`. Zeron reports success only after the matching server
+item acknowledgement, with a bounded timeout and no unbounded send queue.
 
-Physical-phone compositor appearance, unsupported-GPU hardware, and Android
-10/11 remain untested for this update. The emulator was not signed in to ChatGPT;
-it exercised the native sign-in-required result and cleanup, while the local
-JNI tests covered audio without provider credentials.
+Microphone capture pauses while the camera/photo delivery is active and resumes
+according to the current user mute setting. A call-generation and random capture
+token prevent a late camera result from reaching a replacement call, including
+after process restart. Camera-bridge rotation retains a single delivery job.
+Home, lock, call termination, or navigation away revokes ownership and discards
+late results. The camera button is unavailable before the call becomes active
+and while a photo is being added.
+
+References: [OpenAI Realtime image inputs](https://developers.openai.com/api/docs/guides/realtime-conversations#image-inputs)
+and [Android camera intents](https://developer.android.com/guide/components/intents-common#Camera).
+
+Validation for this update:
+
+- All 276 JVM tests passed, including correlated photo acknowledgements,
+  rejection/close handling, message limits, and camera mute precedence.
+- All seven Android instrumentation tests passed on Android 15 x86_64. They
+  include native camera capture into the production private-URI contract,
+  bounded image decoding/encoding and provider isolation, a real JNI WebRTC
+  photo/acknowledgement exchange with a local peer, microphone/audio cleanup,
+  assistant protection/ownership checks, and accessible control placement.
+- Actual power-button invocation over light and dark Android Settings shows a
+  transparent `VOICE_INTERACTION` window with `DIM_BEHIND` and no `BLUR_BEHIND`.
+  The framework still reports disabled screen context `3`. At 200% system text
+  scale, recovery text and bottom controls remain visible and reachable. The
+  settings action opened Jarvis settings correctly on repeated invocations with
+  an existing stopped Zeron task.
+- Screenshots in `docs/screenshots/android-jarvis-assistant-minimal/` distinguish
+  actual system invocations (the emulator is not signed in to ChatGPT) from an
+  active-call caption/control presentation fixture. The fixture is not evidence
+  of a provider conversation. Native capture was exercised with the emulator's
+  virtual camera. An initial emulator RenderThread crash with the software GPU
+  was resolved for validation by using SwiftShader with Vulkan disabled.
+- Lint retains the same 12 existing errors outside voice; this update adds no
+  lint findings. The update APK retains the existing signing certificate
+  (SHA-256 `ca8b677131bd3beed4986da25ce3110fe34144fb1bef136d5633fd65a697e903`).
+
+Physical-phone camera variants, assistant/camera lifecycle behavior on other
+Android versions, and signed-in provider image recognition remain unverified.
+The emulator checks native capture, encoding, UI, call policy, and local media
+transport separately; it cannot exercise the entire signed-in capture-to-vision
+flow or camera-return ownership during a real provider call.

@@ -64,7 +64,21 @@ class WebRtcVoicePeerTest {
                     override fun onIceCandidatesRemoved(candidates: Array<out IceCandidate>) = Unit
                     override fun onAddStream(stream: MediaStream) = Unit
                     override fun onRemoveStream(stream: MediaStream) = Unit
-                    override fun onDataChannel(channel: DataChannel) { data = channel }
+                    override fun onDataChannel(channel: DataChannel) {
+                        data = channel
+                        channel.registerObserver(object : DataChannel.Observer {
+                            override fun onBufferedAmountChange(previous: Long) = Unit
+                            override fun onStateChange() = Unit
+                            override fun onMessage(buffer: DataChannel.Buffer) {
+                                val bytes = ByteArray(buffer.data.remaining()).also { buffer.data.get(it) }
+                                val event = org.json.JSONObject(bytes.toString(Charsets.UTF_8))
+                                val item = event.getJSONObject("item")
+                                assertEquals("input_image", item.getJSONArray("content").getJSONObject(0).getString("type"))
+                                val reply = org.json.JSONObject().put("type", "conversation.item.added").put("item", item).toString().toByteArray()
+                                channel.send(DataChannel.Buffer(java.nio.ByteBuffer.wrap(reply), false))
+                            }
+                        })
+                    }
                     override fun onRenegotiationNeeded() = Unit
                 })
                 val peer = checkNotNull(other)
@@ -80,6 +94,9 @@ class WebRtcVoicePeerTest {
                 withTimeout(10_000) { while (peer.iceGatheringState() != PeerConnection.IceGatheringState.COMPLETE) delay(20) }
                 media.applyAnswer(checkNotNull(peer.localDescription).description)
                 assertEquals("Negotiation must not capture", initial, audio.activeRecordingConfigurations.size)
+                media.setMuted(true)
+                media.addPhoto(byteArrayOf(0xff.toByte(), 0xd8.toByte(), 0xff.toByte(), 0xd9.toByte()))
+                assertEquals("Adding acknowledged photo context must not open the mic", initial, audio.activeRecordingConfigurations.size)
                 media.setMuted(false)
                 withTimeout(5_000) { while (audio.activeRecordingConfigurations.size <= initial) delay(50) }
                 media.muteLocally()

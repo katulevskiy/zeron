@@ -17,7 +17,10 @@
 
     <!-- Explicit speech-provider discovery for the Android 10/11 legacy
          recognizer contract; newer Android keeps its existing provider. -->
-    <queries><intent><action android:name="android.speech.RecognitionService" /></intent></queries>
+    <queries>
+        <intent><action android:name="android.speech.RecognitionService" /></intent>
+        <intent><action android:name="android.media.action.IMAGE_CAPTURE" /></intent>
+    </queries>
 
     <application
         android:name=".ZeronApplication"
@@ -77,6 +80,9 @@
         <service android:name=".voice.assistant.JarvisRecognitionService"
             android:exported="true" android:permission="android.permission.RECORD_AUDIO" />
         <activity android:name=".voice.assistant.JarvisAssistantPermissionActivity"
+            android:exported="false" android:excludeFromRecents="true"
+            android:taskAffinity="" android:theme="@style/Theme.Zeron.AssistantPermission" />
+        <activity android:name=".voice.assistant.JarvisAssistantCameraActivity"
             android:exported="false" android:excludeFromRecents="true"
             android:taskAffinity="" android:theme="@style/Theme.Zeron.AssistantPermission" />
         <activity android:name=".voice.assistant.JarvisAssistantSettingsActivity"

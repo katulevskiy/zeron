@@ -1,15 +1,12 @@
 package sh.zeron.android.voice.assistant
 
-import androidx.compose.foundation.background
-import androidx.compose.foundation.BorderStroke
 import androidx.compose.foundation.clickable
 import androidx.compose.foundation.layout.*
 import androidx.compose.foundation.rememberScrollState
-import androidx.compose.foundation.shape.RoundedCornerShape
 import androidx.compose.foundation.verticalScroll
 import androidx.compose.material.icons.Icons
-import androidx.compose.material.icons.filled.*
 import androidx.compose.material.icons.automirrored.filled.VolumeUp
+import androidx.compose.material.icons.filled.*
 import androidx.compose.material3.*
 import androidx.compose.runtime.*
 import androidx.compose.ui.Alignment
@@ -18,107 +15,128 @@ import androidx.compose.ui.graphics.Color
 import androidx.compose.ui.semantics.*
 import androidx.compose.ui.unit.dp
 import sh.zeron.android.core.AppModel
+import sh.zeron.android.design.Appearance
+import sh.zeron.android.design.ThemeMode
 import sh.zeron.android.design.ZeronTheme
-import sh.zeron.android.design.LocalDarkTheme
 import sh.zeron.android.voice.JarvisOrb
+import sh.zeron.android.voice.JarvisState
+import sh.zeron.android.voice.VoiceHost
 import uniffi.zeron_core.*
+
+internal enum class AssistantAction { Close, Settings, Start, Consent, Mute, Speaker, Minimize, Camera, MicrophoneSettings, CodexSettings, Notification, Conversation, Setup }
 
 @Composable
 fun JarvisAssistantOverlay(model: AppModel, session: JarvisAssistantSession) {
-    val onboarded by model.onboarded.collectAsState()
     val controller = model.jarvis
     val state by controller.state.collectAsState()
     val consent by controller.consentRequest.collectAsState()
     val preparing by session.preparing.collectAsState()
     val notice by session.notice.collectAsState()
     val notifications by session.notifications.collectAsState()
-    val blurred by session.blurred.collectAsState()
-    // Assistant chrome follows the PHONE theme, independently of the app's
-    // appearance setting. The system compositor blurs the other app, not this UI.
-    ZeronTheme {
-        val dark = LocalDarkTheme.current
-        // Text actions/errors need stronger contrast than the app's opaque
-        // palette when arbitrary content shows through the glass.
-        val scheme = MaterialTheme.colorScheme.copy(
-            primary = if (dark) Color(0xFFC4B5FD) else Color(0xFF4525BE),
-            onPrimary = if (dark) Color(0xFF26105C) else Color.White,
-            error = if (dark) Color(0xFFFF9C9C) else Color(0xFF991414),
-        )
+    val cameraBusy by session.cameraBusy.collectAsState()
+    JarvisAssistantContent(state, preparing, notice, consent, cameraBusy, notifications) { action ->
+        when (action) {
+            AssistantAction.Close -> session.dismiss()
+            AssistantAction.Settings -> session.openApp("jarvis-settings")
+            AssistantAction.Start -> session.startJarvis()
+            AssistantAction.Consent -> controller.acceptConsent()
+            AssistantAction.Mute -> controller.toggleMute()
+            AssistantAction.Speaker -> controller.toggleSpeaker()
+            AssistantAction.Minimize -> session.minimize()
+            AssistantAction.Camera -> session.capturePhoto()
+            AssistantAction.MicrophoneSettings -> session.openMicrophoneSettings()
+            AssistantAction.CodexSettings -> session.openApp("agents")
+            AssistantAction.Notification -> session.enableCallNotification()
+            AssistantAction.Conversation -> state.call?.chatId?.let { session.openApp("chat:$it") }
+            AssistantAction.Setup -> session.openApp(if (model.onboarded.value) "jarvis-settings" else "home")
+        }
+    }
+}
+
+/** Transparent assistant content over Android's full-screen dim layer. No card,
+ * blur, title, host label, or instructional footer covers the current app. */
+@Composable
+internal fun JarvisAssistantContent(
+    state: JarvisState,
+    preparing: Boolean,
+    notice: String?,
+    consent: VoiceHost?,
+    cameraBusy: Boolean,
+    notifications: Boolean,
+    onAction: (AssistantAction) -> Unit,
+) {
+    ZeronTheme(Appearance(ThemeMode.Dark)) {
+        val scheme = MaterialTheme.colorScheme.copy(primary = Color(0xFFC4B5FD),
+            onPrimary = Color(0xFF26105C), error = Color(0xFFFF9C9C))
         MaterialTheme(colorScheme = scheme) {
-            val glass = if (dark) Color(0xFF111116) else Color(0xFFFAFAFD)
-            val opacity = if (blurred) 0.78f else 0.90f
-            BoxWithConstraints(Modifier.fillMaxSize().systemBarsPadding()) {
-                Box(Modifier.fillMaxSize().background(Color.Black.copy(alpha = if (blurred) 0.08f else 0.16f))
-                    .clickable(onClickLabel = "Dismiss Jarvis", onClick = session::dismiss))
-                Surface(shape = RoundedCornerShape(28.dp), color = glass.copy(alpha = opacity),
-                    contentColor = MaterialTheme.colorScheme.onSurface,
-                    // Elevation tint would change the deliberately translucent glass.
-                    tonalElevation = 0.dp, shadowElevation = 0.dp,
-                    border = BorderStroke(1.dp, Color.White.copy(alpha = if (dark) 0.14f else 0.50f)),
-                    modifier = Modifier.align(Alignment.BottomCenter).padding(12.dp)
-                        .widthIn(max = 600.dp).fillMaxWidth().heightIn(max = maxHeight - 24.dp)
-                        .semantics { paneTitle = "Zeron Jarvis assistant" }) {
-                    Column(Modifier.verticalScroll(rememberScrollState()).padding(20.dp),
-                        horizontalAlignment = Alignment.CenterHorizontally, verticalArrangement = Arrangement.spacedBy(12.dp)) {
-                        Row(Modifier.fillMaxWidth(), verticalAlignment = Alignment.CenterVertically) {
-                            Text("Jarvis", style = MaterialTheme.typography.titleLarge, modifier = Modifier.weight(1f))
-                            IconButton(onClick = { session.openApp("jarvis-settings") }) { Icon(Icons.Default.Settings, "Jarvis settings") }
-                            IconButton(onClick = session::dismiss) { Icon(Icons.Default.Close, "Close Jarvis and end call") }
+            BoxWithConstraints(Modifier.fillMaxSize().systemBarsPadding().semantics { paneTitle = "Zeron Jarvis assistant" }) {
+                Box(Modifier.fillMaxSize().clickable(onClickLabel = "Dismiss Jarvis", onClick = { onAction(AssistantAction.Close) }))
+                Column(Modifier.align(Alignment.BottomCenter).widthIn(max = 600.dp).fillMaxWidth()
+                    .heightIn(max = maxHeight).verticalScroll(rememberScrollState()).padding(horizontal = 28.dp, vertical = 24.dp),
+                    horizontalAlignment = Alignment.CenterHorizontally, verticalArrangement = Arrangement.spacedBy(16.dp)) {
+                    if (consent != null) {
+                        Text("Your phone sends live microphone audio to OpenAI. Codex on ${consent.name} runs Jarvis, uses your ChatGPT voice allowance, and saves the conversation in its Zeron chat. Jarvis can use your connected agents and tools. You can mute or hang up at any time.", color = scheme.onSurface)
+                        Button(onClick = { onAction(AssistantAction.Consent) }) { Text("Continue") }
+                        TextButton(onClick = { onAction(AssistantAction.Close) }) { Text("Cancel") }
+                    } else {
+                        JarvisOrb(if (state.muted) VoiceOrb.MUTED else state.call?.orb ?: VoiceOrb.IDLE,
+                            state.call?.microphone ?: 0f, state.call?.speaker ?: 0f, Modifier.size(184.dp),
+                            tint = Color(0xFF8B7CF6))
+                        val status = when {
+                            cameraBusy -> "Adding photo…"
+                            preparing -> "Preparing…"
+                            state.muted -> "Microphone muted"
+                            state.call?.work == VoiceCallWork.AWAITING_INPUT -> "Needs your input"
+                            state.call?.work == VoiceCallWork.WORKING -> "Working"
+                            state.live && state.call?.phase != VoiceCallPhase.ACTIVE -> "Connecting…"
+                            else -> null
                         }
-                        if (consent != null) {
-                            Text("Your phone sends live microphone audio to OpenAI. Codex on ${consent!!.name} runs Jarvis, uses your ChatGPT voice allowance, and saves the conversation in its Zeron chat. Jarvis can use your connected agents and tools. You can mute or hang up at any time.")
-                            Button(onClick = controller::acceptConsent) { Text("Continue") }
-                            TextButton(onClick = session::dismiss) { Text("Cancel") }
-                        } else {
-                            JarvisOrb(if (state.muted) VoiceOrb.MUTED else state.call?.orb ?: VoiceOrb.IDLE,
-                                state.call?.microphone ?: 0f, state.call?.speaker ?: 0f, Modifier.size(136.dp))
-                            val status = when {
-                                preparing -> "Preparing Jarvis…"
-                                state.muted -> "Microphone muted"
-                                state.call?.work == VoiceCallWork.AWAITING_INPUT -> "Needs your input"
-                                state.call?.work == VoiceCallWork.WORKING -> "Working"
-                                state.call?.speaking == true -> "Speaking"
-                                state.call?.phase == VoiceCallPhase.ACTIVE -> "Listening"
-                                state.live -> "Connecting…"
-                                else -> "Ready when you are"
-                            }
-                            Text(status, style = MaterialTheme.typography.headlineSmall,
-                                modifier = Modifier.semantics { liveRegion = LiveRegionMode.Polite })
-                            if (state.host.isNotBlank()) Text(state.host, style = MaterialTheme.typography.bodySmall)
-                            (notice ?: state.error)?.let { Text(it, color = MaterialTheme.colorScheme.error,
-                                modifier = Modifier.semantics { liveRegion = LiveRegionMode.Polite }) }
-                            state.call?.caption?.takeLast(240)?.takeIf { it.isNotBlank() }?.let { Text(it) }
-                            if (state.live) {
-                                Row(horizontalArrangement = Arrangement.spacedBy(12.dp)) {
-                                    FilledTonalIconButton(onClick = controller::toggleMute, modifier = Modifier.size(56.dp)) {
-                                        Icon(if (state.muted) Icons.Default.MicOff else Icons.Default.Mic,
-                                            if (state.muted) "Unmute microphone" else "Mute microphone")
-                                    }
-                                    FilledTonalIconButton(onClick = controller::toggleSpeaker, modifier = Modifier.size(56.dp)) {
-                                        Icon(if (state.speaker) Icons.AutoMirrored.Filled.VolumeUp else Icons.Default.PhoneInTalk,
-                                            if (state.speaker) "Use earpiece" else "Use speaker")
-                                    }
-                                    FilledIconButton(onClick = session::dismiss, modifier = Modifier.size(56.dp),
-                                        colors = IconButtonDefaults.filledIconButtonColors(
-                                            containerColor = MaterialTheme.colorScheme.error,
-                                            contentColor = MaterialTheme.colorScheme.onError)) {
-                                        Icon(Icons.Default.CallEnd, "Hang up")
-                                    }
+                        status?.let { Text(it, color = scheme.onSurface, modifier = Modifier.semantics { liveRegion = LiveRegionMode.Polite }) }
+                        (notice ?: state.error)?.let { Text(it, color = if (notice == "Photo added") scheme.onSurface else scheme.error,
+                            modifier = Modifier.semantics { liveRegion = LiveRegionMode.Polite }) }
+                        state.call?.caption?.takeLast(240)?.takeIf { it.isNotBlank() }?.let {
+                            Text(it, color = scheme.onSurface, modifier = Modifier.semantics { liveRegion = LiveRegionMode.Polite })
+                        }
+                        if (state.live) {
+                            Row(horizontalArrangement = Arrangement.spacedBy(16.dp)) {
+                                FilledTonalIconButton(onClick = { onAction(AssistantAction.Mute) }, modifier = Modifier.size(56.dp)) {
+                                    Icon(if (state.muted) Icons.Default.MicOff else Icons.Default.Mic,
+                                        if (state.muted) "Unmute microphone" else "Mute microphone")
                                 }
-                                if (!notifications) TextButton(onClick = session::enableCallNotification) { Text("Enable call notification") }
-                                TextButton(onClick = session::minimize) { Text("Keep call in background") }
-                                state.call?.chatId?.let { id -> TextButton(onClick = { session.openApp("chat:$id") }) { Text("Open conversation") } }
-                                Text(if (notifications) "Closing this overlay ends the call. Background calls stay in the call notification." else "Closing this overlay ends the call. Enable notifications for background mute and hang-up controls.", style = MaterialTheme.typography.bodySmall)
-                            } else if (!preparing) {
-                                if (notice == null) Button(onClick = session::startJarvis) { Text("Start Jarvis") }
-                                if (state.endReason == VoiceEndReason.MICROPHONE_DENIED) TextButton(onClick = session::openMicrophoneSettings) { Text("Microphone permission settings") }
-                                if (state.endReason in listOf(VoiceEndReason.SIGN_IN_REQUIRED, VoiceEndReason.HOST_INCOMPATIBLE)) {
-                                    TextButton(onClick = { session.openApp("agents") }) { Text("Set up Codex") }
+                                FilledTonalIconButton(onClick = { onAction(AssistantAction.Speaker) }, modifier = Modifier.size(56.dp)) {
+                                    Icon(if (state.speaker) Icons.AutoMirrored.Filled.VolumeUp else Icons.Default.PhoneInTalk,
+                                        if (state.speaker) "Use earpiece" else "Use speaker")
                                 }
-                                TextButton(onClick = { session.openApp(if (onboarded) "jarvis-settings" else "home") }) {
-                                    Text(if (onboarded) "Choose device and voice" else "Open Zeron")
+                                FilledIconButton(onClick = { onAction(AssistantAction.Close) }, modifier = Modifier.size(56.dp),
+                                    colors = IconButtonDefaults.filledIconButtonColors(containerColor = scheme.error, contentColor = scheme.onError)) {
+                                    Icon(Icons.Default.CallEnd, "Hang up")
                                 }
                             }
+                            if (!notifications) TextButton(onClick = { onAction(AssistantAction.Notification) }) { Text("Enable call notification") }
+                            if (state.call?.work == VoiceCallWork.AWAITING_INPUT && state.call.chatId != null) {
+                                TextButton(onClick = { onAction(AssistantAction.Conversation) }) { Text("Open conversation") }
+                            }
+                        } else if (!preparing) {
+                            if (notice == null) Button(onClick = { onAction(AssistantAction.Start) }) { Text("Start Jarvis") }
+                            if (state.endReason == VoiceEndReason.MICROPHONE_DENIED) TextButton(onClick = { onAction(AssistantAction.MicrophoneSettings) }) { Text("Microphone permissions") }
+                            if (state.endReason in listOf(VoiceEndReason.SIGN_IN_REQUIRED, VoiceEndReason.HOST_INCOMPATIBLE)) {
+                                TextButton(onClick = { onAction(AssistantAction.CodexSettings) }) { Text("Set up Codex") }
+                            }
+                            if (state.error != null && state.endReason == null) TextButton(onClick = { onAction(AssistantAction.Setup) }) { Text("Open Zeron") }
+                        }
+                    }
+                    Row(Modifier.fillMaxWidth().padding(top = 8.dp), horizontalArrangement = Arrangement.SpaceBetween,
+                        verticalAlignment = Alignment.CenterVertically) {
+                        FilledTonalIconButton(onClick = { onAction(AssistantAction.Settings) }, modifier = Modifier.size(48.dp)) {
+                            Icon(Icons.Default.Settings, "Jarvis settings")
+                        }
+                        if (state.live) IconButton(onClick = { onAction(AssistantAction.Minimize) }, modifier = Modifier.size(48.dp)) {
+                            Icon(Icons.Default.KeyboardArrowDown, "Keep call in background", tint = scheme.onSurface)
+                        }
+                        FilledTonalIconButton(onClick = { onAction(AssistantAction.Camera) },
+                            enabled = state.live && state.call?.phase == VoiceCallPhase.ACTIVE && !cameraBusy && consent == null,
+                            modifier = Modifier.size(48.dp)) {
+                            Icon(Icons.Default.PhotoCamera, "Take photo for Jarvis")
                         }
                     }
                 }

@@ -26,6 +26,7 @@ class JarvisAssistantTest {
         val recognition = pm.getServiceInfo(ComponentName(context, JarvisRecognitionService::class.java), 0)
         assertEquals(Manifest.permission.RECORD_AUDIO, recognition.permission)
         assertFalse(pm.getActivityInfo(ComponentName(context, JarvisAssistantPermissionActivity::class.java), 0).exported)
+        assertFalse(pm.getActivityInfo(ComponentName(context, JarvisAssistantCameraActivity::class.java), 0).exported)
         val parser = registration.loadXmlMetaData(pm, "android.voice_interaction")
         parser.use {
             while (it.next() != org.xmlpull.v1.XmlPullParser.START_TAG) { }
@@ -38,6 +39,7 @@ class JarvisAssistantTest {
         }
         val permissions = pm.getPackageInfo(context.packageName, PackageManager.GET_PERMISSIONS).requestedPermissions.orEmpty()
         assertFalse(permissions.contains(Manifest.permission.SYSTEM_ALERT_WINDOW))
+        assertFalse(permissions.contains(Manifest.permission.CAMERA))
     }
 
     @Test fun staleSessionCannotCancelNewOverlayAndBackgroundRequestsCannotStart() {
@@ -47,7 +49,16 @@ class JarvisAssistantTest {
             context.startActivity(Intent(context, MainActivity::class.java)
                 .addFlags(Intent.FLAG_ACTIVITY_NEW_TASK).putExtra("demo", true))
         }
-        instrumentation.waitForIdleSync()
+        var resumed = false
+        val deadline = System.currentTimeMillis() + 10_000
+        while (!resumed && System.currentTimeMillis() < deadline) {
+            instrumentation.runOnMainSync {
+                resumed = androidx.test.runner.lifecycle.ActivityLifecycleMonitorRegistry.getInstance()
+                    .getActivitiesInStage(androidx.test.runner.lifecycle.Stage.RESUMED).any { it is MainActivity }
+            }
+            if (!resumed) Thread.sleep(50)
+        }
+        assertTrue(resumed)
         instrumentation.runOnMainSync {
             val model = (context.applicationContext as ZeronApplication).model
             val controller = model.jarvis

@@ -9,7 +9,8 @@ import kotlinx.coroutines.withTimeout
 import org.webrtc.*
 import org.webrtc.audio.JavaAudioDeviceModule
 
-/** Audio-only endpoint for the shared Codex V3 transport. Never handles credentials. */
+/** Native audio and explicit photo context over the shared Codex V3 transport.
+ * Never handles credentials, video streaming, or screen capture. */
 class WebRtcVoicePeer(private val context: Context, private val failure: () -> Unit) {
     private var factory: PeerConnectionFactory? = null
     private var audio: JavaAudioDeviceModule? = null
@@ -19,6 +20,13 @@ class WebRtcVoicePeer(private val context: Context, private val failure: () -> U
     private var channel: DataChannel? = null
     @Volatile private var closed = false
     private var activated = false
+    private var maxMessageBytes = 65_536
+    internal val maxPhotoBytes get() = (maxMessageBytes - 1024) / 4 * 3
+    private val photos = VoicePhotoChannel { data ->
+        !closed && activated && channel?.state() == DataChannel.State.OPEN &&
+            (channel?.bufferedAmount() ?: Long.MAX_VALUE) == 0L &&
+            channel?.send(DataChannel.Buffer(java.nio.ByteBuffer.wrap(data), false)) == true
+    }
 
     fun prepare() {
         check(!closed)
@@ -68,7 +76,12 @@ class WebRtcVoicePeer(private val context: Context, private val failure: () -> U
                 if (!closed && channel?.state() in listOf(DataChannel.State.CLOSING, DataChannel.State.CLOSED)) failure()
             }
             // Canonical captions and tool handoffs come from the host coordinator.
-            override fun onMessage(buffer: DataChannel.Buffer) = Unit
+            override fun onMessage(buffer: DataChannel.Buffer) {
+                if (buffer.binary || buffer.data.remaining() > 262_144) return
+                val bytes = ByteArray(buffer.data.remaining())
+                buffer.data.get(bytes)
+                photos.receive(bytes)
+            }
         })
     }
 
@@ -82,6 +95,14 @@ class WebRtcVoicePeer(private val context: Context, private val failure: () -> U
 
     suspend fun applyAnswer(answer: String) {
         require(answer.toByteArray().size in 1..65_536)
+        // SDP defaults to 64 KiB when omitted; 0 means unbounded. Keep our own
+        // 256 KiB cap even when the remote endpoint advertises more.
+        val advertised = Regex("(?m)^a=max-message-size:(\\d+)\\r?$").find(answer)?.groupValues?.get(1)?.toLongOrNull()
+        maxMessageBytes = when (advertised) {
+            null -> 65_536
+            0L -> 262_144
+            else -> advertised.coerceIn(0, 262_144).toInt()
+        }
         val p = checkNotNull(peer)
         setSdp { p.setRemoteDescription(it, SessionDescription(SessionDescription.Type.ANSWER, answer)) }
         waitUntil { p.connectionState() == PeerConnection.PeerConnectionState.CONNECTED && channel?.state() == DataChannel.State.OPEN }
@@ -105,6 +126,11 @@ class WebRtcVoicePeer(private val context: Context, private val failure: () -> U
         peer?.setAudioRecording(false)
     }
 
+    internal suspend fun addPhoto(jpeg: ByteArray) {
+        check(!closed && activated) { "Start a voice call before adding a photo." }
+        photos.add(jpeg, maxMessageBytes)
+    }
+
     suspend fun levels(visible: Boolean): Pair<UShort, UShort> {
         if (!visible || !activated) return 0u.toUShort() to 0u.toUShort()
         check(!closed)
@@ -126,6 +152,7 @@ class WebRtcVoicePeer(private val context: Context, private val failure: () -> U
     fun close() {
         if (closed) return
         closed = true
+        photos.close()
         track?.setEnabled(false)
         audio?.setMicrophoneMute(true)
         audio?.setSpeakerMute(true)

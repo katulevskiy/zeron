@@ -205,6 +205,23 @@ class JarvisController(private val app: Application, private val model: AppModel
         media?.toggleSpeaker()
     }
 
+    fun pauseForCamera(id: Long, paused: Boolean) {
+        if (!owns(id)) return
+        media?.pauseForCamera(paused)
+        // Re-acknowledge the current user mute setting before capture resumes.
+        // Camera return must never undo a user mute from the notification.
+        if (!paused) call?.setMuted(_state.value.muted)
+    }
+
+    internal suspend fun addPhoto(id: Long, file: java.io.File) {
+        check(owns(id) && _state.value.call?.phase == VoiceCallPhase.ACTIVE)
+        val endpoint = checkNotNull(media)
+        val jpeg = withContext(Dispatchers.IO) { VoicePhotoEncoder.encode(file, endpoint.maxPhotoBytes) }
+        check(owns(id) && endpoint === media)
+        endpoint.addPhoto(jpeg)
+        check(owns(id))
+    }
+
     fun stop() {
         if (generation.live) model.feedback.both(Haptic.Confirm, Cue.Close)
         finish(null)

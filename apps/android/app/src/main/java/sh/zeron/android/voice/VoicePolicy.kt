@@ -26,10 +26,11 @@ class VoiceGeneration {
 
 /** A late unmute acknowledgement cannot undo a newer local mute. */
 class VoiceMute {
+    var cameraPaused = false
     var requested = false
         private set
     fun request(muted: Boolean) { requested = muted }
-    fun effective(acknowledged: Boolean) = requested || acknowledged
+    fun effective(acknowledged: Boolean) = requested || acknowledged || cameraPaused
 }
 
 fun voiceElapsed(seconds: Long): String {

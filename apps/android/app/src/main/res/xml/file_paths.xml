@@ -2,4 +2,6 @@
 <!-- Previews handed to other apps ("Open with…"): copies in cache/shared. -->
 <paths>
     <cache-path name="shared" path="shared/" />
+    <!-- Only explicitly taken Jarvis photos are writable by the camera app. -->
+    <cache-path name="jarvis-camera" path="jarvis-camera/" />
 </paths>

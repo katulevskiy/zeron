@@ -51,6 +51,9 @@ import androidx.compose.runtime.remember
 import sh.zeron.android.design.ZIcons
 import androidx.compose.ui.platform.LocalFocusManager
 import androidx.compose.ui.platform.LocalSoftwareKeyboardController
+import androidx.lifecycle.Lifecycle
+import androidx.lifecycle.compose.LocalLifecycleOwner
+import androidx.lifecycle.repeatOnLifecycle
 import androidx.navigation.NavController
 import androidx.navigation.NavHostController
 import androidx.navigation.compose.NavHost
@@ -204,10 +207,19 @@ private fun MainNav(model: AppModel) {
         nav.addOnDestinationChangedListener(listener)
         onDispose { nav.removeOnDestinationChangedListener(listener) }
     }
-    val pending by model.pendingRoute.collectAsState()
-    LaunchedEffect(pending) {
-        pending?.let { nav.openRoute(it) }
-        model.pendingRoute.value = null
+    val lifecycle = LocalLifecycleOwner.current.lifecycle
+    LaunchedEffect(model, nav, lifecycle) {
+        // VoiceInteractionSession can launch MainActivity in an assistant
+        // task alongside its existing, stopped task. Only the visible activity
+        // may consume the shared settings/conversation launch route.
+        lifecycle.repeatOnLifecycle(Lifecycle.State.RESUMED) {
+            model.pendingRoute.collect { route ->
+                if (route != null) {
+                    nav.openRoute(route)
+                    model.pendingRoute.compareAndSet(route, null)
+                }
+            }
+        }
     }
     // NavHost's default is a 700 ms fade in and out: a page that starts transparent and takes most of a second to
     // arrive does not feel instant, however fast it composed. Short fades keep the cross-dissolve and lose the wait.
