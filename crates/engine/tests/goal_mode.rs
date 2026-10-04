@@ -519,6 +519,7 @@ async fn a_round_that_cannot_be_sent_pauses_the_goal_instead_of_looping() {
             Some("space-main"),
             None,
             Some(zeron_proto::ChatConfig {
+                policy: Default::default(),
                 harness: zeron_proto::HarnessId::Codex,
                 model: None,
                 reasoning: None,

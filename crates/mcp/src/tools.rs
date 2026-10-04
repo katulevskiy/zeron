@@ -1169,7 +1169,10 @@ impl Tools {
                     .or_else(|| space.map(|s| s.path.clone()))
                     .unwrap_or_else(|| "~".into());
                 let request = RunRequest {
-                    policy: config.as_ref().map(|c| c.policy.clone()).unwrap_or_default(),
+                    policy: config
+                        .as_ref()
+                        .map(|c| c.policy.clone())
+                        .unwrap_or_default(),
                     mcp: None,
                     prompt: text,
                     harness: Some(harness),
@@ -1719,20 +1722,26 @@ mod tests {
         });
         let tools = tools(world.clone(), Origin::default());
         let created = tools
-            .call("create_chat", json!({ "project": "/repo/comet", "mode": "plan" }))
+            .call(
+                "create_chat",
+                json!({ "project": "space-1", "mode": "plan" }),
+            )
             .await
             .unwrap();
         assert_eq!(created["mode"], "plan");
         assert_eq!(last_config(&world)["policy"]["mode"], "plan");
 
         tools
-            .call("create_chat", json!({ "project": "/repo/comet" }))
+            .call("create_chat", json!({ "project": "space-1" }))
             .await
             .unwrap();
         assert_eq!(last_config(&world)["policy"]["mode"], "acceptEdits");
 
         let err = tools
-            .call("create_chat", json!({ "project": "/repo/comet", "mode": "yolo" }))
+            .call(
+                "create_chat",
+                json!({ "project": "space-1", "mode": "yolo" }),
+            )
             .await
             .unwrap_err();
         assert!(err.contains("unknown mode"), "{err}");
@@ -1740,7 +1749,7 @@ mod tests {
         let err = tools
             .call(
                 "create_chat",
-                json!({ "project": "/repo/comet", "harness": "cursor", "mode": "ask" }),
+                json!({ "project": "space-1", "harness": "cursor", "mode": "ask" }),
             )
             .await
             .unwrap_err();
@@ -1748,7 +1757,7 @@ mod tests {
         tools
             .call(
                 "create_chat",
-                json!({ "project": "/repo/comet", "harness": "cursor", "mode": "bypass" }),
+                json!({ "project": "space-1", "harness": "cursor", "mode": "bypass" }),
             )
             .await
             .unwrap();
@@ -1770,14 +1779,33 @@ mod tests {
         );
         // Asking for Bypass under an Ask spawner yields Ask.
         let created = tools
-            .call("create_chat", json!({ "project": "/repo/comet", "mode": "bypass" }))
+            .call(
+                "create_chat",
+                json!({ "project": "space-1", "mode": "bypass" }),
+            )
             .await
             .unwrap();
         assert_eq!(created["mode"], "ask");
         assert_eq!(last_config(&world)["policy"]["mode"], "ask");
+        // Standalone chats omit the parent but still inherit the spawner's
+        // permission ceiling (the newer goal stack adds `kind: chat`).
+        let standalone = tools
+            .call(
+                "create_chat",
+                json!({"kind": "chat", "project": "space-1", "mode": "bypass"}),
+            )
+            .await
+            .unwrap();
+        assert_eq!(standalone["kind"], "chat");
+        assert_eq!(standalone["parentChatId"], Value::Null);
+        assert_eq!(standalone["mode"], "ask");
+        assert_eq!(last_config(&world)["policy"]["mode"], "ask");
         // Stricter than the spawner is fine.
         tools
-            .call("create_chat", json!({ "project": "/repo/comet", "mode": "plan" }))
+            .call(
+                "create_chat",
+                json!({ "project": "space-1", "mode": "plan" }),
+            )
             .await
             .unwrap();
         assert_eq!(last_config(&world)["policy"]["mode"], "plan");
@@ -1785,7 +1813,7 @@ mod tests {
         let err = tools
             .call(
                 "create_chat",
-                json!({ "project": "/repo/comet", "harness": "cursor", "mode": "bypass" }),
+                json!({ "project": "space-1", "harness": "cursor", "mode": "bypass" }),
             )
             .await
             .unwrap_err();
