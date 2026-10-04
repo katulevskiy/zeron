@@ -256,3 +256,32 @@ Android versions, and signed-in provider image recognition remain unverified.
 The emulator checks native capture, encoding, UI, call policy, and local media
 transport separately; it cannot exercise the entire signed-in capture-to-vision
 flow or camera-return ownership during a real provider call.
+
+### Android photo message sizing correction
+
+The original photo limit allowed for Base64 and JSON overhead, but Android's
+`org.json.JSONStringer` additionally escapes every forward slash. Base64 image
+data contains slashes, so the serialized message could exceed the negotiated
+SCTP limit even when the JPEG itself fit. The resulting pre-send exception was
+hidden by the generic camera-delivery error. JVM tests missed the difference:
+their standalone `org.json` dependency does not apply Android's slash escaping.
+
+The photo event now removes that optional JSON escape before its final UTF-8
+size check. Protocol constants, UUIDs, and Base64 are the only string values in
+this message; literal forward slashes are valid JSON and decode to identical
+image bytes. The original JPEG, Base64, message-size, queue, and correlated
+acknowledgement bounds remain enforced. Camera read, size, transport, call-end,
+and provider rejection failures now have distinct safe messages. Logs contain
+only the bounded failure category, never provider payloads or image data.
+
+An Android-runtime regression with a full-budget, slash-heavy image failed on
+`77c5e2cb` with **The photo is too large for this connection**, and passes with
+this correction. The JNI WebRTC test now encodes and transmits a full valid JPEG
+larger than 16 KiB and decodes it at the receiving peer before acknowledging it;
+it no longer substitutes a four-byte JPEG marker. All 276 JVM and eight Android
+instrumentation tests pass. Lint retains its 12 existing errors and 248 warnings.
+
+No physical phone was connected during this correction. This reproduces and
+fixes a concrete Android pre-send failure consistent with the reported generic
+error; signed-in provider image acceptance and the user's exact failed photo
+remain unverified on their phone.

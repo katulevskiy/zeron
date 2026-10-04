@@ -35,20 +35,22 @@ class VoicePhotoChannelTest {
         channel.receive(JSONObject().put("type", "error").put("error", JSONObject()
             .put("event_id", event!!.getString("event_id")).put("message", "PRIVATE_IMAGE_DATA")).toString().toByteArray())
         assertFalse(result.await().isSuccess)
+        assertEquals(VoicePhotoException.Reason.REJECTED, (result.await().exceptionOrNull() as VoicePhotoException).reason)
         assertFalse(result.await().exceptionOrNull()!!.message!!.contains("PRIVATE_IMAGE_DATA"))
         val second = async { runCatching { channel.add(byteArrayOf(2), 65_536) } }
         yield()
         channel.close()
         assertFalse(second.await().isSuccess)
+        assertEquals(VoicePhotoException.Reason.ENDED, (second.await().exceptionOrNull() as VoicePhotoException).reason)
         assertTrue(runCatching { channel.add(byteArrayOf(3), 65_536) }.isFailure)
     }
 
     @Test fun oversizedAndRefusedSendsDoNotWaitForServerOrLeaveBusySlot() = runBlocking {
         var sends = 0
         val channel = VoicePhotoChannel { sends++; false }
-        assertTrue(runCatching { channel.add(ByteArray(50_000), 65_536) }.isFailure)
+        assertEquals(VoicePhotoException.Reason.SIZE, (runCatching { channel.add(ByteArray(50_000), 65_536) }.exceptionOrNull() as VoicePhotoException).reason)
         assertEquals(0, sends)
-        assertTrue(runCatching { channel.add(byteArrayOf(1), 65_536) }.isFailure)
+        assertEquals(VoicePhotoException.Reason.TRANSPORT, (runCatching { channel.add(byteArrayOf(1), 65_536) }.exceptionOrNull() as VoicePhotoException).reason)
         assertTrue(runCatching { channel.add(byteArrayOf(2), 65_536) }.isFailure)
         assertEquals(2, sends)
     }

@@ -14,7 +14,7 @@ import kotlin.math.roundToInt
 internal object VoicePhotoEncoder {
     fun encode(file: File, maxBytes: Int): ByteArray {
         require(file.length() in 1..32L * 1024 * 1024) { "Couldn't read the camera photo." }
-        require(maxBytes >= 8_000)
+        if (maxBytes < 8_000) throw VoicePhotoException(VoicePhotoException.Reason.SIZE)
         var bitmap = ImageDecoder.decodeBitmap(ImageDecoder.createSource(file)) { decoder, info, _ ->
             val scale = minOf(1f, 1280f / max(info.size.width, info.size.height))
             decoder.setTargetSize(maxOf(1, (info.size.width * scale).roundToInt()), maxOf(1, (info.size.height * scale).roundToInt()))
@@ -27,7 +27,7 @@ internal object VoicePhotoEncoder {
                     check(bitmap.compress(Bitmap.CompressFormat.JPEG, quality, output))
                     if (output.size() <= maxBytes) return output.toByteArray()
                 }
-                require(max(bitmap.width, bitmap.height) > 320) { "The photo is too large for this connection." }
+                if (max(bitmap.width, bitmap.height) <= 320) throw VoicePhotoException(VoicePhotoException.Reason.SIZE)
                 val smaller = bitmap.scale(maxOf(1, (bitmap.width * .75f).roundToInt()), maxOf(1, (bitmap.height * .75f).roundToInt()), true)
                 if (smaller !== bitmap) bitmap.recycle()
                 bitmap = smaller

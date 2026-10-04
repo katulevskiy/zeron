@@ -214,12 +214,17 @@ class JarvisController(private val app: Application, private val model: AppModel
     }
 
     internal suspend fun addPhoto(id: Long, file: java.io.File) {
-        check(owns(id) && _state.value.call?.phase == VoiceCallPhase.ACTIVE)
-        val endpoint = checkNotNull(media)
-        val jpeg = withContext(Dispatchers.IO) { VoicePhotoEncoder.encode(file, endpoint.maxPhotoBytes) }
-        check(owns(id) && endpoint === media)
+        if (!owns(id) || _state.value.call?.phase != VoiceCallPhase.ACTIVE) throw VoicePhotoException(VoicePhotoException.Reason.ENDED)
+        val endpoint = media ?: throw VoicePhotoException(VoicePhotoException.Reason.ENDED)
+        val jpeg = withContext(Dispatchers.IO) {
+            try { VoicePhotoEncoder.encode(file, endpoint.maxPhotoBytes) }
+            catch (e: CancellationException) { throw e }
+            catch (e: VoicePhotoException) { throw e }
+            catch (_: Exception) { throw VoicePhotoException(VoicePhotoException.Reason.READ) }
+        }
+        if (!owns(id) || endpoint !== media) throw VoicePhotoException(VoicePhotoException.Reason.ENDED)
         endpoint.addPhoto(jpeg)
-        check(owns(id))
+        if (!owns(id)) throw VoicePhotoException(VoicePhotoException.Reason.ENDED)
     }
 
     fun stop() {

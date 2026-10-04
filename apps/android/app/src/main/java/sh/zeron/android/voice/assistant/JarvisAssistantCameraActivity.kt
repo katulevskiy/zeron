@@ -20,6 +20,7 @@ import kotlinx.coroutines.flow.MutableStateFlow
 import kotlinx.coroutines.launch
 import sh.zeron.android.ZeronApplication
 import sh.zeron.android.voice.JarvisController
+import sh.zeron.android.voice.VoicePhotoException
 import java.io.File
 import java.util.UUID
 
@@ -112,6 +113,12 @@ class JarvisPhotoDelivery : ViewModel() {
             } catch (_: CancellationException) {
                 currentCoroutineContext().ensureActive()
                 "Jarvis didn't confirm the photo. Try again."
+            }
+            catch (e: VoicePhotoException) {
+                // Only log our bounded classification, never a provider error
+                // body, camera path, image bytes, or credentials.
+                android.util.Log.w("JarvisPhoto", "Photo delivery failed: ${e.reason.name}")
+                e.reason.message
             }
             catch (_: Exception) { "Couldn't add the photo to this call. Try again." }
         }

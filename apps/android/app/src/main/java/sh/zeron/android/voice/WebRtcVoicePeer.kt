@@ -127,7 +127,8 @@ class WebRtcVoicePeer(private val context: Context, private val failure: () -> U
     }
 
     internal suspend fun addPhoto(jpeg: ByteArray) {
-        check(!closed && activated) { "Start a voice call before adding a photo." }
+        if (closed) throw VoicePhotoException(VoicePhotoException.Reason.ENDED)
+        if (!activated) throw VoicePhotoException(VoicePhotoException.Reason.TRANSPORT)
         photos.add(jpeg, maxMessageBytes)
     }
 

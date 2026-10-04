@@ -16,19 +16,25 @@ internal class VoicePhotoChannel(private val send: (ByteArray) -> Boolean) {
     @Volatile private var closed = false
 
     suspend fun add(jpeg: ByteArray, maxMessageBytes: Int) {
-        check(!closed) { "The call ended before the photo was added." }
-        require(jpeg.isNotEmpty()) { "The photo is empty." }
+        if (closed) throw VoicePhotoException(VoicePhotoException.Reason.ENDED)
+        if (jpeg.isEmpty()) throw VoicePhotoException(VoicePhotoException.Reason.READ)
         val id = UUID.randomUUID().toString().replace("-", "")
         val request = Pending("photo_event_$id", "photo_${id.take(24)}", CompletableDeferred())
-        check(pending.compareAndSet(null, request)) { "A photo is already being added." }
+        if (!pending.compareAndSet(null, request)) throw VoicePhotoException(VoicePhotoException.Reason.BUSY)
         try {
             val event = JSONObject().put("type", "conversation.item.create").put("event_id", request.eventId)
                 .put("item", JSONObject().put("id", request.itemId).put("type", "message").put("role", "user")
                     .put("content", JSONArray().put(JSONObject().put("type", "input_image")
                         .put("image_url", "data:image/jpeg;base64," + Base64.getEncoder().encodeToString(jpeg)))))
-            val data = event.toString().toByteArray(Charsets.UTF_8)
-            require(data.size <= maxMessageBytes) { "The photo is too large for this connection." }
-            check(!closed && send(data)) { "Couldn't send the photo. Try again." }
+            // Android's JSONStringer escapes every '/'; the JVM org.json does
+            // not. Base64 can contain many slashes, inflating a correctly sized
+            // photo beyond SCTP's limit. JSON permits literal forward slashes.
+            // All strings here are protocol constants, UUIDs, or Base64, so
+            // removing this optional escape preserves the exact image bytes.
+            val data = event.toString().replace("\\/", "/").toByteArray(Charsets.UTF_8)
+            if (data.size > maxMessageBytes) throw VoicePhotoException(VoicePhotoException.Reason.SIZE)
+            if (closed) throw VoicePhotoException(VoicePhotoException.Reason.ENDED)
+            if (!send(data)) throw VoicePhotoException(VoicePhotoException.Reason.TRANSPORT)
             withTimeout(10_000) { request.result.await() }
         } finally { pending.compareAndSet(request, null) }
     }
@@ -44,13 +50,13 @@ internal class VoicePhotoChannel(private val send: (ByteArray) -> Boolean) {
                 if (event.optJSONObject("item")?.optString("id") == request.itemId) request.result.complete(Unit)
             }
             "error" -> if (event.optJSONObject("error")?.optString("event_id") == request.eventId) {
-                request.result.completeExceptionally(IllegalStateException("Jarvis couldn't accept this photo. Try again."))
+                request.result.completeExceptionally(VoicePhotoException(VoicePhotoException.Reason.REJECTED))
             }
         }
     }
 
     fun close() {
         closed = true
-        pending.getAndSet(null)?.result?.completeExceptionally(IllegalStateException("The call ended before the photo was added."))
+        pending.getAndSet(null)?.result?.completeExceptionally(VoicePhotoException(VoicePhotoException.Reason.ENDED))
     }
 }
