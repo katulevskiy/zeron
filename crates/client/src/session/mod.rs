@@ -343,6 +343,7 @@ impl SessionCore {
                 bearer: crate::live::LiveBackend::bearer(client),
                 edge: live.edge.clone(),
                 device_id: client.config.device_id.clone(),
+                host_device_id: chat.device_id.clone(),
                 store: live.store.clone(),
                 on_applied,
                 on_status,

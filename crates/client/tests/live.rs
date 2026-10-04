@@ -844,6 +844,7 @@ async fn phone_born_sessions_reach_the_host_before_their_first_command() {
         );
         tokio::time::sleep(Duration::from_millis(20)).await;
     }
+    assert_eq!(edge.host_hint(&chat_id).as_deref(), Some(HOST));
     client.shutdown();
 }
 

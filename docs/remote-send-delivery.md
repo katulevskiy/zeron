@@ -15,7 +15,7 @@ symptoms. This is not proof that every reported delay has this cause: no logs
 from the reporting devices were available, and provider startup can contribute
 additional latency.
 
-A remote send has three independently scheduled effects:
+Before the fix, a remote send had three independently scheduled effects:
 
 1. The workspace registry publishes the new chat and its host/configuration.
 2. The session document publishes the Run/Steer command or queued message.
@@ -83,6 +83,28 @@ old request from erasing a newer send. No command is re-minted: existing command
 IDs, Loro imports, and the host's processed-command ledger retain deduplication.
 Deletion removes delivery receipts with the chat's local snapshot/outbox.
 
+The updated senders also carry the selected host's `hostDevice` routing hint on
+both WebSocket joins and HTTPS pushes. The chat room commits the opaque row,
+a versioned host-wake receipt, and the next alarm **in one SQLite storage
+transaction before ACKing the row** (the [SQLite storage transaction API](https://developers.cloudflare.com/durable-objects/api/sqlite-storage-api/#transaction) includes SQL and alarm operations).
+It immediately forwards the wake to the existing device-room queue. Failed forwards (including unclaimed/offline
+hosts, queue saturation, server errors, and timeouts) retain the receipt and
+retry from durable alarms with backoff capped at one minute. A newer row fences
+completion of an older forward. Host-authored rows do not create wake loops.
+
+Consequently, once all command bytes have reached the updated edge, host
+discovery no longer requires the phone to stay alive, send a separate wake,
+or reopen. The chat room owns the handoff until the device room durably accepts
+it; the device room then owns delivery to the host. The original local receipts
+remain as recovery and compatibility paths for older edge deployments.
+
+The Worker supplies the canonical chat ID from the authenticated route, and
+forwards the verified owner identity. A caller's query cannot redirect a wake
+to another chat; another user's device still rejects it. Rooms keep their opaque
+log discipline: no Loro parsing or provider execution moves to the server.
+Wake retries and nightly backups share the existing durable alarm without
+moving backups onto the wake cadence. No new deployment binding is needed.
+
 Discovery and concurrent delivery are bounded. Stalled jobs yield after a
 12-second service window, so eight dead destinations cannot permanently block
 later healthy destinations. Jobs remain durable when that window ends.
@@ -90,8 +112,15 @@ later healthy destinations. Jobs remain durable when that window ends.
 On iOS, recent or pending sends request a [UIApplication background task](https://developer.apple.com/documentation/uikit/uiapplication/beginbackgroundtask%28withname%3Aexpirationhandler%3A%29) for at most 25 seconds
 (or until iOS expires it), ending on foreground or sign-out. This gives normal
 app switching time to finish delivery. Force-quitting or losing connectivity
-before the edge accepts the bytes still requires reopening the app; a stopped
-process cannot transmit. Local receipts survive for that recovery.
+before the edge accepts all command bytes still requires reopening the app; a
+stopped process cannot transmit. Local receipts survive for that recovery.
+Chat visibility on the desktop remains registry visibility, not proof that all
+command bytes arrived. The UI keeps unadopted sends in Sending/Queued until the
+host takes ownership.
+
+Deploy the updated edge together with the updated senders (edge first is safe).
+The server-owned handoff is not available on an older edge, where the local
+wake/relaunch recovery remains the fallback. This PR does not deploy production.
 
 The shared thin-client transcript and session list now reserve Working for host
 status or actual streamed output. The iOS composer explicitly says “Sending to
@@ -100,6 +129,15 @@ This does not treat a pending first Run as permission to start duplicate turns.
 
 ## Regression coverage
 
+- Real workerd/SQLite chat-room tests accept a prompt via HTTPS or WebSocket,
+  keep the phone offline (no restart and no separate nudge), and deliver its
+  wake when the desktop joins. The desktop can then retrieve the stored bytes.
+- Real workerd tests cover device-room queue saturation with both devices
+  offline, stale-forward fencing, transaction rollback of rows/receipts/alarms,
+  batch replay deduplication, host-output loop prevention, legacy senders,
+  invalid/unauthorized routes, and wake/backup alarm coexistence.
+- The actual thin-client socket carries its selected host hint; desktop
+  transport tests verify both WebSocket URLs and HTTPS push requests.
 - A server error after row ACK must retry the host wake and recover it after
   relaunch, with no viewport open or preload.
 - Immediate exit after a new chat's first send must preserve the registry row,
@@ -121,18 +159,26 @@ upstream client (with new implementation-specific UI assertions excluded):
 “host wake was not retried”; the immediate-exit regression failed with
 “windows: first send was stranded without a UI open”. Both pass with the fix.
 
-All 75 executed tests passed on Linux:
+The new accepted-prompt/no-relaunch regression was also run with the previous
+PR's unchanged chat-room server. With implementation-specific receipt assertions
+excluded, the prompt was accepted but the desktop never received its wake
+(`expected [] to include <chatId>`). It passes with the server-owned handoff.
+
+All 166 executed tests passed on Linux:
 
 | Check | Result |
 | --- | --- |
 | `cargo test -p zeron-client -- --test-threads=1` | 45 passed |
 | `cargo test -p zeron-sync --lib sync_jobs::tests -- --test-threads=1` | 3 passed |
-| `cargo test -p zeron-engine --lib remote_delivery -- --test-threads=1` | 1 passed |
+| `cargo test -p zeron-engine --lib remote_delivery -- --test-threads=1` | 2 passed |
 | `cargo test -p zeron-engine --lib sync_lifecycle_tests -- --test-threads=1` | 19 passed |
 | Engine `born_chat2_race`, `relay_delivery`, `rich_composer_delivery` suites | 7 passed |
+| Edge unit + real workerd suites (`npm test`) | 58 + 32 passed |
+| Edge TypeScript check and Worker bundle dry run | Passed |
 | `cargo check -p zeron-mobile` | Passed on Linux |
-| Changed Rust files' rustfmt checks and `git diff --check` | Passed |
+| Changed Rust code's rustfmt checks and `git diff --check` | Passed |
 
-Native iOS background scheduling and visual rendering require Xcode/device
-validation. Native Windows and macOS provider launches were not exercised on the
+The new server tests establish stored-byte and durable host-wake delivery, not
+native provider execution. Native iOS background scheduling and visual rendering
+require Xcode/device validation. Native Windows and macOS provider launches were not exercised on the
 Linux validation host.

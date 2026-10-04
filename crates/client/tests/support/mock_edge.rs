@@ -56,6 +56,7 @@ struct Shared {
     nudge_status: Mutex<u16>,
     nudge_status_by_chat: Mutex<HashMap<String, u16>>,
     nudges: Mutex<Vec<(String, usize)>>,
+    host_hints: Mutex<HashMap<String, String>>,
 }
 
 enum Out {
@@ -92,6 +93,7 @@ impl MockEdge {
             nudge_status: Mutex::new(200),
             nudge_status_by_chat: Mutex::new(HashMap::new()),
             nudges: Mutex::new(Vec::new()),
+            host_hints: Mutex::new(HashMap::new()),
         });
         let accept_shared = shared.clone();
         let task = tokio::spawn(async move {
@@ -196,6 +198,13 @@ impl MockEdge {
                             if *shared.refuse_chat.lock().unwrap() {
                                 return;
                             }
+                            if let Some(host) = query.get("hostDevice") {
+                                shared
+                                    .host_hints
+                                    .lock()
+                                    .unwrap()
+                                    .insert(chat.to_string(), host.clone());
+                            }
                             serve_chat(ws, chat.to_string(), shared).await
                         }
                         _ => {}
@@ -213,6 +222,10 @@ impl MockEdge {
 
     pub fn nudge_status(&self, status: u16) {
         *self.shared.nudge_status.lock().unwrap() = status;
+    }
+
+    pub fn host_hint(&self, chat: &str) -> Option<String> {
+        self.shared.host_hints.lock().unwrap().get(chat).cloned()
     }
 
     pub fn nudge_status_for(&self, chat: &str, status: u16) {

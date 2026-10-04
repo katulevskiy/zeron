@@ -186,11 +186,20 @@ impl EdgeConfig {
     /// the bearer is re-fetched before every connect, so reconnects after a
     /// token expiry present a fresh `?token=` instead of the boot-time one.
     pub fn room_url(&self, path: impl Into<String>) -> Arc<dyn zeron_sync::UrlProvider> {
+        self.room_url_with_host(path, None)
+    }
+
+    fn room_url_with_host(
+        &self,
+        path: impl Into<String>,
+        host_device: Option<String>,
+    ) -> Arc<dyn zeron_sync::UrlProvider> {
         let ws_base = self.url.replacen("http", "ws", 1);
         Arc::new(EdgeRoomUrl {
             base: format!("{}{}", ws_base.trim_end_matches('/'), path.into()),
             token: self.token.clone(),
             device_id: self.device_id.clone(),
+            host_device,
         })
     }
 }
@@ -199,6 +208,7 @@ struct EdgeRoomUrl {
     base: String,
     token: Arc<dyn zeron_rpc::TokenSource>,
     device_id: String,
+    host_device: Option<String>,
 }
 
 impl zeron_sync::UrlProvider for EdgeRoomUrl {
@@ -206,11 +216,18 @@ impl zeron_sync::UrlProvider for EdgeRoomUrl {
         let token = self.token.clone();
         let base = self.base.clone();
         let device = self.device_id.clone();
+        let host = self.host_device.clone();
         Box::pin(async move {
             let token = token.token().await.map_err(zeron_sync::SyncError::from)?;
             let mut url = format!("{base}?token={token}");
             if !device.is_empty() {
                 url.push_str(&format!("&device={device}"));
+            }
+            if let Some(host) = host {
+                let mut parsed = reqwest::Url::parse(&url)
+                    .map_err(|e| zeron_sync::SyncError::Protocol(e.to_string()))?;
+                parsed.query_pairs_mut().append_pair("hostDevice", &host);
+                url = parsed.into();
             }
             Ok(url)
         })
@@ -2144,7 +2161,8 @@ impl DocHost {
                 edge.clone(),
                 chat.clone(),
             ).with_priority(priority));
-            let url = edge.room_url(format!("/chat2/{chat}/ws"));
+            let remote_host = host.remote_host_for(&chat);
+            let url = edge.room_url_with_host(format!("/chat2/{chat}/ws"), remote_host.clone());
             let mut wake = zeron_sync::wake::subscribe();
             // Sibling-dial successes end a backoff wait immediately, exactly
             // like the joined clients' own reconnect loops (chat_client.rs).
@@ -2169,7 +2187,7 @@ impl DocHost {
                     edge.clone(),
                     chat.clone(),
                     device.clone(),
-                ).with_priority(priority));
+                ).with_host_device(remote_host.clone()).with_priority(priority));
                 let dial = tokio::time::timeout(
                     std::time::Duration::from_secs(60),
                     zeron_sync::ChatClient::connect_via_transport(
