@@ -28,9 +28,17 @@ internal enum class AssistantAction { Close, Settings, Start, Consent, Mute, Spe
 @Composable
 fun JarvisAssistantOverlay(model: AppModel, session: JarvisAssistantSession) {
     val controller = model.jarvis
-    var screenControls by remember { mutableStateOf(false) }
-    if (screenControls) sh.zeron.android.voice.screen.ScreenControlsDialog(controller) { screenControls = false }
+    val screenControls by session.screenControls.collectAsState()
     val state by controller.state.collectAsState()
+    if (screenControls && state.live) {
+        // Dialog creates a TYPE_APPLICATION window, which is incompatible
+        // with the system's TYPE_VOICE_INTERACTION context/token. Keep all
+        // controls in the already owned assistant window.
+        ZeronTheme(Appearance(ThemeMode.Dark)) {
+            sh.zeron.android.voice.screen.ScreenControlsPanel(controller) { session.screenControls.value = false }
+        }
+        return
+    }
     val consent by controller.consentRequest.collectAsState()
     val preparing by session.preparing.collectAsState()
     val notice by session.notice.collectAsState()
@@ -45,7 +53,7 @@ fun JarvisAssistantOverlay(model: AppModel, session: JarvisAssistantSession) {
         ) }) { action ->
         when (action) {
             AssistantAction.Close -> session.dismiss()
-            AssistantAction.Screen -> { screenControls = true }
+            AssistantAction.Screen -> session.showScreenControls()
             AssistantAction.Settings -> session.openApp("jarvis-settings")
             AssistantAction.Start -> session.startJarvis()
             AssistantAction.Consent -> controller.acceptConsent()

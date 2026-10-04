@@ -370,7 +370,18 @@ This fork adds three independent experiments without pausing the voice call:
    **Try with Jev** in the settings screen returns to the preceding app before
    running the supplied goal. Stop control in Jarvis or the call notification.
    If Android restricts accessibility for the sideloaded APK, allow restricted
-   settings in Zeron's App info menu before enabling the service.
+   settings in Zeron's App info menu before enabling the service. Jarvis settings
+   include **Open Zeron App info**: choose **⋮ → Allow restricted settings**,
+   approve Android's prompt, then return to **Accessibility → Jarvis phone control**.
+   The app cannot grant this Android approval itself. See
+   [Google's restricted-settings instructions](https://support.google.com/android/answer/12623953).
+
+The overlay's screen controls render inside its existing system-owned assistant
+window. A separate Compose Dialog is not valid in that window context: Android
+rejects an app window (type 2) inside the voice interaction context (type 2031).
+Back or Done closes the screen controls while preserving the call. Opening the
+controls closes an open camera preview; hiding the assistant resets the panel.
+Live sharing uses its own capture consent, independently of accessibility.
 
 The Jev key is entered on the phone, masked in a secure dialog, and encrypted
 using an Android Keystore AES-GCM key. It is not passed to Codex, the guest,
@@ -430,7 +441,7 @@ Validation for the screen experiment (API 35 emulator):
 
 - 285 JVM tests pass, including malformed/uncertain decision rejection,
   speculative target selection and stale/rotated/out-of-bounds input checks.
-- The final voice instrumentation suite passes (13 reported tests, with the two
+- The final voice instrumentation suite passes (14 reported tests, with the two
   optional live-provider/planner checks skipped and verified separately).
   Real Android tests cover
   clicks, typing, coordinate gestures, scrolling/Home/Back, password redaction,
@@ -452,3 +463,8 @@ Validation for the screen experiment (API 35 emulator):
   testing, signed-in V3 voice-to-control execution and model delivery of live
   screenshots remain to be verified on the user's device. These are changed
   screenshots delivered periodically, not a native real-time video model feed.
+
+The screen-button crash was reproduced by clicking the real power-hold overlay
+button on API 35. The regression exercises that button, the owned window type,
+Back preserving a fixture call, missing accessibility producing a message, and
+the live-sharing capture-consent handoff. The fixture starts no provider call.

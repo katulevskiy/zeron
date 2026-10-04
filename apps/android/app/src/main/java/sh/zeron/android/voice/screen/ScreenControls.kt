@@ -1,16 +1,22 @@
 package sh.zeron.android.voice.screen
 
 import android.content.Intent
+import android.net.Uri
+import android.os.Build
 import android.provider.Settings
 import androidx.compose.foundation.rememberScrollState
+import androidx.compose.foundation.clickable
 import androidx.compose.foundation.verticalScroll
 import androidx.compose.foundation.layout.*
 import androidx.compose.material3.*
 import androidx.compose.runtime.*
 import androidx.compose.ui.Modifier
+import androidx.compose.ui.Alignment
 import androidx.compose.ui.platform.LocalContext
 import androidx.compose.ui.text.input.PasswordVisualTransformation
 import androidx.compose.ui.unit.dp
+import androidx.compose.ui.semantics.paneTitle
+import androidx.compose.ui.semantics.semantics
 import sh.zeron.android.voice.JarvisController
 
 @Composable
@@ -22,6 +28,11 @@ fun JarvisScreenSettings(controller: JarvisController) {
     val hasKey by screen.settings.hasKey.collectAsState()
     val state by screen.state.collectAsState()
     var editing by remember { mutableStateOf(false) }
+    var settingsError by remember { mutableStateOf<String?>(null) }
+    fun openSettings(intent: Intent) {
+        try { context.startActivity(intent.addFlags(Intent.FLAG_ACTIVITY_NEW_TASK)); settingsError = null }
+        catch (_: Exception) { settingsError = "Couldn't open Android settings. Open Settings → Apps → Zeron manually." }
+    }
     Text("Phone screen · experimental", style = MaterialTheme.typography.titleLarge)
     Row(Modifier.fillMaxWidth(), horizontalArrangement = Arrangement.SpaceBetween) {
         Text("Screen context", Modifier.weight(1f)); Switch(enabled, screen::setContext)
@@ -31,9 +42,16 @@ fun JarvisScreenSettings(controller: JarvisController) {
         Text("Phone control", Modifier.weight(1f)); Switch(control, screen::setControl)
     }
     Text("Let Jarvis use Jev to choose visible controls for your requested tasks. Visible screen text is sent to TypeSafe. Choose This phone as the execution device for phone control.", style = MaterialTheme.typography.bodySmall)
-    OutlinedButton(onClick = { context.startActivity(Intent(Settings.ACTION_ACCESSIBILITY_SETTINGS)) }) {
+    if (Build.VERSION.SDK_INT >= 33) {
+        Text("If Android says access was denied: open Zeron's App info, tap ⋮ → Allow restricted settings, then enable Jarvis phone control in Accessibility. Android requires you to approve this yourself.", style = MaterialTheme.typography.bodySmall)
+        OutlinedButton(onClick = { openSettings(Intent(Settings.ACTION_APPLICATION_DETAILS_SETTINGS, Uri.parse("package:${context.packageName}"))) }) {
+            Text("Open Zeron App info")
+        }
+    }
+    OutlinedButton(onClick = { openSettings(Intent(Settings.ACTION_ACCESSIBILITY_SETTINGS)) }) {
         Text("Enable Jarvis in Android Accessibility")
     }
+    settingsError?.let { Text(it, color = MaterialTheme.colorScheme.error) }
     FlowRow(horizontalArrangement = Arrangement.spacedBy(8.dp)) {
         OutlinedButton(onClick = { editing = true }) { Text(if (hasKey) "Replace Jev key" else "Add Jev key") }
         if (hasKey) {
@@ -96,14 +114,21 @@ fun ScreenSessionControls(controller: JarvisController) {
 }
 
 @Composable
-fun ScreenControlsDialog(controller: JarvisController, onDismiss: () -> Unit) {
+fun ScreenControlsPanel(controller: JarvisController, onDismiss: () -> Unit) {
     val state by controller.screen.state.collectAsState()
-    AlertDialog(onDismissRequest = onDismiss, title = { Text("Phone screen") },
-        text = { Column(Modifier.verticalScroll(rememberScrollState()), verticalArrangement = Arrangement.spacedBy(8.dp)) {
-            val enabled by controller.screen.settings.contextEnabled.collectAsState()
-            val control by controller.screen.settings.controlEnabled.collectAsState()
-            if (!enabled && !control) Text("Enable screen context or phone control in Jarvis settings first.")
-            ScreenSessionControls(controller)
-            state.message?.let { Text(it) }
-        } }, confirmButton = { TextButton(onClick = onDismiss) { Text("Done") } })
+    BoxWithConstraints(Modifier.fillMaxSize().systemBarsPadding().padding(16.dp).semantics { paneTitle = "Phone screen" }) {
+        Box(Modifier.fillMaxSize().clickable(onClickLabel = "Close screen controls", onClick = onDismiss))
+        Surface(Modifier.align(Alignment.BottomCenter).widthIn(max = 600.dp).fillMaxWidth().heightIn(max = maxHeight),
+            shape = MaterialTheme.shapes.extraLarge) {
+            Column(Modifier.verticalScroll(rememberScrollState()).padding(24.dp), verticalArrangement = Arrangement.spacedBy(12.dp)) {
+                Text("Phone screen", style = MaterialTheme.typography.headlineSmall)
+                val enabled by controller.screen.settings.contextEnabled.collectAsState()
+                val control by controller.screen.settings.controlEnabled.collectAsState()
+                if (!enabled && !control) Text("Enable screen context or phone control in Jarvis settings first.")
+                ScreenSessionControls(controller)
+                state.message?.let { Text(it) }
+                TextButton(onClick = onDismiss, modifier = Modifier.align(Alignment.End)) { Text("Done") }
+            }
+        }
+    }
 }

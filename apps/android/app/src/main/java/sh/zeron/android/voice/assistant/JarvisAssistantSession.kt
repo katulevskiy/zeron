@@ -34,6 +34,8 @@ class JarvisAssistantSession(context: Context) : VoiceInteractionSession(context
     private val photoJobs = mutableMapOf<String, Job>()
     private val _uploading = MutableStateFlow(0)
     val uploading = _uploading.asStateFlow()
+    internal val screenControls = MutableStateFlow(false)
+    internal fun showScreenControls() { camera.close(); screenControls.value = true }
     internal val camera = JarvisOverlayCamera(context, this, ::deliverPhoto, ::showNotice)
     private var cameraPermission = false
     private var startJob: Job? = null
@@ -269,6 +271,7 @@ class JarvisAssistantSession(context: Context) : VoiceInteractionSession(context
         trace("hide")
         super.onHide()
         shown = false
+        screenControls.value = false
         startJob?.cancel()
         registry.currentState = Lifecycle.State.CREATED
         if (permissionGeneration == null) cancelCameraForNavigation()
@@ -296,7 +299,13 @@ class JarvisAssistantSession(context: Context) : VoiceInteractionSession(context
         hide()
     }
     override fun onCloseSystemDialogs() { trace("close system dialogs"); closeSystemUi() }
-    override fun onBackPressed() { if (camera.state.value.open) camera.close() else dismiss() }
+    override fun onBackPressed() {
+        when {
+            screenControls.value -> screenControls.value = false
+            camera.state.value.open -> camera.close()
+            else -> dismiss()
+        }
+    }
     override fun onLockscreenShown() { model.jarvis.screen.stop(); closeSystemUi() }
     override fun onDestroy() {
         camera.dispose()
