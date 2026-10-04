@@ -122,10 +122,11 @@ accounted path/entry storage. Evicted probes are queried again rather than
 skipping file resolution. Tests cover many unique paths, large code histories,
 oversized weak lifetimes and rechecking an evicted negative probe.
 
-## Validation and remaining evidence
+## Initial follow-up validation and remaining evidence
 
 Local validation uses Linux x86-64, Rust 1.98.1, locked dependencies and serial
-regression execution. **2,113 passed; six existing ignores**:
+regression execution. The initial contributor-data follow-up at `bddf36a4` had
+**2,113 passed; six existing ignores**:
 
 | Suite | Passed | Ignored |
 | --- | ---: | ---: |
@@ -151,3 +152,65 @@ cache residency and ONNX native allocations remain profiling candidates.
 
 These changes fix verified ownership and allocation mechanisms. They do not
 attribute or guarantee elimination of the reported 4 GiB production footprint.
+
+
+## Contributor review: multiplexing, hot paths and terminal recovery
+
+The [review comment](https://github.com/zeronsh/zeron/pull/762#issuecomment-5975369095)
+identified three reproduced regressions and two maintenance/performance issues.
+The engineering review also reproduced a blocked-upload reply stall in the device
+relay and silent request ownership after channel half-close. This pass starts at `bddf36a46158eefb3c855c7ebcd904302d4dbd9a`.
+
+| Finding | Root fix and evidence |
+| --- | --- |
+| One unread RPC subscription stalls other calls | The shared reader never awaits a subscription queue. An additive, negotiated `streamWindow`/`streamCredit` protocol acquires a producer permit before polling each stream. Eight unread items stop that producer; another call and another stream continue. Tests resume all 4,096 items in order and verify a real WebSocket producer stops at eight. |
+| Control frames could turn bounded queues into unbounded spawned send tasks | One bounded control writer coalesces credits by request ID; cancellation supersedes credits. A stalled connection with 1,024 distinct queued controls closes explicitly. RAII server task leases release requests even when the outer connection task is aborted or either channel closes. Client calls also fail promptly if their request channel closes. Quiet compatibility receivers also own a cancellation lease. |
+| Device relay upload blocks incoming replies | Protocol reads and writes are polled independently, including host echo deadlines. A 64-byte duplex pipe with deliberately undrained uploads reproduced a one-second reply timeout; the reply now completes without draining those uploads. |
+| Empty/partial durable outboxes query SQLite on every frame | An in-memory invalidation flag changes on publication, explicit disk flush, ACK and permanent rejection. Ordinary rows/presence do not refill the outbox. The regression found 101 extra window reads for 100 presence frames and one row; the fixed path adds zero, with empty and partial windows both covered. ACKs still refill and reopened HTTP backlogs drain. |
+| Oversized-row UPDATE belongs outside reads | Classify oversized rows on both insert paths; migrate existing rows once and index pending rows by document, classification and ordinal. Window reads are SELECT-only, verified with SQLite `query_only`. Durable checkpoint obligations remain on disk. |
+| RIS destroys alternate-screen apps during a gap | Reset the parser and SGR only. Keep the notice in a panel banner outside the terminal grid, preserving alternate-screen contents and application cursor mode. A single debounced native resize pipeline requests a temporary width change and restores the current dimensions; a GPUI regression covers task replacement, remote routing and a timed-out temporary call. |
+| PTY reader polls a full queue every 2 ms | Await a channel permit or `CancellationToken` with `futures::executor::block_on`. Cancellation wakes the blocking thread without polling or a running Tokio executor. Copy the chunk only after admission. Windows still discards/drains to EOF; Unix exits. Tests cover cancellation and receiver closure without any Tokio runtime. |
+| Checkpoint caps can drift between Rust and TypeScript | `crates/proto/chat2-limits.json` supplies the edge checkpoint cap and generated Rust protocol constants. The 32 MiB checkpoint cap and client push budget retain their existing values. Edge deployment change detection includes the shared file. Typecheck, workerd boundary tests and Wrangler's dry-run bundle validate the cross-package import. |
+
+Compatibility is deliberate: old clients receive the original stream framing;
+new clients send credits only after server acknowledgement. With an old server
+that overruns an unread queue, the affected stream fails explicitly (including
+`recv_result`/`error` access) and is cancelled; the connection remains usable.
+Ordered events are never silently evicted. Upgraded peers provide lossless
+per-stream backpressure. The old receiver-only API logs failures and closes;
+replayable consumers reconnect from their durable cursor.
+
+The review checked cancellation before/after admission, independent transport
+directions, bounded control metadata, quiet subscription disposal, request reuse,
+outer connection aborts and both channel half-closes, durable ACK/rejection/HTTP refill boundaries, migration
+idempotence and read-only queries, and resize replacement/restoration. The earlier
+deleted-chat ownership and cache regressions remain included in the broad run.
+This is a review of this PR and the surrounding lifetimes/transport paths, not a
+claim that every subsystem in the repository is free of defects.
+
+A gap still means bytes fell outside bounded replay. A redraw is best effort and
+cannot reconstruct every lost terminal mode transition or force an application
+that ignores resize to repaint. An engine-owned headless emulator with screen
+snapshots would be a separate protocol design. Native ConPTY/SIGWINCH behavior,
+headed GPU retirement and fresh native allocation traces need platform CI or
+capture; headless Linux tests do not establish those results.
+
+
+### Review validation
+
+**2,626 Rust tests passed; six existing ignores.** The final broad library run
+includes 2,552 tests across client (21), doc (132), engine (387), harness (315),
+proto (54), RPC (29), sync (69), text (16) and UI (1,529). The eight engine
+integration suites pass 69 tests, and the client live/relay integration suite
+passes five. Child test subprocesses and repeated runs are excluded from totals.
+The ignores require private incident/whale snapshots, authenticated Claude/Codex,
+a live edge, or an external npm installer download.
+
+Edge validation passes **58 unit tests and 25 workerd tests**, TypeScript
+checking and a Wrangler dry-run bundle. Clippy completes for all five changed
+Rust packages with existing repository/dependency warnings; introduced lint
+findings were resolved. `git diff --check` passes. Commands, test counts and
+SHA-256 hashes of successful and expected-failure logs are archived under
+`contributorReview` in the [evidence JSON](performance/memory-followup-2026-10-03.json).
+Fresh platform/native CI results are pending; earlier native results do not
+validate this new revision.

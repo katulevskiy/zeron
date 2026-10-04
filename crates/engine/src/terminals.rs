@@ -14,9 +14,10 @@
 
 use std::collections::{HashMap, VecDeque};
 use std::io::{Read, Write};
-use std::sync::atomic::{AtomicBool, Ordering};
 use std::sync::{Arc, Mutex, MutexGuard, PoisonError, Weak};
 use std::time::Duration;
+
+use tokio_util::sync::CancellationToken;
 
 use base64::Engine as _;
 use base64::engine::general_purpose::STANDARD as BASE64;
@@ -43,7 +44,7 @@ const EXITED_TTL: Duration = Duration::from_secs(30 * 60);
 const REAPER_INTERVAL: Duration = Duration::from_secs(60);
 
 struct LiveTerminal {
-    discard_output: Arc<AtomicBool>,
+    discard_output: CancellationToken,
     // Keep the private action script alive until the shell exits or the tab is closed.
     initial_script: Option<tempfile::NamedTempFile>,
     #[cfg(all(test, windows))]
@@ -160,6 +161,87 @@ fn event_seq(event: &TerminalEvent) -> u64 {
 #[cfg(test)]
 mod subscription_tests {
     use super::*;
+
+    struct SignalledReader {
+        started: Option<std::sync::mpsc::Sender<()>>,
+        reads: Arc<std::sync::atomic::AtomicUsize>,
+        remaining: usize,
+    }
+    impl Read for SignalledReader {
+        fn read(&mut self, buffer: &mut [u8]) -> std::io::Result<usize> {
+            if self.remaining == 0 {
+                return Ok(0);
+            }
+            self.remaining -= 1;
+            self.reads
+                .fetch_add(1, std::sync::atomic::Ordering::Relaxed);
+            buffer[0] = b'x';
+            if let Some(started) = self.started.take() {
+                started.send(()).unwrap();
+            }
+            Ok(1)
+        }
+    }
+
+    #[test]
+    fn full_pty_queue_cancels_without_a_tokio_executor_and_windows_drains() {
+        let (tx, _rx) = mpsc::channel(1);
+        tx.try_send(vec![0]).unwrap();
+        let token = CancellationToken::new();
+        let (started_tx, started_rx) = std::sync::mpsc::channel();
+        let (finished_tx, finished_rx) = std::sync::mpsc::channel();
+        let reads = Arc::new(std::sync::atomic::AtomicUsize::new(0));
+        let reader = SignalledReader {
+            started: Some(started_tx),
+            reads: reads.clone(),
+            remaining: 9,
+        };
+        let discard = token.clone();
+        let thread = std::thread::spawn(move || {
+            read_pty(Box::new(reader), tx, discard);
+            finished_tx.send(()).unwrap();
+        });
+        started_rx.recv_timeout(Duration::from_secs(1)).unwrap();
+        assert!(
+            finished_rx.try_recv().is_err(),
+            "full queue must backpressure the reader"
+        );
+        token.cancel();
+        finished_rx.recv_timeout(Duration::from_secs(1)).unwrap();
+        thread.join().unwrap();
+        #[cfg(windows)]
+        assert_eq!(
+            reads.load(std::sync::atomic::Ordering::Relaxed),
+            9,
+            "ConPTY must drain discarded output to EOF"
+        );
+        #[cfg(not(windows))]
+        assert_eq!(reads.load(std::sync::atomic::Ordering::Relaxed), 1);
+    }
+
+    #[test]
+    fn full_pty_queue_wakes_when_its_receiver_closes() {
+        let (tx, rx) = mpsc::channel(1);
+        tx.try_send(vec![0]).unwrap();
+        let (started_tx, started_rx) = std::sync::mpsc::channel();
+        let (finished_tx, finished_rx) = std::sync::mpsc::channel();
+        let thread = std::thread::spawn(move || {
+            read_pty(
+                Box::new(SignalledReader {
+                    started: Some(started_tx),
+                    reads: Arc::new(std::sync::atomic::AtomicUsize::new(0)),
+                    remaining: 9,
+                }),
+                tx,
+                CancellationToken::new(),
+            );
+            finished_tx.send(()).unwrap();
+        });
+        started_rx.recv_timeout(Duration::from_secs(1)).unwrap();
+        drop(rx);
+        finished_rx.recv_timeout(Duration::from_secs(1)).unwrap();
+        thread.join().unwrap();
+    }
 
     #[tokio::test]
     async fn a_slow_viewer_gets_a_gap_then_ordered_output_and_exit() {
@@ -429,7 +511,7 @@ impl Terminals {
             #[cfg(windows)]
             cleanup: None,
             output: broadcast::channel(LIVE_QUEUE_CAP).0,
-            discard_output: Arc::new(AtomicBool::new(false)),
+            discard_output: CancellationToken::new(),
             replay: VecDeque::new(),
             replay_bytes: 0,
             seq: 0,
@@ -606,7 +688,7 @@ impl Terminals {
 
 fn dispose(session: &Arc<Mutex<LiveTerminal>>, kill: bool) -> bool {
     let mut session = lock(session);
-    session.discard_output.store(true, Ordering::Release);
+    session.discard_output.cancel();
     // Close existing live receivers before waiting for native cleanup.
     session.output = broadcast::channel(LIVE_QUEUE_CAP).0;
     if kill
@@ -630,35 +712,31 @@ fn dispose(session: &Arc<Mutex<LiveTerminal>>, kill: bool) -> bool {
 
 /// Blocking PTY reader: forwards raw chunks until EOF. A closed PTY reads as an
 /// error on some platforms (EIO on Linux once the shell exits) — both end the loop.
-fn read_pty(mut reader: Box<dyn Read + Send>, tx: mpsc::Sender<Vec<u8>>, discard: Arc<AtomicBool>) {
+fn read_pty(
+    mut reader: Box<dyn Read + Send>,
+    tx: mpsc::Sender<Vec<u8>>,
+    discard: CancellationToken,
+) {
     let mut buf = [0u8; 8192];
     loop {
         match reader.read(&mut buf) {
             Ok(0) | Err(_) => break,
             Ok(n) => {
-                let mut chunk = buf[..n].to_vec();
-                loop {
-                    if discard.load(Ordering::Acquire) || tx.is_closed() {
-                        // ConPTY must drain during explicit close even when
-                        // its bounded queue is full and the executor is idle.
-                        #[cfg(not(windows))]
-                        return;
-                        #[cfg(windows)]
-                        break;
-                    }
-                    match tx.try_send(chunk) {
-                        Ok(()) => break,
-                        Err(mpsc::error::TrySendError::Full(bytes)) => {
-                            chunk = bytes;
-                            std::thread::sleep(Duration::from_millis(2));
-                        }
-                        Err(mpsc::error::TrySendError::Closed(_)) => {
-                            #[cfg(not(windows))]
-                            return;
-                            #[cfg(windows)]
-                            break;
+                let sent = futures::executor::block_on(async {
+                    tokio::select! {
+                        biased;
+                        _ = discard.cancelled() => false,
+                        permit = tx.reserve() => match permit {
+                            Ok(permit) => { permit.send(buf[..n].to_vec()); true }
+                            Err(_) => false,
                         }
                     }
+                });
+                if !sent {
+                    #[cfg(not(windows))]
+                    return;
+                    // ConPTY must drain to EOF during native close. The
+                    // cancellation wake is synchronous, even with an idle runtime.
                 }
             }
         }
