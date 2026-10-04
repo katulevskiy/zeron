@@ -639,7 +639,11 @@ impl Server {
             // Keep MCP optional when its generation cannot be detected, but
             // still install the permission gate for non-Bypass runs.
             if let Some(version) = opencode_version(exe).await {
-                let protocol = if version.major >= 2 { Protocol::V2 } else { Protocol::V1 };
+                let protocol = if version.major >= 2 {
+                    Protocol::V2
+                } else {
+                    Protocol::V1
+                };
                 let mut config = inline_config(inherited.as_deref())?;
                 add_mcp(&mut config, mcp, protocol)?;
                 inline = Some(config);
@@ -4757,17 +4761,27 @@ http.createServer((req, res) => {
             args: vec!["mcp".into()],
             env: Default::default(),
         };
-        let mut server = Server::spawn(
-            &exe,
-            fixture.path().to_str(),
-            Duration::from_secs(5),
-            Some(&mcp),
-        )
-        .await
-        .expect("an unknown version must not fail the run");
-        let probe = server.get_json("/config-probe", None).await.unwrap();
-        server.shutdown(Duration::from_millis(100)).await;
-        assert_eq!(probe["config"], Value::Null);
+        for ask_permissions in [false, true] {
+            let mut server = Server::spawn(
+                &exe,
+                fixture.path().to_str(),
+                Duration::from_secs(5),
+                Some(&mcp),
+                ask_permissions,
+            )
+            .await
+            .expect("an unknown version must not fail the run");
+            let probe = server.get_json("/config-probe", None).await.unwrap();
+            server.shutdown(Duration::from_millis(100)).await;
+            if ask_permissions {
+                let config: Value =
+                    serde_json::from_str(probe["config"].as_str().unwrap()).unwrap();
+                assert_eq!(config["permission"]["*"], "ask");
+                assert!(config.get("mcp").is_none());
+            } else {
+                assert_eq!(probe["config"], Value::Null);
+            }
+        }
     }
 
     /// A freshly installed binary's first `--version` outlasts the shared
@@ -4820,6 +4834,7 @@ if (process.argv.includes('--version')) {{
                 fixture.path().to_str(),
                 Duration::from_secs(10),
                 Some(&mcp),
+                false,
             )
             .await
             .expect("a slow first --version must not fail the run");
