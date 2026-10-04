@@ -409,9 +409,7 @@ impl ChatConnectionSnapshot {
             sync_requested,
             stats: client.as_ref().map(|client| client.stats()),
             delivery_live: sync_started
-                && client
-                    .as_ref()
-                    .is_some_and(|client| client.delivery_live()),
+                && client.as_ref().is_some_and(|client| client.delivery_live()),
         }
     }
 
@@ -927,6 +925,7 @@ impl DocHost {
         };
         if tokio::runtime::Handle::try_current().is_ok() {
             host.spawn_sync_scheduler();
+            host.spawn_remote_wake_delivery();
         }
         host
     }
@@ -3370,10 +3369,8 @@ impl DocHost {
         if is_message {
             self.unarchive_on_send(chat_id);
         }
-        // §7 durable delivery: when another device hosts this chat, nudge its device
-        // room so a cold host opens the doc and drains the queue. Fire-and-forget —
-        // the command is durable in the doc either way (a host that opens the chat
-        // for any other reason still executes it).
+        // The cold host must discover the command even after its room rows
+        // are ACKed. Persist that wake independently and recover it on restart.
         self.nudge_remote_host(chat_id);
         self.spawn_command_delivery(chat_id, entry, transfers);
         Ok(id)
@@ -4138,62 +4135,15 @@ impl DocHost {
         Ok(())
     }
 
-    /// POST `{edge}/device/{host}/nudge {chatId}` when the chat's workspace row names
-    /// another device as host. Best-effort: offline/edge-less engines skip silently.
+    /// Persist remote host discovery separately from the outgoing room rows.
+    /// A row ACK does not prove a cold host has been told to open its room.
     fn nudge_remote_host(&self, chat_id: &str) {
-        let Some(edge) = self.inner.config.edge.clone() else {
-            return;
-        };
-        let Some(workspace) = self.workspace() else {
-            return;
-        };
-        let host_device = match workspace.chat(chat_id) {
-            Ok(Some(chat)) => chat.device_id,
-            // Unclaimed chat: whoever drains first claims it — nobody to nudge.
-            _ => return,
-        };
-        if host_device == self.inner.config.device_id {
+        if self.inner.config.edge.is_none() || self.remote_host_for(chat_id).is_none() {
             return;
         }
-        // Only meaningful inside a runtime (RPC handlers, executors); bare sync
-        // callers (unit tests) skip rather than panic.
-        let Ok(runtime) = tokio::runtime::Handle::try_current() else {
-            return;
-        };
-        let url = format!(
-            "{}/device/{}/nudge",
-            edge.url.trim_end_matches('/'),
-            host_device
-        );
-        let chat = chat_id.to_string();
-        self.spawn_worker_on(&runtime, async move {
-            // Fresh bearer per request — never the boot-time snapshot.
-            let bearer = match edge.bearer().await {
-                Ok(bearer) => bearer,
-                Err(err) => {
-                    tracing::warn!(chat = %chat, error = %err, "nudge skipped: token unavailable");
-                    return;
-                }
-            };
-            let send = reqwest::Client::new()
-                .post(&url)
-                .bearer_auth(&bearer)
-                .json(&serde_json::json!({ "chatId": chat }))
-                .timeout(std::time::Duration::from_secs(10))
-                .send()
-                .await;
-            match send {
-                Ok(res) if res.status().is_success() => {
-                    tracing::info!(chat = %chat, device = %host_device, "host nudged");
-                }
-                Ok(res) => tracing::warn!(chat = %chat, device = %host_device,
-                    status = res.status().as_u16(), "nudge rejected"),
-                Err(err) => {
-                    let err = describe_http_error(err);
-                    tracing::warn!(chat = %chat, error = %err, "nudge failed (best-effort)")
-                }
-            }
-        });
+        if let Err(err) = self.inner.store.schedule_sync_job(chat_id, "remote-wake") {
+            tracing::warn!(chat = %chat_id, %err, "remote host wake persistence failed");
+        }
     }
 
     /// The chat's host device when it is NOT this engine (mirrors
@@ -6474,3 +6424,6 @@ mod publication_eviction_tests {
 #[cfg(test)]
 #[path = "doc_host_sync_tests.rs"]
 mod sync_lifecycle_tests;
+
+#[path = "doc_host_delivery.rs"]
+mod remote_delivery;
