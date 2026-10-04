@@ -44,6 +44,8 @@ final class SessionViewController: UIViewController, UIGestureRecognizerDelegate
         navigationItem.largeTitleDisplayMode = .never
         navigationItem.titleView = titleView
         navigationItem.rightBarButtonItems = [ellipsisItem]
+        ellipsisItem.accessibilityLabel = "Session options"
+        ellipsisItem.accessibilityIdentifier = "session-menu"
         sideChatsButton.addAction(UIAction { [weak self] _ in self?.presentSideChats() }, for: .touchUpInside)
         sideChatsToken = app.observe { [weak self] in self?.updateSideChatsButton() }
         updateSideChatsButton()
@@ -517,8 +519,22 @@ final class SessionViewController: UIViewController, UIGestureRecognizerDelegate
             guard let self else { return done([]) }
             let vm = self.app.session(self.chatId)
             let pinned = vm?.pinned ?? false
+            // Creation lives here so the first side chat is reachable; the
+            // branch button only appears once one exists. Fork works from a
+            // side chat too (it lands as a sibling, like desktop); an empty
+            // child would nest, which only one level allows.
+            var sideChats: [UIMenuElement] = []
+            if let row = self.app.row(self.chatId) {
+                var actions: [UIMenuElement] = []
+                if row.parentChatId == nil {
+                    actions.append(UIAction(title: "New Side Chat", image: UIImage(systemName: "plus.bubble")) { _ in self.newSideChat() })
+                }
+                actions.append(UIAction(title: "Fork to Side Chat", image: UIImage(systemName: "arrow.triangle.branch")) { _ in self.forkToSideChat() })
+                sideChats = actions
+            }
             done([
                 UIAction(title: pinned ? "Unpin" : "Pin", image: UIImage(systemName: pinned ? "pin.slash" : "pin")) { _ in self.app.setPinned(self.chatId, !pinned) },
+            ] + sideChats + [
                 UIAction(title: "Copy Transcript", image: UIImage(systemName: "doc.on.doc")) { _ in
                     UIPasteboard.general.string = self.engine.frame().plainText()
                 },
@@ -567,7 +583,6 @@ final class SessionViewController: UIViewController, UIGestureRecognizerDelegate
         let nav = UINavigationController(rootViewController: sheet)
         nav.navigationBar.titleTextAttributes = [.font: Fonts.ui(.sansSemibold, 17), .foregroundColor: Palette.text]
         nav.navigationBar.tintColor = Palette.text
-        sheet.navigationItem.rightBarButtonItem = UIBarButtonItem(systemItem: .done, primaryAction: UIAction { [weak nav] _ in nav?.dismiss(animated: true) })
         if traitCollection.horizontalSizeClass == .regular {
             // iPad: a popover off the branch button, over the transcript.
             nav.modalPresentationStyle = .popover
@@ -581,6 +596,32 @@ final class SessionViewController: UIViewController, UIGestureRecognizerDelegate
             }
         }
         present(nav, animated: true)
+    }
+
+    private func newSideChat() {
+        do {
+            router?.openSession(try app.createSideChat(parentId: chatId))
+        } catch {
+            presentSideChatError("Couldn't create a side chat", error)
+        }
+    }
+
+    private func forkToSideChat() {
+        Task { @MainActor [weak self] in
+            guard let self else { return }
+            do {
+                let id = try await app.forkSideChat(sourceId: chatId)
+                router?.openSession(id)
+            } catch {
+                presentSideChatError("Couldn't fork this chat", error)
+            }
+        }
+    }
+
+    private func presentSideChatError(_ title: String, _ error: Error) {
+        let alert = UIAlertController(title: title, message: sideChatErrorMessage(error), preferredStyle: .alert)
+        alert.addAction(UIAlertAction(title: "OK", style: .default))
+        present(alert, animated: true)
     }
 }
 

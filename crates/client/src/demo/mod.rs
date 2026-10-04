@@ -22,9 +22,10 @@ use chrono::Utc;
 use tokio_util::sync::CancellationToken;
 use zeron_doc::{
     MessagePart, MessageRole, MessageStatus, QueueDeliveryGate, RegistryDoc, RegistryRow, RowOp,
-    SegmentWriter, SessionCommandPayload, SessionCommandStatus, SessionDoc, apply_op,
+    SegmentWriter, SessionCommandPayload, SessionCommandStatus, SessionDoc, SessionMessageEntry,
+    apply_op,
 };
-use zeron_proto::{FolderEntry, FolderListing, RepoRef, Session, SessionStatus};
+use zeron_proto::{Chat, FolderEntry, FolderListing, RepoRef, Session, SessionStatus};
 
 use crate::catalog::{self, HarnessInfo, ModelInfo};
 use crate::client::ClientInner;
@@ -119,6 +120,8 @@ pub(crate) struct DemoHost {
     processed: Mutex<HashSet<String>>,
     leases: Mutex<HashMap<String, Lease>>,
     uploads: Mutex<HashMap<String, Arc<Vec<u8>>>>,
+    /// Crafted fork transcripts waiting for their first open.
+    forks: Mutex<HashMap<String, Vec<SessionMessageEntry>>>,
     rng: Mutex<Rng>,
     cancel: Mutex<Option<CancellationToken>>,
 }
@@ -140,6 +143,7 @@ impl DemoHost {
             processed: Mutex::new(HashSet::new()),
             leases: Mutex::new(HashMap::new()),
             uploads: Mutex::new(HashMap::new()),
+            forks: Mutex::new(HashMap::new()),
             rng: Mutex::new(Rng(0x9e37_79b9_7f4a_7c15)),
             cancel: Mutex::new(None),
         })
@@ -261,16 +265,77 @@ impl DemoHost {
             .as_ref()
             .and_then(|c| c.last_message_at)
             .map_or_else(now_ms, |t| t.timestamp_millis());
-        let entries = match (chat_id, self.options.transcript_scale.turns()) {
-            ("chat-veil", Some(turns)) => {
-                transcripts::synthetic(turns, &host, now_ms() - turns as i64 * 60_000)
+        let entries = if let Some(fork) = lock(&self.forks).get(chat_id) {
+            fork.clone()
+        } else {
+            match (chat_id, self.options.transcript_scale.turns()) {
+                ("chat-veil", Some(turns)) => {
+                    transcripts::synthetic(turns, &host, now_ms() - turns as i64 * 60_000)
+                }
+                _ => transcripts::fixture(chat_id, &host, last),
             }
-            _ => transcripts::fixture(chat_id, &host, last),
         };
         for entry in &entries {
             doc.push_message(entry).map_err(doc_err)?;
         }
         Ok(doc)
+    }
+
+    /// In-process `ForkSideChat`: copy the source's history through its
+    /// latest completed response, register the child row, and serve the
+    /// crafted doc when the fork is first opened.
+    pub(crate) fn fork_side_chat(
+        &self,
+        chat_id: &str,
+        source: &Chat,
+        parent_chat_id: &str,
+    ) -> Result<Chat> {
+        let client = self.client()?;
+        if let Some(existing) = client.workspace.chat(chat_id) {
+            return Ok(existing);
+        }
+        let entries = match client.session_core(&source.id) {
+            Some(core) => core.doc().read_entries().map_err(doc_err)?,
+            None => self
+                .session_doc(&source.id)?
+                .read_entries()
+                .map_err(doc_err)?,
+        };
+        let source_title = source
+            .title
+            .clone()
+            .or_else(|| source.last_message_preview.clone())
+            .unwrap_or_else(|| "New session".into());
+        let forked = zeron_doc::fork_entries(
+            &entries,
+            chat_id,
+            &source.id,
+            &source_title,
+            &source.device_id,
+            now_ms(),
+        )
+        .ok_or_else(|| {
+            ClientError::InvalidArgument(
+                "Wait for a completed response before starting a side chat".into(),
+            )
+        })?;
+        lock(&self.forks).insert(chat_id.to_owned(), forked);
+        let chat = Chat {
+            id: chat_id.to_owned(),
+            parent_chat_id: Some(parent_chat_id.to_owned()),
+            title: None,
+            archived: false,
+            created_at: Utc::now(),
+            last_message_at: None,
+            last_message_preview: None,
+            last_seen_at: None,
+            harness_session_id: None,
+            harness_session_cwd: None,
+            room_gen: Some(2),
+            ..source.clone()
+        };
+        client.registry_write(|doc| doc.upsert_chat(&chat))?;
+        Ok(chat)
     }
 
     /// A viewer opened `chat-veil`: finish its in-flight streaming entry.

@@ -795,6 +795,51 @@ impl Client {
         self.chat_write(chat_id, |doc| doc.rename_chat(chat_id, title.trim()))
     }
 
+    /// Mint an empty side chat under `parent_chat_id`, inheriting the
+    /// parent's project, host, cwd, branch and provider config. The row is
+    /// written immediately, so the caller can open it ready for its first
+    /// message. [`fork_side_chat`](Self::fork_side_chat) is the copy-history
+    /// sibling of this.
+    pub fn create_side_chat(&self, parent_chat_id: &str, title: Option<&str>) -> Result<String> {
+        let parent = self
+            .inner
+            .workspace
+            .chat(parent_chat_id)
+            .ok_or_else(|| ClientError::NotFound(parent_chat_id.to_owned()))?;
+        if parent.parent_chat_id.is_some() {
+            return Err(ClientError::InvalidArgument(
+                "side chats cannot have side chats".into(),
+            ));
+        }
+        let now = Utc::now();
+        let chat = Chat {
+            id: crate::new_id(),
+            device_id: parent.device_id.clone(),
+            title: title
+                .map(str::trim)
+                .filter(|t| !t.is_empty())
+                .map(str::to_owned),
+            archived: false,
+            cwd: parent.cwd.clone(),
+            branch: parent.branch.clone(),
+            checkout_id: parent.checkout_id.clone(),
+            source_context: parent.source_context.clone(),
+            config: parent.config.clone(),
+            last_message_preview: None,
+            last_message_at: None,
+            created_at: now,
+            harness_session_id: None,
+            harness_session_cwd: None,
+            space_id: parent.space_id.clone(),
+            last_seen_at: None,
+            room_gen: Some(2),
+            parent_chat_id: Some(parent.id.clone()),
+        };
+        let id = chat.id.clone();
+        self.inner.registry_write(|doc| doc.upsert_chat(&chat))?;
+        Ok(id)
+    }
+
     pub fn mark_seen(&self, chat_id: &str) {
         self.inner.mark_seen(chat_id);
     }
@@ -1243,6 +1288,58 @@ impl Client {
                     )
                     .await?;
                 serde_json::from_value(value).map_err(|e| ClientError::HostError(e.to_string()))
+            }
+        }
+    }
+
+    /// Fork `source_chat_id` through its latest completed response into a new
+    /// chat, executed by the source's owning host. `parent_chat_id` defaults
+    /// to the source; a side chat's own fork passes its parent so the copy
+    /// lists as a sibling (`ForkSideChat`).
+    pub async fn fork_side_chat(
+        &self,
+        source_chat_id: &str,
+        parent_chat_id: Option<&str>,
+    ) -> Result<Chat> {
+        let source = self
+            .inner
+            .workspace
+            .chat(source_chat_id)
+            .ok_or_else(|| ClientError::NotFound(source_chat_id.to_owned()))?;
+        let parent = parent_chat_id
+            .map(str::trim)
+            .filter(|p| !p.is_empty())
+            .map(str::to_owned)
+            .unwrap_or_else(|| source.id.clone());
+        let chat_id = crate::new_id();
+        match self.inner.backend() {
+            Backend::Demo(demo) => demo.fork_side_chat(&chat_id, &source, &parent),
+            Backend::Live(live) => {
+                let value = live
+                    .relay
+                    .call(
+                        &source.device_id,
+                        zeron_rpc::methods::FORK_SIDE_CHAT,
+                        serde_json::json!({
+                            "chatId": chat_id,
+                            "sourceChatId": source.id,
+                            "parentChatId": parent,
+                        }),
+                    )
+                    .await?;
+                let chat: Chat = serde_json::from_value(value)
+                    .map_err(|e| ClientError::HostError(e.to_string()))?;
+                // The host writes the row itself; wait for it to ride the
+                // registry back so the caller can open the fork right away.
+                for _ in 0..30 {
+                    if self.inner.workspace.chat(&chat.id).is_some() {
+                        return Ok(chat);
+                    }
+                    tokio::time::sleep(Duration::from_millis(100)).await;
+                }
+                // Registry sync is slow: publish the host's own row locally.
+                self.inner.registry_write(|doc| doc.upsert_chat(&chat))?;
+                Ok(chat)
             }
         }
     }

@@ -415,6 +415,22 @@ final class AppModel {
         (client?.childSessions(parentId: parentId) ?? []).filter { !$0.archived }.map(Self.vm)
     }
 
+    /// Mint an empty side chat under `parentId` (the sheet's "+"), returning
+    /// the new chat id ready to open. Matches desktop's "New side chat".
+    func createSideChat(parentId: String) throws -> String {
+        guard let client else { throw CoreError.Closed }
+        return try client.createSideChat(parentChatId: parentId, title: nil)
+    }
+
+    /// Fork `sourceId` through its latest completed response (the sheet's
+    /// branch button), executed by its host. A side chat forks as a sibling
+    /// of itself, like desktop; returns the new chat id.
+    func forkSideChat(sourceId: String) async throws -> String {
+        guard let client else { throw CoreError.Closed }
+        let parent = row(sourceId)?.parentChatId ?? sourceId
+        return try await client.forkSideChat(sourceChatId: sourceId, parentChatId: parent)
+    }
+
     func search(_ query: String) -> SearchResults {
         let q = query.trimmingCharacters(in: .whitespaces)
         guard let client, !q.isEmpty else { return SearchResults(sessions: frontPage.sessions) }

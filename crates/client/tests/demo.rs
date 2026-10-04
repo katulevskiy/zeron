@@ -7,8 +7,8 @@ use std::time::{Duration, Instant};
 
 use zeron_client::events::NullListener;
 use zeron_client::{
-    ChatIndicator, Client, ClientConfig, Credentials, DemoFixture, DemoOptions, MessageRole,
-    MessageStatus, SendOutcome, SendRequest, StreamSpeed, TranscriptScale,
+    ChatIndicator, Client, ClientConfig, Credentials, DemoFixture, DemoOptions, MessagePart,
+    MessageRole, MessageStatus, SendOutcome, SendRequest, StreamSpeed, TranscriptScale,
 };
 
 fn demo(options: DemoOptions) -> (Client, tempfile::TempDir) {
@@ -113,6 +113,55 @@ fn front_page_mirrors_the_desktop_sidebar() {
     );
     let hits = client.search_including_children("timing", 5);
     assert_eq!(hits[0].session.id, "chat-side");
+}
+
+#[test]
+fn side_chats_mint_empty_or_forked() {
+    let (client, _dir) = demo(fast());
+
+    // Empty "new side chat": inherits the parent's host, project and cwd.
+    let parent = client.workspace().session("chat-veil").unwrap().clone();
+    let empty = client.create_side_chat("chat-veil", None).unwrap();
+    let row = client.workspace().session(&empty).unwrap().clone();
+    assert_eq!(row.parent_chat_id.as_deref(), Some("chat-veil"));
+    assert_eq!(row.device_id, parent.device_id);
+    assert_eq!(
+        row.project.as_ref().map(|p| p.id.as_str()),
+        parent.project.as_ref().map(|p| p.id.as_str())
+    );
+    assert_eq!(row.cwd, parent.cwd);
+    assert!(client.session_config(&empty).is_some());
+    // Only one level of side chats.
+    assert!(client.create_side_chat(&empty, None).is_err());
+
+    // Fork: copies the source through its latest completed response and
+    // appends the seam naming the source.
+    let forked = zeron_client::runtime::shared()
+        .block_on(zeron_client::runtime::run({
+            let client = client.clone();
+            async move { client.fork_side_chat("chat-deploy", None).await }
+        }))
+        .unwrap();
+    assert_eq!(forked.parent_chat_id.as_deref(), Some("chat-deploy"));
+    let handle = client.open_session(&forked.id).unwrap();
+    let snapshot = handle.snapshot();
+    let parts: Vec<_> = snapshot
+        .transcript()
+        .iter()
+        .flat_map(|entry| entry.message.parts.iter())
+        .collect();
+    assert!(
+        parts.iter().any(|p| matches!(p, MessagePart::Fork { source_chat_id, .. } if source_chat_id == "chat-deploy")),
+        "fork seam names the source"
+    );
+    // A side chat's own fork lands beside it, under the same parent.
+    let sibling = zeron_client::runtime::shared()
+        .block_on(zeron_client::runtime::run({
+            let client = client.clone();
+            async move { client.fork_side_chat("chat-side", Some("chat-veil")).await }
+        }))
+        .unwrap();
+    assert_eq!(sibling.parent_chat_id.as_deref(), Some("chat-veil"));
 }
 
 #[test]

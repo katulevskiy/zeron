@@ -228,6 +228,37 @@ impl CoreClient {
         Ok(self.client.create_session(new_session.try_into()?)?)
     }
 
+    /// Mint an empty side chat under `parent_chat_id`, inheriting the
+    /// parent's project, host and provider config (the mobile sheet's "new
+    /// side chat"). Returns the new chat id, ready to open.
+    pub fn create_side_chat(
+        &self,
+        parent_chat_id: String,
+        title: Option<String>,
+    ) -> CoreResult<String> {
+        Ok(self
+            .client
+            .create_side_chat(&parent_chat_id, title.as_deref())?)
+    }
+
+    /// Fork a chat through its latest completed response into a side chat on
+    /// its owning host (`ForkSideChat`); `parentChatId` defaults to the
+    /// source. Returns the new chat id.
+    pub async fn fork_side_chat(
+        &self,
+        source_chat_id: String,
+        parent_chat_id: Option<String>,
+    ) -> CoreResult<String> {
+        let client = self.client.clone();
+        on_runtime(async move {
+            client
+                .fork_side_chat(&source_chat_id, parent_chat_id.as_deref())
+                .await
+        })
+        .await
+        .map(|chat| chat.id)
+    }
+
     pub fn archive_session(&self, chat_id: String) -> CoreResult<()> {
         Ok(self.client.archive_session(&chat_id)?)
     }

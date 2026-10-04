@@ -211,6 +211,31 @@ final class SessionFlowTests: XCTestCase {
         snapshot(app, "search-side-chats")
     }
 
+    /// The session menu's "New Side Chat" mints an empty child and opens it
+    /// ready for its first message.
+    func testNewSideChatFromMenu() {
+        let app = launch(["-route", "chat:chat-deploy"])
+        XCTAssertTrue(app.scrollViews["transcript"].waitForExistence(timeout: 10))
+        app.buttons["session-menu"].tap()
+        app.buttons["New Side Chat"].tap()
+        XCTAssertTrue(app.textViews["composer-input"].waitForExistence(timeout: 10))
+        // One level only: the child offers no further side chats.
+        XCTAssertFalse(app.buttons["side-chats"].exists)
+        snapshot(app, "new-side-chat")
+    }
+
+    /// The session menu's fork action copies the chat through its latest
+    /// completed response; the fork opens with the seam naming the source.
+    func testForkToSideChatFromMenu() {
+        let app = launch(["-route", "chat:chat-deploy"])
+        XCTAssertTrue(app.scrollViews["transcript"].waitForExistence(timeout: 10))
+        app.buttons["session-menu"].tap()
+        app.buttons["Fork to Side Chat"].tap()
+        let seam = app.staticTexts["Forked from Wrangler deploy hygiene"]
+        XCTAssertTrue(seam.waitForExistence(timeout: 15), "the fork opens with its seam")
+        snapshot(app, "forked-side-chat")
+    }
+
     /// Settings turns notifications on (system prompt), and tapping a
     /// session notification opens that session. The notification is sent
     /// from the host (`xcrun simctl push`, same payload as the edge) once the
