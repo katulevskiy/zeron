@@ -201,8 +201,14 @@ final class SessionFlowTests: XCTestCase {
     func testSearchFindsSideChats() {
         let app = launch()
         XCTAssertTrue(app.staticTexts["Sessions"].waitForExistence(timeout: 10))
-        app.tabBars.buttons["Search"].tap()
-        let field = app.searchFields.firstMatch
+        // iPhone searches from the tab; iPad from the sidebar's own field.
+        let field: XCUIElement
+        if app.tabBars.buttons["Search"].exists {
+            app.tabBars.buttons["Search"].tap()
+            field = app.searchFields.firstMatch
+        } else {
+            field = app.descendants(matching: .any)["sidebar-search"].firstMatch
+        }
         XCTAssertTrue(field.waitForExistence(timeout: 5))
         field.tap()
         field.typeText("timing")
@@ -217,10 +223,12 @@ final class SessionFlowTests: XCTestCase {
         let app = launch(["-route", "chat:chat-deploy"])
         XCTAssertTrue(app.scrollViews["transcript"].waitForExistence(timeout: 10))
         app.buttons["session-menu"].tap()
+        snapshot(app, "session-menu")
         app.buttons["New Side Chat"].tap()
         XCTAssertTrue(app.textViews["composer-input"].waitForExistence(timeout: 10))
         // One level only: the child offers no further side chats.
         XCTAssertFalse(app.buttons["side-chats"].exists)
+        XCTAssertTrue(app.descendants(matching: .any)["session-loading"].waitForNonExistence(timeout: 10))
         snapshot(app, "new-side-chat")
     }
 
@@ -230,9 +238,11 @@ final class SessionFlowTests: XCTestCase {
         let app = launch(["-route", "chat:chat-deploy"])
         XCTAssertTrue(app.scrollViews["transcript"].waitForExistence(timeout: 10))
         app.buttons["session-menu"].tap()
+        snapshot(app, "session-menu")
         app.buttons["Fork to Side Chat"].tap()
         let seam = app.staticTexts["Forked from Wrangler deploy hygiene"]
         XCTAssertTrue(seam.waitForExistence(timeout: 15), "the fork opens with its seam")
+        XCTAssertTrue(app.descendants(matching: .any)["session-loading"].waitForNonExistence(timeout: 5))
         snapshot(app, "forked-side-chat")
     }
 
