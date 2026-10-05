@@ -905,7 +905,7 @@ impl DelegationEngine {
                 .chat(id)
                 .ok()
                 .flatten()
-                .is_some_and(|c| c.device_id == self.inner.workspace.device_id().to_string());
+                .is_some_and(|c| c.device_id == self.inner.workspace.device_id());
             if !local {
                 continue;
             }
@@ -932,7 +932,7 @@ impl DelegationEngine {
                 .chat(id)
                 .ok()
                 .flatten()
-                .is_some_and(|c| c.device_id == self.inner.workspace.device_id().to_string());
+                .is_some_and(|c| c.device_id == self.inner.workspace.device_id());
             if !local {
                 continue;
             }
@@ -955,7 +955,7 @@ impl DelegationEngine {
                 .chat(id)
                 .ok()
                 .flatten()
-                .is_some_and(|c| c.device_id == self.inner.workspace.device_id().to_string());
+                .is_some_and(|c| c.device_id == self.inner.workspace.device_id());
             if !local || !self.inner.sessions.run_registered(id) {
                 continue;
             }

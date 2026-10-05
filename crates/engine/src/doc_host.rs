@@ -362,7 +362,7 @@ struct InFlightGuard<'a> {
     id: String,
 }
 
-impl<'a> Drop for InFlightGuard<'_> {
+impl Drop for InFlightGuard<'_> {
     fn drop(&mut self) {
         lock(self.ids).remove(&self.id);
     }
@@ -6215,10 +6215,11 @@ impl DocHost {
                 SessionCommandPayload::Run { message_id, .. } => {
                     ids.insert(message_id.clone());
                 }
-                SessionCommandPayload::Steer { message_id, .. } => {
-                    if let Some(id) = message_id {
-                        ids.insert(id.clone());
-                    }
+                SessionCommandPayload::Steer {
+                    message_id: Some(id),
+                    ..
+                } => {
+                    ids.insert(id.clone());
                 }
                 _ => {}
             }
