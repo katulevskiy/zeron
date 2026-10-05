@@ -43,7 +43,13 @@ final class CoreSessionSource: SessionSource {
         let row = app?.row(chatId)
         hostDevice = c.host.deviceId
         var next = SessionChrome()
-        next.title = c.title
+        // Untitled children read like the sheet and search rows: the row's
+        // "New session" placeholder would drop the side-chat context.
+        if let row, row.parentChatId != nil, !row.hasTitle {
+            next.title = "New side chat"
+        } else {
+            next.title = c.title
+        }
         let project = row?.project?.name ?? "No project"
         if let parentId = row?.parentChatId, let parent = app?.row(parentId) {
             // A side chat orients by its parent: the subtitle taps through.

@@ -20,7 +20,7 @@ Captured flows:
 - `side-chats-sheet.png`: the branch button (count and live tone) opens the
   sheet; rows use the standard session cell, opening one through the shell.
 - `new-side-chat.png`: `+` mints an empty child under the parent — same host,
-  project and model — and opens it ready for the first message. The title
+  project and model — and opens it ready for the first message. Its subtitle
   names the parent and taps back to it; the menu's fork action is disabled
   until a completed reply exists.
 - `forked-side-chat.png`: **Fork to Side Chat** copies the source through its

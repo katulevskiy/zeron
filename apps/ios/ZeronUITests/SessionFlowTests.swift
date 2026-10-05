@@ -230,6 +230,8 @@ final class SessionFlowTests: XCTestCase {
         XCTAssertTrue(app.descendants(matching: .any)["session-loading"].waitForNonExistence(timeout: 3))
         snapshot(app, "new-side-chat")
         XCTAssertTrue(app.buttons["Side chat of Wrangler deploy hygiene"].waitForExistence(timeout: 5), "the child names its parent")
+        // The detail title reads like the sheet and search rows.
+        XCTAssertTrue(app.staticTexts["New side chat"].waitForExistence(timeout: 5), "detail title matches the sheet")
         // One level only: the child offers no further side chats.
         XCTAssertFalse(app.buttons["side-chats"].exists)
         app.buttons["session-menu"].tap()
@@ -244,6 +246,51 @@ final class SessionFlowTests: XCTestCase {
         app.scrollViews["transcript"].coordinate(withNormalizedOffset: CGVector(dx: 0.5, dy: 0.8)).tap()
         app.navigationBars.buttons.element(boundBy: 0).tap()
         XCTAssertTrue(app.staticTexts["Wrangler deploy hygiene"].waitForExistence(timeout: 5), "back at the parent")
+    }
+
+    /// With the sheet open on a session whose first reply is still streaming,
+    /// the fork action flips from disabled to enabled when the reply lands,
+    /// without the sheet being reopened.
+    func testSheetForkEnablesWhenFirstReplyLands() {
+        // A long, realistically-paced reply keeps the source streaming while
+        // the sheet opens, so the disabled start is actually observed.
+        // `-no-projects` lands the new session on the first online host (the
+        // standard fixture defaults it to the offline Mac Studio).
+        let app = launch(["-no-projects", "-longreply"], fast: false)
+        let accessory = app.buttons["new-session"]
+        XCTAssertTrue(accessory.waitForExistence(timeout: 10))
+        accessory.tap()
+        let input = app.textViews["composer-input"]
+        XCTAssertTrue(input.waitForExistence(timeout: 10))
+        input.tap()
+        input.typeText("Explain side chats briefly")
+        app.buttons["composer-send"].tap()
+        XCTAssertTrue(app.scrollViews["transcript"].waitForExistence(timeout: 10))
+        XCTAssertTrue(app.buttons["Stop response"].waitForExistence(timeout: 5), "the first reply is streaming")
+        // A child while the parent streams: the source has no completed
+        // response yet, so the sheet's fork action starts disabled.
+        app.buttons["session-menu"].tap()
+        XCTAssertTrue(app.buttons["New Side Chat"].waitForExistence(timeout: 5))
+        app.buttons["New Side Chat"].tap()
+        XCTAssertTrue(app.textViews["composer-input"].waitForExistence(timeout: 10))
+        // Back to the parent through the child's own "Side chat of …" link:
+        // the back chevron on iPhone, the title link on the iPad column.
+        let back = app.buttons.matching(NSPredicate(format: "label BEGINSWITH 'Side chat of '")).firstMatch
+        XCTAssertTrue(back.waitForExistence(timeout: 5), "the child links back to its parent")
+        back.tap()
+        let branch = app.buttons["side-chats"]
+        XCTAssertTrue(branch.waitForExistence(timeout: 10))
+        branch.tap()
+        XCTAssertTrue(app.navigationBars["Side chats"].waitForExistence(timeout: 5))
+        let fork = app.buttons["side-chats-fork"]
+        XCTAssertTrue(fork.waitForExistence(timeout: 5))
+        XCTAssertFalse(fork.isEnabled, "a streaming source has no completed reply to fork")
+        // The reply lands while the sheet stays open: the action must
+        // re-evaluate against the source's now-complete response.
+        expectation(for: NSPredicate(format: "isEnabled == true"), evaluatedWith: fork)
+        waitForExpectations(timeout: 120)
+        XCTAssertTrue(fork.isEnabled, "a completed reply unlocks the fork action")
+        snapshot(app, "sheet-fork-enabled")
     }
 
     /// Archiving a side chat from its sheet drops the row and the parent's

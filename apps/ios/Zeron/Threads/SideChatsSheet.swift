@@ -104,6 +104,9 @@ final class SideChatsSheetController: SessionListController {
     override func reload(animated: Bool) {
         super.reload(animated: animated)
         empty.isHidden = !sessions.isEmpty
+        // The source may have earned its first completed reply while the
+        // sheet stayed open: re-evaluate the fork action with the list.
+        updateActions()
     }
 
     /// A side chat opens in place of the sheet: dismiss first so the shell's

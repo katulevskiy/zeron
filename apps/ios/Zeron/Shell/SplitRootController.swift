@@ -82,8 +82,10 @@ final class SplitRootController: UISplitViewController, UISplitViewControllerDel
     }
 
     func openChildSession(_ chatId: String) {
-        // No auxiliary stack in the split shell: the detail swap plus the
-        // child's own "Side chat of …" title is the way back.
+        // Collapsed (Slide Over / narrow Split View) uses the tab shell's
+        // stack, which keeps the parent below; expanded swaps the detail
+        // column, where the child's "Side chat of …" title is the way back.
+        guard !isCollapsed else { return tabs.openChildSession(chatId) }
         openSession(chatId)
     }
 
