@@ -5,13 +5,10 @@ no network or signed-in account). They cover the P1 browser and the P2 creation
 paths: the session menu and sheet entry points, an empty side chat, a fork
 through the last completed response, the transcript's fork seam, and search.
 
-```sh
-./scripts/ios/test-side-chats.sh <simulator-udid> [output-dir]
-```
-
-The script runs the five `ZeronUITests/SessionFlowTests` cases below and exports
-their `XCTAttachment` screenshots from the result bundle. Captured on iPhone 17
-Pro and iPad Pro 11-inch (M5), iOS 26 simulator.
+The captures come from the `ZeronUITests/SessionFlowTests` cases listed below,
+run on the simulator with their `XCTAttachment` screenshots exported from the
+result bundle. Captured on iPhone 17 Pro and iPad Pro 11-inch (M5), iOS 26
+simulator.
 
 Captured flows:
 
