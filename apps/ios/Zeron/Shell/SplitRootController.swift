@@ -4,6 +4,10 @@ import UIKit
 /// shell is on screen (iPhone tabs or the iPad split).
 protocol AppRouter: AnyObject {
     func openSession(_ chatId: String)
+    /// Open a chat that hangs off the one on screen. iPhone pushes it on the
+    /// current stack (back returns to the parent); iPad swaps the detail
+    /// column, where the title's "Side chat of …" links back.
+    func openChildSession(_ chatId: String)
     func presentNewSession(prompt: String?)
     func showSettings()
     func showSearch()
@@ -75,6 +79,12 @@ final class SplitRootController: UISplitViewController, UISplitViewControllerDel
         currentChatId = chatId
         sidebar.currentChatId = chatId
         detail.setViewControllers([SessionViewController(app: app, chatId: chatId)], animated: false)
+    }
+
+    func openChildSession(_ chatId: String) {
+        // No auxiliary stack in the split shell: the detail swap plus the
+        // child's own "Side chat of …" title is the way back.
+        openSession(chatId)
     }
 
     func presentNewSession(prompt: String?) {

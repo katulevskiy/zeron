@@ -2823,6 +2823,13 @@ public protocol SessionHandleProtocol: AnyObject, Sendable {
     
     func beginQueuedEdit(id: String, instanceId: String) async  -> QueueEditStart
     
+    /**
+     * True when the session has a completed response for `ForkSideChat` to
+     * copy through. A working tail does not block forking the last complete
+     * response (same boundary [`zeron_doc::fork_entries`] uses).
+     */
+    func canFork()  -> Bool
+    
     func chatId()  -> String
     
     func clearQueueError() 
@@ -2967,6 +2974,20 @@ open func beginQueuedEdit(id: String, instanceId: String)async  -> QueueEditStar
             errorHandler: nil
             
         )
+}
+    
+    /**
+     * True when the session has a completed response for `ForkSideChat` to
+     * copy through. A working tail does not block forking the last complete
+     * response (same boundary [`zeron_doc::fork_entries`] uses).
+     */
+open func canFork() -> Bool  {
+    return try!  FfiConverterBool.lift(try! rustCall() {
+        uniffiCallStatus in
+    uniffi_zeron_mobile_fn_method_sessionhandle_can_fork(
+            self.uniffiCloneHandle(),uniffiCallStatus
+    )
+})
 }
     
 open func chatId() -> String  {
@@ -13372,6 +13393,9 @@ private let initializationResult: InitializationResult = {
         return InitializationResult.apiChecksumMismatch
     }
     if (uniffi_zeron_mobile_checksum_method_sessionhandle_begin_queued_edit() != 9014) {
+        return InitializationResult.apiChecksumMismatch
+    }
+    if (uniffi_zeron_mobile_checksum_method_sessionhandle_can_fork() != 40958) {
         return InitializationResult.apiChecksumMismatch
     }
     if (uniffi_zeron_mobile_checksum_method_sessionhandle_chat_id() != 51345) {

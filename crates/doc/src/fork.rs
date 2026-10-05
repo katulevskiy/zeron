@@ -13,6 +13,16 @@ pub fn fork_boundary(entries: &[SessionMessageEntry]) -> Option<usize> {
     })
 }
 
+/// True when the source has a completed response to fork through. Borrowed
+/// twin of [`fork_boundary`] for callers holding shared entry references
+/// (the mobile session handle's `can_fork`); a working tail never blocks
+/// forking the last complete response.
+pub fn has_fork_boundary<'a>(entries: impl IntoIterator<Item = &'a SessionMessageEntry>) -> bool {
+    entries.into_iter().any(|entry| {
+        entry.role == MessageRole::Assistant && entry.status == Some(MessageStatus::Complete)
+    })
+}
+
 /// Everything a fork inherits from `source`: the history through
 /// [`fork_boundary`], with historical `Input` questions resolved (the source
 /// runtime owns them), ending in the `Fork` seam entry. `None` when the
@@ -146,5 +156,19 @@ mod tests {
     fn no_complete_response_means_no_fork() {
         let source = vec![entry("u1", MessageRole::User, vec![text("t1")])];
         assert!(fork_entries(&source, "child", "parent", "Parent", "phone", 42).is_none());
+    }
+
+    #[test]
+    fn has_fork_boundary_ignores_a_working_tail() {
+        let source = vec![
+            entry("u1", MessageRole::User, vec![text("t1")]),
+            entry("a1", MessageRole::Assistant, vec![text("t2")]),
+            SessionMessageEntry {
+                status: Some(MessageStatus::Streaming),
+                ..entry("a2", MessageRole::Assistant, vec![text("t3")])
+            },
+        ];
+        assert!(has_fork_boundary(source.iter()));
+        assert!(!has_fork_boundary(source[..1].iter()));
     }
 }

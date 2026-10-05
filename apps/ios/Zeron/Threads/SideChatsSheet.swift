@@ -27,8 +27,10 @@ final class SideChatsSheetController: SessionListController {
         didSet { updateActions() }
     }
     private lazy var doneItem = UIBarButtonItem(
-        systemItem: .done,
-        primaryAction: UIAction { [weak self] _ in self?.dismiss(animated: true) }
+        title: "Close",
+        style: .plain,
+        target: self,
+        action: #selector(closeTapped)
     )
     private lazy var newItem = UIBarButtonItem(
         systemItem: .add,
@@ -56,6 +58,7 @@ final class SideChatsSheetController: SessionListController {
         newItem.accessibilityIdentifier = "side-chats-new"
         forkItem.accessibilityLabel = "Fork from last response"
         forkItem.accessibilityIdentifier = "side-chats-fork"
+        doneItem.accessibilityIdentifier = "side-chats-close"
         empty.text = "No side chats yet."
         empty.font = Fonts.ui(.sans, 15)
         empty.textColor = Palette.secondary
@@ -72,8 +75,21 @@ final class SideChatsSheetController: SessionListController {
         updateActions()
     }
 
+    @objc private func closeTapped() {
+        dismiss(animated: true)
+    }
+
     private func updateActions() {
-        navigationItem.rightBarButtonItems = busy ? [spinnerItem] : [newItem, forkItem]
+        if busy {
+            navigationItem.rightBarButtonItems = [spinnerItem]
+        } else {
+            // Same completed-response boundary as the engine: a working tail
+            // may still fork the last complete reply.
+            let canFork = app.canFork(parentId)
+            forkItem.isEnabled = canFork
+            forkItem.accessibilityHint = canFork ? nil : "Needs a completed reply"
+            navigationItem.rightBarButtonItems = [newItem, forkItem]
+        }
         if busy {
             busyIndicator.startAnimating()
         } else {
@@ -91,15 +107,16 @@ final class SideChatsSheetController: SessionListController {
     }
 
     /// A side chat opens in place of the sheet: dismiss first so the shell's
-    /// push (iPhone) or column swap (iPad) isn't covered by it. The router is
-    /// captured before dismissal — by the completion the sheet has left the
-    /// window, and `view.window` alone would resolve to nil.
+    /// push (iPhone, keeping the parent below) or column swap (iPad) isn't
+    /// covered by it. The router is captured before dismissal — by the
+    /// completion the sheet has left the window, and `view.window` alone
+    /// would resolve to nil.
     override func openSession(_ id: String) {
         let router = self.router
         if presentingViewController != nil {
-            dismiss(animated: true) { _ = router?.openSession(id) }
+            dismiss(animated: true) { _ = router?.openChildSession(id) }
         } else {
-            router?.openSession(id)
+            router?.openChildSession(id)
         }
     }
 
@@ -112,7 +129,7 @@ final class SideChatsSheetController: SessionListController {
     }
 
     private func forkFromLastResponse() {
-        guard !busy else { return }
+        guard !busy, app.canFork(parentId) else { return }
         busy = true
         Task { @MainActor [weak self] in
             guard let self else { return }

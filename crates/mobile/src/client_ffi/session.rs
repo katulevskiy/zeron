@@ -490,6 +490,14 @@ impl SessionHandle {
         }
     }
 
+    /// True when the session has a completed response for `ForkSideChat` to
+    /// copy through. A working tail does not block forking the last complete
+    /// response (same boundary [`zeron_doc::fork_entries`] uses).
+    pub fn can_fork(&self) -> bool {
+        let snap = self.inner.snapshot();
+        zeron_doc::has_fork_boundary(snap.transcript().iter().map(|entry| entry.message.as_ref()))
+    }
+
     /// Plain text of one entry's text parts (copy / share).
     pub fn message_text(&self, entry_id: String) -> Option<String> {
         let snap = self.inner.snapshot();

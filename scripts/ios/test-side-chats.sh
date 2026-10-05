@@ -1,8 +1,8 @@
 #!/bin/bash
 # Side-chat captures on one installed iPhone/iPad simulator: the branch
-# sheet, the session menu's creation actions, the fork seam, and search
-# grouping. Screenshots are the UI tests' XCTAttachments, exported from the
-# result bundle.
+# sheet, the session menu's creation actions, the fork seam, search
+# grouping, and the archived-child refresh. Screenshots are the UI tests'
+# XCTAttachments, exported from the result bundle.
 #
 # Usage (from a worktree): scripts/ios/test-side-chats.sh <simulator-udid> [output-dir]
 set -euo pipefail
@@ -27,6 +27,7 @@ xcodebuild -project "$ROOT/apps/ios/Zeron.xcodeproj" -scheme Zeron \
   -only-testing:ZeronUITests/SessionFlowTests/testSideChatsSheetAndForkSeam \
   -only-testing:ZeronUITests/SessionFlowTests/testNewSideChatFromMenu \
   -only-testing:ZeronUITests/SessionFlowTests/testForkToSideChatFromMenu \
+  -only-testing:ZeronUITests/SessionFlowTests/testArchivingSideChatUpdatesParent \
   -only-testing:ZeronUITests/SessionFlowTests/testSearchFindsSideChats \
   test 2>&1 | tee "$OUT/xcodebuild.log"
 STATUS=${PIPESTATUS[0]}

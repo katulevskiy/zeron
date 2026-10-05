@@ -43,6 +43,11 @@ final class SessionViewController: UIViewController, UIGestureRecognizerDelegate
         }
         navigationItem.largeTitleDisplayMode = .never
         navigationItem.titleView = titleView
+        // A child's subtitle names its parent and taps through.
+        titleView.onSubtitleTap = { [weak self] in
+            guard let self, let parent = self.shown.parentChatId else { return }
+            self.router?.openChildSession(parent)
+        }
         navigationItem.rightBarButtonItems = [ellipsisItem]
         ellipsisItem.accessibilityLabel = "Session options"
         ellipsisItem.accessibilityIdentifier = "session-menu"
@@ -54,10 +59,11 @@ final class SessionViewController: UIViewController, UIGestureRecognizerDelegate
         list.autoresizingMask = [.flexibleWidth, .flexibleHeight]
         list.accessibilityIdentifier = "transcript"
         list.imageLoader = { [weak self] ref, iv in self?.source.loadImage(ref, into: iv) }
-        // The fork seam's "Forked from …" link: open the source chat.
+        // The fork seam's "Forked from …" link: reveal the source chat
+        // (already below in the stack when opened from its child).
         list.onOpenChat = { [weak self] id in
             guard let self, id != self.chatId else { return }
-            self.router?.openSession(id)
+            self.router?.openChildSession(id)
         }
         // Hidden while following (the runway glide and tail spring travel).
         list.onDistanceFromBottom = { [weak self] d in
@@ -448,7 +454,9 @@ final class SessionViewController: UIViewController, UIGestureRecognizerDelegate
     private func applyFrame() {
         let frame = engine.frame()
         list.apply(frame)
-        if !reportedOpen, frame.rowCount() > 0 {
+        // A hydrated session with no rows has nothing to lay out: reveal it
+        // instead of holding the loader until the 8s unreachable fallback.
+        if !reportedOpen, frame.rowCount() > 0 || source.hydrated {
             reportedOpen = true
             showTranscriptIfReady()
             // Open latency: push → first measured frame on screen.
@@ -474,7 +482,7 @@ final class SessionViewController: UIViewController, UIGestureRecognizerDelegate
         let c = source.chrome
         let old = shown
         shown = c
-        titleView.set(title: c.title, subtitle: c.subtitle)
+        titleView.set(title: c.title, subtitle: c.subtitle, linked: c.parentChatId != nil)
         list.uploadProgress = c.uploadProgress
         composer.running = c.running
         composer.canSteer = c.canSteer
@@ -517,24 +525,25 @@ final class SessionViewController: UIViewController, UIGestureRecognizerDelegate
     private func sessionMenu() -> UIMenu {
         UIMenu(children: [UIDeferredMenuElement.uncached { [weak self] done in
             guard let self else { return done([]) }
-            let vm = self.app.session(self.chatId)
-            let pinned = vm?.pinned ?? false
-            // Creation lives here so the first side chat is reachable; the
-            // branch button only appears once one exists. Fork works from a
-            // side chat too (it lands as a sibling, like desktop); an empty
-            // child would nest, which only one level allows.
-            var sideChats: [UIMenuElement] = []
-            if let row = self.app.row(self.chatId) {
-                var actions: [UIMenuElement] = []
-                if row.parentChatId == nil {
-                    actions.append(UIAction(title: "New Side Chat", image: UIImage(systemName: "plus.bubble")) { _ in self.newSideChat() })
-                }
-                actions.append(UIAction(title: "Fork to Side Chat", image: UIImage(systemName: "arrow.triangle.branch")) { _ in self.forkToSideChat() })
-                sideChats = actions
+            let row = self.app.row(self.chatId)
+            let isChild = row?.parentChatId != nil
+            let pinned = self.app.session(self.chatId)?.pinned ?? false
+            var actions: [UIMenuElement] = []
+            // Pin and new-child are top-level-only concepts (one level of
+            // side chats); a child forks as a sibling below.
+            if !isChild {
+                actions.append(UIAction(title: pinned ? "Unpin" : "Pin", image: UIImage(systemName: pinned ? "pin.slash" : "pin")) { _ in self.app.setPinned(self.chatId, !pinned) })
+                actions.append(UIAction(title: "New Side Chat", image: UIImage(systemName: "plus.bubble")) { _ in self.newSideChat() })
             }
-            done([
-                UIAction(title: pinned ? "Unpin" : "Pin", image: UIImage(systemName: pinned ? "pin.slash" : "pin")) { _ in self.app.setPinned(self.chatId, !pinned) },
-            ] + sideChats + [
+            // Same boundary as the engine: a working tail may still fork the
+            // last completed reply, so only a source without one is disabled.
+            let forkDisabled = !self.source.canFork || self.app.sideChatBusy
+            let fork = UIAction(title: "Fork to Side Chat", image: UIImage(systemName: "arrow.triangle.branch"), attributes: forkDisabled ? .disabled : []) { _ in self.forkToSideChat() }
+            if forkDisabled {
+                fork.subtitle = self.app.sideChatBusy ? "Forking…" : "Needs a completed reply"
+            }
+            actions.append(fork)
+            done(actions + [
                 UIAction(title: "Copy Transcript", image: UIImage(systemName: "doc.on.doc")) { _ in
                     UIPasteboard.general.string = self.engine.frame().plainText()
                 },
@@ -600,18 +609,19 @@ final class SessionViewController: UIViewController, UIGestureRecognizerDelegate
 
     private func newSideChat() {
         do {
-            router?.openSession(try app.createSideChat(parentId: chatId))
+            router?.openChildSession(try app.createSideChat(parentId: chatId))
         } catch {
             presentSideChatError("Couldn't create a side chat", error)
         }
     }
 
     private func forkToSideChat() {
+        guard !app.sideChatBusy else { return }
         Task { @MainActor [weak self] in
             guard let self else { return }
             do {
                 let id = try await app.forkSideChat(sourceId: chatId)
-                router?.openSession(id)
+                router?.openChildSession(id)
             } catch {
                 presentSideChatError("Couldn't fork this chat", error)
             }
@@ -625,10 +635,14 @@ final class SessionViewController: UIViewController, UIGestureRecognizerDelegate
     }
 }
 
-/// Two-line navigation title: session title over "project @ device".
+/// Two-line navigation title: session title over "project @ device", or a
+/// tap-through "Side chat of …" for child chats.
 final class SessionTitleView: UIView {
     private let title = FadingLabel()
     private let subtitle = FadingLabel()
+    /// Fired when the subtitle names a parent chat.
+    var onSubtitleTap: (() -> Void)?
+    private var subtitleLinked = false
 
     override init(frame: CGRect) {
         super.init(frame: frame)
@@ -638,6 +652,8 @@ final class SessionTitleView: UIView {
         subtitle.font = Fonts.ui(.sans, 12)
         subtitle.textColor = Palette.secondary
         subtitle.fitsAlignment = .center
+        subtitle.isUserInteractionEnabled = true
+        subtitle.addGestureRecognizer(UITapGestureRecognizer(target: self, action: #selector(subtitleTapped)))
         let stack = UIStackView(arrangedSubviews: [title, subtitle])
         stack.axis = .vertical
         stack.alignment = .center
@@ -655,10 +671,18 @@ final class SessionTitleView: UIView {
 
     required init?(coder: NSCoder) { fatalError() }
 
-    func set(title t: String, subtitle s: String) {
+    func set(title t: String, subtitle s: String, linked: Bool = false) {
         title.text = t
         subtitle.text = s
         subtitle.isHidden = s.isEmpty
+        subtitleLinked = linked && !s.isEmpty
+        subtitle.textColor = subtitleLinked ? Palette.accent : Palette.secondary
+        subtitle.accessibilityTraits = subtitleLinked ? .button : .staticText
+    }
+
+    @objc private func subtitleTapped() {
+        guard subtitleLinked else { return }
+        onSubtitleTap?()
     }
 }
 

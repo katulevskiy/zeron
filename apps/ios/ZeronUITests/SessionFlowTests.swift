@@ -217,8 +217,8 @@ final class SessionFlowTests: XCTestCase {
         snapshot(app, "search-side-chats")
     }
 
-    /// The session menu's "New Side Chat" mints an empty child and opens it
-    /// ready for its first message.
+    /// The session menu's "New Side Chat" mints an empty child, opens it
+    /// ready for its first message, and keeps the parent one back-press away.
     func testNewSideChatFromMenu() {
         let app = launch(["-route", "chat:chat-deploy"])
         XCTAssertTrue(app.scrollViews["transcript"].waitForExistence(timeout: 10))
@@ -226,10 +226,45 @@ final class SessionFlowTests: XCTestCase {
         snapshot(app, "session-menu")
         app.buttons["New Side Chat"].tap()
         XCTAssertTrue(app.textViews["composer-input"].waitForExistence(timeout: 10))
+        // An empty but hydrated session reveals right away (no 8s loader).
+        XCTAssertTrue(app.descendants(matching: .any)["session-loading"].waitForNonExistence(timeout: 3))
+        snapshot(app, "new-side-chat")
+        XCTAssertTrue(app.buttons["Side chat of Wrangler deploy hygiene"].waitForExistence(timeout: 5), "the child names its parent")
         // One level only: the child offers no further side chats.
         XCTAssertFalse(app.buttons["side-chats"].exists)
-        XCTAssertTrue(app.descendants(matching: .any)["session-loading"].waitForNonExistence(timeout: 10))
-        snapshot(app, "new-side-chat")
+        app.buttons["session-menu"].tap()
+        XCTAssertFalse(app.buttons["Pin"].exists, "children are not pinnable")
+        // The disabled action carries its explanation as a subtitle, so the
+        // label reads "Fork to Side Chat, Needs a completed reply".
+        let fork = app.buttons.matching(NSPredicate(format: "label BEGINSWITH 'Fork to Side Chat'")).firstMatch
+        XCTAssertTrue(fork.exists)
+        XCTAssertFalse(fork.isEnabled, "no completed reply to fork")
+        // Dismiss the menu on the transcript, then back returns to the
+        // parent, not the Sessions root.
+        app.scrollViews["transcript"].coordinate(withNormalizedOffset: CGVector(dx: 0.5, dy: 0.8)).tap()
+        app.navigationBars.buttons.element(boundBy: 0).tap()
+        XCTAssertTrue(app.staticTexts["Wrangler deploy hygiene"].waitForExistence(timeout: 5), "back at the parent")
+    }
+
+    /// Archiving a side chat from its sheet drops the row and the parent's
+    /// count live (children never enter the page lists).
+    func testArchivingSideChatUpdatesParent() {
+        let app = launch(["-route", "chat:chat-veil"])
+        let branch = app.buttons["side-chats"]
+        XCTAssertTrue(branch.waitForExistence(timeout: 10))
+        XCTAssertEqual(branch.value as? String, "1")
+        branch.tap()
+        XCTAssertTrue(app.navigationBars["Side chats"].waitForExistence(timeout: 5))
+        let row = app.cells["session-chat-side"]
+        XCTAssertTrue(row.waitForExistence(timeout: 5))
+        row.swipeLeft()
+        app.buttons["Archive"].tap()
+        // The sheet and the branch button both see the registry change.
+        XCTAssertTrue(row.waitForNonExistence(timeout: 5), "archived child leaves the sheet")
+        XCTAssertFalse(app.buttons["side-chats"].exists, "the parent's count clears behind the sheet")
+        app.buttons["side-chats-close"].tap()
+        XCTAssertFalse(app.buttons["side-chats"].exists)
+        snapshot(app, "side-chat-archived")
     }
 
     /// The session menu's fork action copies the chat through its latest
@@ -242,6 +277,7 @@ final class SessionFlowTests: XCTestCase {
         app.buttons["Fork to Side Chat"].tap()
         let seam = app.staticTexts["Forked from Wrangler deploy hygiene"]
         XCTAssertTrue(seam.waitForExistence(timeout: 15), "the fork opens with its seam")
+        XCTAssertTrue(app.buttons["Side chat of Wrangler deploy hygiene"].waitForExistence(timeout: 5), "the fork names its source")
         XCTAssertTrue(app.descendants(matching: .any)["session-loading"].waitForNonExistence(timeout: 5))
         snapshot(app, "forked-side-chat")
     }

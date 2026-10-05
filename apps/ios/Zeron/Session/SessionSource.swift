@@ -36,6 +36,9 @@ struct SessionChrome: Equatable {
 
     var title = ""
     var subtitle = ""
+    /// Set when this chat hangs off another: the title's subtitle becomes a
+    /// tap-through back to the parent.
+    var parentChatId: String?
     var running = false
     var canSteer = false
     var placeholder = "Message"
@@ -46,7 +49,7 @@ struct SessionChrome: Equatable {
     var error: String?
 
     static func == (a: SessionChrome, b: SessionChrome) -> Bool {
-        a.title == b.title && a.subtitle == b.subtitle && a.running == b.running && a.canSteer == b.canSteer
+        a.title == b.title && a.subtitle == b.subtitle && a.parentChatId == b.parentChatId && a.running == b.running && a.canSteer == b.canSteer
             && a.placeholder == b.placeholder && a.chips == b.chips && a.banner == b.banner
             && a.questions?.requestId == b.questions?.requestId && a.questions?.items == b.questions?.items
             && a.queue == b.queue && a.error == b.error
@@ -57,6 +60,11 @@ struct SessionChrome: Equatable {
 protocol SessionSource: AnyObject {
     var chrome: SessionChrome { get }
     var onChange: (() -> Void)? { get set }
+    /// Content present: false = the opening loader still stands in.
+    var hydrated: Bool { get }
+    /// The session has a completed response to fork through (a working tail
+    /// does not block forking the last one).
+    var canFork: Bool { get }
     /// Bind the Rust layout engine to this session's transcript.
     func attach(_ engine: TranscriptView)
     func detach()
@@ -93,6 +101,8 @@ enum QueueAction {
 final class FixtureSessionSource: SessionSource {
     private(set) var chrome = SessionChrome()
     var onChange: (() -> Void)?
+    let hydrated = true
+    let canFork = true
     private weak var engine: TranscriptView?
     private var entries: [DebugEntry] = []
     private var timer: Timer?
