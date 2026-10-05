@@ -3118,6 +3118,8 @@ pub struct Transcript {
     /// keyed by row id. Render-local like `folds` — never part of the row
     /// fingerprint, so toggling one costs a repaint, not a rebuild.
     user_folds: HashMap<SharedString, FoldState>,
+    /// User rows whose pasted texts a pill click opened into the bubble.
+    pastes_open: HashSet<SharedString>,
     /// Full laid-out text heights for long user bubbles. The text's paint
     /// canvas writes these cells without notifying or mutating the transcript;
     /// click handlers read them as exact endpoints for the RESIZE tween. This
@@ -3258,12 +3260,8 @@ pub struct Transcript {
     copied_message_clear: Option<Task<()>>,
     /// Transcript attachment being viewed full-size (click a user thumbnail).
     attachment_preview: Option<crate::attachments::PreviewImage>,
-    /// A sent message's paste pill, open in the full-text viewer.
-    paste_view: Option<crate::badges::MessageBadge>,
-    paste_view_focus: gpui::FocusHandle,
     /// Focused while the lightbox is open so Escape reaches it.
     attachment_preview_focus: gpui::FocusHandle,
-    /// Where focus returns when the lightbox or paste viewer closes.
     attachment_preview_return_focus: Option<gpui::FocusHandle>,
     /// Mermaid fences drawn as diagrams in settled Markdown blocks. Each
     /// row's media handler requests its fences while laying out, so only
@@ -3505,6 +3503,7 @@ impl Transcript {
             historical_markdown: HashMap::new(),
             tool_details: HashMap::new(),
             user_folds: HashMap::new(),
+            pastes_open: HashSet::new(),
             user_heights: HashMap::new(),
             user_hold_task: None,
             user_hold_token: 0,
@@ -3554,8 +3553,6 @@ impl Transcript {
             copied_message: None,
             copied_message_clear: None,
             attachment_preview: None,
-            paste_view: None,
-            paste_view_focus: cx.focus_handle(),
             attachment_preview_focus: cx.focus_handle(),
             attachment_preview_return_focus: None,
             diagrams: Rc::default(),
@@ -4635,6 +4632,7 @@ impl Transcript {
             self.last_replay_baseline = None;
             self.historical_markdown.clear();
             self.user_folds.clear();
+            self.pastes_open.clear();
             self.user_heights.clear();
             self.compact_fold_heights.clear();
             self.compact_fold_settle = None;
@@ -5892,7 +5890,7 @@ impl Transcript {
                                 let _ = toggle.update(cx, |this, cx| {
                                     this.diagrams.borrow_mut().toggle_source(&id);
                                     let row = mermaid_cache::frame_row(&id).to_owned();
-                                    this.diagram_layout_changed(&[row.into()], cx);
+                                    this.row_layout_changed(&[row.into()], cx);
                                 });
                             }),
                         })
@@ -5957,13 +5955,23 @@ impl Transcript {
             return;
         };
         crate::image_media::release_media(released, cx);
-        self.diagram_layout_changed(&rows, cx);
+        self.row_layout_changed(&rows, cx);
     }
 
-    /// A diagram replaced its source (or the reverse): remeasure the rows
-    /// painting it and let the bottom pin and the own-turn runway absorb the
-    /// height change, exactly like any other layout-affecting row update.
-    fn diagram_layout_changed(&mut self, rows: &[SharedString], cx: &mut Context<Self>) {
+    /// Opens or closes a sent message's pasted texts inside its bubble.
+    fn toggle_pastes(&mut self, row_id: SharedString, cx: &mut Context<Self>) {
+        if !self.pastes_open.remove(&row_id) {
+            self.pastes_open.insert(row_id.clone());
+            // Long pastes read in full, not clipped to the prompt fold.
+            self.user_folds.entry(row_id.clone()).or_default().open = Some(true);
+        }
+        self.row_layout_changed(&[row_id], cx);
+    }
+
+    /// A row's content changed height (a diagram replaced its source, pastes
+    /// opened): remeasure it and let the bottom pin and the own-turn runway
+    /// absorb the change, exactly like any other layout-affecting row update.
+    fn row_layout_changed(&mut self, rows: &[SharedString], cx: &mut Context<Self>) {
         let mut changed = false;
         for (ix, row) in self.rows.iter().enumerate() {
             if rows.contains(&row.id) {
@@ -6628,7 +6636,17 @@ impl Transcript {
             } => {
                 let attachments = attachments.clone();
                 let badges = badges.clone();
-                let text = text.clone();
+                let mut text = text.clone();
+                if self.pastes_open.contains(&row.id) {
+                    // Opened pastes read as the rest of the prompt.
+                    for badge in badges.iter().filter(|badge| !badge.full.is_empty()) {
+                        text = if text.is_empty() {
+                            badge.full.clone()
+                        } else {
+                            format!("{text}\n\n{}", badge.full).into()
+                        };
+                    }
+                }
                 let mentions = mentions.clone();
                 let pending = *pending;
                 // Attachment thumbnails ride ABOVE the bubble, right-aligned
@@ -6663,14 +6681,12 @@ impl Transcript {
                                 if badge.full.is_empty() {
                                     return pill.into_any_element();
                                 }
-                                let open = badge.clone();
+                                let row_id = row.id.clone();
                                 pill.cursor_pointer()
-                                    .on_click(cx.listener(move |this, _, window, cx| {
+                                    .debug_selector(|| "paste-pill".into())
+                                    .on_click(cx.listener(move |this, _, _, cx| {
                                         cx.stop_propagation();
-                                        this.attachment_preview_return_focus = window.focused(cx);
-                                        this.paste_view = Some(open.clone());
-                                        window.focus(&this.paste_view_focus, cx);
-                                        cx.notify();
+                                        this.toggle_pastes(row_id.clone(), cx);
                                     }))
                                     .into_any_element()
                             })),
@@ -9291,25 +9307,6 @@ impl Render for Transcript {
             ))
             .child(content)
             .child(rail);
-        if let Some(pill) = self.paste_view.clone() {
-            let weak = cx.weak_entity();
-            return root.child(crate::pasted::viewer(
-                window.viewport_size(),
-                &pill,
-                &self.paste_view_focus,
-                move |window, cx| {
-                    if let Ok(focus) = weak.update(cx, |this, cx| {
-                        this.paste_view = None;
-                        cx.notify();
-                        this.attachment_preview_return_focus.take()
-                    }) && let Some(focus) = focus
-                    {
-                        window.focus(&focus, cx);
-                    }
-                },
-                cx,
-            ));
-        }
         // Full-size viewer for a clicked user-bubble thumbnail
         // (AttachmentPreviewDialog: bare lightbox, click closes).
         if let Some(preview) = self.attachment_preview.clone() {
@@ -10895,6 +10892,48 @@ mod tests {
         cx.simulate_keystrokes("escape");
         transcript.read_with(cx, |this, _| assert!(this.attachment_preview.is_none()));
         cx.update(|window, _| assert!(return_focus.is_focused(window)));
+    }
+
+    #[gpui::test]
+    fn clicking_a_paste_pill_opens_its_text_in_the_bubble(cx: &mut gpui::TestAppContext) {
+        let dir = tempfile::tempdir().unwrap();
+        cx.update(|cx| {
+            gpui_base::init(cx);
+            cx.set_global(Theme::dark());
+            crate::settings::init(crate::settings::UiSettings::default(), dir.path(), cx);
+        });
+        let sent = crate::pasted::with_pasted("summarize", &["A log line.\n".repeat(40)]);
+        let mut user = assistant(
+            "prompt",
+            MessageStatus::Complete,
+            vec![text_part("t", &sent)],
+        );
+        user.role = MessageRole::User;
+        // A reply long enough to scroll, so rows report bounds.
+        let reply = vec![text_part("t", &"A paragraph.\n\n".repeat(80))];
+        let reply = assistant("reply", MessageStatus::Complete, reply);
+        let state = cx.new(|_| AppState::new());
+        state.update(cx, |state, _| state.transcript = vec![user, reply]);
+        let (transcript, cx) = cx.add_window_view(|_, cx| Transcript::new(state, cx));
+        transcript.update(cx, |this, cx| this.sync(cx));
+        cx.run_until_parked();
+        let height = |cx: &mut gpui::VisualTestContext| {
+            cx.update(|window, cx| window.draw(cx).clear());
+            transcript.update(cx, |this, _| {
+                let height = this.list.bounds_for_item(0).map(|b| b.size.height);
+                this.pinned = false;
+                this.list.scroll_to(ListOffset::default());
+                height
+            })
+        };
+        height(cx);
+        let closed = height(cx).unwrap();
+        let pill = cx.debug_bounds("paste-pill").unwrap();
+        cx.simulate_click(pill.center(), gpui::Modifiers::default());
+        let open = height(cx).unwrap();
+        assert!(open > closed + px(400.0), "{closed:?} -> {open:?}");
+        cx.simulate_click(pill.center(), gpui::Modifiers::default());
+        assert_eq!(height(cx), Some(closed), "a second click closes it");
     }
 
     #[gpui::test]
@@ -13447,7 +13486,7 @@ mod tests {
                 transcript.update(cx, |this, cx| {
                     assert_eq!(this.diagrams.borrow().ready_count(), 1);
                     this.diagrams.borrow_mut().toggle_source(&frame);
-                    this.diagram_layout_changed(&["reply#text.1".into()], cx);
+                    this.row_layout_changed(&["reply#text.1".into()], cx);
                 });
                 draw(window, cx);
                 assert_eq!(

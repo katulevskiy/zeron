@@ -20,8 +20,8 @@ pub struct MessageBadge {
     pub label: SharedString,
     /// Empty means the label says everything and the pill carries no card.
     pub details: Vec<BadgeDetail>,
-    /// Texts a click opens in full; empty means the pill isn't expandable.
-    pub full: Vec<SharedString>,
+    /// Text a click shows in the message; empty means the pill isn't expandable.
+    pub full: SharedString,
 }
 
 /// One row of a hover card. Three generic slots, so a new badge kind fills them

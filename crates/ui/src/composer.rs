@@ -6442,7 +6442,7 @@ impl Composer {
                     // The staged set is already on screen in the changes
                     // pane, so a hover card would only repeat it.
                     details: Vec::new(),
-                    full: Vec::new(),
+                    full: Default::default(),
                 },
                 theme,
             ));
@@ -6459,11 +6459,25 @@ impl Composer {
                     .group("composer-pasted")
                     .flex_none()
                     .relative()
-                    .child(crate::badges::render(
-                        "composer-pasted",
-                        &crate::pasted::badge(pasted),
-                        theme,
-                    ))
+                    .child(
+                        crate::badges::render(
+                            "composer-pasted",
+                            &crate::pasted::badge(pasted),
+                            theme,
+                        )
+                        .cursor_pointer()
+                        .debug_selector(|| "composer-pasted".into())
+                        .on_click(cx.listener(|this, _, window, cx| {
+                            // Back into the input at the cursor, as one undo step.
+                            let pasted = this.pasted.remove(&this.current_key).unwrap_or_default();
+                            this.input.update(cx, |input, cx| {
+                                input.last_edit = None;
+                                input.replace_text_in_range(None, &pasted.join("\n\n"), window, cx);
+                                input.last_edit = None;
+                            });
+                            cx.notify();
+                        })),
+                    )
                     .child(crate::frost::layered(
                         strip_remove_button(
                             "composer-pasted-remove",
@@ -6472,6 +6486,8 @@ impl Composer {
                             theme,
                         )
                         .on_click(cx.listener(|this, _, _, cx| {
+                            // Overhangs the chip: don't also un-chip.
+                            cx.stop_propagation();
                             this.pasted.remove(&this.current_key);
                             cx.notify();
                         })),
@@ -12659,11 +12675,11 @@ mod tests {
     }
 
     #[gpui::test]
-    fn a_long_paste_stages_a_chip_and_a_short_one_types(cx: &mut gpui::TestAppContext) {
+    fn a_long_paste_stages_a_chip_that_a_click_types_back(cx: &mut gpui::TestAppContext) {
         let (_dir, handle) = composer_focus_window(cx);
+        let long = "line of a long log\n".repeat(200);
         handle
             .update(cx, |composer, window, cx| {
-                let long = "line of a long log\n".repeat(200);
                 composer.input.update(cx, |input, cx| {
                     cx.write_to_clipboard(ClipboardItem::new_string(long.clone()));
                     input.paste(&Paste, window, cx);
@@ -12682,6 +12698,17 @@ mod tests {
                 });
                 assert_eq!(composer.input.read(cx).text(), "short");
                 assert_eq!(composer.staged_pasted().len(), 1);
+            })
+            .unwrap();
+        cx.update_window(handle.into(), |_, window, cx| window.draw(cx).clear())
+            .unwrap();
+        let mut visual = gpui::VisualTestContext::from_window(handle.into(), cx);
+        let chip = visual.debug_bounds("composer-pasted").unwrap();
+        visual.simulate_click(chip.center(), gpui::Modifiers::default());
+        handle
+            .update(cx, |composer, _, cx| {
+                assert_eq!(composer.input.read(cx).text(), format!("short{long}"));
+                assert!(composer.staged_pasted().is_empty(), "the chip is gone");
             })
             .unwrap();
     }

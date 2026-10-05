@@ -3,8 +3,6 @@
 //! carries each one as a trailing `<pasted-text>` block the agent reads, and
 //! [`extract_badge`] turns those blocks back into a pill in the transcript.
 
-use gpui::{SharedString, div, prelude::*, px};
-
 /// Shorter pastes go into the input as typed text.
 pub const MIN_CHARS: usize = 1_500;
 
@@ -33,7 +31,7 @@ pub fn badge(blocks: &[impl AsRef<str>]) -> crate::badges::MessageBadge {
                 body: preview(text.as_ref()).into(),
             })
             .collect(),
-        full: Vec::new(),
+        full: Default::default(),
     }
 }
 
@@ -79,81 +77,10 @@ pub fn extract_badge(text: &str) -> Option<(String, crate::badges::MessageBadge)
     Some((
         rest.to_string(),
         crate::badges::MessageBadge {
-            full: blocks
-                .iter()
-                .map(|block| SharedString::from(block.to_string()))
-                .collect(),
+            full: blocks.join("\n\n").into(),
             ..badge(&blocks)
         },
     ))
-}
-
-/// The read-only full text a transcript pill opens, with Copy. Escape or a
-/// click outside the card closes it.
-pub fn viewer(
-    viewport: gpui::Size<gpui::Pixels>,
-    pill: &crate::badges::MessageBadge,
-    focus: &gpui::FocusHandle,
-    on_close: impl Fn(&mut gpui::Window, &mut gpui::App) + 'static,
-    cx: &gpui::App,
-) -> gpui::AnyElement {
-    let theme = crate::theme::Theme::of(cx).for_popup();
-    let all: SharedString = pill
-        .full
-        .iter()
-        .map(SharedString::as_ref)
-        .collect::<Vec<_>>()
-        .join("\n\n")
-        .into();
-    let copy = all.clone();
-    let on_close = std::rc::Rc::new(on_close);
-    let close_on_key = on_close.clone();
-    let card = crate::popover::dialog_card(&theme)
-        .w(px((f32::from(viewport.width) * 0.9).min(760.0)))
-        .max_h(px(f32::from(viewport.height) * 0.8))
-        .track_focus(focus)
-        .on_key_down(move |event: &gpui::KeyDownEvent, window, cx| {
-            if event.keystroke.key == "escape" {
-                cx.stop_propagation();
-                close_on_key(window, cx);
-            }
-        })
-        .on_mouse_down_out(move |_, window, cx| on_close(window, cx))
-        .child(
-            div()
-                .flex()
-                .flex_row()
-                .items_center()
-                .gap(px(8.0))
-                .child(
-                    crate::popover::dialog_title(&theme, &pill.label)
-                        .flex_1()
-                        .min_w_0()
-                        .truncate(),
-                )
-                .child(
-                    crate::popover::btn_ghost(&theme, "Copy", "paste-viewer-copy")
-                        .id("paste-viewer-copy")
-                        .on_click(move |_, _, cx| {
-                            cx.write_to_clipboard(gpui::ClipboardItem::new_string(
-                                copy.to_string(),
-                            ));
-                        }),
-                ),
-        )
-        .child(
-            div()
-                .id("paste-viewer-body")
-                .mt(px(12.0))
-                .flex_1()
-                .min_h_0()
-                .overflow_y_scroll()
-                .text_size(crate::typography::ui_rems(13.0))
-                .line_height(crate::typography::ui_rems(20.0))
-                .child(all),
-        )
-        .into_any_element();
-    crate::popover::modal("paste-viewer", viewport, card)
 }
 
 /// Character count with separators: `12,400`.
@@ -188,8 +115,7 @@ mod tests {
         assert_eq!(pill.details[0].tag.as_deref(), Some("12,400 chars"));
         assert!(pill.details[0].body.ends_with('…'));
         assert_eq!(pill.details[1].body, "second\nblock");
-        assert_eq!(pill.full.len(), 2);
-        assert_eq!(pill.full[0].len(), 12_400);
+        assert_eq!(pill.full, staged.join("\n\n"));
         // The composer's chip reads the same as the sent pill.
         assert_eq!(badge(&staged).label, pill.label);
         assert_eq!(badge(&staged).details, pill.details);
