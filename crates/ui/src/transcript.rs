@@ -921,7 +921,18 @@ pub fn call_block(call: &ToolCall) -> Option<ToolDetail> {
     };
     let mut lines: Vec<SharedString> = text
         .lines()
-        .flat_map(|l| wrap_cols(l, CALL_WRAP_COLS))
+        .flat_map(|l| {
+            // Keep each URL intact so even a visually truncated link opens
+            // its full destination.
+            if crate::markdown::parser::plain_text_links(l)
+                .iter()
+                .any(|r| r.style.link.is_some())
+            {
+                vec![SharedString::from(l.to_owned())]
+            } else {
+                wrap_cols(l, CALL_WRAP_COLS)
+            }
+        })
         .collect();
     while lines.last().is_some_and(|l| l.trim().is_empty()) {
         lines.pop();
@@ -7779,6 +7790,7 @@ impl Transcript {
                 .into_any_element();
         }
 
+        let link_ui = self.link_ui(cx);
         let chips = div()
             .pt(px(CHIPS_TOP_PAD))
             .flex()
@@ -7832,6 +7844,7 @@ impl Transcript {
                             continuation_reveal,
                             theme,
                             cx.entity_id(),
+                            link_ui.clone(),
                             cx,
                         ),
                         row_height,
@@ -7887,7 +7900,14 @@ impl Transcript {
                                 entry.toggled_at = Some(Instant::now());
                                 cx.notify();
                             }))
-                            .child(chip_header(tool, open, theme, cx.entity_id(), cx)),
+                            .child(chip_header(
+                                tool,
+                                open,
+                                theme,
+                                cx.entity_id(),
+                                link_ui.clone(),
+                                cx,
+                            )),
                     );
                 // The body stays mounted while the close tween shrinks over it.
                 // Invocation first (what was asked), then output/diff (what
@@ -7907,7 +7927,13 @@ impl Transcript {
                                     .flex_none()
                                     .when(!collapses, |line| line.bg(crate::theme::hairline(0.06))),
                             )
-                            .child(detail_body(invocation, None, theme));
+                            .child(detail_body(
+                                invocation,
+                                None,
+                                theme,
+                                &format!("{key}-call"),
+                                link_ui.clone(),
+                            ));
                     }
                     if let Some(detail) = detail.as_deref() {
                         panel = panel
@@ -7917,7 +7943,13 @@ impl Transcript {
                                     .flex_none()
                                     .when(!collapses, |line| line.bg(crate::theme::hairline(0.06))),
                             )
-                            .child(detail_body(detail, detail_highlights[ix].clone(), theme));
+                            .child(detail_body(
+                                detail,
+                                detail_highlights[ix].clone(),
+                                theme,
+                                &format!("{key}-output"),
+                                link_ui.clone(),
+                            ));
                     }
                     if let Some(ChipAffordance { blob_ref, label }) = affordance {
                         let loading = matches!(
@@ -8566,6 +8598,8 @@ fn detail_body(
     detail: &ToolDetail,
     diff_highlights: Option<Arc<crate::changes::DiffHighlights>>,
     theme: &Theme,
+    id: &str,
+    link_ui: Option<render::LinkUi>,
 ) -> AnyElement {
     let body = div().w_full().min_w_0().flex().flex_col().overflow_hidden();
     match detail {
@@ -8627,7 +8661,7 @@ fn detail_body(
             .py(px(6.0))
             .font_family(theme.font_mono.clone())
             .text_size(px(TOOL_TEXT_SIZE))
-            .children(lines.iter().map(|line| {
+            .children(lines.iter().enumerate().map(|(ix, line)| {
                 div()
                     .h(px(OUTPUT_LINE_HEIGHT))
                     .w_full()
@@ -8635,7 +8669,13 @@ fn detail_body(
                     .flex()
                     .items_center()
                     .text_color(theme.text_faint)
-                    .child(div().w_full().min_w_0().truncate().child(line.clone()))
+                    .child(render::tool_text(
+                        line.clone(),
+                        format!("{id}-{ix}").into(),
+                        link_ui.clone(),
+                        theme,
+                        true,
+                    ))
             }))
             .when(*truncated_by > 0, |block| {
                 block.child(more_lines_row(*truncated_by, theme))
@@ -8767,6 +8807,7 @@ fn chip_header_row(
     trail: Option<ChipTrail>,
     theme: &Theme,
     view: gpui::EntityId,
+    link_ui: Option<render::LinkUi>,
     cx: &mut gpui::App,
 ) -> gpui::Div {
     let (label, detail) = match tool.kind {
@@ -8930,11 +8971,13 @@ fn chip_header_row(
                         });
                     crate::frost::frosted(5.0, 16.0, badge).into_any_element()
                 } else {
-                    div()
-                        .min_w_0()
-                        .truncate()
-                        .child(SharedString::from(detail))
-                        .into_any_element()
+                    render::tool_text(
+                        detail.into(),
+                        format!("tool-header-link-{}", tool.part_id).into(),
+                        link_ui,
+                        theme,
+                        false,
+                    )
                 })
                 .map(|detail| {
                     if hover_text {
@@ -9032,9 +9075,17 @@ fn chip_header(
     open: bool,
     theme: &Theme,
     view: gpui::EntityId,
+    link_ui: Option<render::LinkUi>,
     cx: &mut gpui::App,
 ) -> gpui::Div {
-    chip_header_row(tool, Some(ChipTrail::Chevron { open }), theme, view, cx)
+    chip_header_row(
+        tool,
+        Some(ChipTrail::Chevron { open }),
+        theme,
+        view,
+        link_ui,
+        cx,
+    )
 }
 
 /// Max chars a subagent tab title keeps. The strip chip is fixed-width and
@@ -9228,6 +9279,7 @@ fn tool_chip(
     continuation_reveal: f32,
     theme: &Theme,
     view: gpui::EntityId,
+    link_ui: Option<render::LinkUi>,
     cx: &mut gpui::App,
 ) -> AnyElement {
     let row_height = if rail {
@@ -9273,7 +9325,7 @@ fn tool_chip(
                         .top(px(4.0 * (1.0 - content_reveal)))
                         .opacity(content_reveal)
                 })
-                .child(chip_header_row(tool, None, theme, view, cx)),
+                .child(chip_header_row(tool, None, theme, view, link_ui, cx)),
         )
         .into_any_element()
 }
@@ -9331,6 +9383,7 @@ fn subagent_chip(
                     Some(ChipTrail::OpenArrow),
                     theme,
                     view,
+                    None,
                     cx,
                 )),
         )
@@ -9663,6 +9716,19 @@ impl Render for Transcript {
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    #[test]
+    fn web_invocation_keeps_long_link_destination_intact() {
+        let url = format!("https://example.com/{}", "segment/".repeat(30));
+        let Some(ToolDetail::Output { lines, .. }) = call_block(&ToolCall::WebFetch {
+            url: url.clone(),
+            prompt: None,
+        }) else {
+            panic!("missing invocation")
+        };
+        assert_eq!(lines.len(), 1);
+        assert_eq!(lines[0].as_ref(), url.as_str());
+    }
 
     #[test]
     fn jump_button_stays_available_when_scrolling_down_until_near_bottom() {
