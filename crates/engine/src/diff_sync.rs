@@ -31,10 +31,12 @@
 //! `GetCheckoutDiff` captures for the Changes pane's scopes: *branch changes*
 //! (vs `merge-base(baseRef, HEAD)`, same capture path with the base overridden)
 //! and *latest turn* (vs a temp-index `write-tree` snapshot taken when a turn
-//! dispatches — see [`CheckoutDiffSync::note_turn_start`]).
+//! dispatches — see [`CheckoutDiffSync::note_turn_start`]). Those snapshots
+//! live in Zeron's own object store, never the checkout's — see
+//! [`turn_snapshot`].
 
 use std::collections::{HashMap, HashSet};
-use std::ffi::OsString;
+use std::ffi::{OsStr, OsString};
 use std::path::{Component, Path, PathBuf};
 use std::sync::{Arc, Mutex, MutexGuard, PoisonError, Weak};
 use std::time::Duration;
@@ -53,6 +55,9 @@ use crate::repos::{CheckoutIdentity, Repos};
 use crate::workspace_host::WorkspaceHost;
 
 mod git_status;
+mod turn_snapshot;
+
+pub use turn_snapshot::{TreeSnapshot, snapshot_tree};
 
 /// Hard cap on the unified patch (plus untracked hunks) — "Partial snapshot".
 pub const MAX_PATCH_BYTES: usize = 3 * 1024 * 1024;
@@ -146,8 +151,9 @@ struct CheckoutEntry {
 pub struct TurnSnapshot {
     /// Canonical checkout root the tree was captured in.
     pub root: PathBuf,
-    /// `git write-tree` sha of the tracked + untracked (unignored) tree.
-    pub tree: String,
+    /// The tracked + untracked (unignored) tree, with the object store that
+    /// holds it. Replacing or dropping the snapshot deletes that store.
+    pub tree: TreeSnapshot,
     pub at: chrono::DateTime<chrono::Utc>,
 }
 
@@ -211,6 +217,9 @@ impl CheckoutDiffSync {
         orphan_grace: Duration,
     ) -> Self {
         let (diffs_tx, _) = watch::channel(Vec::new());
+        // Turn snapshots are in-memory state: whatever an earlier run left on
+        // disk is unreachable now.
+        turn_snapshot::sweep_stale_stores(repos.data_dir());
         let sync = Self {
             inner: Arc::new(DiffSyncInner {
                 repos,
@@ -296,7 +305,7 @@ impl CheckoutDiffSync {
                 Ok(identity) => identity,
                 Err(_) => return, // not a checkout
             };
-            match snapshot_tree(&identity.root).await {
+            match snapshot_tree(&inner.repos, &identity.root).await {
                 Ok(tree) => {
                     lock(&inner.turn_trees).insert(
                         chat_id,
@@ -831,7 +840,25 @@ struct Capture {
 
 /// Run git capturing stdout under a hard byte ceiling — the child is killed once
 /// the cap is hit, so an arbitrarily large repository diff never buffers fully.
-async fn capture_git(cwd: &Path, args: &[&str], max_bytes: usize) -> Result<Capture, EngineError> {
+///
+/// Not an `async fn`: a wrapping future would add a poll frame, and a copy of
+/// the 64 KiB read buffer, to every capture on the RPC worker's stack.
+fn capture_git<'a, S: AsRef<OsStr>>(
+    cwd: &'a Path,
+    args: &'a [S],
+    max_bytes: usize,
+) -> impl Future<Output = Result<Capture, EngineError>> + 'a {
+    capture_git_in(cwd, args, max_bytes, None)
+}
+
+/// [`capture_git`] that can also see a turn snapshot's objects, which exist
+/// only in that snapshot's store.
+async fn capture_git_in<S: AsRef<OsStr>>(
+    cwd: &Path,
+    args: &[S],
+    max_bytes: usize,
+    snapshot: Option<&TreeSnapshot>,
+) -> Result<Capture, EngineError> {
     let mut cmd = tokio::process::Command::new("git");
     #[cfg(windows)]
     {
@@ -839,6 +866,9 @@ async fn capture_git(cwd: &Path, args: &[&str], max_bytes: usize) -> Result<Capt
         cmd.as_std_mut().creation_flags(0x08000000);
     }
     cmd.arg("-C").arg(cwd).args(args);
+    if let Some(snapshot) = snapshot {
+        snapshot.apply_to(&mut cmd);
+    }
     cmd.stdin(std::process::Stdio::null());
     cmd.stdout(std::process::Stdio::piped());
     cmd.stderr(std::process::Stdio::piped());
@@ -1090,9 +1120,20 @@ async fn read_worktree_source(root: &Path, path: &Path) -> Result<Capture, Engin
     })
 }
 
-async fn read_git_source(root: &Path, revision: &str, path: &Path) -> Result<Capture, EngineError> {
+async fn read_git_source(
+    root: &Path,
+    revision: &str,
+    snapshot: Option<&TreeSnapshot>,
+    path: &Path,
+) -> Result<Capture, EngineError> {
     let spec = format!("{revision}:{}", path.to_string_lossy());
-    capture_git(root, &["cat-file", "blob", &spec], MAX_DIFF_SOURCE_BYTES).await
+    capture_git_in(
+        root,
+        &["cat-file", "blob", &spec],
+        MAX_DIFF_SOURCE_BYTES,
+        snapshot,
+    )
+    .await
 }
 
 /// Read the exact old/new documents for one file in a previously captured diff.
@@ -1103,15 +1144,18 @@ pub async fn read_diff_file_text(
     base: &str,
     file: &DiffFileSummary,
 ) -> Result<DiffFileTextPair, EngineError> {
-    read_diff_file_text_at(root, base, None, file).await
+    read_diff_file_text_at(root, base, None, None, file).await
 }
 
 /// Read the exact old/new documents for one file in a diff between `base` and
 /// an optional committed target. Without a target, the new source is the live
-/// working tree; with one, both sources are immutable Git blobs.
+/// working tree; with one, both sources are immutable Git blobs. A `base` that
+/// is a turn snapshot's tree needs that snapshot as `base_snapshot`: its
+/// objects are not in the checkout.
 pub(crate) async fn read_diff_file_text_at(
     root: &Path,
     base: &str,
+    base_snapshot: Option<&TreeSnapshot>,
     target: Option<&str>,
     file: &DiffFileSummary,
 ) -> Result<DiffFileTextPair, EngineError> {
@@ -1121,12 +1165,12 @@ pub(crate) async fn read_diff_file_text_at(
     let old = if file.status == "added" {
         None
     } else {
-        Some(read_git_source(root, base, old_path).await?)
+        Some(read_git_source(root, base, base_snapshot, old_path).await?)
     };
     let new = if file.status == "deleted" {
         None
     } else if let Some(target) = target {
-        Some(read_git_source(root, target, new_path).await?)
+        Some(read_git_source(root, target, None, new_path).await?)
     } else {
         Some(read_worktree_source(root, new_path).await?)
     };
@@ -1722,65 +1766,22 @@ pub async fn merge_base(root: &Path, base_ref: &str) -> Result<String, EngineErr
     Ok(sha)
 }
 
-/// Write the checkout's current tracked + untracked (unignored) tree into the
-/// object db via a throwaway index: `git add -A` under `GIT_INDEX_FILE`, then
-/// `git write-tree`. The real index is never touched. Costs one full hash pass
-/// over the working tree (no stat cache in a fresh index) — run once per turn
-/// dispatch, that is the same cost class as the untracked-file reads the watch
-/// capture already does.
-pub async fn snapshot_tree(root: &Path) -> Result<String, EngineError> {
-    let index = std::env::temp_dir().join(format!(
-        "zeron-turn-index-{}-{}",
-        std::process::id(),
-        chrono::Utc::now().timestamp_micros()
-    ));
-    let run = |args: &[&str]| {
-        let mut cmd = tokio::process::Command::new("git");
-        #[cfg(windows)]
-        {
-            use std::os::windows::process::CommandExt;
-            cmd.as_std_mut().creation_flags(0x08000000);
-        }
-        cmd.arg("-C").arg(root).args(args);
-        cmd.env("GIT_INDEX_FILE", &index);
-        cmd.stdin(std::process::Stdio::null());
-        cmd.output()
-    };
-    let added = run(&["add", "-A", "--ignore-errors", "."])
-        .await
-        .map_err(|e| EngineError::Other(format!("git add failed: {e}")))?;
-    if !added.status.success() {
-        let _ = tokio::fs::remove_file(&index).await;
-        return Err(EngineError::Other(format!(
-            "git add: {}",
-            String::from_utf8_lossy(&added.stderr).trim()
-        )));
-    }
-    let written = run(&["write-tree"])
-        .await
-        .map_err(|e| EngineError::Other(format!("git write-tree failed: {e}")));
-    let _ = tokio::fs::remove_file(&index).await;
-    let written = written?;
-    if !written.status.success() {
-        return Err(EngineError::Other(format!(
-            "git write-tree: {}",
-            String::from_utf8_lossy(&written.stderr).trim()
-        )));
-    }
-    Ok(String::from_utf8_lossy(&written.stdout).trim().to_string())
-}
-
 /// "Latest turn" capture: tree-to-tree diff from the turn-start snapshot to a
 /// fresh [`snapshot_tree`] of the current state. Both trees carry untracked
 /// (unignored) files, so no synthesis is needed and a file that was already
 /// untracked at turn start diffs correctly (the watch capture's synthesis
 /// would misreport it as entirely new).
+///
+/// The fresh snapshot is layered on the turn's store, so it only writes the
+/// files that changed since, and it is deleted again when this returns.
 pub async fn capture_turn_diff(
     repos: &Repos,
     root: &Path,
-    turn_tree: &str,
+    turn: &TreeSnapshot,
 ) -> Result<DiffSnapshot, EngineError> {
-    let current = snapshot_tree(root).await?;
+    let current = turn_snapshot::snapshot_tree_onto(repos, root, Some(turn)).await?;
+    let turn_tree = turn.tree();
+    let current_tree = current.tree();
     let head = capture_git(root, &["rev-parse", "--verify", "HEAD"], 256)
         .await
         .map(|c| String::from_utf8_lossy(&c.stdout).trim().to_string())
@@ -1790,7 +1791,7 @@ pub async fn capture_turn_diff(
         .await
         .unwrap_or_else(|_| "HEAD".into());
 
-    let names = capture_git(
+    let names = capture_git_in(
         root,
         &[
             "diff",
@@ -1798,13 +1799,14 @@ pub async fn capture_turn_diff(
             "-z",
             "--find-renames",
             turn_tree,
-            &current,
+            current_tree,
             "--",
         ],
         2 * 1024 * 1024,
+        Some(&current),
     )
     .await?;
-    let nums = capture_git(
+    let nums = capture_git_in(
         root,
         &[
             "diff",
@@ -1812,13 +1814,14 @@ pub async fn capture_turn_diff(
             "-z",
             "--find-renames",
             turn_tree,
-            &current,
+            current_tree,
             "--",
         ],
         2 * 1024 * 1024,
+        Some(&current),
     )
     .await?;
-    let tracked = capture_git(
+    let tracked = capture_git_in(
         root,
         &[
             "diff",
@@ -1827,10 +1830,11 @@ pub async fn capture_turn_diff(
             "--find-renames",
             "--unified=3",
             turn_tree,
-            &current,
+            current_tree,
             "--",
         ],
         MAX_PATCH_BYTES,
+        Some(&current),
     )
     .await?;
 
