@@ -750,6 +750,7 @@ async fn preview_keeps_the_real_login_and_setup_requires_the_owner_link() {
     .unwrap();
     assert!(html.contains("Contribution Manager"));
     assert!(html.contains("/auth/callback"));
+    assert!(html.contains("&quot;pull_requests&quot;:&quot;write&quot;"));
     assert!(!html.contains("GITHUB_CLIENT_SECRET"));
     assert_eq!(
         call(

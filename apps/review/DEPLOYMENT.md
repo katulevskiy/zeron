@@ -30,3 +30,5 @@ PY'
 ```
 
 Keep that link private. It stops accepting registrations once an App is configured. The App owner must complete GitHub's registration and installation screens. The callback saves credentials server-side and the dedicated service restarts itself to load them; no secrets need to be pasted into chat.
+
+The App requires repository permissions: Contents read, Metadata read, Issues write, Pull requests write, and Checks write. GitHub requires Pull requests write to label PRs even though those endpoints use `/issues/`. Existing installations created with Pull requests read must be updated in the App's Permissions and events settings, then the owner must approve the new permission on the repository installation. Updating the manifest does not change an existing installation.
