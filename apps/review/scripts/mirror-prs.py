@@ -58,7 +58,11 @@ if missing:
     refs=[]
     remote_refs={line.split()[1]:line.split()[0] for line in git('ls-remote','--heads','origin').splitlines()}
     for pr in missing:
-        n=pr['number'];source=git('rev-parse',f'refs/heads/source-pr-{n}').strip()
+        n=pr['number'];source=pr['head']['sha']
+        # A PR can advance between API enumeration and fetching its moving ref.
+        # Mirror the exact attributed revision, not whichever ref was fetched.
+        try:git('cat-file','-e',source+'^{commit}')
+        except RuntimeError:git('fetch','source',source)
         tree=git('rev-parse',source+'^{tree}').strip();branch=f'mirror/upstream-pr/{n}'
         parents=['-p',source]
         remote=remote_refs.get('refs/heads/'+branch)
