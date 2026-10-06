@@ -14,6 +14,11 @@ pub(super) struct ChipAttachment {
 pub(super) const CHIP_ICON_SLOT: &str = "\u{00A0}\u{00A0}\u{00A0}\u{00A0}\u{00A0}";
 /// Breathing room after a chip's label.
 pub(super) const CHIP_TRAILING_PAD: &str = "\u{00A0}\u{00A0}";
+/// The bundled face a chip's padding is shaped in. A space's advance follows
+/// the font (Geist Mono's is 2.4× Geist's), and the counts above are tuned to
+/// Geist, so pinning the padding keeps every chip's icon slot and insets the
+/// same whatever the interface font. The label keeps the surrounding font.
+pub(crate) const CHIP_PAD_FAMILY: &str = "Geist";
 /// The icon sits at this size in its well.
 const CHIP_ICON_SIZE: f32 = 14.0;
 
@@ -33,6 +38,18 @@ pub enum ChipKind {
 pub(crate) enum ChipIcon {
     Glyph(&'static str),
     FileTheme(SharedString),
+}
+
+/// The padding around the label in a chip's display `range`: the side
+/// bearing and icon slot before it, and the trailing room after it. Callers
+/// shape both in [`CHIP_PAD_FAMILY`].
+pub(crate) fn chip_pad_ranges(range: &Range<usize>) -> [Range<usize>; 2] {
+    let lead_end = (range.start + MENTION_SIDE_PAD.len() + CHIP_ICON_SLOT.len()).min(range.end);
+    let trail_start = range
+        .end
+        .saturating_sub(CHIP_TRAILING_PAD.len())
+        .max(lead_end);
+    [range.start..lead_end, trail_start..range.end]
 }
 
 /// The icon of a chip. `path` names the file or folder for the file kinds.
@@ -122,7 +139,22 @@ pub(crate) fn chip_text(
     if spans.is_empty() {
         return text.into_any_element();
     }
-    let styled = gpui::StyledText::new(text);
+    // Split runs at the padding (a default highlight changes nothing else),
+    // so the family override lands on whole runs over the inherited style.
+    let pads: Vec<Range<usize>> = spans
+        .iter()
+        .flat_map(|span| chip_pad_ranges(&span.range))
+        .filter(|range| !range.is_empty())
+        .collect();
+    let styled = gpui::StyledText::new(text)
+        .with_highlights(
+            pads.iter()
+                .map(|range| (range.clone(), gpui::HighlightStyle::default())),
+        )
+        .with_font_family_overrides(
+            pads.into_iter()
+                .map(|range| (range, SharedString::from(CHIP_PAD_FAMILY))),
+        );
     let layout = styled.layout().clone();
     let icons: Vec<ChipIcon> = spans
         .iter()

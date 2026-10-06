@@ -8104,8 +8104,22 @@ fn user_bubble_text(
         if at < span.range.start {
             runs.push(body_run(span.range.start - at));
         }
-        // Chips are labels in the body font, like the composer's.
-        runs.push(body_run(span.range.len()));
+        // Chips are labels in the body font, like the composer's, with their
+        // padding pinned to the face its insets are tuned for.
+        let [lead, trail] = crate::composer::chip_pad_ranges(&span.range);
+        for (len, pad) in [
+            (lead.len(), true),
+            (trail.start - lead.end, false),
+            (trail.len(), true),
+        ] {
+            if len > 0 {
+                let mut run = body_run(len);
+                if pad {
+                    run.font.family = crate::composer::CHIP_PAD_FAMILY.into();
+                }
+                runs.push(run);
+            }
+        }
         at = span.range.end;
     }
     if at < text.len() {
