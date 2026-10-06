@@ -35,6 +35,7 @@ pub struct App {
     pub github: GitHub,
     reconciling: Mutex<()>,
     publishing: Mutex<()>,
+    preview_app: Mutex<Option<Arc<App>>>,
 }
 impl App {
     pub async fn new(config: Config, store: Store) -> Result<Arc<Self>> {
@@ -69,7 +70,49 @@ impl App {
             github,
             reconciling: Mutex::new(()),
             publishing: Mutex::new(()),
+            preview_app: Mutex::new(None),
         }))
+    }
+    pub async fn preview_app(&self) -> Result<Arc<App>> {
+        ensure(
+            self.config.dev_preview,
+            404,
+            "Development preview is disabled.",
+        )?;
+        let mut cached = self.preview_app.lock().await;
+        if let Some(app) = &*cached {
+            return Ok(app.clone());
+        }
+        let mut config = self.config.as_ref().clone();
+        config.dev_preview = false;
+        config.preview = true;
+        config.writeback = false;
+        config.agent_tokens.clear();
+        config.read_token.clear();
+        config.app_id.clear();
+        config.installation_id.clear();
+        config.private_key_path.clear();
+        config.policy.maintainers = vec!["preview-maintainer".into()];
+        config.policy.triagers = vec!["preview-triager".into()];
+        config.policy.reviewers = vec!["preview-reviewer".into()];
+        config.policy.validators = vec!["preview-validator".into()];
+        config.data_path = self.config.data_path.with_extension("preview.sqlite");
+        let store = Store::open(&config.data_path)?;
+        let items = self.store.read(|db| db.list()).await?;
+        store
+            .write(move |db| {
+                for item in items {
+                    if db.get(s(&item, "id"))?.is_none() {
+                        db.put(&item)?;
+                    }
+                }
+                Ok(())
+            })
+            .await?;
+        let app = App::new(config, store).await?;
+        app.workers();
+        *cached = Some(app.clone());
+        Ok(app)
     }
     pub async fn reconcile(&self) {
         if self.config.demo {
@@ -97,12 +140,12 @@ impl App {
         let Ok(pending) = self.store.read(|db| db.pending()).await else {
             return;
         };
-        for id in pending {
+        for id in pending.into_iter().take(1) {
             let get_id = id.clone();
             let Ok(Some(item)) = self.store.read(move |db| db.get(&get_id)).await else {
                 continue;
             };
-            if flag(&item, "sample") {
+            if flag(&item, "sample") || flag(&item, "local") {
                 let _ = self.store.write(move |db| db.sent(&id)).await;
                 continue;
             }
@@ -168,10 +211,10 @@ impl App {
                 app.drain().await;
             }
         });
-        if !self.config.demo {
+        if !self.config.demo && !self.config.installation_id.is_empty() {
             let app = self.clone();
             tokio::spawn(async move {
-                let mut tick = tokio::time::interval(Duration::from_secs(900));
+                let mut tick = tokio::time::interval(Duration::from_secs(1800));
                 loop {
                     tick.tick().await;
                     app.reconcile().await;
@@ -241,6 +284,8 @@ struct Identity {
     csrf: String,
     sid: String,
     agent: bool,
+    preview: bool,
+    github_id: String,
 }
 async fn identity(app: &App, headers: &HeaderMap) -> Result<Identity> {
     let authorization = header_value(headers, "authorization");
@@ -262,18 +307,22 @@ async fn identity(app: &App, headers: &HeaderMap) -> Result<Identity> {
             ..Default::default()
         });
     }
-    if let Some(sid) = cookie_value(headers, "review_session")
-        .filter(|s| s.len() == 64 && s.bytes().all(|c| c.is_ascii_hexdigit()))
-    {
-        let key = format!("session:{}", hash(sid));
-        let session = app.store.read(move |db| db.value(&key)).await?;
-        if session["expires"].as_i64().unwrap_or(0) > Utc::now().timestamp_millis() {
-            return Ok(Identity {
-                actor: s(&session, "actor").into(),
-                csrf: s(&session, "csrf").into(),
-                sid: sid.into(),
-                agent: false,
-            });
+    for name in ["review_preview", "review_session"] {
+        if let Some(sid) = cookie_value(headers, name)
+            .filter(|s| s.len() == 64 && s.bytes().all(|c| c.is_ascii_hexdigit()))
+        {
+            let key = format!("session:{}", hash(sid));
+            let session = app.store.read(move |db| db.value(&key)).await?;
+            if session["expires"].as_i64().unwrap_or(0) > Utc::now().timestamp_millis() {
+                return Ok(Identity {
+                    actor: s(&session, "actor").into(),
+                    csrf: s(&session, "csrf").into(),
+                    sid: sid.into(),
+                    agent: false,
+                    preview: flag(&session, "preview"),
+                    github_id: s(&session, "githubId").into(),
+                });
+            }
         }
     }
     Ok(Identity::default())
@@ -284,11 +333,10 @@ fn ensure(condition: bool, status: u16, message: impl Into<String>) -> Result<()
 fn parse(raw: &[u8]) -> Result<Value> {
     serde_json::from_slice(raw).map_err(|_| Error::new(400, "Invalid JSON."))
 }
-async fn session(app: &App, actor: String) -> Result<String> {
+async fn session(app: &App, actor: String, github_id: String) -> Result<String> {
     let sid = secret();
     let key = format!("session:{}", hash(&sid));
-    let value =
-        json!({"actor":actor,"csrf":secret(),"expires":Utc::now().timestamp_millis()+86400000});
+    let value = json!({"actor":actor,"githubId":github_id,"csrf":secret(),"expires":Utc::now().timestamp_millis()+86400000});
     app.store.write(move |db| db.set(&key, &value)).await?;
     Ok(cookie(&app.config, "review_session", &sid, 86400))
 }
@@ -341,16 +389,57 @@ fn static_response(asset: &Asset, headers: &HeaderMap) -> Response {
         .body(Body::from(if gzip { asset.gzip } else { asset.raw }))
         .unwrap()
 }
-async fn public_state(app: &App) -> Result<(Bytes, String)> {
+async fn verified_policy(app: &App, actor: &str) -> Result<(crate::config::Policy, String)> {
+    if app.config.demo || app.config.preview {
+        return Ok((
+            app.config.policy.clone(),
+            if actor.is_empty() {
+                "guest"
+            } else {
+                "contributor"
+            }
+            .into(),
+        ));
+    }
+    let role = if actor.is_empty() {
+        "guest".into()
+    } else {
+        app.github
+            .permissions(actor)
+            .await
+            .unwrap_or_else(|_| "unverified".into())
+    };
+    let login = actor.to_string();
+    let saved_role = role.clone();
+    let existing = app.store.read(|db| db.value("githubPermissions")).await?;
+    let permissions = if actor.is_empty() || existing[actor] == role {
+        existing
+    } else {
+        app.store
+            .write(move |db| {
+                let mut records = db.value("githubPermissions")?;
+                if !records.is_object() {
+                    records = json!({});
+                }
+                records[&login] = json!(saved_role);
+                db.set("githubPermissions", &records)?;
+                Ok(records)
+            })
+            .await?
+    };
+    let policy = app.config.policy.github_roles(&permissions);
+    Ok((policy, role))
+}
+async fn public_state(app: &App, policy: crate::config::Policy) -> Result<(Bytes, String)> {
     let config = app.config.clone();
     app.store.read(move |db| {
         if let Some(snapshot)=&db.snapshot { return Ok(snapshot.clone()); }
         let claims=db.all_claims()?; let mut grouped:BTreeMap<String,Vec<Value>>=BTreeMap::new();
         for claim in claims { grouped.entry(s(&claim,"item").to_owned()).or_default().push(claim); }
         let mut items=Vec::new();
-        for item in db.list()? { items.push(domain::view(&item,grouped.remove(s(&item,"id")).unwrap_or_default(),&config.policy)?); }
+        for item in db.list()? { items.push(domain::view(&item,grouped.remove(s(&item,"id")).unwrap_or_default(),&policy)?); }
         let value=json!({"mode":if config.demo {"demo"} else {"live"},"repository":config.policy.repository,"writeback":config.writeback,
-            "demoActors":if config.demo {seed::ACTORS.to_vec()} else {vec![]},"loginEnabled":!config.client_id.is_empty() && !config.client_secret.is_empty(),
+            "demoActors":if config.demo {seed::ACTORS.to_vec()} else {vec![]},"loginEnabled":!config.client_id.is_empty() && !config.client_secret.is_empty() && !config.installation_id.is_empty(),
             "policy":{"requiredChecks":config.policy.required_checks,"claimHours":config.policy.claim_hours,"decisionDays":config.policy.decision_days},
             "lastReconciled":db.value("lastReconciled")?,"syncError":db.value("syncError")?,"writebackError":db.value("writebackError")?,"items":items});
         let snapshot=Bytes::from(serde_json::to_vec(&value)?); let etag=hash(&snapshot); db.snapshot=Some((snapshot.clone(),etag.clone())); Ok((snapshot,etag))
@@ -441,7 +530,12 @@ async fn webhook(app: Arc<App>, headers: HeaderMap, raw: Bytes) -> Result<Respon
                     let actor = s(&payload["comment"]["user"], "login").to_owned();
                     let action = parts[1].to_owned();
                     let task = parts[2].to_owned();
-                    let policy = app.config.policy.clone();
+                    let (policy, access) = verified_policy(&app, &actor).await?;
+                    ensure(
+                        access != "unverified",
+                        403,
+                        "GitHub access could not be verified.",
+                    )?;
                     let delivery_id = delivery.clone();
                     app.store
                         .write(move |db| {
@@ -497,7 +591,7 @@ async fn dispatch(
     raw: Bytes,
 ) -> Result<Response> {
     let path = uri.path();
-    if method == Method::GET {
+    if method == Method::GET || method == Method::HEAD {
         if path == "/health" {
             return Ok(json_response(
                 json!({"ok":true,"mode":if app.config.demo {"demo"} else {"live"},"backend":"rust"}),
@@ -510,17 +604,102 @@ async fn dispatch(
     if path == "/webhooks/github" && method == Method::POST {
         return webhook(app, headers, raw).await;
     }
+    if path.starts_with("/setup/") && method == Method::GET {
+        return crate::setup::handle(app, &uri, &headers).await;
+    }
     let user = identity(&app, &headers).await?;
-    if method != Method::GET {
+    if !user.preview && !user.github_id.is_empty() && path != "/api/logout" {
+        let profile = app
+            .github
+            .request(&format!("/users/{}", user.actor), Method::GET, None)
+            .await?;
+        ensure(
+            profile["id"].as_u64() == user.github_id.parse::<u64>().ok(),
+            401,
+            "GitHub identity changed. Sign in again.",
+        )?;
+    }
+    if path == "/api/dev/preview" && method == Method::POST {
+        ensure(
+            app.config.dev_preview,
+            404,
+            "Development preview is disabled.",
+        )?;
+        ensure(
+            header_value(&headers, "origin") == app.config.public_url,
+            403,
+            "Same-origin request required.",
+        )?;
+        ensure(
+            header_value(&headers, "content-type") == "application/json",
+            415,
+            "Use application/json.",
+        )?;
+        let body = parse(&raw)?;
+        let role = s(&body, "role");
+        ensure(
+            [
+                "guest",
+                "contributor",
+                "triager",
+                "reviewer",
+                "validator",
+                "maintainer",
+                "live",
+            ]
+            .contains(&role),
+            400,
+            "Unknown preview role.",
+        )?;
+        if role == "live" {
+            return with_cookie(
+                json_response(json!({"ok":true})),
+                cookie(&app.config, "review_preview", "", 0),
+            );
+        }
+        let sid = secret();
+        let key = format!("session:{}", hash(&sid));
+        let actor = if role == "guest" {
+            String::new()
+        } else {
+            format!("preview-{role}")
+        };
+        let value = json!({"actor":actor,"preview":role != "live","csrf":secret(),"expires":Utc::now().timestamp_millis()+86400000});
+        app.store.write(move |db| db.set(&key, &value)).await?;
+        return with_cookie(
+            json_response(json!({"ok":true})),
+            cookie(&app.config, "review_preview", &sid, 86400),
+        );
+    }
+    let root = app.clone();
+    let app = if user.preview {
+        app.preview_app().await?
+    } else {
+        app
+    };
+    let (policy, access) = verified_policy(&app, &user.actor).await?;
+    if method != Method::GET
+        && method != Method::HEAD
+        && access == "unverified"
+        && path != "/api/logout"
+    {
+        return Err(Error::new(
+            403,
+            "GitHub access could not be verified. Retry once GitHub is available.",
+        ));
+    }
+
+    if method != Method::GET && method != Method::HEAD {
         let origin = header_value(&headers, "origin");
         ensure(
             origin.is_empty() || origin == app.config.public_url,
             403,
             "Unexpected request origin.",
         )?;
-        if !user.agent && path != "/api/demo/login" {
+        if !user.agent && path != "/api/demo/login" && path != "/api/reports" {
             ensure(
-                !user.actor.is_empty() && equal(header_value(&headers, "x-csrf-token"), &user.csrf),
+                (!user.actor.is_empty() || (path == "/api/logout" && !user.sid.is_empty()))
+                    && equal(header_value(&headers, "x-csrf-token"), &user.csrf),
                 403,
                 "Session or CSRF token missing.",
             )?;
@@ -534,6 +713,7 @@ async fn dispatch(
     if path == "/auth/github" && method == Method::GET {
         ensure(
             !app.config.demo
+                && !app.config.preview
                 && !app.config.client_id.is_empty()
                 && !app.config.client_secret.is_empty(),
             503,
@@ -591,7 +771,7 @@ async fn dispatch(
             .await?;
         return with_cookie(
             redirect("/")?,
-            session(&app, s(&profile, "login").into()).await?,
+            session(&app, s(&profile, "login").into(), profile["id"].to_string()).await?,
         );
     }
     if path == "/api/demo/login" && method == Method::POST {
@@ -601,28 +781,103 @@ async fn dispatch(
         ensure(seed::ACTORS.contains(&actor), 400, "Unknown demo identity.")?;
         return with_cookie(
             json_response(json!({"actor":actor})),
-            session(&app, actor.into()).await?,
+            session(&app, actor.into(), String::new()).await?,
         );
+    }
+    if path == "/api/reports" && method == Method::POST {
+        ensure(
+            header_value(&headers, "origin") == app.config.public_url || user.agent,
+            403,
+            "Same-origin request required.",
+        )?;
+        if !user.actor.is_empty() && !user.agent {
+            ensure(
+                equal(header_value(&headers, "x-csrf-token"), &user.csrf),
+                403,
+                "CSRF token missing.",
+            )?;
+        }
+        let body = parse(&raw)?;
+        let actor = user.actor.clone();
+        let client = hash(header_value(&headers, "x-forwarded-for"));
+        let bucket = format!("report-limit:{}:{}", client, Utc::now().timestamp() / 60);
+        let report = app
+            .store
+            .write(move |db| {
+                let count = db.value(&bucket)?.as_u64().unwrap_or(0);
+                ensure(
+                    count < 10,
+                    429,
+                    "Too many reports. Please retry in a minute.",
+                )?;
+                let report = crate::reports::create(db, &actor, &body)?;
+                db.set(&bucket, &json!(count + 1))?;
+                Ok(report)
+            })
+            .await?;
+        return Ok((StatusCode::CREATED, axum::Json(report)).into_response());
+    }
+    if path == "/api/stars" {
+        ensure(
+            !user.actor.is_empty(),
+            401,
+            "Sign in to save your starred PRs.",
+        )?;
+        let key = format!("stars:{}", user.actor);
+        if method == Method::POST {
+            let body = parse(&raw)?;
+            let id = s(&body, "id").to_string();
+            let starred = flag(&body, "starred");
+            app.store
+                .write(move |db| {
+                    ensure(db.get(&id)?.is_some(), 404, "Item not found.")?;
+                    let mut stars = crate::array(&db.value(&key)?, "items");
+                    stars.retain(|v| v != &json!(id));
+                    if starred {
+                        stars.push(json!(id));
+                    }
+                    db.set(&key, &json!({"items":stars}))
+                })
+                .await?;
+            return Ok(json_response(json!({"ok":true})));
+        }
     }
     if path == "/api/logout" && method == Method::POST {
-        if !user.sid.is_empty() {
-            let key = format!("session:{}", hash(&user.sid));
-            app.store.write(move |db| db.remove(&key)).await?;
+        for name in ["review_session", "review_preview"] {
+            if let Some(sid) = cookie_value(&headers, name) {
+                let key = format!("session:{}", hash(sid));
+                root.store.write(move |db| db.remove(&key)).await?;
+            }
         }
-        return with_cookie(
+        let mut response = with_cookie(
             json_response(json!({"ok":true})),
             cookie(&app.config, "review_session", "", 0),
+        )?;
+        response.headers_mut().append(
+            header::SET_COOKIE,
+            cookie(&app.config, "review_preview", "", 0)
+                .parse()
+                .unwrap(),
         );
+        return Ok(response);
     }
     if path == "/api/state" && method == Method::GET {
-        let (public, version) = public_state(&app).await?;
+        let (public, version) = public_state(&app, policy.clone()).await?;
+        let star_key = format!("stars:{}", user.actor);
+        let stars = if user.actor.is_empty() {
+            json!([])
+        } else {
+            app.store
+                .read(move |db| Ok(db.value(&star_key)?["items"].clone()))
+                .await?
+        };
         let etag = format!(
             "\"{}\"",
             hash(format!(
-                "{version}:{}:{}:{}",
+                "{version}:{access}:{}:{}:{}",
                 user.actor,
                 user.csrf,
-                app.config.policy.roles(&user.actor).join(",")
+                policy.roles(&user.actor).join(",")
             ))
         );
         if header_value(&headers, "if-none-match") == etag {
@@ -633,7 +888,7 @@ async fn dispatch(
                 .unwrap());
         }
         let identity = serde_json::to_vec(
-            &json!({"actor":if user.actor.is_empty() {Value::Null} else {json!(user.actor)},"roles":app.config.policy.roles(&user.actor),"csrf":if user.csrf.is_empty() {Value::Null} else {json!(user.csrf)}}),
+            &json!({"actor":if user.actor.is_empty() {Value::Null} else {json!(user.actor)},"roles":policy.roles(&user.actor),"access":access,"preview":app.config.preview,"devPreview":root.config.dev_preview,"stars":stars,"csrf":if user.csrf.is_empty() {Value::Null} else {json!(user.csrf)}}),
         )?;
         let mut body = Vec::with_capacity(public.len() + identity.len());
         body.extend_from_slice(&public[..public.len() - 1]);
@@ -647,11 +902,15 @@ async fn dispatch(
     }
     if path == "/api/sync" && method == Method::POST {
         ensure(
-            app.config.policy.roles(&user.actor).contains(&"maintainer"),
+            policy.roles(&user.actor).contains(&"maintainer"),
             403,
             "Maintainer capability required.",
         )?;
-        ensure(!app.config.demo, 409, "Demo mode does not contact GitHub.")?;
+        ensure(
+            !app.config.demo && !app.config.preview,
+            409,
+            "Sandbox mode does not contact GitHub.",
+        )?;
         let worker = app.clone();
         tokio::spawn(async move {
             worker.reconcile().await;
@@ -662,12 +921,12 @@ async fn dispatch(
         let parts: Vec<_> = tail.split('/').collect();
         let id = parts[0].to_owned();
         let valid = id.split_once(':').is_some_and(|(kind, number)| {
-            ["pr", "issue"].contains(&kind)
+            ["pr", "issue", "report"].contains(&kind)
                 && !number.is_empty()
                 && number.bytes().all(|c| c.is_ascii_digit())
         });
         ensure(valid, 404, "Item not found.")?;
-        let policy = app.config.policy.clone();
+        let policy = policy.clone();
         if method == Method::GET && parts.len() == 1 {
             return app
                 .store

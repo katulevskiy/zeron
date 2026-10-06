@@ -392,3 +392,375 @@ async fn a_policy_change_invalidates_an_existing_sessions_capability_etag() {
     assert_eq!(state["actor"], "demo-maintainer");
     assert_eq!(state["roles"], json!([]));
 }
+
+#[tokio::test]
+async fn guests_can_submit_reports_but_cannot_forge_identity_or_authority() {
+    let (router, _) = fixture().await;
+    let headers = [
+        ("content-type", "application/json"),
+        ("origin", "http://localhost:3080"),
+    ];
+    let (status,_,report)=call(&router,"POST","/api/reports",&headers,json!({"type":"bug","name":"Visitor","title":"A real bug","details":"Steps to reproduce the problem","actor":"demo-maintainer","roles":["maintainer"]})).await;
+    assert_eq!(status, StatusCode::CREATED);
+    assert_eq!(report["author"], "guest: Visitor");
+    assert_eq!(report["verifiedAuthor"], false);
+    assert_eq!(
+        call(
+            &router,
+            "POST",
+            "/api/reports",
+            &headers,
+            json!({"type":"feature","title":"No name","details":"A useful proposal"})
+        )
+        .await
+        .0,
+        StatusCode::BAD_REQUEST
+    );
+    assert_eq!(
+        call(
+            &router,
+            "POST",
+            "/api/reports",
+            &[
+                ("content-type", "application/json"),
+                ("origin", "https://attacker.test")
+            ],
+            json!({"type":"bug","name":"X","title":"Cross-site","details":"Cross-site submission"})
+        )
+        .await
+        .0,
+        StatusCode::FORBIDDEN
+    );
+    assert_eq!(
+        call(
+            &router,
+            "POST",
+            "/api/items/pr:90001/triage",
+            &headers,
+            json!({"revision":"forged"})
+        )
+        .await
+        .0,
+        StatusCode::FORBIDDEN
+    );
+}
+
+#[tokio::test]
+async fn stars_are_private_to_the_session_principal_and_survive_reload() {
+    let (router, _) = fixture().await;
+    let (cookie, csrf, _) = login(&router).await;
+    assert_eq!(
+        call(
+            &router,
+            "POST",
+            "/api/stars",
+            &[
+                ("cookie", &cookie),
+                ("x-csrf-token", &csrf),
+                ("content-type", "application/json")
+            ],
+            json!({"id":"pr:90001","starred":true})
+        )
+        .await
+        .0,
+        StatusCode::OK
+    );
+    let (_, _, personal) = call(
+        &router,
+        "GET",
+        "/api/state",
+        &[("cookie", &cookie)],
+        Value::Null,
+    )
+    .await;
+    assert_eq!(personal["stars"], json!(["pr:90001"]));
+    let (_, _, guest) = call(&router, "GET", "/api/state", &[], Value::Null).await;
+    assert_eq!(guest["stars"], json!([]));
+}
+
+#[tokio::test]
+async fn fork_preview_mutations_are_isolated_and_never_grant_live_permissions() {
+    let mut config = Config::load(true).unwrap();
+    config.demo = false;
+    config.dev_preview = true;
+    config.policy.repository = "katulevskiy/zeron".into();
+    let directory = std::env::temp_dir().join(format!("cm-test-{}", uuid::Uuid::new_v4()));
+    config.data_path = directory.join("live.sqlite");
+    let store = Store::open(&config.data_path).unwrap();
+    store
+        .write(|db| zeron_review::seed::seed(db))
+        .await
+        .unwrap();
+    let app = App::new(config, store).await.unwrap();
+    let router = router(app.clone());
+    let (status, headers, _) = call(
+        &router,
+        "POST",
+        "/api/dev/preview",
+        &[
+            ("origin", "http://localhost:3080"),
+            ("content-type", "application/json"),
+        ],
+        json!({"role":"maintainer"}),
+    )
+    .await;
+    assert_eq!(status, StatusCode::OK);
+    let cookie = headers["set-cookie"]
+        .to_str()
+        .unwrap()
+        .split(';')
+        .next()
+        .unwrap();
+    let (_, _, state) = call(
+        &router,
+        "GET",
+        "/api/state",
+        &[("cookie", cookie)],
+        Value::Null,
+    )
+    .await;
+    assert_eq!(state["preview"], true);
+    assert!(
+        state["roles"]
+            .as_array()
+            .unwrap()
+            .contains(&json!("maintainer"))
+    );
+    let item = state["items"]
+        .as_array()
+        .unwrap()
+        .iter()
+        .find(|i| i["id"] == "pr:90001")
+        .unwrap();
+    let status=call(&router,"POST","/api/items/pr:90001/hotfix",&[("cookie",cookie),("x-csrf-token",state["csrf"].as_str().unwrap()),("content-type","application/json")],json!({"revision":item["revision"],"area":"browser","platforms":["linux"],"reason":"Urgent sandbox hotfix"})).await.0;
+    assert_eq!(status, StatusCode::OK);
+    assert_eq!(
+        app.store
+            .read(|db| Ok(db.get("pr:90001")?.unwrap()["direction"].clone()))
+            .await
+            .unwrap(),
+        "pending"
+    );
+    let (_, _, live) = call(&router, "GET", "/api/state", &[], Value::Null).await;
+    assert_eq!(live["roles"], json!([]));
+    let mut forbidden = app.config.as_ref().clone();
+    forbidden.policy.repository = "zeronsh/zeron".into();
+    assert!(forbidden.validate().is_err());
+    assert_eq!(
+        call(
+            &router,
+            "POST",
+            "/api/dev/preview",
+            &[
+                ("origin", "https://attacker.test"),
+                ("content-type", "application/json")
+            ],
+            json!({"role":"maintainer"})
+        )
+        .await
+        .0,
+        StatusCode::FORBIDDEN
+    );
+}
+
+#[tokio::test]
+async fn live_permissions_are_verified_and_revocation_applies_to_existing_sessions() {
+    use axum::{extract::State, routing::get};
+    let access = std::sync::Arc::new(tokio::sync::Mutex::new("admin".to_string()));
+    async fn permission(
+        State(access): State<std::sync::Arc<tokio::sync::Mutex<String>>>,
+    ) -> axum::Json<Value> {
+        axum::Json(json!({"permission":access.lock().await.clone()}))
+    }
+    let listener = tokio::net::TcpListener::bind("127.0.0.1:0").await.unwrap();
+    let address = listener.local_addr().unwrap();
+    let stub = Router::new()
+        .route(
+            "/repos/zeronsh/zeron/collaborators/demo-maintainer/permission",
+            get(permission),
+        )
+        .with_state(access.clone());
+    let server = tokio::spawn(async move {
+        axum::serve(listener, stub).await.unwrap();
+    });
+    let (demo, app) = fixture().await;
+    let (cookie, csrf, _) = login(&demo).await;
+    let mut config = app.config.as_ref().clone();
+    config.demo = false;
+    config.api_url = format!("http://{address}");
+    let live = router(App::new(config, app.store.clone()).await.unwrap());
+    let (_, _, state) = call(
+        &live,
+        "GET",
+        "/api/state",
+        &[("cookie", &cookie)],
+        Value::Null,
+    )
+    .await;
+    assert_eq!(state["access"], "admin");
+    assert!(
+        state["roles"]
+            .as_array()
+            .unwrap()
+            .contains(&json!("maintainer"))
+    );
+    *access.lock().await = "read".into();
+    let (_, _, state) = call(
+        &live,
+        "GET",
+        "/api/state",
+        &[("cookie", &cookie)],
+        Value::Null,
+    )
+    .await;
+    assert_eq!(state["roles"], json!([]));
+    let item = state["items"]
+        .as_array()
+        .unwrap()
+        .iter()
+        .find(|i| i["id"] == "pr:90001")
+        .unwrap();
+    assert_eq!(call(&live,"POST","/api/items/pr:90001/direction",&[("cookie",&cookie),("x-csrf-token",&csrf),("content-type","application/json")],json!({"revision":item["revision"],"verdict":"accepted","reason":"Must not grant static maintainer status"})).await.0,StatusCode::FORBIDDEN);
+    server.abort();
+    assert_eq!(call(&live,"POST","/api/items/pr:90001/direction",&[("cookie",&cookie),("x-csrf-token",&csrf),("content-type","application/json")],json!({"revision":item["revision"],"verdict":"accepted","reason":"Unavailable authority"})).await.0,StatusCode::FORBIDDEN);
+    assert_eq!(
+        call(
+            &live,
+            "POST",
+            "/api/logout",
+            &[
+                ("cookie", &cookie),
+                ("x-csrf-token", &csrf),
+                ("content-type", "application/json")
+            ],
+            json!({})
+        )
+        .await
+        .0,
+        StatusCode::OK
+    );
+}
+
+#[tokio::test]
+async fn preview_keeps_the_real_login_and_setup_requires_the_owner_link() {
+    let mut config = Config::load(true).unwrap();
+    config.dev_preview = true;
+    config.policy.repository = "katulevskiy/zeron".into();
+    let directory = std::env::temp_dir().join(format!("cm-cookie-{}", uuid::Uuid::new_v4()));
+    config.data_path = directory.join("live.sqlite");
+    let app = App::new(config, Store::open(&directory.join("live.sqlite")).unwrap())
+        .await
+        .unwrap();
+    let router = router(app.clone());
+    let (original, _, _) = login(&router).await;
+    let (_, headers, _) = call(
+        &router,
+        "POST",
+        "/api/dev/preview",
+        &[
+            ("origin", "http://localhost:3080"),
+            ("cookie", &original),
+            ("content-type", "application/json"),
+        ],
+        json!({"role":"reviewer"}),
+    )
+    .await;
+    let preview = headers["set-cookie"]
+        .to_str()
+        .unwrap()
+        .split(';')
+        .next()
+        .unwrap();
+    let cookies = format!("{original}; {preview}");
+    let (_, _, state) = call(
+        &router,
+        "GET",
+        "/api/state",
+        &[("cookie", &cookies)],
+        Value::Null,
+    )
+    .await;
+    assert_eq!(state["actor"], "preview-reviewer");
+    assert_eq!(
+        call(
+            &router,
+            "POST",
+            "/api/dev/preview",
+            &[
+                ("origin", "http://localhost:3080"),
+                ("cookie", &cookies),
+                ("content-type", "application/json")
+            ],
+            json!({"role":"live"})
+        )
+        .await
+        .0,
+        StatusCode::OK
+    );
+    let (_, _, live) = call(
+        &router,
+        "GET",
+        "/api/state",
+        &[("cookie", &original)],
+        Value::Null,
+    )
+    .await;
+    assert_eq!(live["actor"], "demo-maintainer");
+    let mut config = app.config.as_ref().clone();
+    config.demo = false;
+    config.dev_preview = false;
+    config.setup_token = "a".repeat(64);
+    let live = zeron_review::server::router(App::new(config, app.store.clone()).await.unwrap());
+    assert_eq!(
+        call(&live, "GET", "/setup/github?token=wrong", &[], Value::Null)
+            .await
+            .0,
+        StatusCode::FORBIDDEN
+    );
+    let response = live
+        .clone()
+        .oneshot(
+            Request::builder()
+                .uri(format!("/setup/github?token={}", "a".repeat(64)))
+                .body(Body::empty())
+                .unwrap(),
+        )
+        .await
+        .unwrap();
+    assert_eq!(response.status(), StatusCode::OK);
+    assert!(
+        response.headers()["content-security-policy"]
+            .to_str()
+            .unwrap()
+            .contains("form-action https://github.com")
+    );
+    let cookie = response.headers()["set-cookie"]
+        .to_str()
+        .unwrap()
+        .split(';')
+        .next()
+        .unwrap()
+        .to_string();
+    let html = String::from_utf8(
+        to_bytes(response.into_body(), 100000)
+            .await
+            .unwrap()
+            .to_vec(),
+    )
+    .unwrap();
+    assert!(html.contains("Contribution Manager"));
+    assert!(html.contains("/auth/callback"));
+    assert!(!html.contains("GITHUB_CLIENT_SECRET"));
+    assert_eq!(
+        call(
+            &live,
+            "GET",
+            "/setup/callback?state=wrong&code=forged",
+            &[("cookie", &cookie)],
+            Value::Null
+        )
+        .await
+        .0,
+        StatusCode::FORBIDDEN
+    );
+}

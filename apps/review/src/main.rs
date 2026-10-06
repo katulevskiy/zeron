@@ -102,6 +102,18 @@ async fn main() -> Result<()> {
     let app = App::new(config, store).await?;
     let listener = tokio::net::TcpListener::bind(&address).await?;
     app.workers();
+    // A manifest registration writes credentials atomically. The service supervisor
+    // restarts us so the immutable runtime configuration is loaded consistently.
+    let credentials = app.config.credentials_path.clone();
+    let initial = std::fs::read(&credentials).ok();
+    tokio::spawn(async move {
+        loop {
+            tokio::time::sleep(std::time::Duration::from_secs(5)).await;
+            if std::fs::read(&credentials).ok() != initial {
+                std::process::exit(75);
+            }
+        }
+    });
     println!(
         "Zeron review (Rust, {}) listening on {public_url}",
         if app.config.demo { "demo" } else { "live" }

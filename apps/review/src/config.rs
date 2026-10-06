@@ -16,6 +16,28 @@ pub struct Policy {
     pub decision_days: i64,
 }
 impl Policy {
+    pub fn github_roles(&self, records: &serde_json::Value) -> Self {
+        let mut policy = self.clone();
+        policy.maintainers.clear();
+        policy.triagers.clear();
+        policy.reviewers.clear();
+        policy.validators.clear();
+        if let Some(records) = records.as_object() {
+            for (actor, role) in records {
+                match role.as_str().unwrap_or("") {
+                    "admin" | "maintain" => policy.maintainers.push(actor.clone()),
+                    "write" => {
+                        policy.triagers.push(actor.clone());
+                        policy.reviewers.push(actor.clone());
+                        policy.validators.push(actor.clone());
+                    }
+                    "triage" => policy.triagers.push(actor.clone()),
+                    _ => {}
+                }
+            }
+        }
+        policy
+    }
     pub fn roles(&self, actor: &str) -> Vec<&'static str> {
         if actor.is_empty() {
             return vec![];
@@ -36,6 +58,10 @@ impl Policy {
 #[derive(Clone)]
 pub struct Config {
     pub demo: bool,
+    pub dev_preview: bool,
+    pub preview: bool,
+    pub credentials_path: PathBuf,
+    pub setup_token: String,
     pub policy: Policy,
     pub public_url: String,
     pub host: String,
@@ -64,7 +90,16 @@ pub fn secret() -> String {
 }
 impl Config {
     pub fn load(demo: bool) -> Result<Self> {
-        let get = |key: &str| env::var(key).unwrap_or_default();
+        let credentials_path =
+            env::var("GITHUB_CREDENTIALS_PATH").unwrap_or_else(|_| "data/github.json".into());
+        let credentials: serde_json::Value = match std::fs::read(&credentials_path) {
+            Ok(raw) => serde_json::from_slice(&raw)?,
+            Err(e) if e.kind() == std::io::ErrorKind::NotFound => serde_json::Value::Null,
+            Err(e) => return Err(e.into()),
+        };
+        let get = |key: &str| {
+            env::var(key).unwrap_or_else(|_| credentials[key].as_str().unwrap_or_default().into())
+        };
         let default = |key: &str, fallback: &str| {
             let value = get(key);
             if value.is_empty() {
@@ -92,6 +127,10 @@ impl Config {
         )?;
         let config = Self {
             demo,
+            dev_preview: get("DEV_PREVIEW") == "true",
+            preview: false,
+            credentials_path: credentials_path.into(),
+            setup_token: get("SETUP_TOKEN"),
             policy,
             public_url,
             host: default("HOST", "127.0.0.1"),
@@ -107,7 +146,9 @@ impl Config {
                 },
             )
             .into(),
-            writeback: !demo && get("GITHUB_WRITEBACK") == "true",
+            writeback: !demo
+                && get("GITHUB_WRITEBACK") == "true"
+                && !get("GITHUB_INSTALLATION_ID").is_empty(),
             app_id: get("GITHUB_APP_ID"),
             installation_id: get("GITHUB_INSTALLATION_ID"),
             private_key_path: get("GITHUB_PRIVATE_KEY_PATH"),
@@ -157,6 +198,20 @@ impl Config {
                 && self.policy.decision_days > 0,
             500,
             "Invalid policy durations.",
+        )?;
+        ensure(
+            !self.dev_preview
+                || self
+                    .policy
+                    .repository
+                    .eq_ignore_ascii_case("katulevskiy/zeron"),
+            500,
+            "Development role preview is restricted to katulevskiy/zeron.",
+        )?;
+        ensure(
+            self.setup_token.is_empty() || self.setup_token.len() >= 32,
+            500,
+            "Setup token must have at least 32 characters.",
         )?;
         if !self.demo {
             ensure(

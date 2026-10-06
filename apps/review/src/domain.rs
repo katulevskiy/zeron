@@ -9,6 +9,13 @@ pub struct Assessment {
     pub state: String,
     pub blockers: Vec<String>,
 }
+pub fn author(item: &Value) -> &str {
+    if s(item, "originalAuthor").is_empty() {
+        s(item, "author")
+    } else {
+        s(item, "originalAuthor")
+    }
+}
 pub fn assess(item: &Value, policy: &Policy) -> Assessment {
     if s(item, "kind") == "issue" {
         return Assessment {
@@ -53,7 +60,7 @@ pub fn assess(item: &Value, policy: &Policy) -> Assessment {
     let trusted: Vec<_> = latest
         .values()
         .filter(|r| {
-            s(r, "actor") != s(item, "author") && policy.roles(s(r, "actor")).contains(&"reviewer")
+            s(r, "actor") != author(item) && policy.roles(s(r, "actor")).contains(&"reviewer")
         })
         .collect();
     let changes = trusted.iter().any(|r| s(r, "verdict") == "changes");
@@ -73,7 +80,7 @@ pub fn assess(item: &Value, policy: &Policy) -> Assessment {
         for record in &records {
             if record["platform"] == platform
                 && s(record, "revision") == s(item, "revision")
-                && s(record, "actor") != s(item, "author")
+                && s(record, "actor") != author(item)
                 && policy.roles(s(record, "actor")).contains(&"validator")
             {
                 latest.insert(s(record, "actor"), record);
@@ -212,7 +219,7 @@ pub fn mutate(
     };
     let independent = || {
         ensure(
-            actor != s(&item, "author"),
+            actor != author(&item),
             403,
             "Authors cannot verify their own changes.",
         )
@@ -220,6 +227,15 @@ pub fn mutate(
     let at = now();
     let revision = s(&item, "revision").to_owned();
     match action {
+        "hotfix" => {
+            allowed("maintainer")?;
+            let mut triage = body.clone();
+            triage["risk"] = "low".into();
+            triage["priority"] = "urgent".into();
+            mutate(db, id, actor, "triage", &triage, policy)?;
+            let direction = json!({"revision":revision,"verdict":"accepted","reason":text(body,"reason","Hotfix scope and reason",4000)?});
+            return mutate(db, id, actor, "direction", &direction, policy);
+        }
         "direction" => {
             allowed("triager")?;
             let verdict = choice(
@@ -248,7 +264,8 @@ pub fn mutate(
                 .ok_or_else(|| Error::new(400, "Invalid platforms."))?;
             ensure(
                 platforms.iter().all(|p| {
-                    ["linux", "macos", "windows", "ios"].contains(&p.as_str().unwrap_or(""))
+                    ["linux", "macos", "windows", "ios", "android"]
+                        .contains(&p.as_str().unwrap_or(""))
                 }),
                 400,
                 "Invalid platforms.",

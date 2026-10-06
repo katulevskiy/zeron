@@ -167,7 +167,7 @@ impl Db {
     pub fn pending(&self) -> Result<Vec<String>> {
         let mut stmt = self
             .connection
-            .prepare_cached("SELECT item FROM outbox WHERE retry_at<=?")?;
+            .prepare_cached("SELECT item FROM outbox WHERE retry_at<=? ORDER BY retry_at DESC")?;
         Ok(stmt
             .query_map([now()], |r| r.get(0))?
             .collect::<std::result::Result<Vec<_>, _>>()?)

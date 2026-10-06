@@ -90,3 +90,6 @@ pub fn flag(value: &Value, key: &str) -> bool {
 pub fn array(value: &Value, key: &str) -> Vec<Value> {
     value[key].as_array().cloned().unwrap_or_default()
 }
+
+pub mod reports;
+pub mod setup;

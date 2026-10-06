@@ -40,7 +40,7 @@ fn encode(value: &str) -> String {
 pub fn summary(item: &Value, claims: &[Value], config: &Config) -> String {
     let assessment = domain::assess(item, &config.policy);
     let mut body = format!(
-        "<!-- zeron-review -->\n### Zeron review queue\n\n**{}** · {} risk · {}\n\n[Open review workspace]({}/?item={}) · Revision `{}`\n\n",
+        "<!-- zeron-review -->\n### Contribution Manager\n\n**{}** · {} risk · {}\n\n[Open review workspace]({}/?item={}) · Revision `{}`\n\n",
         assessment.state.replace('-', " "),
         s(item, "risk"),
         s(item, "area"),
@@ -176,6 +176,28 @@ impl GitHub {
         self.request_token(path, method, body, &self.token().await?)
             .await
     }
+    pub async fn permissions(&self, actor: &str) -> Result<String> {
+        let path = format!(
+            "/repos/{}/collaborators/{}/permission",
+            self.config.policy.repository,
+            encode(actor)
+        );
+        match self.request(&path, Method::GET, None).await {
+            Ok(value) => {
+                let role = s(&value, "permission");
+                Ok(match role {
+                    "admin" => "admin",
+                    "maintain" => "maintain",
+                    "write" | "push" => "write",
+                    "triage" => "triage",
+                    _ => "read",
+                }
+                .into())
+            }
+            Err(error) if error.message.ends_with(": 404") => Ok("read".into()),
+            Err(error) => Err(error),
+        }
+    }
     pub async fn pages(&self, path: &str) -> Result<Vec<Value>> {
         let mut result = Vec::new();
         for page in 1..=100 {
@@ -223,18 +245,73 @@ impl GitHub {
         let id = format!("{kind}:{number}");
         let read_id = id.clone();
         let previous = store.read(move |db| db.get(&read_id)).await?;
-        let mut source = json!({"id":id,"number":number,"kind":kind,"title":raw["title"],"author":raw["user"]["login"],"url":raw["html_url"],"createdAt":raw["created_at"],
+        let mut source = json!({"id":id,"number":number,"kind":kind,"title":raw["title"],"body":raw["body"],"author":raw["user"]["login"],"url":raw["html_url"],"createdAt":raw["created_at"],
             "updatedAt":raw["updated_at"],"closed":s(&raw,"state") == "closed","revision":if kind == "pr" {raw["head"]["sha"].clone()} else {raw["updated_at"].clone()},
             "labels":array(&raw,"labels").iter().map(|l| l["name"].clone()).collect::<Vec<_>>(),"syncedAt":now()});
         if kind == "pr" {
             source["baseRevision"] = raw["base"]["sha"].clone();
             source["draft"] = raw["draft"].clone();
+            source["mergeable"] = raw["mergeable"].clone();
+            source["mergeState"] = raw["mergeable_state"].clone();
+            source["headBranch"] = raw["head"]["ref"].clone();
+            source["baseBranch"] = raw["base"]["ref"].clone();
+            source["diffUrl"] = raw["html_url"]
+                .as_str()
+                .map(|url| format!("{url}/files"))
+                .into();
+            source["additions"] = raw["additions"].clone();
+            source["deletions"] = raw["deletions"].clone();
+            source["changedFiles"] = raw["changed_files"].clone();
+            if let Some(line) = s(&raw, "body")
+                .lines()
+                .find(|line| line.starts_with("<!-- contribution-manager-mirror:"))
+            {
+                let upstream_number = line
+                    .trim_start_matches("<!-- contribution-manager-mirror:")
+                    .trim_end_matches(" -->")
+                    .parse::<u64>()
+                    .ok();
+                if let Some(n) = upstream_number {
+                    source["upstreamUrl"] =
+                        format!("https://github.com/zeronsh/zeron/pull/{n}").into();
+                    source["upstreamNumber"] = n.into();
+                    if let Some(old) = &previous {
+                        source["upstream"] = old["upstream"].clone();
+                    }
+                }
+            }
             source["merged"] = (!raw["merged_at"].is_null()).into();
             let reviews = self
                 .pages(&format!("{prefix}/pulls/{number}/reviews"))
                 .await?;
             source["nativeReviews"]=json!(reviews.iter().filter(|r| ["APPROVED","CHANGES_REQUESTED","DISMISSED"].contains(&s(r,"state"))).map(|r| json!({"actor":r["user"]["login"],"revision":r["commit_id"],"source":"github-review","sourceId":r["id"],
-                "verdict":match s(r,"state") {"APPROVED"=>"pass","CHANGES_REQUESTED"=>"changes",_=>"dismissed"},"summary":if s(r,"body").is_empty() {"Native GitHub review"} else {s(r,"body")},"at":r["submitted_at"]})).collect::<Vec<_>>());
+                "verdict":match s(r,"state") {"APPROVED"=>"pass","CHANGES_REQUESTED"=>"changes",_=>"dismissed"},"url":r["html_url"],"summary":if s(r,"body").is_empty() {"Native GitHub review"} else {s(r,"body")},"at":r["submitted_at"]})).collect::<Vec<_>>());
+            if !self.config.demo && !self.config.preview {
+                let actors: HashSet<String> = reviews
+                    .iter()
+                    .filter_map(|r| r["user"]["login"].as_str().map(str::to_string))
+                    .collect();
+                let mut permissions = Vec::new();
+                for actor in actors {
+                    let role = self
+                        .permissions(&actor)
+                        .await
+                        .unwrap_or_else(|_| "unverified".into());
+                    permissions.push((actor, role));
+                }
+                store
+                    .write(move |db| {
+                        let mut records = db.value("githubPermissions")?;
+                        if !records.is_object() {
+                            records = json!({});
+                        }
+                        for (actor, role) in permissions {
+                            records[actor] = json!(role);
+                        }
+                        db.set("githubPermissions", &records)
+                    })
+                    .await?;
+            }
             let mut checks = vec![];
             for name in &self.config.policy.required_checks {
                 let runs=self.request(&format!("{prefix}/commits/{}/check-runs?check_name={}&filter=latest&per_page=100",s(&source,"revision"),encode(name)),Method::GET,None).await?;
@@ -259,11 +336,51 @@ impl GitHub {
                     checks.push(json!({"name":name,"revision":source["revision"],"baseRevision":base,"conclusion":if s(&run,"conclusion").is_empty() {"pending"} else {s(&run,"conclusion")},"runId":run["id"],"completedAt":run["completed_at"],"url":run["html_url"]}));
                 }
             }
+            // The detail view includes every current check, not only policy gates.
+            let all = self
+                .request(
+                    &format!(
+                        "{prefix}/commits/{}/check-runs?filter=latest&per_page=100",
+                        s(&source, "revision")
+                    ),
+                    Method::GET,
+                    None,
+                )
+                .await?;
+            for run in array(&all, "check_runs") {
+                if !checks.iter().any(|c| c["runId"] == run["id"]) {
+                    checks.push(json!({"name":run["name"],"revision":source["revision"],"baseRevision":null,"conclusion":if s(&run,"conclusion").is_empty() {"pending"} else {s(&run,"conclusion")},"url":run["html_url"],"runId":run["id"]}));
+                }
+            }
+            let statuses = self
+                .request(
+                    &format!("{prefix}/commits/{}/status", s(&source, "revision")),
+                    Method::GET,
+                    None,
+                )
+                .await?;
+            for status in array(&statuses, "statuses") {
+                checks.push(json!({"name":status["context"],"revision":source["revision"],"baseRevision":null,"conclusion":status["state"],"url":status["target_url"]}));
+            }
             source["checks"] = json!(checks);
         }
         store.write(move |db| domain::ingest(db, &source)).await
     }
     pub async fn reconcile(&self, store: &Store) -> Result<()> {
+        let records = store.read(|db| db.value("githubPermissions")).await?;
+        if let Some(records) = records.as_object() {
+            let mut current = json!({});
+            for actor in records.keys() {
+                current[actor] = json!(
+                    self.permissions(actor)
+                        .await
+                        .unwrap_or_else(|_| "unverified".into())
+                );
+            }
+            store
+                .write(move |db| db.set("githubPermissions", &current))
+                .await?;
+        }
         let rows = self
             .pages(&format!(
                 "/repos/{}/issues?state=open",
@@ -284,7 +401,11 @@ impl GitHub {
             self.sync_item(store, number, kind).await?;
         }
         for item in store.read(|db| db.list()).await? {
-            if !flag(&item, "closed") && !flag(&item, "sample") && !open.contains(s(&item, "id")) {
+            if !flag(&item, "closed")
+                && !flag(&item, "sample")
+                && !flag(&item, "local")
+                && !open.contains(s(&item, "id"))
+            {
                 self.sync_item(
                     store,
                     item["number"].as_u64().unwrap_or(0),
@@ -298,12 +419,17 @@ impl GitHub {
             .await
     }
     pub async fn writeback(&self, store: &Store, item: &Value) -> Result<()> {
-        if flag(item, "sample") {
+        if flag(item, "sample") || flag(item, "local") {
             return Ok(());
         }
         let prefix = format!("/repos/{}", self.config.policy.repository);
         let number = item["number"].as_u64().unwrap_or(0);
-        let label = format!("review:{}", domain::assess(item, &self.config.policy).state);
+        let mut config = self.config.as_ref().clone();
+        if !config.demo && !config.preview {
+            let permissions = store.read(|db| db.value("githubPermissions")).await?;
+            config.policy = config.policy.github_roles(&permissions);
+        }
+        let label = format!("review:{}", domain::assess(item, &config.policy).state);
         if let Err(error) = self
             .request(
                 &format!("{prefix}/labels/{}", encode(&label)),
@@ -319,7 +445,7 @@ impl GitHub {
                 &format!("{prefix}/labels"),
                 Method::POST,
                 Some(
-                    &json!({"name":label,"color":"8b5cf6","description":"Managed by Zeron review"}),
+                    &json!({"name":label,"color":"8b5cf6","description":"Managed by Contribution Manager"}),
                 ),
             )
             .await?;
@@ -354,7 +480,7 @@ impl GitHub {
         }
         let context_id = s(item, "id").to_owned();
         let claims = store.read(move |db| db.claims(&context_id)).await?;
-        let body = summary(item, &claims, &self.config);
+        let body = summary(item, &claims, &config);
         let key = format!("comment:{}", s(item, "id"));
         let body_key = format!("comment-body:{}", s(item, "id"));
         let read_key = key.clone();
@@ -398,7 +524,7 @@ impl GitHub {
                 .await?;
         }
         if s(item, "kind") == "pr" {
-            let ready = domain::assess(item, &self.config.policy).state == "ready-to-merge";
+            let ready = domain::assess(item, &config.policy).state == "ready-to-merge";
             let check = json!({"name":"zeron-review/readiness","head_sha":item["revision"],"status":"completed","conclusion":if flag(item,"closed") {"cancelled"} else if ready {"success"} else {"action_required"},
                 "details_url":format!("{}/?item={}",self.config.public_url,encode(s(item,"id"))),"output":{"title":if ready {"Review evidence complete"} else {"Review evidence incomplete"},"summary":body}});
             let key = format!("check-body:{}", s(item, "id"));
