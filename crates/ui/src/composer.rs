@@ -44,7 +44,9 @@ use crate::theme::Theme;
 mod chip;
 pub use chip::ChipKind;
 use chip::*;
-pub(crate) use chip::{ChipIcon, chip_icon, chip_text, paint_chip};
+pub(crate) use chip::{
+    CHIP_PAD_FAMILY, ChipIcon, chip_icon, chip_pad_ranges, chip_text, paint_chip,
+};
 
 // ---------------------------------------------------------------------------
 // Constants + pure decision logic
@@ -4237,6 +4239,9 @@ impl ComposerInput {
         }
         for (_, range) in &self.projection.mentions {
             boundaries.extend([range.start, range.end]);
+            for pad in chip_pad_ranges(range) {
+                boundaries.extend([pad.start, pad.end]);
+            }
         }
         if let Some(range) = &marked {
             boundaries.extend([range.start, range.end]);
@@ -4268,17 +4273,24 @@ impl ComposerInput {
                     .projection
                     .mentions
                     .partition_point(|(_, range)| range.end <= r[0]);
-                let chip = self
+                let chip_range = self
                     .projection
                     .mentions
                     .get(mention_ix)
-                    .is_some_and(|(_, range)| range.contains(&r[0]));
+                    .map(|(_, range)| range)
+                    .filter(|range| range.contains(&r[0]));
+                let chip = chip_range.is_some();
                 let code = face_depth[composer_markdown::Face::Code as usize] > 0;
                 let mut run = run_for(
                     r[1] - r[0],
                     marked.as_ref().is_some_and(|range| range.contains(&r[0])),
                     code,
                 );
+                if chip_range.is_some_and(|range| {
+                    chip_pad_ranges(range).iter().any(|pad| pad.contains(&r[0]))
+                }) {
+                    run.font.family = CHIP_PAD_FAMILY.into();
+                }
                 if !chip {
                     if face_depth[composer_markdown::Face::Bold as usize] > 0 {
                         run.font.weight = gpui::FontWeight::BOLD;
@@ -14833,6 +14845,24 @@ mod tests {
         assert_eq!(spans[1].kind, ChipKind::Directory);
         assert_eq!(spans[0].path.as_ref(), "src/composer.rs");
         assert_eq!(spans[1].path.as_ref(), "src/components/");
+    }
+
+    /// The padding pinned to Geist is exactly the chip's NBSP padding, so the
+    /// label keeps the interface font and the insets don't follow it.
+    #[test]
+    fn chip_pad_ranges_cover_only_the_padding() {
+        let raw = format!(
+            "open {} now",
+            zeron_proto::attachment_mentions::attachment_mention_link(1, None)
+        );
+        let (display, spans) = sent_mention_display(&raw).expect("image chip projects");
+        let [lead, trail] = chip_pad_ranges(&spans[0].range);
+        assert_eq!(
+            &display[lead.clone()],
+            format!("{MENTION_SIDE_PAD}{CHIP_ICON_SLOT}")
+        );
+        assert_eq!(&display[trail.clone()], CHIP_TRAILING_PAD);
+        assert_eq!(&display[lead.end..trail.start], "Image\u{a0}1");
     }
 
     /// Ordinary prompts must stay on the zero-cost path, including ones that
