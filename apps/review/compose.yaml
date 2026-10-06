@@ -1,0 +1,11 @@
+services:
+  review:
+    build: .
+    restart: unless-stopped
+    command: ["zeron-review", "--demo"]
+    ports: ["127.0.0.1:3080:3080"]
+    environment:
+      PUBLIC_URL: ${PUBLIC_URL:-http://localhost:3080}
+    volumes: ["review-data:/app/data"]
+volumes:
+  review-data:

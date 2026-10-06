@@ -1,0 +1,10 @@
+{
+  "repository": "zeronsh/zeron",
+  "maintainers": [],
+  "triagers": [],
+  "reviewers": [],
+  "validators": [],
+  "requiredChecks": ["core-tests"],
+  "claimHours": 24,
+  "decisionDays": 30
+}

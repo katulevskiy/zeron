@@ -1,0 +1,44 @@
+name: Review workspace
+on:
+  pull_request:
+    paths: ["apps/review/**", ".github/workflows/review-app.yml"]
+  push:
+    branches: [main]
+    paths: ["apps/review/**", ".github/workflows/review-app.yml"]
+permissions:
+  contents: read
+jobs:
+  review-app:
+    runs-on: ubuntu-latest
+    timeout-minutes: 20
+    steps:
+      - uses: actions/checkout@v4
+      - uses: dtolnay/rust-toolchain@stable
+        with:
+          components: rustfmt, clippy
+      - uses: Swatinem/rust-cache@v2
+        with:
+          workspaces: apps/review
+      - run: cargo fmt --check
+        working-directory: apps/review
+      - run: cargo clippy --locked --all-targets -- -D warnings
+        working-directory: apps/review
+      - run: cargo test --locked
+        working-directory: apps/review
+      - run: cargo build --release --locked
+        working-directory: apps/review
+      - uses: actions/setup-node@v4
+        with:
+          node-version: 24
+          cache: npm
+          cache-dependency-path: apps/review/package-lock.json
+      - run: npm ci
+        working-directory: apps/review
+      - run: npm run check
+        working-directory: apps/review
+      - run: npm run format:check
+        working-directory: apps/review
+      - run: npx playwright install --with-deps chromium
+        working-directory: apps/review
+      - run: npm run test:ui
+        working-directory: apps/review
