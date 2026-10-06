@@ -1,0 +1,22 @@
+{
+  "name": "zeron-review",
+  "version": "0.1.0",
+  "private": true,
+  "type": "module",
+  "engines": {
+    "node": ">=24.0.0"
+  },
+  "scripts": {
+    "start": "cargo run --release --locked",
+    "demo": "cargo run --release --locked -- --demo",
+    "test": "cargo test --locked",
+    "test:ui": "playwright test",
+    "check": "node scripts/check.mjs",
+    "format:check": "prettier --check --ignore-path .gitignore . ../../.github/workflows/review-app.yml",
+    "import": "cargo run --release --locked -- import"
+  },
+  "devDependencies": {
+    "@playwright/test": "^1.63.0",
+    "prettier": "^3.9.9"
+  }
+}
