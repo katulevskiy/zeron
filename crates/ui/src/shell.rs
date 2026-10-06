@@ -1271,13 +1271,14 @@ fn new_thread_background_opacity(is_frost: bool) -> f32 {
     }
 }
 
-fn new_thread_background_height(viewport_height: f32) -> f32 {
+pub(crate) fn new_thread_background_height(viewport_height: f32) -> f32 {
     (viewport_height.max(0.0) * NEW_THREAD_BACKGROUND_VIEWPORT_RATIO)
         .min(NEW_THREAD_BACKGROUND_MAX_HEIGHT)
 }
 
 fn new_thread_background(
     artwork: Option<std::sync::Arc<gpui::RenderImage>>,
+    adjustment: settings::NewThreadBackgroundAdjustment,
     viewport_height: f32,
     hero_width: f32,
     composer_bounds: crate::new_thread_background_mask::SurfaceBounds,
@@ -1322,6 +1323,7 @@ fn new_thread_background(
                                     artwork.clone(),
                                     bounds,
                                     composer,
+                                    adjustment,
                                     cutout,
                                     window,
                                 );
@@ -9821,6 +9823,10 @@ impl Shell {
         let ui_settings = settings::current(cx);
         let new_thread_background_setting = ui_settings.new_thread_composer_background;
         let new_thread_background_effect = ui_settings.new_thread_background_effect;
+        let new_thread_background_adjustment = new_thread_background_setting
+            .as_ref()
+            .map(|background| background.adjustment)
+            .unwrap_or_default();
         let frame_time = self.render_time.unwrap_or_else(std::time::Instant::now);
         // Prewarm even in an established thread. Decode/effect work is not
         // contingent on a hero measurement or a navigation gesture.
@@ -9836,6 +9842,10 @@ impl Shell {
             });
         let artwork_frame = self.new_thread_artwork_ready.frame(
             artwork,
+            new_thread_background_setting
+                .as_ref()
+                .map(|background| std::path::Path::new(&background.path)),
+            new_thread_background_adjustment,
             new_thread_background_setting.is_some(),
             self.reduced_motion,
             frame_time,
@@ -9883,6 +9893,7 @@ impl Shell {
                 .inset_0()
                 .child(new_thread_background(
                     artwork_frame.previous,
+                    artwork_frame.previous_adjustment,
                     self.viewport_height,
                     width,
                     bounds.clone(),
@@ -9891,6 +9902,7 @@ impl Shell {
                 ))
                 .child(new_thread_background(
                     artwork_frame.current,
+                    artwork_frame.current_adjustment,
                     self.viewport_height,
                     width,
                     bounds,
