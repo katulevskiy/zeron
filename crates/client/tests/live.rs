@@ -58,6 +58,7 @@ fn host_rows(now: chrono::DateTime<Utc>) -> (Device, Space, Chat) {
         git_detected: true,
         git_checked_at: None,
         checkout_id: None,
+        repository_id: None,
         created_at: now,
     };
     let chat = Chat {
@@ -904,6 +905,40 @@ async fn acked_command_recovers_failed_host_wake_without_opening_the_chat() {
         tokio::time::sleep(Duration::from_millis(20)).await;
     }
     restarted.shutdown();
+}
+
+#[tokio::test(flavor = "multi_thread", worker_threads = 2)]
+async fn a_refused_host_wake_settles_instead_of_retrying_forever() {
+    let edge = MockEdge::start().await;
+    let _host = HostRegistry::start(&edge).await;
+    // Another owner's device: no retry can change a 403.
+    edge.nudge_status(403);
+    let dir = tempfile::tempdir().unwrap();
+    let client = phone(&edge, dir.path());
+    await_chat(&client, CHAT).await;
+    let session = client.open_session(CHAT).unwrap();
+    session
+        .send(SendRequest::text("to a foreign host"))
+        .unwrap();
+    let store = zeron_sync::DocsStore::open(dir.path()).unwrap();
+    let start = Instant::now();
+    while edge.rows(CHAT).is_empty()
+        || store.has_pending_chat_updates(CHAT).unwrap()
+        || store
+            .sync_job_version(CHAT, "viewer-delivery")
+            .unwrap()
+            .is_some()
+    {
+        assert!(
+            start.elapsed() < Duration::from_secs(10),
+            "a refused wake kept its receipt"
+        );
+        tokio::time::sleep(Duration::from_millis(20)).await;
+    }
+    let settled = edge.nudges(CHAT);
+    tokio::time::sleep(Duration::from_secs(2)).await;
+    assert_eq!(edge.nudges(CHAT), settled, "a refused wake was retried");
+    client.shutdown();
 }
 
 async fn await_chat(client: &Client, chat: &str) {

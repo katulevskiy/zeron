@@ -32,7 +32,10 @@ import {
 } from "./chat-log";
 import { decodeFrame, encodeFrame, FRAME } from "./chat-frames";
 import { AUTH_USER_HEADER, type Env } from "./env";
-import { ensureChatWakes, finishChatWake, pendingChatWake, queueChatWake, retryChatWake, validWakeRoute } from "./chat-wakes";
+import {
+  ensureChatWakes, finishChatWake, MAX_WAKE_ATTEMPTS, PERMANENT_WAKE_REJECTIONS,
+  pendingChatWake, queueChatWake, retryChatWake, validWakeRoute
+} from "./chat-wakes";
 
 const DAY_MS = 24 * 60 * 60 * 1000;
 /** Inbound frame budget: one pushed row (+ header slack). */
@@ -110,8 +113,10 @@ export class ChatRoom implements DurableObject {
       else if (owner !== userId) return json({ error: "forbidden" }, 403);
       const device = url.searchParams.get("device") ?? "";
       const chatId = url.searchParams.get("chatId") ?? "";
-      const hostDevice = url.searchParams.get("hostDevice") ?? "";
-      if (hostDevice && !validWakeRoute(chatId, hostDevice)) return json({ error: "bad_wake_route" }, 400);
+      // An unroutable wake hint never refuses the push: the rows are the
+      // user's message; only host discovery is skipped.
+      const hint = url.searchParams.get("hostDevice") ?? "";
+      const hostDevice = hint && validWakeRoute(chatId, hint) ? hint : "";
       const pair = new WebSocketPair();
       this.ctx.acceptWebSocket(pair[1]);
       const state: SocketState = { userId, device, chatId, hostDevice };
@@ -252,8 +257,8 @@ export class ChatRoom implements DurableObject {
       const device = url.searchParams.get("device") ?? "";
       const batchId = url.searchParams.get("batchId") ?? "";
       const chatId = url.searchParams.get("chatId") ?? "";
-      const hostDevice = url.searchParams.get("hostDevice") ?? "";
-      if (hostDevice && !validWakeRoute(chatId, hostDevice)) return json({ error: "bad_wake_route" }, 400);
+      const hint = url.searchParams.get("hostDevice") ?? "";
+      const hostDevice = hint && validWakeRoute(chatId, hint) ? hint : "";
       if (batchId === "" || batchId.length > 128) {
         this.recordPush(device, false);
         return json({ error: "bad_push" }, 400);
@@ -599,6 +604,7 @@ export class ChatRoom implements DurableObject {
     const wake = pendingChatWake(sql);
     if (!wake) return;
     let accepted = false;
+    let rejected = false;
     try {
       const room = this.env.DEVICE_ROOMS.get(this.env.DEVICE_ROOMS.idFromName(`d2/${wake.host_device}`));
       const response = await room.fetch("https://device/nudge", {
@@ -606,12 +612,21 @@ export class ChatRoom implements DurableObject {
         body: JSON.stringify({ chatId: wake.chat_id }), signal: AbortSignal.timeout(5000)
       });
       accepted = response.ok;
+      // Another owner's device (403) or a chat id it refuses (400): no retry
+      // can succeed. Unclaimed (404) and queue-full (503) retry.
+      rejected = PERMANENT_WAKE_REJECTIONS.has(response.status);
       await response.arrayBuffer();
     } catch {
       // A failed forward remains owned by this room, even with no viewer.
     }
+    const exhausted = !accepted && wake.attempts + 1 >= MAX_WAKE_ATTEMPTS;
+    if (rejected || exhausted) {
+      console.warn("chat2 host wake dropped", {
+        chat: wake.chat_id, host: wake.host_device, rejected, attempts: wake.attempts + 1
+      });
+    }
     await this.ctx.storage.transaction(async () => {
-      if (accepted) finishChatWake(sql, wake.token);
+      if (accepted || rejected || exhausted) finishChatWake(sql, wake.token);
       else retryChatWake(sql, wake);
       await this.scheduleAlarm();
     });
@@ -666,6 +681,11 @@ export class ChatRoom implements DurableObject {
     if (headSeq(sql) === head) {
       setMeta(sql, "backupDirty", "0");
       sql.exec("DELETE FROM meta WHERE key='backupDue'");
+    } else {
+      // Rows landed during the upload: they stay dirty for the NEXT nightly
+      // backup. Leaving the passed deadline re-armed the alarm at once and
+      // re-uploaded the whole log back to back while the chat streamed.
+      setMeta(sql, "backupDue", String(Date.now() + DAY_MS));
     }
   }
 }

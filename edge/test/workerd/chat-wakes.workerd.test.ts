@@ -158,20 +158,58 @@ it("deduplicates replays, avoids host-output wake loops, and preserves legacy pu
   }
 });
 
-it("rejects malformed or unauthorized routes and cannot wake another owner's device", async () => {
+it("accepts rows with an unroutable wake, rejects unauthorized pushes, and drops a wake another owner's device refuses", async () => {
   const chat = crypto.randomUUID();
-  const bad = await SELF.fetch(`https://edge/chat2/${chat}/rows?hostDevice=invalid/host&batchId=bad`, { method: "POST", headers: auth });
-  expect(bad.status).toBe(400); await bad.text();
+  // A malformed wake hint never refuses the user's message: the row lands,
+  // only host discovery is skipped.
+  const bad = await SELF.fetch(`https://edge/chat2/${chat}/rows?device=phone&hostDevice=invalid/host&batchId=bad`, {
+    method: "POST", headers: auth, body: new Uint8Array([1])
+  });
+  expect(bad.status, await bad.text()).toBe(200);
   await runInDurableObject(chatRoom(chat), (_i, state) => {
-    expect(logStats(state.storage.sql).rowCount).toBe(0); expect(pendingChatWake(state.storage.sql)).toBeUndefined();
+    expect(logStats(state.storage.sql).rowCount).toBe(1); expect(pendingChatWake(state.storage.sql)).toBeUndefined();
   });
   const forbidden = await SELF.fetch(`https://edge/chat2/${chat}/rows?batchId=bad&hostDevice=host`, {
     method: "POST", headers: { authorization: "Bearer stranger@org" }
   });
   expect(forbidden.status).toBe(403); await forbidden.text();
+  // Another owner's device room refuses the forward (403): no retry can
+  // succeed, so the receipt is dropped rather than retried forever.
   const host = crypto.randomUUID(); const other = await hostSocket(host, "stranger");
-  const accepted = await post(chat, host); expect(accepted.status).toBe(200); await accepted.text();
-  await waitForRetry(chat);
+  const accepted = await post(chat, host, "foreign"); expect(accepted.status).toBe(200); await accepted.text();
+  await retryNow(chat);
+  await expect.poll(() => runInDurableObject(chatRoom(chat), (_i, state) => pendingChatWake(state.storage.sql))).toBeUndefined();
   await runInDurableObject(deviceRoom(host), (_i, state) => { expect(pendingNudges(state.storage.sql)).toEqual([]); });
   other.socket.close();
+});
+
+it("moves the backup deadline a day on when rows land during the upload", async () => {
+  const chat = crypto.randomUUID();
+  const room = chatRoom(chat);
+  const response = await post(chat, crypto.randomUUID(), "first"); expect(response.status).toBe(200); await response.text();
+  await runInDurableObject(room, async (instance, state) => {
+    const sql = state.storage.sql;
+    sql.exec("DELETE FROM chat_wake");
+    setMeta(sql, "backupDue", "0");
+    await state.storage.setAlarm(Date.now());
+    // The chat keeps streaming while the R2 put is in flight.
+    const target = instance as unknown as { env: { BLOBS: { put: (...args: unknown[]) => Promise<unknown> } } };
+    const real = target.env.BLOBS;
+    target.env = { ...target.env, BLOBS: { ...real, put: async (...args: unknown[]) => {
+      appendRow(sql, "host", `during-${crypto.randomUUID()}`, new Uint8Array([9]), Date.now());
+      return real.put.apply(real, args);
+    } } };
+  });
+  // Fire it if the runtime has not already.
+  await runDurableObjectAlarm(room);
+  await expect.poll(() => runInDurableObject(room, (_i, state) => getMeta(state.storage.sql, "backupSeq"))).toBe("1");
+  await runInDurableObject(room, async (_instance, state) => {
+    const sql = state.storage.sql;
+    expect(getMeta(sql, "backupSeq")).toBe("1");
+    // The new row waits for the NEXT nightly backup, not an immediate re-run.
+    expect(getMeta(sql, "backupDirty")).toBe("1");
+    const due = Number(getMeta(sql, "backupDue"));
+    expect(due).toBeGreaterThan(Date.now() + 23 * 60 * 60 * 1000);
+    expect(await state.storage.getAlarm()).toBe(due);
+  });
 });

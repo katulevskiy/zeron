@@ -107,6 +107,14 @@ async fn deliver(weak: std::sync::Weak<ClientInner>, chat: &str) {
                 .send()
                 .await
                 .map_err(|err| crate::ClientError::Network(err.to_string()))?;
+            // Another owner's device (403) or a chat id its room refuses
+            // (400): no retry can change that, so the wake is settled. The
+            // receipt still waits for the outgoing rows. Unclaimed (404:
+            // the host has not connected yet) and 5xx retry.
+            if matches!(response.status().as_u16(), 400 | 403) {
+                tracing::warn!(%chat, status = response.status().as_u16(), "host wake refused; not retrying");
+                return Ok(());
+            }
             if !response.status().is_success() {
                 return Err(crate::ClientError::Network(format!(
                     "host wake HTTP {}",

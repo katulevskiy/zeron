@@ -115,6 +115,13 @@ async fn deliver(weak: std::sync::Weak<DocHostInner>, chat: &str) {
         .await;
         let accepted = match sent {
             Ok(response) if response.status().is_success() => true,
+            // Another owner's device (403) or a chat id its room refuses
+            // (400): no retry can change that, so the wake is settled.
+            // Unclaimed (404: not connected yet) and 5xx retry.
+            Ok(response) if matches!(response.status().as_u16(), 400 | 403) => {
+                tracing::warn!(%chat, device = %target, status = response.status().as_u16(), "remote host wake refused; not retrying");
+                true
+            }
             Ok(response) => {
                 tracing::debug!(%chat, device = %target, status = response.status().as_u16(), "remote host wake retrying");
                 false
@@ -258,6 +265,7 @@ mod tests {
                 org_id: "org".into(),
                 user_id: "user".into(),
                 edge: None,
+                local_only: false,
             },
         )
         .unwrap();
@@ -310,6 +318,7 @@ mod tests {
                 org_id: "org".into(),
                 user_id: "user".into(),
                 edge: None,
+                local_only: false,
             },
         )
         .unwrap();
