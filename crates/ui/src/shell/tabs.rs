@@ -110,7 +110,7 @@ impl Shell {
             || self.sync_flow.has_visible_overlay()
             || self.delete_confirm.is_some()
             || self.delete_space_confirm.is_some()
-            || self.rename_dialog.is_some()
+            || self.chat_rename.is_some()
             || self.rename_space_dialog.is_some()
             || self.discard_working_tree.is_some()
             || self.chat_menu.get().is_some()
@@ -205,6 +205,9 @@ impl Shell {
     /// Open a session from the sidebar: select it, the main area follows.
     pub(crate) fn open_chat(&mut self, chat_id: String, cx: &mut Context<Self>) {
         self.command_palette = None;
+        // Opening any session steps the voice stage aside — including the one
+        // already selected under it. The call keeps running in the background.
+        self.set_voice_stage_open(false, cx);
         self.route = Route::Chat;
         self.focus_composer(cx);
         self.state
@@ -213,14 +216,18 @@ impl Shell {
     }
 
     /// `+` in the titlebar: open the new-session canvas. A set sidebar filter
-    /// re-homes the canvas onto that project; under "All" the current pick
-    /// (the last selected project, restored from composer defaults) stands.
+    /// re-homes the canvas onto that project; under "All" the canvas reopens
+    /// on the project/device it was left at (see `AppState::canvas_target`).
     ///
     /// A new chat always starts with the terminal hidden: when the drawer is
     /// open it just hides (detach, not close — the source chat's tabs and
     /// PTYs survive for the return trip).
-    pub(super) fn open_new_session(&mut self, cx: &mut Context<Self>) {
+    ///
+    /// `project` (the per-project `+` on a sidebar group header) homes the
+    /// canvas on that project and wins over the sidebar filter.
+    pub(super) fn open_new_session(&mut self, project: Option<String>, cx: &mut Context<Self>) {
         self.command_palette = None;
+        self.set_voice_stage_open(false, cx);
         self.route = Route::Chat;
         self.focus_composer(cx);
         // Pre-hide before the selection flips so the state change can't
@@ -239,24 +246,26 @@ impl Shell {
         }
         let target = {
             let state = self.state.read(cx);
-            self.settings
-                .space_filter
-                .clone()
+            project
+                .or_else(|| self.settings.space_filter.clone())
                 .filter(|id| state.space_row(id).is_some())
         };
         let defaults = crate::settings::composer::ComposerDefaults::load(&self.data_dir);
         self.state.update(cx, |s, cx| {
+            // Leaving a chat puts the canvas's own target back; the filter
+            // (an explicit standing choice) then applies on top of it.
+            let restores = s.canvas_target.is_some();
+            s.select_chat(None, cx);
             if target.is_some() {
                 s.select_space(target, cx);
-            } else if defaults.no_project {
-                // Opening an existing project session (including boot's last
-                // session) must not erase the saved new-session opt-out.
+            } else if !restores && defaults.no_project {
+                // No canvas target was set aside (e.g. after a runtime swap):
+                // fall back to the saved new-session opt-out.
                 s.select_space(None, cx);
                 if let Some(device) = defaults.device {
                     s.select_device(device, cx);
                 }
             }
-            s.select_chat(None, cx);
         });
         // The canvas never restores a drawer: a previously opened canvas
         // terminal must not pop open on a fresh new chat.
@@ -396,6 +405,13 @@ impl Shell {
         let available_titlebar_width =
             (self.viewport_width - row_left - right_pad - trailing_width - row_gap * 3.0).max(0.0);
 
+        let running_subagents = {
+            let state = self.state.read(cx);
+            state
+                .selected_chat
+                .as_deref()
+                .map_or(0, |chat| state.running_subagents_for(chat, Utc::now()))
+        };
         let trailing: Option<gpui::AnyElement> = if on_canvas {
             None
         } else {
@@ -496,13 +512,31 @@ impl Shell {
                                 .aria_label(files_panel_label)
                                 .when(self.files_panel_open(cx), |button| {
                                     button.bg(crate::theme::wash(0.09))
+                                })
+                                // Running subagents live in this panel: mark the
+                                // button so they are findable while it is closed.
+                                .when(running_subagents > 0, |button| {
+                                    crate::running_pill::mark_files_button(
+                                        button,
+                                        running_subagents,
+                                        &theme,
+                                    )
                                 }),
                             )
-                            .child(header_icon_button(
+                            .child(header_icon_button_with(
                                 "toggle-changes",
-                                icons::SIDEBAR_MINIMALISTIC,
+                                icons::sidebar_glyph(
+                                    motion::state_t(
+                                        "toggle-changes",
+                                        right_pane_open,
+                                        motion::GLYPH_STATE,
+                                        self.reduced_motion,
+                                    ),
+                                    true,
+                                    16.0,
+                                    theme.text_muted,
+                                ),
                                 ShortcutId::ToggleChanges.label(),
-                                &theme,
                                 cx.listener(|this, _, _, cx| this.toggle_right_pane(cx)),
                             )),
                     )
@@ -537,7 +571,7 @@ impl Shell {
                 .child(
                     header_icon_button(
                         "session-fork",
-                        icons::GIT_BRANCH,
+                        icons::FORK,
                         "Fork this session",
                         &theme,
                         cx.listener(|this, _, _, cx| this.create_side_chat(cx)),
