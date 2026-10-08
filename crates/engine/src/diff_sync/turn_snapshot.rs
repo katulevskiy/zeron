@@ -20,6 +20,10 @@
 //!   and untracked directories past the untracked budget are left out, and the
 //!   whole snapshot runs under [`SNAPSHOT_TIMEOUT`]. A left-out path simply
 //!   never shows in the turn diff; tracked files are always snapshotted.
+//!
+//! Git still refreshes the mtime of checkout objects a snapshot finds there
+//! instead of writing them (as it did before), so pruning the checkout while
+//! a turn is open can make that turn's diff unreadable until the next turn.
 
 use std::ffi::{OsStr, OsString};
 use std::path::{Path, PathBuf};
@@ -62,6 +66,9 @@ const ALTERNATES_SEPARATOR: char = ':';
 pub struct TreeSnapshot {
     tree: String,
     store: Arc<ObjectStore>,
+    /// Untracked paths left out of `tree` (git's spelling, from the root).
+    /// A snapshot layered on this one leaves them as they are here.
+    skipped: Arc<Vec<Vec<u8>>>,
 }
 
 impl TreeSnapshot {
@@ -136,7 +143,11 @@ impl ObjectStore {
                 value
             }
         };
-        let dir = store_root(repos.data_dir()).join(uuid::Uuid::new_v4().to_string());
+        // Absolute: git resolves `GIT_OBJECT_DIRECTORY` against the checkout
+        // (`-C`), not against this process's directory.
+        let dir = std::path::absolute(store_root(repos.data_dir()))
+            .map_err(|error| EngineError::Other(format!("turn snapshot store: {error}")))?
+            .join(uuid::Uuid::new_v4().to_string());
         let objects = dir.join("objects");
         tokio::fs::create_dir_all(&objects)
             .await
@@ -276,7 +287,31 @@ async fn write_snapshot(
     base: Option<&TreeSnapshot>,
 ) -> Result<TreeSnapshot, EngineError> {
     let store = Arc::new(ObjectStore::create(repos, root, base.map(|base| &base.store)).await?);
-    let skipped = untracked_to_skip(root).await?;
+    let mut skipped = untracked_to_skip(root).await?;
+    let index = store.dir.join("index");
+    if let Some(base) = base {
+        // Start from the base tree and leave out what either side left out:
+        // a path skipped on one side only (a directory that crossed the
+        // budget mid-turn) then keeps its base state instead of showing as
+        // thousands of added or deleted files.
+        let read = snapshot_git(root, &store, &index, &["read-tree", base.tree()], None)
+            .await
+            .map_err(|e| EngineError::Other(format!("git read-tree failed: {e}")))?;
+        if !read.status.success() {
+            return Err(EngineError::Other(format!(
+                "git read-tree: {}",
+                String::from_utf8_lossy(&read.stderr).trim()
+            )));
+        }
+        let known: std::collections::HashSet<&[u8]> = skipped.iter().map(Vec::as_slice).collect();
+        let inherited: Vec<Vec<u8>> = base
+            .skipped
+            .iter()
+            .filter(|path| !known.contains(path.as_slice()))
+            .cloned()
+            .collect();
+        skipped.extend(inherited);
+    }
     // NUL-separated pathspecs on stdin: no argv limit, no quoting.
     let mut pathspecs = b".\0".to_vec();
     for path in &skipped {
@@ -284,7 +319,6 @@ async fn write_snapshot(
         pathspecs.extend_from_slice(path);
         pathspecs.push(0);
     }
-    let index = store.dir.join("index");
     let added = snapshot_git(
         root,
         &store,
@@ -321,6 +355,7 @@ async fn write_snapshot(
     Ok(TreeSnapshot {
         tree: String::from_utf8_lossy(&written.stdout).trim().to_string(),
         store,
+        skipped: Arc::new(skipped),
     })
 }
 
@@ -401,14 +436,30 @@ async fn untracked_to_skip(root: &Path) -> Result<Vec<Vec<u8>>, EngineError> {
     let _stop_walk = cancel.clone().drop_guard();
     let walk_root = root.to_path_buf();
     let walk_units = units.clone();
-    let (mut skipped, dirs, mut files) =
+    let (mut skipped, dirs, files) =
         tokio::task::spawn_blocking(move || triage_units(&walk_root, walk_units, &cancel))
             .await
             .map_err(|error| EngineError::Other(format!("untracked walk: {error}")))?;
 
     // Files inside the directories that fit, in git's own spelling: only git
     // knows which of them are ignored, and the names go back to git as
-    // pathspecs.
+    // pathspecs. Loose files are units of their own.
+    let mut measured: Vec<Unit> = files
+        .into_iter()
+        .map(|path| Unit {
+            files: vec![path.clone()],
+            path,
+        })
+        .collect();
+    let dir_units: std::collections::HashMap<Vec<u8>, usize> = dirs
+        .iter()
+        .enumerate()
+        .map(|(index, dir)| (dir.clone(), measured.len() + index))
+        .collect();
+    measured.extend(dirs.iter().map(|dir| Unit {
+        path: dir.clone(),
+        files: Vec::new(),
+    }));
     for batch in path_batches(&dirs, MAX_PATH_ARGUMENT_BYTES) {
         let mut args: Vec<OsString> = [
             "--literal-pathspecs",
@@ -424,21 +475,38 @@ async fn untracked_to_skip(root: &Path) -> Result<Vec<Vec<u8>>, EngineError> {
         args.extend(batch.iter().map(|dir| path_argument(dir)));
         let listed = capture_git(root, &args, MAX_UNTRACKED_LISTING_BYTES).await?;
         if listed.truncated {
-            return Ok(units);
+            // Unmeasurable: leave every directory out, keep the loose files.
+            skipped.extend(dirs);
+            return Ok(skipped);
         }
-        files.extend(split_nul(&listed.stdout));
+        for file in split_nul(&listed.stdout) {
+            // Git's untracked units never nest: the file belongs to the one
+            // listed directory among its ancestors.
+            let owner = file
+                .iter()
+                .enumerate()
+                .filter(|(_, byte)| **byte == b'/')
+                .find_map(|(end, _)| dir_units.get(&file[..=end]));
+            if let Some(&owner) = owner {
+                measured[owner].files.push(file);
+            }
+        }
     }
 
     let stat_root = root.to_path_buf();
-    let (oversized, within_budget) =
-        tokio::task::spawn_blocking(move || measure_files(&stat_root, files))
-            .await
-            .map_err(|error| EngineError::Other(format!("untracked stat: {error}")))?;
-    if !within_budget {
-        return Ok(units);
-    }
+    let (oversized, excess) = tokio::task::spawn_blocking(move || fit_units(&stat_root, measured))
+        .await
+        .map_err(|error| EngineError::Other(format!("untracked stat: {error}")))?;
     skipped.extend(oversized);
+    skipped.extend(excess);
     Ok(skipped)
+}
+
+/// An untracked unit (a loose file, or a wholly untracked directory) and the
+/// files it holds, as git spells them.
+struct Unit {
+    path: Vec<u8>,
+    files: Vec<Vec<u8>>,
 }
 
 fn split_nul(bytes: &[u8]) -> Vec<Vec<u8>> {
@@ -512,30 +580,56 @@ fn dir_exceeds_budget(dir: &Path) -> bool {
     false
 }
 
-/// Split `files` into those past the per-file cap, and whether the rest fit
-/// the untracked budget. A path that vanished since git listed it costs
-/// nothing; `git add --ignore-errors` copes with it.
-fn measure_files(root: &Path, files: Vec<Vec<u8>>) -> (Vec<Vec<u8>>, bool) {
+/// Files past the per-file cap, then the units to leave out so the rest fits
+/// the untracked budget: the largest go first, so one big directory or a
+/// pile of assets costs only itself and new source files keep showing. A
+/// path that vanished since git listed it costs nothing; `git add
+/// --ignore-errors` copes with it.
+fn fit_units(root: &Path, units: Vec<Unit>) -> (Vec<Vec<u8>>, Vec<Vec<u8>>) {
     let mut oversized = Vec::new();
-    let mut kept = 0usize;
-    let mut bytes = 0u64;
-    for file in files {
-        let Ok(metadata) = std::fs::symlink_metadata(root.join(path_argument(&file))) else {
-            continue;
-        };
-        if metadata.is_file() && metadata.len() > MAX_UNTRACKED_FILE_BYTES {
-            oversized.push(file);
-            continue;
+    // (path, files, bytes) of what each unit would add.
+    let mut costs = Vec::with_capacity(units.len());
+    for unit in units {
+        let (mut files, mut bytes) = (0usize, 0u64);
+        for file in unit.files {
+            let Ok(metadata) = std::fs::symlink_metadata(root.join(path_argument(&file))) else {
+                continue;
+            };
+            if metadata.is_file() && metadata.len() > MAX_UNTRACKED_FILE_BYTES {
+                oversized.push(file);
+                continue;
+            }
+            files += 1;
+            if metadata.is_file() {
+                bytes += metadata.len();
+            }
         }
-        kept += 1;
-        if metadata.is_file() {
-            bytes += metadata.len();
+        costs.push((unit.path, files, bytes));
+    }
+    let mut files: usize = costs.iter().map(|(_, files, _)| files).sum();
+    let mut bytes: u64 = costs.iter().map(|(_, _, bytes)| bytes).sum();
+    let mut excess = Vec::new();
+    if files <= MAX_UNTRACKED_FILES && bytes <= MAX_UNTRACKED_BYTES {
+        return (oversized, excess);
+    }
+    // Largest first, measured against the budget it overruns most.
+    let weight = |unit_files: usize, unit_bytes: u64| {
+        (unit_files as f64 / MAX_UNTRACKED_FILES as f64)
+            .max(unit_bytes as f64 / MAX_UNTRACKED_BYTES as f64)
+    };
+    costs.sort_by(|a, b| weight(b.1, b.2).total_cmp(&weight(a.1, a.2)));
+    for (path, unit_files, unit_bytes) in costs {
+        if files <= MAX_UNTRACKED_FILES && bytes <= MAX_UNTRACKED_BYTES {
+            break;
         }
-        if kept > MAX_UNTRACKED_FILES || bytes > MAX_UNTRACKED_BYTES {
-            return (oversized, false);
+        files -= unit_files;
+        bytes -= unit_bytes;
+        // A loose file's oversized self is already left out.
+        if unit_files > 0 || unit_bytes > 0 {
+            excess.push(path);
         }
     }
-    (oversized, true)
+    (oversized, excess)
 }
 
 #[cfg(test)]
@@ -544,8 +638,8 @@ mod tests {
     use std::path::{Path, PathBuf};
 
     use super::{
-        MAX_UNTRACKED_BYTES, MAX_UNTRACKED_FILE_BYTES, STORE_DIR, TreeSnapshot, alternates_value,
-        remove_other_runs, run_id, snapshot_tree,
+        MAX_UNTRACKED_BYTES, MAX_UNTRACKED_FILE_BYTES, MAX_UNTRACKED_FILES, STORE_DIR,
+        TreeSnapshot, alternates_value, remove_other_runs, run_id, snapshot_tree,
     };
     use crate::repos::Repos;
 
@@ -624,6 +718,13 @@ mod tests {
 
     /// A file of `len` zero bytes. Sparse where the filesystem allows, so the
     /// budget tests do not write hundreds of megabytes.
+    fn many_files(dir: &Path, count: usize) {
+        std::fs::create_dir_all(dir).expect("dir");
+        for i in 0..count {
+            std::fs::write(dir.join(format!("f{i}.txt")), "x").expect("file");
+        }
+    }
+
     fn sized_file(path: &Path, len: u64) {
         std::fs::File::create(path)
             .and_then(|file| file.set_len(len))
@@ -743,13 +844,15 @@ mod tests {
     }
 
     #[tokio::test]
-    async fn loose_untracked_files_over_budget_leave_tracked_files_only() {
+    async fn untracked_over_budget_leaves_out_the_largest_units_first() {
         let tmp = tempfile::tempdir().expect("tempdir");
         let (root, repos, _data_dir) = fixture(tmp.path()).await;
         std::fs::write(root.join("a.txt"), "one\ntwo\nedited\n").expect("edit a.txt");
         std::fs::create_dir_all(root.join("docs")).expect("docs dir");
         std::fs::write(root.join("docs/readme.md"), "small\n").expect("readme.md");
-        for i in 0..=MAX_UNTRACKED_BYTES / MAX_UNTRACKED_FILE_BYTES {
+        // One file-sized unit past the byte budget.
+        let captures = MAX_UNTRACKED_BYTES / MAX_UNTRACKED_FILE_BYTES + 1;
+        for i in 0..captures {
             sized_file(
                 &root.join(format!("capture-{i}.raw")),
                 MAX_UNTRACKED_FILE_BYTES,
@@ -757,10 +860,19 @@ mod tests {
         }
 
         let snapshot = snapshot_tree(&repos, &root).await.expect("snapshot");
-        assert_eq!(
-            tree_paths(&root, &snapshot).await,
-            BTreeSet::from(["a.txt".to_string()])
+        let paths = tree_paths(&root, &snapshot).await;
+        assert!(paths.contains("a.txt"));
+        assert!(
+            paths.contains("docs/readme.md"),
+            "small files stay: {paths:?}"
         );
+        let kept = paths
+            .iter()
+            .filter(|path| path.starts_with("capture-"))
+            .count();
+        // 32 captures fill the budget exactly, so the readme's bytes push
+        // one more out: only the excess goes, largest first.
+        assert_eq!(kept as u64, captures - 2, "only the excess is left out");
         // The tracked edit is still in the tree.
         let mut cmd = tokio::process::Command::new("git");
         cmd.arg("-C")
@@ -771,6 +883,59 @@ mod tests {
         assert_eq!(
             String::from_utf8_lossy(&output.stdout),
             "one\ntwo\nedited\n"
+        );
+    }
+
+    /// Directories that each fit but together overrun the budget cost only
+    /// the largest of them: a file the agent adds still shows in the turn.
+    #[tokio::test]
+    async fn new_files_show_when_untracked_directories_overrun_the_budget() {
+        let tmp = tempfile::tempdir().expect("tempdir");
+        let (root, repos, _data_dir) = fixture(tmp.path()).await;
+        let per_dir = MAX_UNTRACKED_FILES * 2 / 5;
+        for (dir, count) in [("a", per_dir + 2), ("b", per_dir + 1), ("c", per_dir)] {
+            many_files(&root.join(dir), count);
+        }
+        let turn = snapshot_tree(&repos, &root).await.expect("turn snapshot");
+        std::fs::write(root.join("new.rs"), "fn main() {}\n").expect("new.rs");
+
+        let diff = crate::diff_sync::capture_turn_diff(&repos, &root, &turn)
+            .await
+            .expect("turn diff");
+        let paths: Vec<&str> = diff.files.iter().map(|file| file.path.as_str()).collect();
+        assert_eq!(paths, ["new.rs"]);
+    }
+
+    /// A directory that crosses the budget during a turn keeps its turn-start
+    /// state on both sides instead of diffing as a mass add or delete.
+    #[tokio::test]
+    async fn a_directory_crossing_the_budget_mid_turn_is_not_a_mass_change() {
+        let tmp = tempfile::tempdir().expect("tempdir");
+        let (root, repos, _data_dir) = fixture(tmp.path()).await;
+        let gen_dir = root.join("gen");
+
+        // Fits at turn start, over budget after one more file.
+        many_files(&gen_dir, MAX_UNTRACKED_FILES);
+        let turn = snapshot_tree(&repos, &root).await.expect("turn snapshot");
+        std::fs::write(gen_dir.join("extra.txt"), "x").expect("extra");
+        std::fs::write(root.join("a.txt"), "one\ntwo\nthree\n").expect("edit a.txt");
+        let diff = crate::diff_sync::capture_turn_diff(&repos, &root, &turn)
+            .await
+            .expect("turn diff");
+        let paths: Vec<&str> = diff.files.iter().map(|file| file.path.as_str()).collect();
+        assert_eq!(paths, ["a.txt"], "grew past the budget");
+
+        // Over budget at turn start, fits after the turn removed files.
+        let turn = snapshot_tree(&repos, &root).await.expect("turn snapshot");
+        std::fs::remove_file(gen_dir.join("extra.txt")).expect("remove extra");
+        std::fs::remove_file(gen_dir.join("f0.txt")).expect("remove f0");
+        let diff = crate::diff_sync::capture_turn_diff(&repos, &root, &turn)
+            .await
+            .expect("turn diff");
+        assert!(
+            diff.files.is_empty(),
+            "shrank under the budget: {:?}",
+            diff.files.len()
         );
     }
 

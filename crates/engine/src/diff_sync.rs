@@ -460,7 +460,11 @@ impl CheckoutDiffSync {
             let Some(inner) = inner.upgrade() else { return };
             let identity = match inner.repos.checkout_identity(&cwd).await {
                 Ok(identity) => identity,
-                Err(_) => return, // not a checkout
+                Err(_) => {
+                    // Not a checkout: no turn to diff, not the previous one.
+                    lock(&inner.turn_trees).remove(&chat_id);
+                    return;
+                }
             };
             match snapshot_tree(&inner.repos, &identity.root).await {
                 Ok(tree) => {
@@ -474,6 +478,8 @@ impl CheckoutDiffSync {
                     );
                 }
                 Err(err) => {
+                    // Keeping the previous base would silently diff two turns.
+                    lock(&inner.turn_trees).remove(&chat_id);
                     tracing::debug!(chat = %chat_id, error = %err,
                         "diff-sync: turn snapshot failed");
                 }
@@ -625,6 +631,19 @@ async fn reconcile(inner: &Arc<DiffSyncInner>, chats: Vec<Chat>, fresh: bool) {
             .or_insert_with(|| (identity, Vec::new()))
             .1
             .push(chat);
+    }
+    // A turn snapshot holds an object store on disk: keep it only for chats
+    // that can still show "Latest turn". Judged on the current rows, not this
+    // pass's (possibly older) list, so a chat created meanwhile keeps its own.
+    {
+        let current = inner.workspace.watch_chats();
+        let current = current.borrow();
+        let live: HashSet<&str> = current
+            .iter()
+            .filter(|chat| !chat.archived || interested.contains(&chat.id))
+            .map(|chat| chat.id.as_str())
+            .collect();
+        lock(&inner.turn_trees).retain(|chat_id, _| live.contains(chat_id.as_str()));
     }
 
     // Close entries whose checkout has had no chats for a full grace period;
@@ -1060,6 +1079,9 @@ async fn capture_git_in<S: AsRef<OsStr>>(
     if let Some(snapshot) = snapshot {
         snapshot.apply_to(&mut cmd);
     }
+    // Read-only commands: a caller that gives up (a timed-out snapshot, a
+    // dropped request) takes its git child down with it.
+    cmd.kill_on_drop(true);
     cmd.stdin(std::process::Stdio::null());
     cmd.stdout(std::process::Stdio::piped());
     cmd.stderr(std::process::Stdio::piped());
