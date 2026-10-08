@@ -13733,6 +13733,7 @@ mod tests {
             status,
             started_at: Some(updated_at),
             updated_at,
+            running_subagents: 0,
         }
     }
 
