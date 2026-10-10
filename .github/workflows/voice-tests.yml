@@ -26,11 +26,41 @@ on:
       - 'scripts/tests/test_voice_packaging.py'
       - '.github/workflows/voice-tests.yml'
       - '.github/actions/linux-ci/**'
+  # Main only seeds native-platform-check's Rust cache; the other jobs are
+  # pull-request checks (offline-linux restores core-tests' cache instead).
+  push:
+    branches: [main]
+    paths:
+      - 'crates/audio/**'
+      - 'crates/voice-media/**'
+      - 'crates/voice-session/**'
+      - 'crates/orb/**'
+      - 'crates/proto/src/voice/**'
+      - 'crates/rpc/**'
+      - 'crates/client/**'
+      - 'crates/mobile/**'
+      - 'apps/ios/Zeron/Voice/**'
+      - 'apps/ios/ZeronTests/RemoteVoiceLifecycleTests.swift'
+      - 'dist/voice/**'
+      - 'scripts/package-voice-runtime.py'
+      - 'crates/proto/src/voice.rs'
+      - 'crates/harness/**'
+      - 'crates/engine/**'
+      - 'crates/ui/**'
+      - 'crates/mcp/**'
+      - 'Cargo.toml'
+      - 'Cargo.lock'
+      - 'scripts/codex-voice-remote-smoke.py'
+      - 'scripts/tests/*voice_remote*'
+      - 'scripts/tests/test_voice_packaging.py'
+      - '.github/workflows/voice-tests.yml'
+      - '.github/actions/linux-ci/**'
   workflow_dispatch:
 permissions:
   contents: read
 jobs:
   runtime-packaging:
+    if: github.event_name != 'push'
     strategy:
       fail-fast: false
       matrix:
@@ -46,6 +76,7 @@ jobs:
         run: python -m unittest discover -s scripts/tests -p 'test_voice_packaging.py' -v
 
   split-host-probe:
+    if: github.event_name != 'push'
     strategy:
       fail-fast: false
       matrix:
@@ -61,6 +92,7 @@ jobs:
         run: python3 -m unittest discover -s scripts/tests -p 'test_voice_remote*.py' -v
 
   offline-linux:
+    if: github.event_name != 'push'
     runs-on: ubuntu-24.04
     timeout-minutes: 45
     steps:
@@ -113,11 +145,12 @@ jobs:
     steps:
       - uses: actions/checkout@v4
       - uses: dtolnay/rust-toolchain@stable
-      # Pull requests restore but never save: their caches can't be read by
-      # other branches and evict main's.
+      # Main seeds the cache; pull requests restore but never save (their
+      # caches can't be read by other branches and evict main's).
       - uses: Swatinem/rust-cache@6323deb102c322ba6fcbdcafc7e3dddab59af2b6 # v2.9.2
         with:
           save-if: ${{ github.ref == 'refs/heads/main' }}
+          cache-on-failure: true
       - name: Compile subscription bridge without audio hardware or provider access
         run: cargo check --locked -p zeron-harness -p zeron-engine
       - name: Installed and development runtime resolution
