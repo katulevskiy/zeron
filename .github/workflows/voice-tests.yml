@@ -25,6 +25,7 @@ on:
       - 'scripts/tests/*voice_remote*'
       - 'scripts/tests/test_voice_packaging.py'
       - '.github/workflows/voice-tests.yml'
+      - '.github/actions/linux-ci/**'
   workflow_dispatch:
 permissions:
   contents: read
@@ -62,19 +63,24 @@ jobs:
   offline-linux:
     runs-on: ubuntu-24.04
     timeout-minutes: 45
-    env:
-      CARGO_BUILD_JOBS: 2
     steps:
-      - uses: actions/checkout@v4
-      - uses: dtolnay/rust-toolchain@stable
-        with:
-          components: llvm-tools-preview
+      - uses: actions/checkout@11d5960a326750d5838078e36cf38b85af677262 # v4.4.0
       - name: Native audio and GPUI build tools
         run: |
           sudo apt-get update
           sudo apt-get install -y libasound2-dev clang libclang-dev pkg-config meson ninja-build libwayland-dev libxkbcommon-dev libxcb1-dev libxcb-shape0-dev libxcb-xfixes0-dev libx11-xcb-dev libxrandr-dev libxi-dev libxcursor-dev libx11-dev libxinerama-dev libegl1-mesa-dev libvulkan-dev libfontconfig1-dev libfreetype6-dev libssl-dev libdbus-1-dev
-      - uses: Swatinem/rust-cache@v2
+      # This workflow never runs on main, so it has no cache of its own. It
+      # restores the `core` cache that core-tests (ui-tests.yml) saves on main:
+      # most of the dependency graph is the same, and a pull request saving its
+      # own copy only evicts main's caches from the repository's 10 GB.
+      - uses: ./.github/actions/linux-ci
+        with:
+          rust-cache: core
       - name: Protocol, transport and idle runtime (no provider access)
+        # Step-level, not job-level: CARGO_* variables at the cache step are
+        # part of the rust-cache key, which must match core-tests'.
+        env:
+          CARGO_BUILD_JOBS: 2
         run: |
           cargo test --locked -p zeron-voice-media --lib
           cargo test --locked -p zeron-orb
@@ -91,6 +97,8 @@ jobs:
           cargo test --locked -p zeron-rpc --test device_room
           cargo test --locked -p zeron-mcp --lib
       - name: Native audio and WebRTC AEC3
+        env:
+          CARGO_BUILD_JOBS: 2
         run: cargo test --locked -p zeron-audio --features aec --lib
 
   native-platform-check:
@@ -105,7 +113,11 @@ jobs:
     steps:
       - uses: actions/checkout@v4
       - uses: dtolnay/rust-toolchain@stable
-      - uses: Swatinem/rust-cache@v2
+      # Pull requests restore but never save: their caches can't be read by
+      # other branches and evict main's.
+      - uses: Swatinem/rust-cache@6323deb102c322ba6fcbdcafc7e3dddab59af2b6 # v2.9.2
+        with:
+          save-if: ${{ github.ref == 'refs/heads/main' }}
       - name: Compile subscription bridge without audio hardware or provider access
         run: cargo check --locked -p zeron-harness -p zeron-engine
       - name: Installed and development runtime resolution
