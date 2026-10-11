@@ -643,12 +643,8 @@ async fn v2_wire_streams_text_and_settles_on_execution_success() {
             loop {
                 match wire.events.recv().await.unwrap().unwrap() {
                     AgentEvent::TextDelta { text: delta } => text.push_str(&delta),
-                    AgentEvent::Usage {
-                        input_tokens,
-                        output_tokens,
-                        ..
-                    } => {
-                        usage = Some((input_tokens, output_tokens));
+                    usage_event @ AgentEvent::Usage { .. } => {
+                        usage = Some(usage_event);
                     }
                     AgentEvent::ContextUsage { tokens, window } => {
                         context_usage.push((tokens, window));
@@ -664,7 +660,15 @@ async fn v2_wire_streams_text_and_settles_on_execution_success() {
         .unwrap();
     assert_eq!(status, DoneStatus::Completed);
     assert_eq!(text, "PONG");
-    assert_eq!(usage, Some((4, 1)));
+    assert_eq!(
+        usage,
+        Some(
+            AgentEvent::usage(4, 1)
+                .with_cache(Some(0), Some(0))
+                .with_reasoning(Some(0))
+                .with_cost_usd(Some(0.0))
+        )
+    );
     assert_eq!(
         context_usage,
         vec![
@@ -1529,7 +1533,8 @@ fn v2_frames_normalize_to_v1_payloads() {
         vec![json!({"type":"message.updated","properties":{
             "info":{"sessionID":"ses_1","id":"usage","role":"assistant",
                     "tokens":{"input":10,"output":2,"reasoning":0,
-                              "cache":{"read":0,"write":0}}}}})]
+                              "cache":{"read":0,"write":0}},
+                    "cost":0}}})]
     );
     // Cumulative session totals are spend, not occupancy; malformed step
     // usage is dropped.
@@ -1565,7 +1570,7 @@ fn v2_frames_normalize_to_v1_payloads() {
         out,
         vec![json!({"type":"message.updated","properties":{
             "info":{"sessionID":"ses_2","id":"usage","role":"assistant",
-                    "tokens":{"input":1,"output":2},
+                    "tokens":{"input":1,"output":2},"cost":0,
                     "providerID":"opencode","modelID":"long-context"}}})]
     );
     // A malformed model leaves the cached one in place.

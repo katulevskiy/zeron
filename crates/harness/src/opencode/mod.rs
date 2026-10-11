@@ -2384,6 +2384,21 @@ async fn create_session(
     unreachable!("create_session retry loop returns from every path")
 }
 
+/// Billing usage off an assistant message's `tokens` (and its `cost`, USD).
+/// OpenCode's `input` is already uncached; unreported fields stay `None`.
+/// Zero-input-and-output placeholders carry no usage yet.
+fn billing_usage_event(info: &Value, tokens: &Value) -> Option<AgentEvent> {
+    let count = |pointer: &str| tokens.pointer(pointer).and_then(Value::as_u64);
+    let input = count("/input").unwrap_or(0);
+    let output = count("/output").unwrap_or(0);
+    (input > 0 || output > 0).then(|| {
+        AgentEvent::usage(input, output)
+            .with_cache(count("/cache/read"), count("/cache/write"))
+            .with_reasoning(count("/reasoning"))
+            .with_cost_usd(info.get("cost").and_then(Value::as_f64))
+    })
+}
+
 fn context_usage_event(info: &Value, context_windows: &HashMap<String, u64>) -> Option<AgentEvent> {
     let tokens = info.get("tokens")?;
     let counts: Vec<u64> = [
@@ -2999,10 +3014,8 @@ async fn handle_bus_event(ctx: BusCtx<'_>) -> BusOutcome {
                     {
                         return BusOutcome::ConsumerGone;
                     }
-                    let input = tokens.get("input").and_then(Value::as_u64).unwrap_or(0);
-                    let output = tokens.get("output").and_then(Value::as_u64).unwrap_or(0);
-                    if input > 0 || output > 0 {
-                        *pending_usage = Some(AgentEvent::usage(input, output));
+                    if let Some(usage) = billing_usage_event(info, tokens) {
+                        *pending_usage = Some(usage);
                     }
                 }
                 let events = replay_pending(main_feed, message, true, turn);
@@ -4076,6 +4089,9 @@ fn normalize_v2_frame_with_session_models(
                 "role": "assistant",
                 "tokens": tokens,
             });
+            if let Some(cost) = data.get("cost").filter(|c| c.is_number()) {
+                info["cost"] = cost.clone();
+            }
             if let Some(model) = data
                 .get("sessionID")
                 .and_then(Value::as_str)
@@ -4335,6 +4351,34 @@ mod tests;
 #[cfg(test)]
 mod context_tests {
     use super::*;
+
+    #[test]
+    fn billing_usage_carries_cache_reasoning_and_cost() {
+        let info = json!({"cost": 0.0123, "tokens": {
+            "input": 200, "output": 100, "reasoning": 50, "cache": {"read":40000,"write":1800}
+        }});
+        assert_eq!(
+            billing_usage_event(&info, &info["tokens"]),
+            Some(
+                AgentEvent::usage(200, 100)
+                    .with_cache(Some(40000), Some(1800))
+                    .with_reasoning(Some(50))
+                    .with_cost_usd(Some(0.0123))
+            )
+        );
+        // Unreported fields stay unknown rather than zero.
+        let bare = json!({"tokens": {"input": 3, "output": 4}});
+        assert_eq!(
+            billing_usage_event(&bare, &bare["tokens"]),
+            Some(AgentEvent::usage(3, 4))
+        );
+        let placeholder = json!({"cost": 0, "tokens": {"input": 0, "output": 0}});
+        assert_eq!(
+            billing_usage_event(&placeholder, &placeholder["tokens"]),
+            None
+        );
+    }
+
     #[test]
     fn context_includes_cache_and_uses_reported_model_limit() {
         let windows = HashMap::from([("provider/model".into(), 200000)]);

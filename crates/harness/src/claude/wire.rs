@@ -212,6 +212,9 @@ pub(crate) struct ResultFrame {
     pub errors: Vec<Value>,
     #[serde(default)]
     pub usage: UsageBody,
+    /// Whole-turn USD cost the CLI computed (includes subagents).
+    #[serde(default)]
+    pub total_cost_usd: Option<f64>,
     #[serde(default)]
     pub session_id: Option<String>,
 }
@@ -222,6 +225,19 @@ pub(crate) struct UsageBody {
     pub input_tokens: u64,
     #[serde(default)]
     pub output_tokens: u64,
+    /// Absent (not zero) when the CLI doesn't report cache traffic.
+    #[serde(default, rename = "cache_read_input_tokens")]
+    pub cache_read_tokens: Option<u64>,
+    #[serde(default, rename = "cache_creation_input_tokens")]
+    pub cache_write_tokens: Option<u64>,
+    #[serde(default)]
+    pub output_tokens_details: OutputTokensDetails,
+}
+
+#[derive(Debug, Default, Deserialize)]
+pub(crate) struct OutputTokensDetails {
+    #[serde(default)]
+    pub thinking_tokens: Option<u64>,
 }
 
 /// A CLI→client control request (`can_use_tool` is the one we act on).

@@ -123,18 +123,25 @@ pub(crate) fn turn_error_message(params: &Value) -> Option<String> {
 }
 
 /// `thread/tokenUsage/updated` → a [`AgentEvent::Usage`] snapshot of the LAST
-/// turn's tokens (held by the session loop, emitted before `Done`).
+/// turn's tokens (held by the session loop, emitted before `Done`). Codex's
+/// `inputTokens` includes the cached prefix, so the uncached input is the
+/// difference; cache/reasoning counts stay `None` when the wire omits them.
 pub(crate) fn usage_event(params: &Value) -> Option<AgentEvent> {
     let last = field(params, &["tokenUsage", "token_usage"])?.get("last")?;
-    let count = |keys: &[&str]| {
-        field(last, keys)
-            .and_then(Value::as_u64)
-            .unwrap_or_default()
-    };
-    Some(AgentEvent::usage(
-        count(&["inputTokens", "input_tokens"]),
-        count(&["outputTokens", "output_tokens"]),
-    ))
+    let opt = |keys: &[&str]| field(last, keys).and_then(Value::as_u64);
+    let input = opt(&["inputTokens", "input_tokens"]).unwrap_or_default();
+    let cached = opt(&["cachedInputTokens", "cached_input_tokens"]);
+    Some(
+        AgentEvent::usage(
+            input.saturating_sub(cached.unwrap_or_default()),
+            opt(&["outputTokens", "output_tokens"]).unwrap_or_default(),
+        )
+        .with_cache(
+            cached,
+            opt(&["cacheWriteInputTokens", "cache_write_input_tokens"]),
+        )
+        .with_reasoning(opt(&["reasoningOutputTokens", "reasoning_output_tokens"])),
+    )
 }
 
 pub(crate) fn context_usage_event(params: &Value) -> Option<AgentEvent> {
@@ -918,6 +925,39 @@ mod tests {
             Some(AgentEvent::usage(1, 2))
         );
         assert_eq!(usage_event(&json!({})), None);
+    }
+
+    #[test]
+    fn usage_splits_cached_input_out_of_codex_input_total() {
+        // Real `last` snapshot shape (codex 0.146): inputTokens includes the
+        // cached prefix.
+        let last = json!({"totalTokens": 13837, "inputTokens": 13747,
+            "cachedInputTokens": 11008, "cacheWriteInputTokens": 0,
+            "outputTokens": 90, "reasoningOutputTokens": 64});
+        assert_eq!(
+            usage_event(&json!({"tokenUsage": {"last": last}})),
+            Some(
+                AgentEvent::usage(2739, 90)
+                    .with_cache(Some(11008), Some(0))
+                    .with_reasoning(Some(64))
+            )
+        );
+        assert_eq!(
+            usage_event(&json!({"token_usage": {"last": {"input_tokens": 100,
+                "cached_input_tokens": 30, "output_tokens": 5,
+                "reasoning_output_tokens": 2}}})),
+            Some(
+                AgentEvent::usage(70, 5)
+                    .with_cache(Some(30), None)
+                    .with_reasoning(Some(2))
+            )
+        );
+        // Cached > input never underflows.
+        assert_eq!(
+            usage_event(&json!({"tokenUsage": {"last": {"inputTokens": 5,
+                "cachedInputTokens": 9, "outputTokens": 1}}})),
+            Some(AgentEvent::usage(0, 1).with_cache(Some(9), None))
+        );
     }
 
     #[test]
