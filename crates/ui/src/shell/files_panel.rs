@@ -402,14 +402,21 @@ impl Shell {
     /// The explorer's own toggle. Opening docks the explorer into the right
     /// pane — opening the pane with just that portion when it was closed.
     pub(super) fn toggle_files_panel(&mut self, window: &mut Window, cx: &mut Context<Self>) {
-        if !self.files_panel_open(cx) {
+        let opening = !self.files_panel_open(cx);
+        if opening || self.promote_hidden_panel(AuxiliaryPanel::Files, cx) {
+            crate::telemetry::track(
+                cx,
+                "panel.toggled",
+                [("panel", "files".into()), ("open", true.into())],
+            );
             self.add_files_surface(window, cx);
             return;
         }
-        if self.promote_hidden_panel(AuxiliaryPanel::Files, cx) {
-            self.add_files_surface(window, cx);
-            return;
-        }
+        crate::telemetry::track(
+            cx,
+            "panel.toggled",
+            [("panel", "files".into()), ("open", false.into())],
+        );
         self.close_files_panel(cx);
         window.focus(&self.composer.focus_handle(cx), cx);
         if self.right_pane_open(cx) {

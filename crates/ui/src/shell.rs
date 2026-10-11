@@ -47,6 +47,7 @@ use crate::settings::devices::DevicesPage;
 use crate::settings::files::{FilesSettingsEvent, FilesSettingsPage};
 use crate::settings::harnesses::HarnessesPage;
 use crate::settings::notifications::{NotificationsEvent, NotificationsPage};
+use crate::settings::privacy::PrivacyPage;
 use crate::settings::shortcuts::{ShortcutsEvent, ShortcutsPage};
 use crate::settings::{
     self, CHAT_PANEL_MIN, ComposerSendBehavior, FILES_PANEL_MIN, JUMP_SLOTS, KeymapConfig,
@@ -546,6 +547,8 @@ pub enum SettingsSection {
     Notifications,
     Voice,
     Shortcuts,
+    /// Anonymous usage data: consent toggles, recent events, local usage.
+    Privacy,
     /// Composer and conversation behavior plus thread naming.
     #[default]
     General,
@@ -555,12 +558,13 @@ pub enum SettingsSection {
 
 impl SettingsSection {
     /// Sections shown in Settings. `Agents` is a legacy Accounts route alias.
-    pub const ALL: [SettingsSection; 10] = [
+    pub const ALL: [SettingsSection; 11] = [
         SettingsSection::General,
         SettingsSection::Appearance,
         SettingsSection::Notifications,
         SettingsSection::Voice,
         SettingsSection::Shortcuts,
+        SettingsSection::Privacy,
         SettingsSection::Harnesses,
         SettingsSection::Devices,
         SettingsSection::Files,
@@ -605,6 +609,7 @@ impl SettingsSection {
             SettingsSection::Notifications => "notifications",
             SettingsSection::Voice => "voice",
             SettingsSection::Shortcuts => "shortcuts",
+            SettingsSection::Privacy => "privacy",
             SettingsSection::General => "general",
             SettingsSection::Appshots => "appshots",
             SettingsSection::Archived => "archived",
@@ -622,6 +627,7 @@ impl SettingsSection {
             "notifications" => SettingsSection::Notifications,
             "voice" => SettingsSection::Voice,
             "shortcuts" => SettingsSection::Shortcuts,
+            "privacy" => SettingsSection::Privacy,
             "general" | "conversations" => SettingsSection::General,
             "appshots" => SettingsSection::Appshots,
             "archived" => SettingsSection::Archived,
@@ -647,6 +653,7 @@ impl SettingsSection {
             SettingsSection::Notifications => "Notifications",
             SettingsSection::Voice => "Voice",
             SettingsSection::Shortcuts => "Shortcuts",
+            SettingsSection::Privacy => "Privacy",
             SettingsSection::General => "General",
             SettingsSection::Appshots => "Appshots",
             SettingsSection::Archived => "Archived sessions",
@@ -2061,6 +2068,7 @@ pub struct Shell {
     appearance_page: Option<Entity<AppearancePage>>,
     files_settings_page: Option<Entity<FilesSettingsPage>>,
     notifications_page: Option<Entity<NotificationsPage>>,
+    privacy_page: Option<Entity<PrivacyPage>>,
     shortcuts_page: Option<Entity<ShortcutsPage>>,
     accounts_page: Option<Entity<AccountsPage>>,
     harnesses_page: Option<Entity<HarnessesPage>>,
@@ -2563,6 +2571,7 @@ impl Shell {
             appearance_page: None,
             files_settings_page: None,
             notifications_page: None,
+            privacy_page: None,
             shortcuts_page: None,
             accounts_page: None,
             harnesses_page: None,
@@ -3269,6 +3278,14 @@ impl Shell {
         self.pane_resize_active = None;
         self.pane_resize_dragging = None;
         self.settings.sidebar_collapsed = !self.settings.sidebar_collapsed;
+        crate::telemetry::track(
+            cx,
+            "panel.toggled",
+            [
+                ("panel", "sidebar".into()),
+                ("open", (!self.settings.sidebar_collapsed).into()),
+            ],
+        );
         // Record the open before targeting: the fit ranks columns by recency,
         // and an unrecorded sidebar would target the width of a hidden one.
         if !self.settings.sidebar_collapsed {
@@ -3289,6 +3306,12 @@ impl Shell {
             return;
         }
         self.set_surfaces_open(!self.right_pane_open(cx), cx);
+        let open = self.right_pane_open(cx);
+        crate::telemetry::track(
+            cx,
+            "panel.toggled",
+            [("panel", "changes".into()), ("open", open.into())],
+        );
     }
 
     /// Closing the last surface tab closes the surface host; a docked
@@ -3812,6 +3835,11 @@ impl Shell {
         if self.active_chat.is_empty() {
             return;
         }
+        crate::telemetry::track(
+            cx,
+            "panel.toggled",
+            [("panel", "browser".into()), ("open", true.into())],
+        );
         let key = self.panel_key(cx);
         let remote = {
             let state = self.state.read(cx);
@@ -4651,6 +4679,11 @@ impl Shell {
         let from = self.terminal_geometry.get().height;
         let key = self.panel_key(cx);
         let open = self.panels.toggle_terminal(&key);
+        crate::telemetry::track(
+            cx,
+            "panel.toggled",
+            [("panel", "terminal".into()), ("open", open.into())],
+        );
         self.terminal_tween = Some(WidthTween::new(from, self.terminal_target(cx)));
         let panel = self.terminal_panel(cx);
         panel.update(cx, |panel, cx| panel.set_open(open, cx));
@@ -5270,6 +5303,11 @@ impl Shell {
     /// from it, so a write that bypassed it would be undone by the next save.
     fn remember_settings_section(&mut self, section: SettingsSection, cx: &mut Context<Self>) {
         let section = section.canonical();
+        crate::telemetry::track(
+            cx,
+            "settings.page_viewed",
+            [("page", section.slug().into())],
+        );
         if self.settings.settings_section != section {
             self.settings.settings_section = section;
             self.schedule_save(cx);
@@ -5350,6 +5388,11 @@ impl Shell {
         cx: &mut Context<Self>,
     ) {
         self.pending_pull_request = None;
+        crate::telemetry::track(
+            cx,
+            "pull_request.opened",
+            [("remote", target.is_some().into())],
+        );
         if self.pull_requests_page.is_none() {
             self.pull_requests_page =
                 Some(cx.new(|cx| PullRequestsPage::new(self.state.clone(), cx)));
@@ -5708,6 +5751,15 @@ impl Shell {
                         });
                         page.clone().into_any_element()
                     }
+                    None => Empty.into_any_element(),
+                }
+            }
+            SettingsSection::Privacy => {
+                if self.privacy_page.is_none() {
+                    self.privacy_page = Some(cx.new(PrivacyPage::new));
+                }
+                match &self.privacy_page {
+                    Some(page) => page.clone().into_any_element(),
                     None => Empty.into_any_element(),
                 }
             }
@@ -7836,6 +7888,7 @@ impl Shell {
             SettingsSection::Notifications => icons::BELL,
             SettingsSection::Voice => icons::MICROPHONE,
             SettingsSection::Shortcuts => icons::KEYBOARD,
+            SettingsSection::Privacy => icons::EYE_CLOSED,
             SettingsSection::General => icons::SETTINGS,
             SettingsSection::Appshots => icons::MONITOR,
             SettingsSection::Archived => icons::ARCHIVE_MINIMALISTIC,
@@ -9265,6 +9318,11 @@ impl Shell {
             .when_some(self.render_connection_pill(theme, cx), |el, pill| {
                 el.child(pill)
             })
+            // First-run telemetry notice until acknowledged (engine-held, so
+            // every viewport on this engine stops showing it together).
+            .when_some(self.render_telemetry_notice(theme, cx), |el, notice| {
+                el.child(notice)
+            })
             // "Star on GitHub" banner until dismissed (persisted), then the
             // update strip — both above the user menu, below the lists.
             .when_some(github_star_banner, |el, banner| el.child(banner))
@@ -9278,6 +9336,68 @@ impl Shell {
                     .child(self.render_sidebar_footer_row(theme, cx)),
             )
             .into_any_element()
+    }
+
+    /// One-time notice that anonymous usage data is shared, with a way into
+    /// the Privacy page. Either button acknowledges it for good.
+    fn render_telemetry_notice(&self, theme: &Theme, cx: &mut Context<Self>) -> Option<AnyElement> {
+        if !crate::telemetry::notice_visible(cx) {
+            return None;
+        }
+        let tone = theme.accent;
+        let hover = theme.accent.opacity(0.16);
+        let button = |id: &'static str, label: &'static str| {
+            div()
+                .id(id)
+                .flex_none()
+                .px(px(8.0))
+                .py(px(2.0))
+                .rounded(px(4.0))
+                .cursor_pointer()
+                .hover(move |s| s.bg(hover))
+                .role(gpui::Role::Button)
+                .tab_index(0)
+                .focus_visible(move |s| s.border_1().border_color(tone))
+                .child(label)
+        };
+        Some(
+            div()
+                .id("telemetry-notice")
+                .mx(px(Theme::SPACE_SM))
+                .mb(px(Theme::SPACE_XS))
+                .px(px(Theme::SPACE_SM))
+                .py(px(6.0))
+                .rounded(px(Theme::CONTROL_RADIUS))
+                .bg(theme.accent_wash)
+                .flex()
+                .flex_col()
+                .gap(px(4.0))
+                .text_size(crate::typography::ui_rems(11.0))
+                .text_color(tone)
+                .child(div().font_weight(gpui::FontWeight::MEDIUM).child(
+                    "Zeron shares anonymous usage data to improve the app. \
+                             No prompts, code or paths.",
+                ))
+                .child(
+                    div()
+                        .flex()
+                        .flex_row()
+                        .gap(px(4.0))
+                        .child(button("telemetry-notice-settings", "Settings").on_click(
+                            cx.listener(|this, _, _, cx| {
+                                crate::telemetry::acknowledge_notice(cx);
+                                this.open_settings(SettingsSection::Privacy, cx);
+                            }),
+                        ))
+                        .child(button("telemetry-notice-ok", "OK").on_click(cx.listener(
+                            |_, _, _, cx| {
+                                crate::telemetry::acknowledge_notice(cx);
+                                cx.notify();
+                            },
+                        ))),
+                )
+                .into_any_element(),
+        )
     }
 
     /// "Star on GitHub" banner, styled like the update strip. Clicking it

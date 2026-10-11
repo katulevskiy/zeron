@@ -70,6 +70,7 @@ pub mod sound;
 pub mod state;
 pub(crate) mod surface_chrome;
 pub mod syntax_cache;
+pub mod telemetry;
 pub mod terminal;
 mod todo_panel;
 pub(crate) mod tool_images;
@@ -173,6 +174,7 @@ pub fn run_app(config: UiConfig) {
         let data_dir = config.boot().data_dir.clone();
         let ui_settings = settings::UiSettings::load(&data_dir);
         settings::init(ui_settings.clone(), data_dir.clone(), cx);
+        telemetry::init(cx);
         let font_availability = typography::register_fonts(cx);
         // Typography first: theme installation reads the effective family, so
         // the first frame has the final font and palette without a flash.
@@ -246,10 +248,20 @@ pub fn run_app(config: UiConfig) {
         cx.on_app_quit(move |cx| {
             settings::flush(cx);
             app_update::install_on_quit(cx);
-            let shutdown =
-                quit_state.read(cx).engine().cloned().map(|handle| {
-                    gpui_tokio::Tokio::spawn(cx, async move { handle.shutdown().await })
-                });
+            // Last telemetry batch goes out before the engine drains.
+            let final_events = telemetry::drain_for_quit(cx);
+            let shutdown = quit_state.read(cx).engine().cloned().map(|handle| {
+                gpui_tokio::Tokio::spawn(cx, async move {
+                    if let Some(params) = final_events {
+                        let send = handle
+                            .client()
+                            .call(zeron_rpc::methods::TRACK_EVENTS, params);
+                        let _ =
+                            tokio::time::timeout(std::time::Duration::from_millis(500), send).await;
+                    }
+                    handle.shutdown().await
+                })
+            });
             async move {
                 if let Some(task) = shutdown {
                     let _ = task.await;

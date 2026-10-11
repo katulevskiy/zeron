@@ -61,6 +61,7 @@ impl Shell {
             .device_name(&device)
             .unwrap_or("This device")
             .to_owned();
+        crate::telemetry::track(cx, "voice.started", [("kind", "orchestrator".into())]);
         self.voice.update(cx, |controller, cx| {
             controller.start(engine, device, config, voice, cx);
             controller.host_name = Some(host_name);

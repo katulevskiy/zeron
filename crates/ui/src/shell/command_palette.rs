@@ -210,6 +210,15 @@ impl Tab {
         Self::ALL.iter().position(|tab| *tab == self).unwrap_or(0)
     }
 
+    fn token(self) -> &'static str {
+        match self {
+            Self::All => "all",
+            Self::Threads => "threads",
+            Self::Commands => "commands",
+            Self::Files => "files",
+        }
+    }
+
     /// The neighbouring tab, wrapping (tab / shift-tab).
     fn step(self, forward: bool) -> Self {
         let count = Self::ALL.len();
@@ -257,6 +266,19 @@ enum Command {
 }
 
 impl Command {
+    /// Stable enum token for telemetry.
+    fn token(&self) -> &'static str {
+        match self {
+            Self::NewChat => "new_chat",
+            Self::NewProject => "new_project",
+            Self::Settings => "settings",
+            Self::Theme(AppearanceMode::System) => "theme_system",
+            Self::Theme(AppearanceMode::Light) => "theme_light",
+            Self::Theme(AppearanceMode::Dark) => "theme_dark",
+            Self::ArchiveThread => "archive_thread",
+        }
+    }
+
     fn label(&self) -> &'static str {
         match self {
             Self::NewChat => "New chat",
@@ -859,6 +881,7 @@ impl Shell {
         window: &mut Window,
         cx: &mut Context<Self>,
     ) {
+        self.track_palette_row(&row, cx);
         if let RowKind::Command(Command::Theme(mode)) = row.kind {
             // Keep the palette open so this ordinary action updates to its next state.
             crate::appearance::set_mode(mode, cx);
@@ -882,6 +905,25 @@ impl Shell {
                 self.open_palette_path(found.path, false, Some((line, column)), window, cx)
             }
         }
+    }
+
+    /// Which kind of row was picked, never which one (titles and paths are
+    /// content).
+    fn track_palette_row(&self, row: &PaletteRow, cx: &mut Context<Self>) {
+        let (kind, command) = match &row.kind {
+            RowKind::Command(command) => ("command", Some(command.token())),
+            RowKind::Chat(_) => ("chat", None),
+            RowKind::File { .. } => ("file", None),
+            RowKind::Content(_) => ("content", None),
+        };
+        let tab = self
+            .command_palette
+            .as_ref()
+            .map(|palette| palette.tab.token());
+        let props = [("kind", Some(kind)), ("command", command), ("tab", tab)]
+            .into_iter()
+            .filter_map(|(key, value)| value.map(|value| (key, value.into())));
+        crate::telemetry::track(cx, "palette.activated", props);
     }
 
     /// Open a workspace path of the focused chat: a file in an editor tab

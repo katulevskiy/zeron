@@ -198,6 +198,7 @@ impl Shell {
             cx.notify();
             return;
         }
+        crate::telemetry::track(cx, "side_chat.opened", [("unsaved", unsaved.into())]);
         let chat_id = chat.id.clone();
         let parent = self.state.clone();
         let state = cx.new(|cx| AppState::side_chat_state(&parent, chat, unsaved, cx));
