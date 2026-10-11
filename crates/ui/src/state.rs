@@ -2388,6 +2388,7 @@ impl AppState {
     /// account while the local profile is opening.
     pub fn prepare_runtime_replacement(&mut self, cx: &mut Context<Self>) {
         self.engine = None;
+        crate::telemetry::detach_engine(cx);
         self.watch_tasks.clear();
         self.transcript_task = None;
         self.change_request_tasks.clear();
@@ -2580,6 +2581,7 @@ impl AppState {
             self.harness_updates.clear();
         }
         self.engine = Some(handle.clone());
+        crate::telemetry::attach_engine(handle.clone(), cx);
         let mut watch_tasks = Vec::with_capacity(10);
         if let Some(task) = spawn_deferred_engine_watch(cx, handle.clone()) {
             watch_tasks.push(task);

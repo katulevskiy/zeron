@@ -236,6 +236,7 @@ impl Shell {
     /// `project` (the per-project `+` on a sidebar group header) homes the
     /// canvas on that project and wins over the sidebar filter.
     pub(super) fn open_new_session(&mut self, project: Option<String>, cx: &mut Context<Self>) {
+        crate::telemetry::track(cx, "session.new", [("project", project.is_some().into())]);
         self.command_palette = None;
         self.set_voice_stage_open(false, cx);
         self.set_route(Route::Chat, cx);

@@ -13885,6 +13885,7 @@ dependencies = [
  "zeron-proto",
  "zeron-rpc",
  "zeron-syntax",
+ "zeron-telemetry",
  "zeron-theme",
  "zeron-update",
  "zeron-veil",

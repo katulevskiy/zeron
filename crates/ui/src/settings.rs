@@ -24,6 +24,7 @@ pub mod devices;
 pub mod files;
 pub mod harnesses;
 pub mod notifications;
+pub mod privacy;
 pub mod shortcuts;
 pub mod thread_naming;
 pub mod wallpaper;
@@ -322,6 +323,9 @@ pub struct SettingsStore {
     /// changes, including a change back to its previous value.
     code_fences_generation: u64,
     save_task: Option<Task<()>>,
+    /// Settings as they stood before the first change not yet reported to
+    /// telemetry ([`crate::telemetry`] diffs it against `current` on its tick).
+    unreported_baseline: Option<UiSettings>,
 }
 
 impl Global for SettingsStore {}
@@ -347,6 +351,7 @@ impl SettingsStore {
             self.code_fences_generation = self.code_fences_generation.wrapping_add(1);
         }
         self.revision = self.revision.wrapping_add(1);
+        self.unreported_baseline.get_or_insert(before);
         true
     }
 }
@@ -361,7 +366,20 @@ pub fn init(settings: UiSettings, data_dir: impl Into<PathBuf>, cx: &mut App) {
         saved_revision: 0,
         code_fences_generation: 0,
         save_task: None,
+        unreported_baseline: None,
     });
+}
+
+/// The settings before and after everything written since the last call, or
+/// `None` when nothing changed. Telemetry reads this to report which options
+/// the user changed.
+pub(crate) fn take_changes_since_report(cx: &mut App) -> Option<(UiSettings, UiSettings)> {
+    if !cx.has_global::<SettingsStore>() {
+        return None;
+    }
+    let store = cx.global_mut::<SettingsStore>();
+    let before = store.unreported_baseline.take()?;
+    Some((before, store.current.clone()))
 }
 
 /// Latest settings, including mutations still inside the debounce window.
@@ -2853,6 +2871,7 @@ mod tests {
             saved_revision: 0,
             code_fences_generation: 0,
             save_task: None,
+            unreported_baseline: None,
         };
 
         store.current.sidebar_width = 300.0;
@@ -2911,6 +2930,7 @@ mod tests {
             saved_revision: 0,
             code_fences_generation: 0,
             save_task: None,
+            unreported_baseline: None,
         };
 
         assert!(store.update_current(|settings| settings.sidebar_width = 300.0));
@@ -2923,6 +2943,32 @@ mod tests {
 
         assert!(!store.update_current(|settings| settings.code_fences_fit_content = false));
         assert_eq!(store.code_fences_generation, 2);
+    }
+
+    #[test]
+    fn telemetry_baseline_is_the_state_before_the_first_unreported_change() {
+        let dir = tempfile::tempdir().unwrap();
+        let mut store = SettingsStore {
+            current: UiSettings::default(),
+            data_dir: dir.path().to_path_buf(),
+            revision: 0,
+            saved_revision: 0,
+            code_fences_generation: 0,
+            save_task: None,
+            unreported_baseline: None,
+        };
+
+        assert!(!store.update_current(|settings| settings.diff_wrap = false));
+        assert!(
+            store.unreported_baseline.is_none(),
+            "no-op writes are not changes"
+        );
+
+        assert!(store.update_current(|settings| settings.diff_wrap = true));
+        assert!(store.update_current(|settings| settings.diff_split = true));
+        let baseline = store.unreported_baseline.clone().unwrap();
+        assert!(!baseline.diff_wrap && !baseline.diff_split);
+        assert!(store.current.diff_wrap && store.current.diff_split);
     }
 
     #[test]

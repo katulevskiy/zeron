@@ -1506,6 +1506,14 @@ impl Pickers {
             self.compact_motion = compact::CompactMotion::default();
         }
         self.open.open(kind);
+        crate::telemetry::track(
+            cx,
+            "picker.opened",
+            [(
+                "kind",
+                crate::telemetry::snake_case(&format!("{kind:?}")).into(),
+            )],
+        );
         self.focus_on_mount = true;
         // The plain-div menus (branch / project / device) share one scroll
         // handle; a fresh open starts at the top. The model list resets its

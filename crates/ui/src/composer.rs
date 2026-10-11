@@ -2715,6 +2715,7 @@ impl ComposerInput {
             self.projection.normalize_range(self.selected_range.clone()),
         );
         self.transcriber = Some(transcriber);
+        crate::telemetry::track(cx, "dictation.started", [("kind", "composer".into())]);
         self.last_edit = None;
         let generation = self.dictation.generation;
         let started = Instant::now();
@@ -6652,6 +6653,12 @@ impl Composer {
                     this.failure_key = Some(key.clone());
                 }
                 if !staged.is_empty() && !this.queue_edit_finishing {
+                    let images = staged.iter().filter(|att| att.image().is_some()).count();
+                    crate::telemetry::track(
+                        cx,
+                        "attachment.added",
+                        [("count", staged.len().into()), ("images", images.into())],
+                    );
                     this.adopt_staged_attachments(key, staged, cx);
                     this.focus_pending = true;
                 }
