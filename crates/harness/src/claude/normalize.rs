@@ -694,10 +694,7 @@ impl Normalizer {
                 if let Some(id) = &f.session_id {
                     self.session_id = Some(id.clone());
                 }
-                let usage = AgentEvent::Usage {
-                    input_tokens: f.usage.input_tokens,
-                    output_tokens: f.usage.output_tokens,
-                };
+                let usage = AgentEvent::usage(f.usage.input_tokens, f.usage.output_tokens);
                 let done = if f.subtype == "success" {
                     AgentEvent::Done {
                         status: if interrupted {

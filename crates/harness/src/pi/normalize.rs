@@ -88,10 +88,7 @@ impl Normalizer {
                 if usage.is_object() {
                     let n = |key| usage[key].as_u64().unwrap_or(0);
                     let input = n("input") + n("cacheRead") + n("cacheWrite");
-                    events.push(AgentEvent::Usage {
-                        input_tokens: input,
-                        output_tokens: n("output"),
-                    });
+                    events.push(AgentEvent::usage(input, n("output")));
                     events.push(AgentEvent::ContextUsage {
                         tokens: Some(input + n("output")),
                         window: self.window,

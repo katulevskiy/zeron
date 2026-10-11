@@ -958,10 +958,10 @@ fn map_shim_frame(frame: &Value, interrupted: bool) -> Vec<AgentEvent> {
                 _ => Vec::new(),
             }
         }
-        "usage" => vec![AgentEvent::Usage {
-            input_tokens: frame.get("input").and_then(Value::as_u64).unwrap_or(0),
-            output_tokens: frame.get("output").and_then(Value::as_u64).unwrap_or(0),
-        }],
+        "usage" => vec![AgentEvent::usage(
+            frame.get("input").and_then(Value::as_u64).unwrap_or(0),
+            frame.get("output").and_then(Value::as_u64).unwrap_or(0),
+        )],
         "turn" => {
             let status = frame.get("status").and_then(Value::as_str).unwrap_or("");
             let error = frame

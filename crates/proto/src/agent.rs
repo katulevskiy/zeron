@@ -603,11 +603,24 @@ pub enum AgentEvent {
         tokens: Option<u64>,
         window: Option<u64>,
     },
-    /// Kept as a harness passthrough (rate-limit probes); never persisted to docs.
+    /// Billing usage for (part of) a turn; several reports in one turn sum.
+    /// Never persisted to docs — it feeds rate-limit probes and product
+    /// telemetry. `input_tokens` is UNCACHED input on every harness; cache
+    /// traffic rides the optional fields, which stay `None` (unknown, not
+    /// zero) when the harness doesn't report them. Build with
+    /// [`AgentEvent::usage`] and the `with_*` setters.
     #[serde(rename_all = "camelCase")]
     Usage {
         input_tokens: u64,
         output_tokens: u64,
+        #[serde(default, skip_serializing_if = "Option::is_none")]
+        cache_read_tokens: Option<u64>,
+        #[serde(default, skip_serializing_if = "Option::is_none")]
+        cache_write_tokens: Option<u64>,
+        #[serde(default, skip_serializing_if = "Option::is_none")]
+        reasoning_tokens: Option<u64>,
+        #[serde(default, skip_serializing_if = "Option::is_none")]
+        cost_usd: Option<f64>,
     },
     /// The agent advertised (or changed) its slash-command set — ACP
     /// `available_commands_update`. The engine caches the latest list per
@@ -667,9 +680,69 @@ pub enum AgentEvent {
     },
 }
 
+impl AgentEvent {
+    /// A [`AgentEvent::Usage`] with only the always-known counts; chain the
+    /// `with_*` setters for what the harness additionally reports.
+    pub fn usage(input_tokens: u64, output_tokens: u64) -> Self {
+        AgentEvent::Usage {
+            input_tokens,
+            output_tokens,
+            cache_read_tokens: None,
+            cache_write_tokens: None,
+            reasoning_tokens: None,
+            cost_usd: None,
+        }
+    }
+
+    /// Sets cache read/write counts on a `Usage`; no-op on other variants.
+    pub fn with_cache(mut self, read: Option<u64>, write: Option<u64>) -> Self {
+        if let AgentEvent::Usage {
+            cache_read_tokens,
+            cache_write_tokens,
+            ..
+        } = &mut self
+        {
+            *cache_read_tokens = read;
+            *cache_write_tokens = write;
+        }
+        self
+    }
+
+    /// Sets reasoning-token count on a `Usage`; no-op on other variants.
+    pub fn with_reasoning(mut self, tokens: Option<u64>) -> Self {
+        if let AgentEvent::Usage {
+            reasoning_tokens, ..
+        } = &mut self
+        {
+            *reasoning_tokens = tokens;
+        }
+        self
+    }
+
+    /// Sets the provider-reported cost on a `Usage`; no-op on other variants.
+    pub fn with_cost_usd(mut self, cost: Option<f64>) -> Self {
+        if let AgentEvent::Usage { cost_usd, .. } = &mut self {
+            *cost_usd = cost;
+        }
+        self
+    }
+}
+
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    #[test]
+    fn usage_without_extras_keeps_legacy_wire_shape() {
+        let json = serde_json::to_value(AgentEvent::usage(3, 4)).unwrap();
+        assert_eq!(
+            json,
+            serde_json::json!({"type": "usage", "inputTokens": 3, "outputTokens": 4})
+        );
+        let legacy: AgentEvent =
+            serde_json::from_str(r#"{"type":"usage","inputTokens":3,"outputTokens":4}"#).unwrap();
+        assert_eq!(legacy, AgentEvent::usage(3, 4));
+    }
 
     #[test]
     fn agent_event_round_trips() {

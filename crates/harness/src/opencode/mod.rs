@@ -3002,10 +3002,7 @@ async fn handle_bus_event(ctx: BusCtx<'_>) -> BusOutcome {
                     let input = tokens.get("input").and_then(Value::as_u64).unwrap_or(0);
                     let output = tokens.get("output").and_then(Value::as_u64).unwrap_or(0);
                     if input > 0 || output > 0 {
-                        *pending_usage = Some(AgentEvent::Usage {
-                            input_tokens: input,
-                            output_tokens: output,
-                        });
+                        *pending_usage = Some(AgentEvent::usage(input, output));
                     }
                 }
                 let events = replay_pending(main_feed, message, true, turn);

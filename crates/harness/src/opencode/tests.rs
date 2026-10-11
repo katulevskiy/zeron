@@ -646,6 +646,7 @@ async fn v2_wire_streams_text_and_settles_on_execution_success() {
                     AgentEvent::Usage {
                         input_tokens,
                         output_tokens,
+                        ..
                     } => {
                         usage = Some((input_tokens, output_tokens));
                     }

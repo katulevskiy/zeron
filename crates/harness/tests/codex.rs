@@ -329,15 +329,7 @@ async fn happy_path_maps_deltas_items_usage_and_done() {
     // Usage rides just before the terminal Done.
     let usage_pos = events
         .iter()
-        .position(|e| {
-            matches!(
-                e,
-                AgentEvent::Usage {
-                    input_tokens: 42,
-                    output_tokens: 7
-                }
-            )
-        })
+        .position(|e| *e == AgentEvent::usage(42, 7))
         .expect("usage emitted");
     let done_pos = events
         .iter()

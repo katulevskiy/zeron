@@ -154,10 +154,7 @@ async fn happy_path_maps_shim_frames_and_tags_subagents() {
                 && matches!(event.as_ref(), AgentEvent::Done { status: DoneStatus::Completed, .. })
     )));
 
-    assert!(events.contains(&AgentEvent::Usage {
-        input_tokens: 11,
-        output_tokens: 5
-    }));
+    assert!(events.contains(&AgentEvent::usage(11, 5)));
     assert!(matches!(
         events.last(),
         Some(AgentEvent::Done {

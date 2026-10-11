@@ -2942,10 +2942,8 @@ fn usage_from_response(res: &Result<Value, HarnessError>) -> Option<AgentEvent> 
     };
     let input = count(&["inputTokens", "input_tokens"]);
     let output = count(&["outputTokens", "output_tokens"]);
-    (input.is_some() || output.is_some()).then(|| AgentEvent::Usage {
-        input_tokens: input.unwrap_or(0),
-        output_tokens: output.unwrap_or(0),
-    })
+    (input.is_some() || output.is_some())
+        .then(|| AgentEvent::usage(input.unwrap_or(0), output.unwrap_or(0)))
 }
 
 /// Map a finished `session/prompt` result to the run's terminal status.

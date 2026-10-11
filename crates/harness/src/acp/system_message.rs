@@ -254,10 +254,7 @@ mod tests {
                 tokens: Some(42),
                 window: Some(1000),
             },
-            AgentEvent::Usage {
-                input_tokens: 42,
-                output_tokens: 10,
-            },
+            AgentEvent::usage(42, 10),
             AgentEvent::AvailableCommands {
                 commands: Vec::new(),
             },

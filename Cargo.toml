@@ -23,6 +23,7 @@ members = [
     "crates/client",
     "crates/mcp",
     "crates/text",
+    "crates/telemetry",
     "apps/zeron",
 ]
 
@@ -47,6 +48,7 @@ zeron-engine = { path = "crates/engine" }
 zeron-rpc = { path = "crates/rpc" }
 zeron-update = { path = "crates/update" }
 zeron-ui = { path = "crates/ui" }
+zeron-telemetry = { path = "crates/telemetry" }
 zeron-syntax = { path = "crates/syntax" }
 zeron-markdown = { path = "crates/markdown" }
 zeron-mobile = { path = "crates/mobile" }
@@ -140,6 +142,9 @@ tracing-subscriber = { version = "0.3", features = ["env-filter"] }
 clap = { version = "4", features = ["derive"] }
 chrono = { version = "0.4", features = ["serde"] }
 sha2 = "0.10"
+# Telemetry batches are gzip-compressed on the wire.
+flate2 = "1"
+memchr = "2"
 zip = { version = "7.2", default-features = false, features = ["deflate-flate2-zlib-rs"] }
 notify = "7"
 portable-pty = "0.8"

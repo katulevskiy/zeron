@@ -13763,6 +13763,25 @@ dependencies = [
 ]
 
 [[package]]
+name = "zeron-telemetry"
+version = "0.2.111"
+dependencies = [
+ "chrono",
+ "flate2",
+ "memchr",
+ "reqwest",
+ "rusqlite",
+ "serde",
+ "serde_json",
+ "sha2",
+ "tempfile",
+ "tokio",
+ "tracing",
+ "uuid",
+ "zeron-proto",
+]
+
+[[package]]
 name = "zeron-text"
 version = "0.2.111"
 dependencies = [

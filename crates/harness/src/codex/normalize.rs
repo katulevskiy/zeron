@@ -131,10 +131,10 @@ pub(crate) fn usage_event(params: &Value) -> Option<AgentEvent> {
             .and_then(Value::as_u64)
             .unwrap_or_default()
     };
-    Some(AgentEvent::Usage {
-        input_tokens: count(&["inputTokens", "input_tokens"]),
-        output_tokens: count(&["outputTokens", "output_tokens"]),
-    })
+    Some(AgentEvent::usage(
+        count(&["inputTokens", "input_tokens"]),
+        count(&["outputTokens", "output_tokens"]),
+    ))
 }
 
 pub(crate) fn context_usage_event(params: &Value) -> Option<AgentEvent> {
@@ -911,17 +911,11 @@ mod tests {
     fn usage_reads_last_snapshot_under_both_spellings() {
         assert_eq!(
             usage_event(&json!({"tokenUsage": {"last": {"inputTokens": 42, "outputTokens": 7}}})),
-            Some(AgentEvent::Usage {
-                input_tokens: 42,
-                output_tokens: 7
-            })
+            Some(AgentEvent::usage(42, 7))
         );
         assert_eq!(
             usage_event(&json!({"token_usage": {"last": {"input_tokens": 1, "output_tokens": 2}}})),
-            Some(AgentEvent::Usage {
-                input_tokens: 1,
-                output_tokens: 2
-            })
+            Some(AgentEvent::usage(1, 2))
         );
         assert_eq!(usage_event(&json!({})), None);
     }
