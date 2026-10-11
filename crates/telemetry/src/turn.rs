@@ -38,13 +38,20 @@ impl TurnMeta {
         let model_options = request
             .model_options
             .iter()
-            .filter(|(k, v)| short_token(k) && v.as_str().is_none_or(short_token))
+            .filter(|(k, v)| {
+                short_token(k)
+                    && match v {
+                        Value::String(s) => short_token(s),
+                        Value::Bool(_) | Value::Number(_) => true,
+                        _ => false,
+                    }
+            })
             .take(16)
             .map(|(k, v)| (k.clone(), v.clone()))
             .collect();
         TurnMeta {
             harness: enum_str(&harness),
-            model: request.model.clone().filter(|m| !m.is_empty()),
+            model: request.model.as_deref().and_then(model_token),
             reasoning: request.reasoning.as_ref().map(enum_str),
             sandbox: enum_str(&request.sandbox),
             auto_approve: request.auto_approve,
@@ -81,6 +88,27 @@ fn enum_str(value: &impl serde::Serialize) -> String {
         Ok(Value::String(s)) => s,
         _ => "unknown".to_string(),
     }
+}
+
+/// A model id as reported, unless it looks like something other than an id:
+/// local model paths, URLs, or free text collapse to `custom`. Slashes stay
+/// (`openrouter/anthropic/claude-…` is an id), leading ones don't.
+pub fn model_token(model: &str) -> Option<String> {
+    let model = model.trim();
+    if model.is_empty() {
+        return None;
+    }
+    let id_like = model.len() <= 80
+        && !model.starts_with(['/', '~', '.'])
+        && !model.contains("://")
+        && model.chars().all(|c| {
+            c.is_ascii_alphanumeric() || matches!(c, '_' | '-' | '.' | '/' | ':' | '@' | '[' | ']')
+        });
+    Some(if id_like {
+        model.to_string()
+    } else {
+        "custom".to_string()
+    })
 }
 
 fn short_token(s: &str) -> bool {
@@ -200,8 +228,8 @@ impl TurnTracker {
     pub fn observe(&mut self, event: &AgentEvent) {
         match event {
             AgentEvent::SessionStarted { model, .. } => {
-                if !model.is_empty() {
-                    self.resolved_model = Some(model.clone());
+                if let Some(model) = model_token(model) {
+                    self.resolved_model = Some(model);
                 }
             }
             AgentEvent::TextDelta { text } => {
@@ -218,8 +246,8 @@ impl TurnTracker {
                 self.tool_calls += 1;
                 if call.is_subagent_spawn() {
                     self.subagents_spawned += 1;
-                    if let Some(model) = call.subagent_model() {
-                        *self.subagent_models.entry(model.to_string()).or_default() += 1;
+                    if let Some(model) = call.subagent_model().and_then(model_token) {
+                        *self.subagent_models.entry(model).or_default() += 1;
                     }
                 }
                 *self.tools.entry(tool_kind(call)).or_default() += 1;
@@ -529,6 +557,48 @@ mod tests {
         let p = t.finish(DoneStatus::Errored).props().clone();
         assert_eq!(p["error_kind"], "rate_limit");
         assert!(!serde_json::to_string(&p).unwrap().contains("secret-org"));
+    }
+
+    #[test]
+    fn model_ids_survive_but_paths_and_urls_do_not() {
+        assert_eq!(
+            model_token("claude-opus-4-1[1m]").as_deref(),
+            Some("claude-opus-4-1[1m]")
+        );
+        assert_eq!(
+            model_token("openrouter/anthropic/claude").as_deref(),
+            Some("openrouter/anthropic/claude")
+        );
+        assert_eq!(
+            model_token("gpt-5.1-codex:high").as_deref(),
+            Some("gpt-5.1-codex:high")
+        );
+        assert_eq!(
+            model_token("/Users/me/models/llama.gguf").as_deref(),
+            Some("custom")
+        );
+        assert_eq!(model_token("~/m.gguf").as_deref(), Some("custom"));
+        assert_eq!(
+            model_token("http://10.0.0.2:8080/v1").as_deref(),
+            Some("custom")
+        );
+        assert_eq!(model_token("my secret model").as_deref(), Some("custom"));
+        assert_eq!(model_token(""), None);
+    }
+
+    #[test]
+    fn structured_model_option_values_are_dropped() {
+        let mut req = request();
+        req.model_options
+            .insert("blob".into(), serde_json::json!({"path": "/etc/passwd"}));
+        req.model_options
+            .insert("list".into(), serde_json::json!(["/a"]));
+        req.model_options
+            .insert("budget".into(), serde_json::json!(4096));
+        let meta = TurnMeta::from_request(HarnessId::ClaudeCode, &req);
+        assert!(!meta.model_options.contains_key("blob"));
+        assert!(!meta.model_options.contains_key("list"));
+        assert_eq!(meta.model_options["budget"], 4096);
     }
 
     #[test]

@@ -91,13 +91,7 @@ pub(crate) async fn run(inner: Arc<Inner>, mut rx: mpsc::Receiver<Command>, cfg:
                 Some(Command::Purge) => {
                     // Channel order: anything captured before the opt-out
                     // was pushed above; clear it all here, after the fact.
-                    worker.buffer.clear();
-                    if let Ok(mut recent) = worker.inner.recent.lock() {
-                        recent.clear();
-                    }
-                    if let Some(spool) = &worker.cfg.spool {
-                        let _ = std::fs::remove_file(spool);
-                    }
+                    worker.discard();
                 }
                 None => {
                     worker.take_rollups();
@@ -124,7 +118,28 @@ struct Worker {
 }
 
 impl Worker {
+    /// The single consent gate for anything leaving the process or landing
+    /// on disk. Checked at every send, not just at capture: a spool written
+    /// before an opt-out (or before `DO_NOT_TRACK` was exported) must never
+    /// be replayed after it.
+    fn consented(&self) -> bool {
+        self.inner.collecting.load(Ordering::Relaxed)
+    }
+
+    fn discard(&mut self) {
+        self.buffer.clear();
+        if let Ok(mut recent) = self.inner.recent.lock() {
+            recent.clear();
+        }
+        if let Some(spool) = &self.cfg.spool {
+            let _ = std::fs::remove_file(spool);
+        }
+    }
+
     fn push(&mut self, env: Envelope) {
+        if !self.consented() {
+            return;
+        }
         let event = self.serialize(env);
         self.remember(&event);
         if let Some(path) = &self.cfg.debug_log {
@@ -165,6 +180,10 @@ impl Worker {
     }
 
     async fn flush(&mut self) {
+        if !self.consented() {
+            self.discard();
+            return;
+        }
         if self.buffer.is_empty() {
             return;
         }
@@ -262,6 +281,10 @@ impl Worker {
         let Some(path) = self.cfg.spool.clone() else {
             return;
         };
+        if !self.consented() {
+            let _ = std::fs::remove_file(&path);
+            return;
+        }
         let Ok(file) = std::fs::File::open(&path) else {
             return;
         };
@@ -273,6 +296,9 @@ impl Worker {
         let _ = std::fs::remove_file(&path);
         let mut batches = batches;
         while let Some(batch) = batches.pop_front() {
+            if !self.consented() {
+                return;
+            }
             let Value::Array(events) = batch else {
                 continue;
             };

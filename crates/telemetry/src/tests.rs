@@ -234,3 +234,37 @@ fn disabled_handle_is_inert() {
     assert!(!t.is_collecting());
     assert!(t.status().recent.is_empty());
 }
+
+#[tokio::test]
+async fn spool_is_never_replayed_after_opt_out() {
+    let dir = tempfile::tempdir().unwrap();
+    let (url, bodies) = capture_server(vec![503]).await;
+    let t = Telemetry::start_with(opts(dir.path()), tuning(Some(url.clone())), None);
+    t.capture(Event::new(names::APP_STARTED));
+    t.flush(Duration::from_secs(5)).await;
+    let spool = dir.path().join("telemetry/spool.jsonl");
+    assert!(spool.exists());
+    drop(t);
+
+    // Opted out between launches (CLI / settings file).
+    write_settings(
+        dir.path(),
+        &TelemetrySettings {
+            enabled: false,
+            ..TelemetrySettings::default()
+        },
+    );
+    let t2 = Telemetry::start_with(opts(dir.path()), tuning(Some(url.clone())), None);
+    t2.flush(Duration::from_secs(5)).await;
+    assert!(events_of(&bodies.lock().unwrap()).is_empty());
+    assert!(!spool.exists(), "spool discarded, not sent");
+
+    // Same for an environment opt-out with settings still enabled.
+    write_settings(dir.path(), &TelemetrySettings::default());
+    let t3 = Telemetry::start_with(opts(dir.path()), tuning(Some(url)), None);
+    t3.capture(Event::new(names::APP_STARTED));
+    drop(t3);
+    let t4 = Telemetry::start_with(opts(dir.path()), tuning(None), Some("DO_NOT_TRACK"));
+    t4.flush(Duration::from_secs(5)).await;
+    assert!(events_of(&bodies.lock().unwrap()).len() <= 1);
+}
