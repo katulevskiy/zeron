@@ -148,7 +148,11 @@ pub(crate) struct Inner {
     stats: Stats,
     recent: Mutex<VecDeque<Value>>,
     common: Map<String, Value>,
+    /// Properties that change during the process's life (workspace scope
+    /// after a sign-in swaps runtimes, relay connectivity).
+    context: RwLock<Map<String, Value>>,
     started: Instant,
+    first_run: bool,
 }
 
 impl Inner {
@@ -158,7 +162,14 @@ impl Inner {
             .read()
             .map(|id| id.clone())
             .unwrap_or_else(|_| Identity::new("poisoned"));
-        let mut props = event.props;
+        let mut props = match self.context.read() {
+            Ok(context) if !context.is_empty() => {
+                let mut props = context.clone();
+                props.extend(event.props);
+                props
+            }
+            _ => event.props,
+        };
         props.insert("account_linked".into(), identity.account_linked.into());
         Envelope {
             name: event.name,
@@ -276,7 +287,9 @@ impl Telemetry {
                 stats: Stats::default(),
                 recent: Mutex::new(VecDeque::new()),
                 common: Map::new(),
+                context: RwLock::new(Map::new()),
                 started: Instant::now(),
+                first_run: false,
             }),
         }
     }
@@ -308,7 +321,7 @@ impl Telemetry {
         };
         let state_dir = opts.data_dir.join("telemetry");
         let settings = load_settings(&state_dir);
-        let install_id = identity::load_or_create_install_id(&state_dir);
+        let (install_id, first_run) = identity::load_or_create_install_id(&state_dir);
         let identity = Identity::new(&install_id);
         let collecting =
             settings.enabled && !matches!(env_override, Some(EnvOverride::ForcedOff(_)));
@@ -332,7 +345,6 @@ impl Telemetry {
             "run_mode".into(),
             serde_json::to_value(opts.run_mode).unwrap_or_default(),
         );
-        common.insert("workspace_scope".into(), opts.workspace_scope.into());
         common.insert("device_hash".into(), hash("device", &opts.device_id).into());
         common.insert("install_hash".into(), identity.install.to_string().into());
         common.insert(
@@ -353,7 +365,12 @@ impl Telemetry {
             stats: Stats::default(),
             recent: Mutex::new(VecDeque::new()),
             common,
+            context: RwLock::new(Map::from_iter([(
+                "workspace_scope".to_string(),
+                Value::from(opts.workspace_scope),
+            )])),
             started: Instant::now(),
+            first_run,
         });
         let cfg = WorkerConfig {
             endpoint: tuning.endpoint,
@@ -401,6 +418,12 @@ impl Telemetry {
         self.inner.collecting.load(Ordering::Relaxed)
     }
 
+    /// This install's telemetry identity was minted by this process — a new
+    /// install (or one whose state dir was wiped).
+    pub fn first_run(&self) -> bool {
+        self.inner.first_run
+    }
+
     /// Time since this handle started (process uptime for the engine).
     pub fn uptime(&self) -> Duration {
         self.inner.started.elapsed()
@@ -411,6 +434,16 @@ impl Telemetry {
     pub fn set_account(&self, account_id: Option<&str>) {
         if let Ok(mut identity) = self.inner.identity.write() {
             *identity = identity.with_account(account_id);
+        }
+    }
+
+    /// Sets a property stamped on every subsequent event (`None` removes it).
+    pub fn set_context(&self, key: &'static str, value: Option<Value>) {
+        if let Ok(mut context) = self.inner.context.write() {
+            match value {
+                Some(value) => context.insert(key.to_string(), value),
+                None => context.remove(key),
+            };
         }
     }
 
@@ -522,6 +555,46 @@ impl Telemetry {
             let _ = tokio::time::timeout(timeout, done).await;
         }
     }
+}
+
+static GLOBAL: RwLock<Option<Telemetry>> = RwLock::new(None);
+static DISABLED: std::sync::OnceLock<Telemetry> = std::sync::OnceLock::new();
+
+/// The process's telemetry handle — inert until [`install_global`]. Event
+/// sources anywhere in the engine report through this, the way `tracing`
+/// macros reach the installed subscriber, so no handle has to be threaded
+/// through every service constructor.
+pub fn global() -> Telemetry {
+    if let Ok(slot) = GLOBAL.read()
+        && let Some(telemetry) = slot.as_ref()
+    {
+        return telemetry.clone();
+    }
+    DISABLED.get_or_init(Telemetry::disabled).clone()
+}
+
+/// Installs the process-wide handle. The first install wins (one engine per
+/// process; a headed runtime swap after sign-in keeps the same telemetry) —
+/// returns `false` when one was already installed.
+pub fn install_global(telemetry: &Telemetry) -> bool {
+    let Ok(mut slot) = GLOBAL.write() else {
+        return false;
+    };
+    if slot.is_some() {
+        return false;
+    }
+    *slot = Some(telemetry.clone());
+    true
+}
+
+/// Shorthand for `global().capture(event)`.
+pub fn capture(event: Event) {
+    global().capture(event);
+}
+
+/// Shorthand for `global().record(..)`.
+pub fn record(metric: &'static str, key: &str, elapsed: Option<Duration>, ok: bool) {
+    global().record(metric, key, elapsed, ok);
 }
 
 /// Reads persisted settings without starting anything (CLI, engine-less).

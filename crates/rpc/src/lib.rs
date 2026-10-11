@@ -24,9 +24,10 @@ mod server;
 
 pub use client::{RpcClient, RpcSubscription, connect_ws};
 pub use device_room::{
-    DeviceFrameHeader, DeviceLink, HostRelay, HostRelayConfig, LinkCache, LinkCacheConfig,
-    NudgeHandler, PeerLiveness, PeerLivenessProbe, StaticToken, TokenError, TokenSource,
-    decode_device_frame, device_room_ws_url, encode_device_frame,
+    DeviceFrameHeader, DeviceLink, HostRelay, HostRelayConfig, HostSessionObserver,
+    HostSessionReport, LinkCache, LinkCacheConfig, NudgeHandler, PeerLiveness, PeerLivenessProbe,
+    StaticToken, TokenError, TokenSource, decode_device_frame, device_room_ws_url,
+    encode_device_frame,
 };
 pub use server::{serve_connection, serve_ws_listener};
 
@@ -97,6 +98,21 @@ pub mod methods {
     /// app foregrounded). No params; IPC-only. Each room ignores the hint
     /// unless it has been broadcast-quiet ≥30s, so this is cheap to spam.
     pub const PROBE_SYNC: &str = "ProbeSync";
+    /// Product telemetry status for the privacy settings page
+    /// (`zeron_telemetry::TelemetryStatus`: settings, whether collecting /
+    /// uploading, environment overrides, the recent events exactly as sent).
+    /// No params; IPC-only.
+    pub const TELEMETRY_STATUS: &str = "TelemetryStatus";
+    /// Patch telemetry settings (`zeron_telemetry::TelemetrySettingsPatch`);
+    /// replies with the new `TelemetryStatus`. IPC-only.
+    pub const SET_TELEMETRY_SETTINGS: &str = "SetTelemetrySettings";
+    /// Viewport-reported product events, batched:
+    /// `{surface, events: [{name, props}]}`. Names/props are sanitized
+    /// engine-side; a disabled engine accepts and drops them. IPC-only.
+    pub const TRACK_EVENTS: &str = "TrackEvents";
+    /// Local agent-usage stats (opt-in external import + Zeron turns):
+    /// `zeron_telemetry::external::UsageStats`. No params; IPC-only.
+    pub const USAGE_STATS: &str = "UsageStats";
     /// Live sync introspection (`zeron sync` / debug surfaces): per-room
     /// connection state, last pushed-frame/ack ages, rejoin/probe/resync
     /// counters for the workspace room and every open chat doc. No params;

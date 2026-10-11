@@ -280,6 +280,21 @@ impl TokenSource for StaticToken {
 /// open it and drain"); the engine warms/opens the chat doc.
 pub type NudgeHandler = Arc<dyn Fn(String) -> bool + Send + Sync>;
 
+/// One host-relay session's outcome, for observability (product telemetry).
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub struct HostSessionReport {
+    /// The socket reached the DeviceRoom (false: the dial itself failed).
+    pub connected: bool,
+    /// The session ended with an error rather than a clean close.
+    pub failed: bool,
+    pub duration: Duration,
+    /// Remote client connections served during the session.
+    pub clients: u32,
+}
+
+/// Called once per ended host session; must not block.
+pub type HostSessionObserver = Arc<dyn Fn(HostSessionReport) + Send + Sync>;
+
 pub struct HostRelayConfig {
     /// Edge base URL (`http(s)://…`; rewritten to `ws(s)` for the socket).
     pub edge_url: String,
@@ -287,6 +302,7 @@ pub struct HostRelayConfig {
     pub token: Arc<dyn TokenSource>,
     /// Reconnect delay after a session ends (a small jitter is added).
     pub retry: Duration,
+    pub observer: Option<HostSessionObserver>,
 }
 
 impl HostRelayConfig {
@@ -300,6 +316,7 @@ impl HostRelayConfig {
             device_id: device_id.into(),
             token,
             retry: Duration::from_secs(5),
+            observer: None,
         }
     }
 }
@@ -342,8 +359,14 @@ impl HostRelay {
                         );
                         let url = format!("{url}&nudgeAck=1");
                         let started = tokio::time::Instant::now();
+                        let mut report = HostSessionReport {
+                            connected: false,
+                            failed: false,
+                            duration: Duration::ZERO,
+                            clients: 0,
+                        };
                         let outcome = {
-                            let session = host_session(&url, &service, &on_nudge);
+                            let session = host_session(&url, &service, &on_nudge, &mut report);
                             tokio::pin!(session);
                             loop {
                                 tokio::select! {
@@ -363,6 +386,11 @@ impl HostRelay {
                             }
                         };
                         let healthy = started.elapsed() >= HOST_HEALTHY_SESSION;
+                        if let Some(observer) = &config.observer {
+                            report.duration = started.elapsed();
+                            report.failed = outcome.is_err();
+                            observer(report);
+                        }
                         match outcome {
                             Ok(()) => {
                                 tracing::info!("device-room: host session ended; reconnecting");
@@ -470,11 +498,13 @@ async fn host_session(
     url: &str,
     service: &Arc<dyn RpcService>,
     on_nudge: &NudgeHandler,
+    report: &mut HostSessionReport,
 ) -> Result<(), RpcError> {
     let ws = zeron_sync::dial::connect_ws(url)
         .await
         .map_err(|e| RpcError::Transport(format!("device room unreachable: {e}")))?;
     tracing::info!("device-room: host connected");
+    report.connected = true;
     let (out_tx, out_rx) = mpsc::channel::<Vec<u8>>(256);
     let (in_tx, mut in_rx) = mpsc::channel::<Vec<u8>>(1);
     let transport = zeron_sync::socket::pump_with_timing(
@@ -487,9 +517,14 @@ async fn host_session(
         SILENCE_LEASE,
     );
     let mut conns: HashMap<String, VirtualConn> = HashMap::new();
+    let clients = &mut report.clients;
     let dispatch = async {
         while let Some(bytes) = in_rx.recv().await {
+            let before = conns.len();
             handle_host_frame(&bytes, &mut conns, service, &out_tx, on_nudge).await;
+            if conns.len() > before {
+                *clients += 1;
+            }
         }
     };
     // Poll the transport even when a virtual RPC connection is backpressured.

@@ -66,14 +66,14 @@ impl Identity {
 }
 
 /// Reads `<dir>/install-id`, minting (atomically) a fresh v4 UUID on first
-/// run. Falls back to an ephemeral id if the disk refuses — telemetry must
-/// never block startup.
-pub(crate) fn load_or_create_install_id(dir: &Path) -> String {
+/// run — the boolean is `true` then. Falls back to an ephemeral id if the
+/// disk refuses — telemetry must never block startup.
+pub(crate) fn load_or_create_install_id(dir: &Path) -> (String, bool) {
     let path = dir.join("install-id");
     if let Ok(existing) = std::fs::read_to_string(&path) {
         let existing = existing.trim();
         if uuid::Uuid::parse_str(existing).is_ok() {
-            return existing.to_string();
+            return (existing.to_string(), false);
         }
     }
     let fresh = uuid::Uuid::new_v4().to_string();
@@ -88,7 +88,7 @@ pub(crate) fn load_or_create_install_id(dir: &Path) -> String {
     if let Err(err) = write() {
         tracing::debug!(%err, "telemetry: install id not persisted");
     }
-    fresh
+    (fresh, true)
 }
 
 #[cfg(test)]
@@ -105,9 +105,10 @@ mod tests {
     #[test]
     fn install_id_persists() {
         let dir = tempfile::tempdir().unwrap();
-        let a = load_or_create_install_id(dir.path());
-        let b = load_or_create_install_id(dir.path());
+        let (a, first) = load_or_create_install_id(dir.path());
+        let (b, again) = load_or_create_install_id(dir.path());
         assert_eq!(a, b);
+        assert!(first && !again);
     }
 
     #[test]
