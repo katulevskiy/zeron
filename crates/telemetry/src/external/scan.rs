@@ -433,10 +433,7 @@ fn parse_pi(line: &[u8], session: u64, horizon: &str) -> Option<Record> {
             .unwrap_or_else(|| "unknown".into()),
         origin: "unknown".into(),
         session,
-        dedupe: message
-            .response_id
-            .as_deref()
-            .map(|id| hash64(&["pi", id])),
+        dedupe: message.response_id.as_deref().map(|id| hash64(&["pi", id])),
         input: usage.input,
         output: usage.output,
         cache_read: usage.cache_read,

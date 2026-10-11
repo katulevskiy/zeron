@@ -259,7 +259,10 @@ pub fn run_app(config: UiConfig) {
                         let _ =
                             tokio::time::timeout(std::time::Duration::from_millis(500), send).await;
                     }
-                    handle.shutdown().await
+                    handle.shutdown().await;
+                    // app.stopped + bounded flush; a no-op when this viewport
+                    // was attached to a daemon (no engine in this process).
+                    zeron_engine::telemetry::process_exit().await
                 })
             });
             async move {

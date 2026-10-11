@@ -135,10 +135,7 @@ async fn status(engine: Option<&zeron_rpc::RpcClient>, data_dir: &Path) -> anyho
             " (hashed install)"
         }
     );
-    println!(
-        "sent/dropped:  {} / {}",
-        status["sent"], status["dropped"]
-    );
+    println!("sent/dropped:  {} / {}", status["sent"], status["dropped"]);
     if let Some(err) = status["lastError"].as_str() {
         println!("last error:    {err}");
     }
@@ -303,7 +300,9 @@ fn print_usage(rows: &[DailyUsage], days: i64) {
             human(s.output),
             human(s.cache_read),
             human(s.cache_write),
-            s.cost.map(|c| format!("${c:.2}")).unwrap_or_else(|| "-".into()),
+            s.cost
+                .map(|c| format!("${c:.2}"))
+                .unwrap_or_else(|| "-".into()),
         );
     }
 }

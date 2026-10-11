@@ -166,7 +166,11 @@ impl UsageScanner {
     }
 
     fn scan_at(&mut self, now: chrono::DateTime<chrono::Utc>) -> ScanReport {
-        let day = |offset: i64| (now - chrono::Duration::days(offset)).format("%Y-%m-%d").to_string();
+        let day = |offset: i64| {
+            (now - chrono::Duration::days(offset))
+                .format("%Y-%m-%d")
+                .to_string()
+        };
         let horizon = day(RETENTION_DAYS);
         let roots = self.roots.clone();
 
@@ -256,7 +260,8 @@ impl UsageScanner {
 
         // Prune everything outside the window.
         state.aggregates.retain(|d| d.day >= horizon);
-        let live: std::collections::HashSet<String> = state.aggregates.iter().map(agg_key).collect();
+        let live: std::collections::HashSet<String> =
+            state.aggregates.iter().map(agg_key).collect();
         state.sessions.retain(|k, _| live.contains(k));
         state.seen.retain(|_, d| *d >= horizon);
         state.reported_days.retain(|d| *d >= horizon);
@@ -266,12 +271,18 @@ impl UsageScanner {
         report.unreported = state
             .aggregates
             .iter()
-            .filter(|d| d.day < settled && d.day >= backfill && !state.reported_days.contains(&d.day))
+            .filter(|d| {
+                d.day < settled && d.day >= backfill && !state.reported_days.contains(&d.day)
+            })
             .cloned()
             .collect();
-        report.unreported.sort_by(|a, b| (&a.day, &a.source, &a.model).cmp(&(&b.day, &b.source, &b.model)));
+        report
+            .unreported
+            .sort_by(|a, b| (&a.day, &a.source, &a.model).cmp(&(&b.day, &b.source, &b.model)));
         report.window = state.aggregates.clone();
-        report.window.sort_by(|a, b| (&b.day, &a.source, &a.model).cmp(&(&a.day, &b.source, &b.model)));
+        report
+            .window
+            .sort_by(|a, b| (&b.day, &a.source, &a.model).cmp(&(&a.day, &b.source, &b.model)));
         self.save();
         report
     }
@@ -485,7 +496,9 @@ mod scanner_tests {
     fn scans_all_sources_incrementally_with_dedupe() {
         let home = tempfile::tempdir().unwrap();
         let state = tempfile::tempdir().unwrap();
-        let claude = home.path().join(".claude/projects/-home-alice-secret/s-1.jsonl");
+        let claude = home
+            .path()
+            .join(".claude/projects/-home-alice-secret/s-1.jsonl");
         append(
             &claude,
             &[
@@ -498,7 +511,9 @@ mod scanner_tests {
         );
         // Subagent transcripts live one level deeper.
         append(
-            &home.path().join(".claude/projects/-p/s-1/subagents/agent-1.jsonl"),
+            &home
+                .path()
+                .join(".claude/projects/-p/s-1/subagents/agent-1.jsonl"),
             &[claude_line("msg_3", "req_3", "2026-10-07T12:00:00Z", 1)],
         );
         let codex = home.path().join(".codex/sessions/2026/10/07/rollout.jsonl");
@@ -523,10 +538,12 @@ mod scanner_tests {
         );
         append(
             &home.path().join(".pi/agent/sessions/slug/a.jsonl"),
-            &[serde_json::json!({"type": "message", "timestamp": "2026-10-07T08:00:00Z", "message": {
-                "role": "assistant", "model": "glm-4.6", "responseId": "r1",
-                "usage": {"input": 3, "output": 4, "cacheRead": 5, "cacheWrite": 6, "cost": {"total": 0.25}}
-            }})],
+            &[
+                serde_json::json!({"type": "message", "timestamp": "2026-10-07T08:00:00Z", "message": {
+                    "role": "assistant", "model": "glm-4.6", "responseId": "r1",
+                    "usage": {"input": 3, "output": 4, "cacheRead": 5, "cacheWrite": 6, "cost": {"total": 0.25}}
+                }}),
+            ],
         );
         let db = rusqlite::Connection::open(home.path().join("opencode.db")).unwrap();
         db.execute_batch(
@@ -551,7 +568,14 @@ mod scanner_tests {
 
         let mut scanner = UsageScanner::new(state.path().to_path_buf(), roots(home.path()));
         let report = scanner.scan_at(now());
-        let find = |source: &str| report.window.iter().find(|d| d.source == source).cloned().unwrap();
+        let find = |source: &str| {
+            report
+                .window
+                .iter()
+                .find(|d| d.source == source)
+                .cloned()
+                .unwrap()
+        };
 
         let claude_day = find("claude-code");
         assert_eq!(claude_day.day, "2026-10-07");
@@ -581,12 +605,22 @@ mod scanner_tests {
         scanner.mark_reported(&report.unreported);
 
         // Appends are picked up incrementally; old bytes aren't re-read.
-        append(&claude, &[claude_line("msg_9", "req_9", "2026-10-07T13:00:00Z", 1)]);
+        append(
+            &claude,
+            &[claude_line("msg_9", "req_9", "2026-10-07T13:00:00Z", 1)],
+        );
         let mut fresh = UsageScanner::new(state.path().to_path_buf(), roots(home.path()));
         let second = fresh.scan_at(now());
         assert_eq!(second.files_scanned, 1);
-        assert!(second.unreported.is_empty(), "already reported day not resent");
-        let claude_day = second.window.iter().find(|d| d.source == "claude-code").unwrap();
+        assert!(
+            second.unreported.is_empty(),
+            "already reported day not resent"
+        );
+        let claude_day = second
+            .window
+            .iter()
+            .find(|d| d.source == "claude-code")
+            .unwrap();
         assert_eq!(claude_day.requests, 4);
 
         let serialized = serde_json::to_string(&second.window).unwrap();
