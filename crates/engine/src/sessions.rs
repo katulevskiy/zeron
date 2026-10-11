@@ -1304,11 +1304,9 @@ impl Inner {
     fn turn_begin(&self, chat_id: &str, harness: HarnessId, request: &RunRequest) {
         use zeron_telemetry::turn::{TurnMeta, TurnTracker};
         let mut turns = lock(&self.turns);
-        if let Some(turn) = turns.get_mut(chat_id) {
-            turn.observe(&AgentEvent::Steered {
-                assistant_message_id: None,
-                next_assistant_message_id: None,
-            });
+        // A prompt into a turn still in flight is a steer; the harness
+        // confirms it with its own `Steered`, which the tracker counts.
+        if turns.contains_key(chat_id) {
             return;
         }
         let turn = TurnTracker::new(TurnMeta::from_request(harness, request));
@@ -2770,7 +2768,25 @@ async fn drive_run(
             };
             event
         };
-        inner.turn_observe(&chat_id, &event);
+        // The startup-crash retry below re-dispatches this same prompt: its
+        // Done must not close the turn the retry continues.
+        let startup_retry_pending = resume_state.resume_injected
+            && !resume_state.idle
+            && !resume_state.startup_retry
+            && !saw_session_started
+            && folded.is_empty()
+            && !interrupted
+            && retry_request.is_some()
+            && matches!(
+                &event,
+                AgentEvent::Done {
+                    status: DoneStatus::Errored,
+                    ..
+                }
+            );
+        if !startup_retry_pending {
+            inner.turn_observe(&chat_id, &event);
+        }
 
         // ── subagent routing ───────────────────────────────────────────
         // Tagged events NEVER fold into the parent transcript: they stream
@@ -3412,8 +3428,10 @@ async fn drive_run(
         .filter(|h| h.run_id == run_id)
         .map(|h| std::mem::take(&mut *lock(&h.routed_steers)).into())
         .unwrap_or_default();
-    inner.remove_run(&chat_id, &run_id);
+    // Before `remove_run`: once the run is gone a new dispatch may open the
+    // chat's next turn, which this must not close.
     inner.turn_abandon(&chat_id, interrupted);
+    inner.remove_run(&chat_id, &run_id);
     inner.set_status_with_completion(&chat_id, final_status, false, final_completed_turn);
     // A Stop cancels the messages it found waiting; one accepted after it
     // began is still the user's next message and must run.

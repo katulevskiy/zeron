@@ -210,9 +210,30 @@ fn skip_setting(key: &str) -> bool {
 
 /// A settings value worth reporting: a bool, a number or a short enum token.
 /// Device-local font names collapse to `installed`.
-fn settings_scalar(value: &Value) -> Option<Value> {
+/// Settings whose string values are enum ids (safe to report). Any other
+/// string-valued setting is reported as changed without its value, and is
+/// left out of the snapshot: a new free-form field can't leak by default.
+const ENUM_STRING_SETTINGS: &[&str] = &[
+    "composer_send_behavior",
+    "sidebar_organization",
+    "sidebar_sort",
+    "appshot_destination",
+    "appearance",
+    "git_history_author_display",
+    "ui_font_family",
+    "terminal_font_family",
+    "code_font_family",
+    "pull_request_destination",
+    "accent",
+    "surface",
+    "new_thread_background_effect",
+    "reduce_motion",
+];
+
+fn settings_scalar(key: &str, value: &Value) -> Option<Value> {
     match value {
         Value::String(text) if text.starts_with("installed:") => Some(json!("installed")),
+        Value::String(_) if !ENUM_STRING_SETTINGS.contains(&key) => None,
         other => clean_scalar(other),
     }
 }
@@ -234,7 +255,8 @@ pub(crate) fn settings_changes(before: &Value, after: &Value) -> Vec<(String, Op
             if skip_setting(&snake) || !is_identifier(&snake, 40) {
                 return None;
             }
-            Some((snake, after.get(key).and_then(settings_scalar)))
+            let value = after.get(key).and_then(|v| settings_scalar(&snake, v));
+            Some((snake, value))
         })
         .take(MAX_SETTING_EVENTS)
         .collect()
@@ -252,7 +274,7 @@ pub(crate) fn settings_snapshot(settings: &Value) -> Vec<(String, Value)> {
             if skip_setting(&snake) || !is_identifier(&snake, 40) {
                 return None;
             }
-            settings_scalar(value).map(|value| (snake, value))
+            settings_scalar(&snake, value).map(|value| (snake, value))
         })
         .collect();
     entries.sort_by(|a, b| a.0.cmp(&b.0));
@@ -900,6 +922,25 @@ mod tests {
             vec![("accent".to_string(), None), ("note".to_string(), None)]
         );
         assert!(settings_changes(&json!(null), &after).is_empty());
+    }
+
+    /// Every string or nullable field of `UiSettings` must be classified:
+    /// an enum id (reportable) or skipped. A new free-form field fails here
+    /// instead of silently shipping in `settings.snapshot`.
+    #[test]
+    fn every_string_setting_is_classified() {
+        let defaults = serde_json::to_value(crate::settings::UiSettings::default()).unwrap();
+        for (key, value) in defaults.as_object().unwrap() {
+            if value.is_string() || value.is_null() {
+                let snake = snake_case(key);
+                assert!(
+                    skip_setting(&snake) || ENUM_STRING_SETTINGS.contains(&snake.as_str()),
+                    "classify UiSettings::{snake} in crates/ui/src/telemetry.rs"
+                );
+            }
+        }
+        let snapshot = settings_snapshot(&json!({"futureFreeText": "acme corp"}));
+        assert!(snapshot.is_empty(), "unclassified strings stay out");
     }
 
     #[test]

@@ -212,7 +212,8 @@ pub(crate) struct ResultFrame {
     pub errors: Vec<Value>,
     #[serde(default)]
     pub usage: UsageBody,
-    /// Whole-turn USD cost the CLI computed (includes subagents).
+    /// USD cost the CLI computed (includes subagents), cumulative over the
+    /// process lifetime; the normalizer turns it into a per-turn delta.
     #[serde(default)]
     pub total_cost_usd: Option<f64>,
     #[serde(default)]

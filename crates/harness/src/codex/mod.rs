@@ -72,7 +72,7 @@ use crate::{Harness, HarnessError, RunControls};
 use catalog::{REASONING_LEVELS, sandbox_mode, sandbox_policy_value, static_models, to_effort};
 use normalize::{
     ChildRoute, Phase, ReasoningStream, delta_text, item_id, item_type, notification_thread_id,
-    route_child_notification, turn_error_message, turn_id, usage_event,
+    route_child_notification, turn_error_message, turn_id,
 };
 
 /// Locate the device's installed Codex CLI: `CODEX_EXECUTABLE`, then our own
@@ -1315,8 +1315,9 @@ async fn run_session(session: Session) {
     // (item/completed only) still emits its text exactly once.
     let mut streamed_text: HashSet<String> = HashSet::new();
     let mut reasoning_streams: HashMap<String, ReasoningStream> = HashMap::new();
-    // Token usage is held until the turn ends, emitted just before Done.
-    let mut pending_usage: Option<AgentEvent> = None;
+    // Token usage (summed over the turn's model requests) is held until the
+    // turn ends, emitted just before Done.
+    let mut turn_usage = normalize::TurnUsage::default();
     // Steers whose `turn/steer` lost the turn-completed race; delivered as the
     // next `turn/start` when the expected turn's end notification arrives.
     // Each carries the configuration it was sent with, adopted when its own
@@ -1532,9 +1533,7 @@ async fn run_session(session: Session) {
                     "thread/tokenUsage/updated" => {
                         if let Some(usage) = normalize::context_usage_event(&params)
                             && !send(&event_tx, usage).await { break 'main; }
-                        if let Some(usage) = usage_event(&params) {
-                            pending_usage = Some(usage);
-                        }
+                        turn_usage.observe(&params);
                     }
 
                     // Codex's `update_plan` tool: the whole checklist, replaced
@@ -1572,7 +1571,7 @@ async fn run_session(session: Session) {
                         // Item ids never span turns; without this the set grew
                         // one entry per message for a persistent session's life.
                         streamed_text.clear();
-                        if let Some(usage) = pending_usage.take()
+                        if let Some(usage) = turn_usage.take()
                             && !send(&event_tx, usage).await
                         {
                             break 'main;
@@ -1650,7 +1649,7 @@ async fn run_session(session: Session) {
                         router.note_completed(&id);
                         stop_when_announced = false;
                         accepted_steers.clear();
-                        if let Some(usage) = pending_usage.take()
+                        if let Some(usage) = turn_usage.take()
                             && !send(&event_tx, usage).await
                         {
                             break 'main;

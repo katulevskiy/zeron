@@ -1795,7 +1795,7 @@ impl RpcService for EngineRpc {
     /// rest are timed into the hourly rollup (and a few become product
     /// events) around the real dispatch.
     async fn handle(&self, method: &str, params: serde_json::Value) -> Result<RpcReply, RpcError> {
-        if let Some(reply) = crate::telemetry::handle_rpc(method, &params).await {
+        if let Some(reply) = crate::telemetry::handle_rpc(self.origin, method, &params).await {
             return reply;
         }
         let forwarded = forwardable(method)

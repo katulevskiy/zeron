@@ -11,8 +11,17 @@ discarded, never sent later.
 
 - **Settings → Privacy → Share anonymous usage data**
 - `zeron telemetry disable`
-- `ZERON_TELEMETRY=0` in the engine's environment (wins over the setting)
-- `DO_NOT_TRACK=1` ([consoledonottrack.com](https://consoledonottrack.com))
+- `ZERON_TELEMETRY=0` in the engine's environment (wins over the setting;
+  any value other than `1`/`true`/`on`/`yes` means off)
+- `DO_NOT_TRACK=1` ([consoledonottrack.com](https://consoledonottrack.com)),
+  which wins over everything, including `ZERON_TELEMETRY=1`
+
+A settings file that exists but can't be read counts as off.
+
+Headless engines print a notice on stderr at every start until it is
+acknowledged (`zeron telemetry ack`, or OK on the desktop notice). The
+telemetry RPCs answer only local viewports: a remote device on the same
+account can't read or change this machine's telemetry.
 
 `zeron telemetry status` shows the current state and why.
 `zeron telemetry events` prints the most recent events exactly as they are
@@ -32,13 +41,18 @@ profiles (`$process_person_profile` is always false).
 Enforcement is structural, not by convention:
 
 - Engine events are built only from typed fields (enums, counts, durations,
-  token numbers); the code that builds them never reads text fields.
+  token numbers). Text is only ever measured (byte counts) or classified
+  (error kind), never copied.
 - Events from viewports are sanitized by the engine: names must be short
   identifiers, property values must be booleans, numbers or short
   identifier-like tokens. Anything with a space, slash, `:` or `@` is dropped.
-- Model ids that look like paths, URLs or free text become `custom`. MCP tool
-  names collapse to `mcp`. Error messages become a coarse kind (`rate_limit`,
-  `auth`, `network`, `context_overflow`, …).
+- Model ids that look like absolute paths, URLs, emails or free text become
+  `custom` (slash-separated ids such as `openrouter/org/model` are kept —
+  that's how providers name models). Tool names are reported only from a
+  fixed list of built-in tools; MCP tools are `mcp` and anything else is
+  `other`. Error messages become a coarse kind (`rate_limit`, `auth`,
+  `network`, `context_overflow`, …). RPC method names that aren't plain
+  identifiers roll up as `unknown`.
 - `crates/engine/tests/telemetry.rs` runs a turn full of secrets through the
   real engine and asserts none of them appears in anything recorded.
 
@@ -64,12 +78,12 @@ Every event carries: `app_version`, `os`, `arch`, `build`
 | `app.stopped` | engine process exit | `uptime_secs` |
 | `app.heartbeat` | ≤ once a day | installed / enabled harnesses; chat counts (total, active 7d, archived, side, hosted here, worktree); active chats by harness, model, sandbox, reasoning; spaces (total, here, git); devices (total, seen 7d, by platform); `auto_update` |
 | `turn.started` | a prompt reaches an agent | `harness`, `model`, `reasoning`, `sandbox`, `auto_approve`, `attachments`, `worktree`, `resumed`, `zeron_mcp`, `prompt_size` (bucket), `model_options` (ids only) |
-| `turn.finished` | the turn ends | everything in `turn.started` plus `outcome` (`completed`/`interrupted`/`errored`), `duration_ms`, `ttft_ms`, `tool_calls`, `tools` (counts by kind), `tool_errors`, `subagents_spawned`, `subagent_models`, `steers`, `input_requests`, `error_events`, `error_kind`, `generated_images`, `output_chars`, `reasoning_chars`, `context_tokens`, `context_window`, `context_pct`, `input_tokens`, `output_tokens`, `cache_read_tokens`, `cache_write_tokens`, `reasoning_tokens`, `cost_usd`, `total_tokens`, `subagent_*_tokens`, `usage_reported`, `usage_complete` |
+| `turn.finished` | the turn ends | everything in `turn.started` plus `outcome` (`completed`/`interrupted`/`errored`), `duration_ms`, `ttft_ms`, `tool_calls`, `tools` (counts by kind), `tool_errors`, `subagents_spawned`, `subagent_models`, `steers`, `input_requests`, `error_events`, `error_kind`, `generated_images`, `output_bytes`, `reasoning_bytes`, `context_tokens`, `context_window`, `context_pct`, `input_tokens`, `output_tokens`, `cache_read_tokens`, `cache_write_tokens`, `reasoning_tokens`, `cost_usd`, `total_tokens`, `subagent_*_tokens`, `usage_reported`, `usage_complete` |
 | `chat.created` | new chat | `harness`, `model`, `side`, `in_space`, `custom_cwd`, `remote` |
 | `space.created` | new space | `git`, `remote` |
 | `repo.added` | add / clone / create repo | `via` |
 | `worktree.created`, `worktree.removed`, `terminal.opened`, `project_action.run`, `local_import.finished` | the action | `remote` |
-| `upload.committed` | attachment uploaded | `mime_class` (`image`, …) |
+| `upload.committed` | attachment uploaded | `remote` |
 | `harness.installed`, `harness.toggled`, `harness.updated`, `agent_account.activated` | the action | `harness`, `enabled` |
 | `source_control.action` | PR comment, discard, fetch, switch ref | `action` |
 | `auth.changed` | sign-in state changes | `state` |
@@ -98,6 +112,12 @@ the turns that are safe for per-model comparisons (usage reported, no
 subagents, no model reroute). Compare aggregate ratios by dividing summed
 totals, not by averaging per-turn ratios.
 
+A turn's usage covers every model request in it (Codex and OpenCode report
+per request; Zeron sums them). Claude's cost is the per-turn delta of the
+CLI's cumulative `total_cost_usd`, which includes background subagent spend
+between turns; the first turn after `--resume` may include earlier spend.
+`steers` counts prompts delivered into a turn already producing output.
+
 | Agent | input | cache read | cache write | reasoning | cost |
 | --- | --- | --- | --- | --- | --- |
 | Claude Code | ✓ | ✓ | ✓ | ✓ (thinking) | ✓ |
@@ -105,7 +125,9 @@ totals, not by averaging per-turn ratios.
 | OpenCode | ✓ | ✓ | ✓ | ✓ | ✓ |
 | Pi | ✓ | ✓ | ✓ | when reported | ✓ |
 | Cursor | ✓ | ✓ | ✓ | when reported | |
-| ACP (Devin, Grok, …) | ✓ | when reported | when reported | when reported | |
+| ACP (Devin, Grok, …) | as reported¹ | when reported | when reported | when reported | |
+
+¹ Some ACP adapters report input including cached tokens.
 
 ## Usage from other agent CLIs (opt-in)
 

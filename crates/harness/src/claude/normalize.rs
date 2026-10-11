@@ -208,6 +208,11 @@ pub(crate) struct Normalizer {
     assistant_message_id: String,
     /// Last session id seen (init or result) — used for synthetic Dones.
     pub session_id: Option<String>,
+    /// The previous `result`'s `total_cost_usd`. The CLI's cost counter is
+    /// cumulative over the process lifetime and one normalizer serves the
+    /// whole process (every turn, wake turns included), so per-turn cost is
+    /// the difference between consecutive results.
+    last_total_cost_usd: Option<f64>,
 }
 
 impl Normalizer {
@@ -220,6 +225,7 @@ impl Normalizer {
             agent_spawn_tools: std::collections::HashSet::new(),
             assistant_message_id: new_message_id(),
             session_id: None,
+            last_total_cost_usd: None,
         }
     }
 
@@ -695,11 +701,24 @@ impl Normalizer {
                     self.session_id = Some(id.clone());
                 }
                 // `input_tokens` is already uncached; cache traffic and cost
-                // ride the optional fields.
+                // ride the optional fields. `usage` is this turn's own (live
+                // transcripts: a later result's counts are far below its
+                // cumulative `modelUsage`), but `total_cost_usd` is
+                // process-cumulative, so report the delta.
+                let cost = f.total_cost_usd.map(|total| {
+                    let delta = match self.last_total_cost_usd {
+                        // A counter that went backwards was reset: the new
+                        // total is all this turn's.
+                        Some(prev) if total >= prev => total - prev,
+                        _ => total,
+                    };
+                    self.last_total_cost_usd = Some(total);
+                    delta
+                });
                 let usage = AgentEvent::usage(f.usage.input_tokens, f.usage.output_tokens)
                     .with_cache(f.usage.cache_read_tokens, f.usage.cache_write_tokens)
                     .with_reasoning(f.usage.output_tokens_details.thinking_tokens)
-                    .with_cost_usd(f.total_cost_usd);
+                    .with_cost_usd(cost);
                 let done = if f.subtype == "success" {
                     AgentEvent::Done {
                         status: if interrupted {
@@ -889,6 +908,37 @@ mod tests {
                 .with_reasoning(Some(150))
                 .with_cost_usd(Some(0.0421))
         );
+    }
+
+    #[test]
+    fn result_cost_is_the_delta_over_a_persistent_process() {
+        let result = |total: &str| {
+            crate::claude::wire::parse_frame(&format!(
+                r#"{{"type":"result","subtype":"success","total_cost_usd":{total},"usage":{{"input_tokens":1,"output_tokens":2}}}}"#
+            ))
+            .expect("frame parses")
+        };
+        let cost = |events: Vec<AgentEvent>| match &events[0] {
+            AgentEvent::Usage { cost_usd, .. } => *cost_usd,
+            other => panic!("expected usage, got {other:?}"),
+        };
+        let mut norm = Normalizer::new();
+        // First result carries the full value; later turns only their share.
+        assert_eq!(cost(norm.normalize(result("0.25"), false)), Some(0.25));
+        let second = cost(norm.normalize(result("0.75"), false)).unwrap();
+        assert!((second - 0.5).abs() < 1e-12, "{second}");
+        let third = cost(norm.normalize(result("0.75"), false)).unwrap();
+        assert_eq!(third, 0.0);
+        // A result without a cost reports none and keeps the baseline.
+        let bare = crate::claude::wire::parse_frame(
+            r#"{"type":"result","subtype":"success","usage":{"input_tokens":1,"output_tokens":2}}"#,
+        )
+        .unwrap();
+        assert_eq!(cost(norm.normalize(bare, false)), None);
+        let fourth = cost(norm.normalize(result("1.0"), false)).unwrap();
+        assert!((fourth - 0.25).abs() < 1e-12, "{fourth}");
+        // A counter that goes backwards was reset.
+        assert_eq!(cost(norm.normalize(result("0.1"), false)), Some(0.1));
     }
 
     #[test]

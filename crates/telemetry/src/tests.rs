@@ -164,7 +164,8 @@ async fn opting_out_stops_and_purges() {
     t.update_settings(TelemetrySettingsPatch {
         enabled: Some(false),
         ..Default::default()
-    });
+    })
+    .unwrap();
     t.capture(Event::new(names::APP_STOPPED));
     t.count("rpc", "x");
     t.flush(Duration::from_secs(5)).await;
@@ -188,7 +189,8 @@ async fn env_override_wins_over_settings() {
     t.update_settings(TelemetrySettingsPatch {
         enabled: Some(true),
         ..Default::default()
-    });
+    })
+    .unwrap();
     assert!(!t.is_collecting());
     assert_eq!(
         t.status().override_reason.as_deref(),
@@ -253,18 +255,57 @@ async fn spool_is_never_replayed_after_opt_out() {
             enabled: false,
             ..TelemetrySettings::default()
         },
-    );
+    )
+    .unwrap();
     let t2 = Telemetry::start_with(opts(dir.path()), tuning(Some(url.clone())), None);
     t2.flush(Duration::from_secs(5)).await;
     assert!(events_of(&bodies.lock().unwrap()).is_empty());
     assert!(!spool.exists(), "spool discarded, not sent");
 
     // Same for an environment opt-out with settings still enabled.
-    write_settings(dir.path(), &TelemetrySettings::default());
+    write_settings(dir.path(), &TelemetrySettings::default()).unwrap();
     let t3 = Telemetry::start_with(opts(dir.path()), tuning(Some(url)), None);
     t3.capture(Event::new(names::APP_STARTED));
     drop(t3);
     let t4 = Telemetry::start_with(opts(dir.path()), tuning(None), Some("DO_NOT_TRACK"));
     t4.flush(Duration::from_secs(5)).await;
     assert!(events_of(&bodies.lock().unwrap()).len() <= 1);
+}
+
+#[test]
+fn env_opt_outs_fail_closed() {
+    assert_eq!(env_override_for_test(None, None), None);
+    assert_eq!(env_override_for_test(Some("1"), None), Some("on"));
+    assert_eq!(
+        env_override_for_test(Some("0"), None),
+        Some("ZERON_TELEMETRY")
+    );
+    // Anything but an explicit "on" is off.
+    assert_eq!(
+        env_override_for_test(Some("disable"), None),
+        Some("ZERON_TELEMETRY")
+    );
+    assert_eq!(
+        env_override_for_test(Some("n"), None),
+        Some("ZERON_TELEMETRY")
+    );
+    // DO_NOT_TRACK beats an explicit on.
+    assert_eq!(
+        env_override_for_test(Some("1"), Some("1")),
+        Some("DO_NOT_TRACK")
+    );
+    assert_eq!(
+        env_override_for_test(None, Some("true")),
+        Some("DO_NOT_TRACK")
+    );
+    assert_eq!(env_override_for_test(None, Some("0")), None);
+}
+
+#[tokio::test]
+async fn corrupt_settings_fail_closed() {
+    let dir = tempfile::tempdir().unwrap();
+    std::fs::create_dir_all(dir.path().join("telemetry")).unwrap();
+    std::fs::write(dir.path().join("telemetry/settings.json"), b"{not json").unwrap();
+    let t = Telemetry::start_with(opts(dir.path()), tuning(None), None);
+    assert!(!t.is_collecting());
 }

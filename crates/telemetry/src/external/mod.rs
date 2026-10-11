@@ -112,7 +112,9 @@ struct ScanState {
     sessions: std::collections::HashMap<String, Vec<u64>>,
     /// Dedupe id → day it was seen (pruned with the window).
     seen: std::collections::HashMap<u64, String>,
-    reported_days: std::collections::BTreeSet<String>,
+    /// Aggregate keys (day|source|model|origin) already sent, so a model
+    /// first seen late for an already-reported day still goes out.
+    reported: std::collections::BTreeSet<String>,
 }
 
 impl UsageScanner {
@@ -187,13 +189,19 @@ impl UsageScanner {
         collect(&roots.pi_sessions, 2, scan::Kind::Pi);
 
         let state = self.load();
+        let horizon_time =
+            std::time::SystemTime::from(now - chrono::Duration::days(RETENTION_DAYS));
         let jobs: Vec<_> = paths
             .into_iter()
             .filter_map(|(path, kind)| {
+                let meta = std::fs::metadata(&path).ok()?;
+                // Untouched since before the window: nothing in it can count.
+                if meta.modified().is_ok_and(|m| m < horizon_time) {
+                    return None;
+                }
                 let key = path.to_string_lossy().into_owned();
                 let cursor = state.files.get(&key).cloned().unwrap_or_default();
-                let len = std::fs::metadata(&path).ok()?.len();
-                (len != cursor.offset).then_some((path, kind, cursor))
+                (meta.len() != cursor.offset).then_some((path, kind, cursor))
             })
             .collect();
         let threads = std::thread::available_parallelism()
@@ -264,7 +272,7 @@ impl UsageScanner {
             state.aggregates.iter().map(agg_key).collect();
         state.sessions.retain(|k, _| live.contains(k));
         state.seen.retain(|_, d| *d >= horizon);
-        state.reported_days.retain(|d| *d >= horizon);
+        state.reported.retain(|k| live.contains(k));
 
         let settled = day(SETTLE_DAYS - 1);
         let backfill = day(BACKFILL_DAYS);
@@ -272,7 +280,7 @@ impl UsageScanner {
             .aggregates
             .iter()
             .filter(|d| {
-                d.day < settled && d.day >= backfill && !state.reported_days.contains(&d.day)
+                d.day < settled && d.day >= backfill && !state.reported.contains(&agg_key(d))
             })
             .cloned()
             .collect();
@@ -287,11 +295,11 @@ impl UsageScanner {
         report
     }
 
-    /// Marks the given days reported so they're never sent twice.
+    /// Marks the given aggregates reported so they're never sent twice.
     pub fn mark_reported(&mut self, days: &[DailyUsage]) {
         let state = self.load();
         for d in days {
-            state.reported_days.insert(d.day.clone());
+            state.reported.insert(agg_key(d));
         }
         self.save();
     }
@@ -616,6 +624,16 @@ mod scanner_tests {
             second.unreported.is_empty(),
             "already reported day not resent"
         );
+
+        // A model first seen late for an already-reported day still goes out.
+        let late = claude_line("msg_10", "req_10", "2026-10-07T14:00:00Z", 1)
+            .to_string()
+            .replace("claude-opus-4-1", "claude-haiku-4-5");
+        append(&claude, &[serde_json::from_str(&late).unwrap()]);
+        let third = fresh.scan_at(now());
+        assert_eq!(third.unreported.len(), 1);
+        assert_eq!(third.unreported[0].model, "claude-haiku-4-5");
+        fresh.mark_reported(&third.unreported);
         let claude_day = second
             .window
             .iter()

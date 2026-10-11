@@ -122,8 +122,9 @@ pub(crate) fn turn_error_message(params: &Value) -> Option<String> {
         })
 }
 
-/// `thread/tokenUsage/updated` → a [`AgentEvent::Usage`] snapshot of the LAST
-/// turn's tokens (held by the session loop, emitted before `Done`). Codex's
+/// `thread/tokenUsage/updated` → a [`AgentEvent::Usage`] for the one model
+/// request in `tokenUsage.last` (folded across the turn by [`TurnUsage`] and
+/// emitted before `Done`; `tokenUsage.total` is cumulative). Codex's
 /// `inputTokens` includes the cached prefix, so the uncached input is the
 /// difference; cache/reasoning counts stay `None` when the wire omits them.
 pub(crate) fn usage_event(params: &Value) -> Option<AgentEvent> {
@@ -142,6 +143,39 @@ pub(crate) fn usage_event(params: &Value) -> Option<AgentEvent> {
         )
         .with_reasoning(opt(&["reasoningOutputTokens", "reasoning_output_tokens"])),
     )
+}
+
+/// A turn's billing usage. Codex sends `thread/tokenUsage/updated` once per
+/// model request (a tool loop makes several), with the request's own tokens
+/// in `last` and the thread's running sum in `total`; the turn's usage is the
+/// sum of every request's `last`. An update whose `total.totalTokens` is
+/// unchanged re-emits a request already counted and is skipped. The last
+/// seen total outlives the turn (it is cumulative for the thread).
+#[derive(Default)]
+pub(crate) struct TurnUsage {
+    pending: Option<AgentEvent>,
+    last_total: Option<u64>,
+}
+
+impl TurnUsage {
+    pub(crate) fn observe(&mut self, params: &Value) {
+        let total = field(params, &["tokenUsage", "token_usage"])
+            .and_then(|usage| usage.get("total"))
+            .and_then(|total| field(total, &["totalTokens", "total_tokens"]))
+            .and_then(Value::as_u64);
+        if total.is_some() && total == self.last_total {
+            return;
+        }
+        if let Some(usage) = usage_event(params) {
+            crate::usage::accumulate(&mut self.pending, usage);
+            self.last_total = total.or(self.last_total);
+        }
+    }
+
+    /// The turn's summed usage; starts the next turn's tally.
+    pub(crate) fn take(&mut self) -> Option<AgentEvent> {
+        self.pending.take()
+    }
 }
 
 pub(crate) fn context_usage_event(params: &Value) -> Option<AgentEvent> {
@@ -957,6 +991,52 @@ mod tests {
             usage_event(&json!({"tokenUsage": {"last": {"inputTokens": 5,
                 "cachedInputTokens": 9, "outputTokens": 1}}})),
             Some(AgentEvent::usage(0, 1).with_cache(Some(9), None))
+        );
+    }
+
+    #[test]
+    fn turn_usage_sums_every_request_and_skips_repeated_totals() {
+        let update = |last_in: u64, last_out: u64, total: u64| {
+            json!({"tokenUsage": {
+                "last": {"inputTokens": last_in, "cachedInputTokens": 0, "outputTokens": last_out},
+                "total": {"totalTokens": total}}})
+        };
+        let mut turn = TurnUsage::default();
+        assert_eq!(turn.take(), None);
+        turn.observe(&update(100, 10, 110));
+        // Re-emit of the same request: unchanged total, not counted twice.
+        turn.observe(&update(100, 10, 110));
+        turn.observe(&update(150, 20, 280));
+        turn.observe(&update(150, 20, 280));
+        assert_eq!(
+            turn.take(),
+            Some(AgentEvent::usage(250, 30).with_cache(Some(0), None))
+        );
+        // Next turn starts from zero; a repeat of the previous total is
+        // still skipped, a new request counts.
+        assert_eq!(turn.take(), None);
+        turn.observe(&update(150, 20, 280));
+        turn.observe(&update(60, 5, 345));
+        assert_eq!(
+            turn.take(),
+            Some(AgentEvent::usage(60, 5).with_cache(Some(0), None))
+        );
+    }
+
+    #[test]
+    fn turn_usage_without_totals_counts_every_update() {
+        let mut turn = TurnUsage::default();
+        let update = json!({"tokenUsage": {"last": {"inputTokens": 4, "outputTokens": 1,
+            "cachedInputTokens": 1, "reasoningOutputTokens": 2}}});
+        turn.observe(&update);
+        turn.observe(&update);
+        assert_eq!(
+            turn.take(),
+            Some(
+                AgentEvent::usage(6, 2)
+                    .with_cache(Some(2), None)
+                    .with_reasoning(Some(4))
+            )
         );
     }
 

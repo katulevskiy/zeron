@@ -59,6 +59,15 @@ pub fn start(data_dir: &Path, run_mode: RunMode, scope: WorkspaceScope, device_i
         "telemetry: anonymous usage data {} (disable: Settings → Privacy, `zeron telemetry disable`, or ZERON_TELEMETRY=0)",
         if status.collecting { "on" } else { "off" },
     );
+    if run_mode == RunMode::Headless && status.collecting && !status.settings.notice_acknowledged {
+        // Headless installs never see the desktop notice; say it where the
+        // operator looks, every start until acknowledged.
+        eprintln!(
+            "zeron: anonymous usage data is on (no prompts, code or paths; see docs/telemetry.md).\n\
+             zeron: turn off with `zeron telemetry disable` or ZERON_TELEMETRY=0; hide this with \
+             `zeron telemetry ack`."
+        );
+    }
     telemetry.capture(
         Event::new(names::APP_STARTED)
             .with("first_run", telemetry.first_run())
@@ -249,7 +258,13 @@ pub(crate) fn heartbeat(sources: &HeartbeatSources) -> Event {
         .count();
     let mut platforms = BTreeMap::<String, u64>::new();
     for device in &devices {
-        *platforms.entry(device.platform.clone()).or_default() += 1;
+        // Synced from other devices: only identifier-shaped values count.
+        let platform = if is_token(&device.platform) {
+            device.platform.clone()
+        } else {
+            "other".to_string()
+        };
+        *platforms.entry(platform).or_default() += 1;
     }
 
     Event::new(names::APP_HEARTBEAT)
@@ -333,10 +348,20 @@ fn usage_state() -> &'static UsageState {
 /// always folded into the local usage ledger.
 pub(crate) fn turn_finished(event: Event) {
     let telemetry = zeron_telemetry::global();
-    if telemetry.state_dir().is_some()
-        && let Ok(mut ledger) = usage_state().ledger.lock()
-    {
-        ledger.record_turn(&event);
+    if telemetry.state_dir().is_some() {
+        // The ledger rewrites its file; keep that off the async workers.
+        let for_ledger = event.clone();
+        let record = move || {
+            if let Ok(mut ledger) = usage_state().ledger.lock() {
+                ledger.record_turn(&for_ledger);
+            }
+        };
+        match tokio::runtime::Handle::try_current() {
+            Ok(runtime) => {
+                runtime.spawn_blocking(record);
+            }
+            Err(_) => record(),
+        }
     }
     telemetry.capture(event);
 }
@@ -348,7 +373,9 @@ async fn usage_import_loop() {
         _ = state.scan_now.notified() => {}
     }
     loop {
-        if zeron_telemetry::global().settings().usage_import {
+        let telemetry = zeron_telemetry::global();
+        // The import reads other tools' logs only for a consenting user.
+        if telemetry.is_collecting() && telemetry.settings().usage_import {
             run_usage_scan().await;
         }
         tokio::select! {
@@ -380,8 +407,11 @@ async fn run_usage_scan() {
         return;
     };
     let telemetry = zeron_telemetry::global();
-    // Re-check consent after the (possibly long) scan.
-    if telemetry.is_collecting() && telemetry.settings().usage_import {
+    // Re-check consent after the (possibly long) scan. Days count as
+    // reported only when they actually go out — a dev/CI build sharing the
+    // data dir must not swallow them for a later release build.
+    let status = telemetry.status();
+    if status.collecting && status.settings.usage_import && status.uploading {
         for day in &report.unreported {
             telemetry.capture(day.to_event());
         }
@@ -435,7 +465,25 @@ impl RpcOrigin {
 
 /// The telemetry methods, answered before routing (always local, never
 /// forwarded). `None` = not a telemetry method.
-pub(crate) async fn handle_rpc(method: &str, params: &Value) -> Option<Result<RpcReply, RpcError>> {
+pub(crate) async fn handle_rpc(
+    origin: RpcOrigin,
+    method: &str,
+    params: &Value,
+) -> Option<Result<RpcReply, RpcError>> {
+    const LOCAL_ONLY: &[&str] = &[
+        methods::TELEMETRY_STATUS,
+        methods::SET_TELEMETRY_SETTINGS,
+        methods::TRACK_EVENTS,
+        methods::USAGE_STATS,
+    ];
+    if !LOCAL_ONLY.contains(&method) {
+        return None;
+    }
+    // Consent and this machine's usage are this machine's business: a
+    // remote viewport on the same account can't read or flip them.
+    if origin == RpcOrigin::Relay {
+        return Some(Err(RpcError::Failed(format!("{method} is local-only"))));
+    }
     let telemetry = zeron_telemetry::global();
     Some(match method {
         methods::TELEMETRY_STATUS => RpcReply::value(&telemetry.status()),
@@ -445,7 +493,11 @@ pub(crate) async fn handle_rpc(method: &str, params: &Value) -> Option<Result<Rp
                 Err(err) => return Some(Err(RpcError::BadParams(err.to_string()))),
             };
             let turned_on_import = patch.usage_import == Some(true);
-            telemetry.update_settings(patch);
+            if let Err(err) = telemetry.update_settings(patch) {
+                return Some(Err(RpcError::Failed(format!(
+                    "telemetry settings applied but not saved ({err}); they will reset on restart"
+                ))));
+            }
             if turned_on_import {
                 usage_state().scan_now.notify_one();
             }
@@ -493,6 +545,11 @@ fn rollup_key<'a>(method: &'a str, params: &'a Value) -> std::borrow::Cow<'a, st
     {
         return format!("Mutate.{op}").into();
     }
+    // Method names come from clients: only identifier-shaped ones are kept.
+    if method.is_empty() || method.len() > 48 || !method.chars().all(|c| c.is_ascii_alphanumeric())
+    {
+        return "unknown".into();
+    }
     method.into()
 }
 
@@ -538,6 +595,13 @@ impl RpcCall {
     }
 }
 
+fn is_token(v: &str) -> bool {
+    !v.is_empty()
+        && v.len() <= 40
+        && v.chars()
+            .all(|c| c.is_ascii_alphanumeric() || matches!(c, '-' | '_' | '.'))
+}
+
 fn str_param<'a>(params: &'a Value, key: &str) -> Option<&'a str> {
     params.get(key).and_then(Value::as_str)
 }
@@ -548,11 +612,7 @@ fn str_param<'a>(params: &'a Value, key: &str) -> Option<&'a str> {
 pub(crate) fn product_event(method: &str, params: &Value) -> Option<Event> {
     let token = |key: &str| {
         str_param(params, key)
-            .filter(|v| {
-                v.len() <= 40
-                    && v.chars()
-                        .all(|c| c.is_ascii_alphanumeric() || matches!(c, '-' | '_' | '.'))
-            })
+            .filter(|v| is_token(v))
             .map(str::to_string)
     };
     Some(match method {
@@ -565,6 +625,7 @@ pub(crate) fn product_event(method: &str, params: &Value) -> Option<Event> {
                         config
                             .and_then(|c| c.get("harness"))
                             .and_then(Value::as_str)
+                            .filter(|h| is_token(h))
                             .map(str::to_string),
                     )
                     .with_opt(
@@ -603,8 +664,7 @@ pub(crate) fn product_event(method: &str, params: &Value) -> Option<Event> {
         methods::DELETE_WORKTREE => Event::new(names::WORKTREE_REMOVED),
         methods::OPEN_TERMINAL => Event::new(names::TERMINAL_OPENED),
         methods::RUN_PROJECT_ACTION => Event::new(names::PROJECT_ACTION_RUN),
-        methods::UPLOAD_COMMIT => Event::new(names::UPLOAD_COMMITTED)
-            .with_opt("mime_class", token("mimeType").map(mime_class)),
+        methods::UPLOAD_COMMIT => Event::new(names::UPLOAD_COMMITTED),
         methods::INSTALL_HARNESS => {
             Event::new(names::HARNESS_INSTALLED).with_opt("harness", token("harness"))
         }
@@ -632,10 +692,6 @@ pub(crate) fn product_event(method: &str, params: &Value) -> Option<Event> {
         ),
         _ => return None,
     })
-}
-
-fn mime_class(mime: String) -> String {
-    mime.split('/').next().unwrap_or("other").to_string()
 }
 
 /// Relay session outcomes → `remote.relay` events.
@@ -716,11 +772,12 @@ mod tests {
             rollup_key(methods::LIST_REPOS, &json!({})),
             methods::LIST_REPOS
         );
+        assert_eq!(rollup_key("/home/alice/x", &json!({})), "unknown");
     }
 
     #[tokio::test]
     async fn telemetry_methods_answer_even_when_disabled() {
-        let status = handle_rpc(methods::TELEMETRY_STATUS, &Value::Null)
+        let status = handle_rpc(RpcOrigin::Local, methods::TELEMETRY_STATUS, &Value::Null)
             .await
             .unwrap()
             .unwrap();
@@ -729,11 +786,21 @@ mod tests {
         };
         assert_eq!(value["collecting"], false);
         assert!(
-            handle_rpc(methods::LIST_REPOS, &Value::Null)
+            handle_rpc(RpcOrigin::Local, methods::LIST_REPOS, &Value::Null)
                 .await
                 .is_none()
         );
+        assert!(matches!(
+            handle_rpc(
+                RpcOrigin::Relay,
+                methods::SET_TELEMETRY_SETTINGS,
+                &json!({"enabled": true})
+            )
+            .await,
+            Some(Err(_))
+        ));
         let tracked = handle_rpc(
+            RpcOrigin::Local,
             methods::TRACK_EVENTS,
             &json!({"surface": "desktop", "events": [{"name": "panel.toggled", "props": {}}]}),
         )

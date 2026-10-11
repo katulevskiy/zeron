@@ -241,20 +241,29 @@ enum EnvOverride {
 }
 
 impl EnvOverride {
+    /// Opt-outs fail closed: `DO_NOT_TRACK` beats everything, and any
+    /// `ZERON_TELEMETRY` value other than an explicit "on" means off.
     fn detect() -> Option<Self> {
-        if let Some(v) = env_nonempty("ZERON_TELEMETRY") {
-            match v.to_ascii_lowercase().as_str() {
-                "0" | "false" | "off" | "no" | "disabled" => {
-                    return Some(EnvOverride::ForcedOff("ZERON_TELEMETRY"));
-                }
-                "1" | "true" | "on" | "yes" | "enabled" => return Some(EnvOverride::ForcedOn),
-                _ => {}
-            }
-        }
-        if env_truthy("DO_NOT_TRACK") {
+        Self::from_values(
+            env_nonempty("ZERON_TELEMETRY").as_deref(),
+            env_nonempty("DO_NOT_TRACK").as_deref(),
+        )
+    }
+
+    fn from_values(zeron: Option<&str>, do_not_track: Option<&str>) -> Option<Self> {
+        if do_not_track.is_some_and(|v| {
+            !matches!(
+                v.to_ascii_lowercase().as_str(),
+                "0" | "false" | "no" | "off"
+            )
+        }) {
             return Some(EnvOverride::ForcedOff("DO_NOT_TRACK"));
         }
-        None
+        match zeron.map(str::to_ascii_lowercase).as_deref() {
+            None => None,
+            Some("1" | "true" | "on" | "yes" | "enabled") => Some(EnvOverride::ForcedOn),
+            Some(_) => Some(EnvOverride::ForcedOff("ZERON_TELEMETRY")),
+        }
     }
 }
 
@@ -263,6 +272,18 @@ fn env_nonempty(key: &str) -> Option<String> {
         .ok()
         .map(|v| v.trim().to_string())
         .filter(|v| !v.is_empty())
+}
+
+#[cfg(test)]
+pub(crate) fn env_override_for_test(
+    zeron: Option<&str>,
+    dnt: Option<&str>,
+) -> Option<&'static str> {
+    match EnvOverride::from_values(zeron, dnt) {
+        Some(EnvOverride::ForcedOff(var)) => Some(var),
+        Some(EnvOverride::ForcedOn) => Some("on"),
+        None => None,
+    }
 }
 
 fn env_truthy(key: &str) -> bool {
@@ -465,11 +486,15 @@ impl Telemetry {
 
     /// Applies and persists a settings change. Turning collection off drops
     /// everything still buffered or spooled — nothing recorded before the
-    /// opt-out is sent after it.
-    pub fn update_settings(&self, patch: TelemetrySettingsPatch) -> TelemetrySettings {
+    /// opt-out is sent after it. The change applies to this process even
+    /// when persisting fails; the error says it won't survive a restart.
+    pub fn update_settings(
+        &self,
+        patch: TelemetrySettingsPatch,
+    ) -> std::io::Result<TelemetrySettings> {
         let (before, after) = {
             let Ok(mut settings) = self.inner.settings.lock() else {
-                return TelemetrySettings::default();
+                return Err(std::io::Error::other("telemetry settings lock poisoned"));
             };
             let before = settings.clone();
             if let Some(v) = patch.enabled {
@@ -483,9 +508,10 @@ impl Telemetry {
             }
             (before, settings.clone())
         };
-        if let Some(dir) = &self.inner.state_dir {
-            save_settings(dir, &after);
-        }
+        let saved = match &self.inner.state_dir {
+            Some(dir) => save_settings(dir, &after),
+            None => Ok(()),
+        };
         let forced_off = matches!(self.inner.env_override, Some(EnvOverride::ForcedOff(_)));
         let collecting = after.enabled && !forced_off && self.inner.tx.is_some();
         let was = self.inner.collecting.swap(collecting, Ordering::Relaxed);
@@ -502,7 +528,7 @@ impl Telemetry {
                     .with("notice_acknowledged", after.notice_acknowledged),
             );
         }
-        after
+        saved.map(|()| after)
     }
 
     pub fn status(&self) -> TelemetryStatus {
@@ -606,27 +632,37 @@ pub fn read_settings(data_dir: &Path) -> TelemetrySettings {
 }
 
 /// Writes settings without starting anything (CLI when no engine runs).
-pub fn write_settings(data_dir: &Path, settings: &TelemetrySettings) {
-    save_settings(&data_dir.join("telemetry"), settings);
+pub fn write_settings(data_dir: &Path, settings: &TelemetrySettings) -> std::io::Result<()> {
+    save_settings(&data_dir.join("telemetry"), settings)
 }
 
+/// Missing file → defaults. A file that exists but can't be read or parsed
+/// fails closed (collection off): it may hold an opt-out we can't see.
 fn load_settings(dir: &Path) -> TelemetrySettings {
-    std::fs::read(dir.join(SETTINGS_FILE))
-        .ok()
-        .and_then(|bytes| serde_json::from_slice(&bytes).ok())
-        .unwrap_or_default()
+    match std::fs::read(dir.join(SETTINGS_FILE)) {
+        Ok(bytes) => serde_json::from_slice(&bytes).unwrap_or_else(|err| {
+            tracing::warn!(%err, "telemetry: unreadable settings; collection off");
+            TelemetrySettings {
+                enabled: false,
+                ..TelemetrySettings::default()
+            }
+        }),
+        Err(err) if err.kind() == std::io::ErrorKind::NotFound => TelemetrySettings::default(),
+        Err(err) => {
+            tracing::warn!(%err, "telemetry: settings unreadable; collection off");
+            TelemetrySettings {
+                enabled: false,
+                ..TelemetrySettings::default()
+            }
+        }
+    }
 }
 
-fn save_settings(dir: &Path, settings: &TelemetrySettings) {
-    let write = || -> std::io::Result<()> {
-        std::fs::create_dir_all(dir)?;
-        let tmp = dir.join(format!("{SETTINGS_FILE}.{}.tmp", std::process::id()));
-        std::fs::write(&tmp, serde_json::to_vec_pretty(settings)?)?;
-        std::fs::rename(&tmp, dir.join(SETTINGS_FILE))
-    };
-    if let Err(err) = write() {
-        tracing::warn!(%err, "telemetry: settings not saved");
-    }
+fn save_settings(dir: &Path, settings: &TelemetrySettings) -> std::io::Result<()> {
+    std::fs::create_dir_all(dir)?;
+    let tmp = dir.join(format!("{SETTINGS_FILE}.{}.tmp", std::process::id()));
+    std::fs::write(&tmp, serde_json::to_vec_pretty(settings)?)?;
+    std::fs::rename(&tmp, dir.join(SETTINGS_FILE))
 }
 
 #[cfg(test)]

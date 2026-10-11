@@ -21,6 +21,9 @@ pub enum TelemetryCommand {
     Enable,
     /// Turn anonymous usage data off (also discards anything not yet sent).
     Disable,
+    /// Acknowledge the usage-data notice (hides it on headless start and in
+    /// the desktop sidebar).
+    Ack,
     /// Include daily per-model token totals from other agent CLIs' local logs
     /// (Claude Code, Codex, Pi, OpenCode) — `on` or `off`.
     Import { state: OnOff },
@@ -59,6 +62,14 @@ pub async fn run(command: TelemetryCommand, data_dir: &Path, ipc_port: u16) -> a
         TelemetryCommand::Enable => set(engine.as_ref(), data_dir, json!({"enabled": true})).await,
         TelemetryCommand::Disable => {
             set(engine.as_ref(), data_dir, json!({"enabled": false})).await
+        }
+        TelemetryCommand::Ack => {
+            set(
+                engine.as_ref(),
+                data_dir,
+                json!({"noticeAcknowledged": true}),
+            )
+            .await
         }
         TelemetryCommand::Import { state } => {
             let on = matches!(state, OnOff::On);
@@ -175,7 +186,11 @@ async fn set(
             if let Some(v) = patch["usageImport"].as_bool() {
                 settings.usage_import = v;
             }
-            zeron_telemetry::write_settings(data_dir, &settings);
+            if let Some(v) = patch["noticeAcknowledged"].as_bool() {
+                settings.notice_acknowledged = v;
+            }
+            zeron_telemetry::write_settings(data_dir, &settings)
+                .map_err(|e| anyhow::anyhow!("could not save telemetry settings: {e}"))?;
         }
     }
     status(engine, data_dir).await

@@ -663,8 +663,9 @@ async fn v2_wire_streams_text_and_settles_on_execution_success() {
     assert_eq!(
         usage,
         Some(
-            AgentEvent::usage(4, 1)
-                .with_cache(Some(0), Some(0))
+            // Every step counts once: msg_a + msg_b + msg_d (msg_c is empty).
+            AgentEvent::usage(34, 6)
+                .with_cache(Some(5), Some(0))
                 .with_reasoning(Some(0))
                 .with_cost_usd(Some(0.0))
         )
@@ -1531,7 +1532,7 @@ fn v2_frames_normalize_to_v1_payloads() {
     assert_eq!(
         out,
         vec![json!({"type":"message.updated","properties":{
-            "info":{"sessionID":"ses_1","id":"usage","role":"assistant",
+            "info":{"sessionID":"ses_1","id":"usage:msg_a:evt_9","role":"assistant",
                     "tokens":{"input":10,"output":2,"reasoning":0,
                               "cache":{"read":0,"write":0}},
                     "cost":0}}})]
@@ -1569,7 +1570,7 @@ fn v2_frames_normalize_to_v1_payloads() {
     assert_eq!(
         out,
         vec![json!({"type":"message.updated","properties":{
-            "info":{"sessionID":"ses_2","id":"usage","role":"assistant",
+            "info":{"sessionID":"ses_2","id":"usage:msg_b:evt_13","role":"assistant",
                     "tokens":{"input":1,"output":2},"cost":0,
                     "providerID":"opencode","modelID":"long-context"}}})]
     );
@@ -2438,6 +2439,52 @@ async fn abort_ignores_late_bus_text_and_usage() {
         }
     }
     assert_eq!(dones, 1);
+}
+
+#[tokio::test]
+async fn usage_sums_assistant_messages_and_counts_repeated_updates_once() {
+    let mut wire = TurnWire::start(false).await;
+    wire.request("/prompt_async").await;
+    wire.status("busy");
+    let assistant = |id: &str, input: u64, output: u64, cost: f64| {
+        json!({"type":"message.updated", "properties":{"info":{
+            "id": id, "sessionID":"fixture", "role":"assistant", "cost": cost,
+            "tokens":{"input": input, "output": output, "cache":{"read": 7, "write": 0}}}}})
+    };
+    // Streaming placeholder, then the final numbers for the same message.
+    wire.bus.send(assistant("m1", 5, 1, 0.01)).unwrap();
+    wire.bus.send(assistant("m1", 100, 10, 0.10)).unwrap();
+    wire.bus.send(assistant("m2", 40, 4, 0.05)).unwrap();
+    wire.bus.send(assistant("m2", 40, 4, 0.05)).unwrap();
+    wire.idle();
+    let mut usages = Vec::new();
+    loop {
+        match wire.events.recv().await.unwrap().unwrap() {
+            usage @ AgentEvent::Usage { .. } => usages.push(usage),
+            AgentEvent::Done { status, .. } => {
+                assert_eq!(status, DoneStatus::Completed);
+                break;
+            }
+            _ => {}
+        }
+    }
+    assert_eq!(usages.len(), 1, "one summed report per turn");
+    let AgentEvent::Usage {
+        input_tokens,
+        output_tokens,
+        cache_read_tokens,
+        cache_write_tokens,
+        reasoning_tokens,
+        cost_usd,
+    } = &usages[0]
+    else {
+        unreachable!()
+    };
+    assert_eq!((*input_tokens, *output_tokens), (140, 14));
+    assert_eq!(*cache_read_tokens, Some(14));
+    assert_eq!(*cache_write_tokens, Some(0));
+    assert_eq!(*reasoning_tokens, None);
+    assert!((cost_usd.unwrap() - 0.15).abs() < 1e-9);
 }
 
 #[tokio::test]

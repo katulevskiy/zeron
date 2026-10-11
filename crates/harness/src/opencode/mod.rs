@@ -47,7 +47,7 @@
 //! [`default_stall_bound`] (`ZERON_OPENCODE_STALL_MS`, 0 disables) errors
 //! out instead of spinning "Working" forever.
 
-use std::collections::{HashMap, VecDeque};
+use std::collections::{BTreeMap, HashMap, VecDeque};
 use std::path::PathBuf;
 use std::sync::Arc;
 use std::time::Duration;
@@ -1746,7 +1746,9 @@ async fn run_session(session: Session) {
     // A stop the server never acknowledged: the turn may still be running,
     // so the runtime is torn down and the stop reported only once it is gone.
     let mut stop_teardown = false;
-    let mut pending_usage: Option<AgentEvent> = None;
+    // Billing usage per assistant message of the turn: an update replaces
+    // that message's entry, distinct messages sum, flushed before Done.
+    let mut pending_usage: BTreeMap<String, AgentEvent> = BTreeMap::new();
     let mut done_sent = false;
 
     // Post-abort grace: the abort endpoint promised an idle; if it never
@@ -1764,7 +1766,8 @@ async fn run_session(session: Session) {
                 continue $label;
             }
             turn.active = false;
-            if let Some(usage) = pending_usage.take()
+            let usage = take_turn_usage(&mut pending_usage);
+            if let Some(usage) = usage
                 && !interrupt_requested
                 && !stopping
                 && !send(&event_tx, usage).await
@@ -2399,6 +2402,15 @@ fn billing_usage_event(info: &Value, tokens: &Value) -> Option<AgentEvent> {
     })
 }
 
+/// Drains the per-message usage of the turn that just ended into one report.
+fn take_turn_usage(by_message: &mut BTreeMap<String, AgentEvent>) -> Option<AgentEvent> {
+    let mut total = None;
+    for usage in std::mem::take(by_message).into_values() {
+        crate::usage::accumulate(&mut total, usage);
+    }
+    total
+}
+
 fn context_usage_event(info: &Value, context_windows: &HashMap<String, u64>) -> Option<AgentEvent> {
     let tokens = info.get("tokens")?;
     let counts: Vec<u64> = [
@@ -2781,7 +2793,7 @@ struct BusCtx<'a> {
     pending_spawns: &'a mut VecDeque<PendingSpawn>,
     unbound_children: &'a mut HashMap<String, String>,
     turn: &'a mut TurnState,
-    pending_usage: &'a mut Option<AgentEvent>,
+    pending_usage: &'a mut BTreeMap<String, AgentEvent>,
     context_windows: &'a HashMap<String, u64>,
 }
 
@@ -3004,8 +3016,9 @@ async fn handle_bus_event(ctx: BusCtx<'_>) -> BusOutcome {
                     .assistant_messages
                     .entry(message.to_owned())
                     .or_insert(role == "assistant");
-                // Token usage rides the assistant message; the last one
-                // before idle wins, emitted right before Done.
+                // Token usage rides the assistant message. A turn can span
+                // several; each counts once (a repeated update replaces its
+                // message's entry) and the sum is emitted right before Done.
                 if role == "assistant"
                     && let Some(tokens) = info.get("tokens")
                 {
@@ -3015,7 +3028,7 @@ async fn handle_bus_event(ctx: BusCtx<'_>) -> BusOutcome {
                         return BusOutcome::ConsumerGone;
                     }
                     if let Some(usage) = billing_usage_event(info, tokens) {
-                        *pending_usage = Some(usage);
+                        pending_usage.insert(message.to_owned(), usage);
                     }
                 }
                 let events = replay_pending(main_feed, message, true, turn);
@@ -4083,9 +4096,22 @@ fn normalize_v2_frame_with_session_models(
             // is what the 1.x assistant message carried. The frame omits the
             // model, so the session's latest step supplies it and the
             // advertised context limit resolves.
+            // Each step is its own usage entry downstream (a shared id would
+            // replace), keyed by message and frame id so a replay of the
+            // same frame stays idempotent.
+            let usage_id = ["assistantMessageID", "id"]
+                .iter()
+                .filter_map(|key| {
+                    event
+                        .get(key)
+                        .or_else(|| data.get(key))
+                        .and_then(Value::as_str)
+                        .filter(|s| !s.is_empty())
+                })
+                .fold(String::from("usage"), |id, part| format!("{id}:{part}"));
             let mut info = json!({
                 "sessionID": session(),
-                "id": "usage",
+                "id": usage_id,
                 "role": "assistant",
                 "tokens": tokens,
             });

@@ -101,6 +101,8 @@ pub fn model_token(model: &str) -> Option<String> {
     let id_like = model.len() <= 80
         && !model.starts_with(['/', '~', '.'])
         && !model.contains("://")
+        // `claude-sonnet-4@20250514` is an id; `alice@corp.com` is not.
+        && !model.split_once('@').is_some_and(|(_, host)| host.contains('.'))
         && model.chars().all(|c| {
             c.is_ascii_alphanumeric() || matches!(c, '_' | '-' | '.' | '/' | ':' | '@' | '[' | ']')
         });
@@ -179,8 +181,8 @@ pub struct TurnTracker {
     error_events: u32,
     error_kind: Option<&'static str>,
     generated_images: u32,
-    output_chars: u64,
-    reasoning_chars: u64,
+    output_bytes: u64,
+    reasoning_bytes: u64,
     usage: Tokens,
     subagent_usage: Tokens,
     context_tokens: Option<u64>,
@@ -209,8 +211,8 @@ impl TurnTracker {
             error_events: 0,
             error_kind: None,
             generated_images: 0,
-            output_chars: 0,
-            reasoning_chars: 0,
+            output_bytes: 0,
+            reasoning_bytes: 0,
             usage: Tokens::default(),
             subagent_usage: Tokens::default(),
             context_tokens: None,
@@ -234,11 +236,11 @@ impl TurnTracker {
             }
             AgentEvent::TextDelta { text } => {
                 self.mark_output();
-                self.output_chars += text.len() as u64;
+                self.output_bytes += text.len() as u64;
             }
             AgentEvent::ReasoningDelta { text } => {
                 self.mark_output();
-                self.reasoning_chars += text.len() as u64;
+                self.reasoning_bytes += text.len() as u64;
             }
             AgentEvent::GeneratedImage { .. } => self.generated_images += 1,
             AgentEvent::ToolCall { call, .. } => {
@@ -271,7 +273,14 @@ impl TurnTracker {
                 self.error_kind.get_or_insert(classify_error(message));
             }
             AgentEvent::InputRequested { .. } => self.input_requests += 1,
-            AgentEvent::Steered { .. } => self.steers += 1,
+            // A prompt delivered into a parked runtime is confirmed with
+            // `Steered` before anything streams; that's this turn's own
+            // prompt, not a steer into it.
+            AgentEvent::Steered { .. } => {
+                if self.first_output.is_some() {
+                    self.steers += 1;
+                }
+            }
             AgentEvent::Done { error, .. } => {
                 if let Some(error) = error {
                     self.error_kind.get_or_insert(classify_error(error));
@@ -323,8 +332,8 @@ impl TurnTracker {
             .with("error_events", self.error_events)
             .with_opt("error_kind", self.error_kind)
             .with("generated_images", self.generated_images)
-            .with("output_chars", self.output_chars)
-            .with("reasoning_chars", self.reasoning_chars)
+            .with("output_bytes", self.output_bytes)
+            .with("reasoning_bytes", self.reasoning_bytes)
             .with_opt("context_tokens", self.context_tokens)
             .with_opt("context_window", self.context_window);
         if let (Some(tokens), Some(window)) = (self.context_tokens, self.context_window)
@@ -333,7 +342,11 @@ impl TurnTracker {
             let pct = (tokens as f64 / window as f64 * 1000.0).round() / 10.0;
             ev = ev.with("context_pct", pct);
         }
-        if model.is_some() && self.meta.model.is_some() && model != self.meta.model {
+        let rerouted = match (&self.meta.model, &self.resolved_model) {
+            (Some(requested), Some(resolved)) => !same_model(requested, resolved),
+            _ => false,
+        };
+        if rerouted {
             ev = ev.with_opt("model_requested", self.meta.model.clone());
         }
         if !self.tools.is_empty() {
@@ -352,12 +365,9 @@ impl TurnTracker {
                 .collect();
             ev = ev.with("subagent_models", Value::Object(models));
         }
-        let mixed_models = self.meta.model.is_some()
-            && self.resolved_model.is_some()
-            && self.meta.model != self.resolved_model;
         ev = ev.with("usage_reported", self.usage.reports > 0).with(
             "usage_complete",
-            self.usage.reports > 0 && self.subagents_spawned == 0 && !mixed_models,
+            self.usage.reports > 0 && self.subagents_spawned == 0 && !rerouted,
         );
         if self.usage.reports > 0 {
             ev = with_tokens(ev, "", &self.usage);
@@ -397,8 +407,38 @@ fn with_tokens(ev: Event, prefix: &'static str, t: &Tokens) -> Event {
     ev
 }
 
-/// Content-free tool family. MCP tools collapse to `mcp` — their server and
-/// tool names are user configuration and may be private.
+/// Built-in tool names reported as-is (lowercased). Everything else —
+/// MCP tools (`server_tool`, `mcp__server__tool`), ACP titles that can be a
+/// file name, custom tools — is `other`: an unknown name may be private.
+const KNOWN_TOOLS: &[&str] = &[
+    "bash",
+    "bashoutput",
+    "killshell",
+    "notebookedit",
+    "notebookread",
+    "multiedit",
+    "skill",
+    "exitplanmode",
+    "enterplanmode",
+    "askuserquestion",
+    "toolsearch",
+    "listmcpresourcestool",
+    "readmcpresourcetool",
+    "monitor",
+    "taskoutput",
+    "taskstop",
+    "view_image",
+    "update_plan",
+    "image_generation",
+    "shell",
+    "local_shell",
+    "unified_exec",
+    "write_stdin",
+    "list_dir",
+    "lsp",
+];
+
+/// Content-free tool family.
 pub fn tool_kind(call: &ToolCall) -> String {
     let kind = match call {
         ToolCall::Exec { .. } => "exec",
@@ -417,17 +457,35 @@ pub fn tool_kind(call: &ToolCall) -> String {
                 return "agent".to_string();
             }
             let lower = name.to_ascii_lowercase();
-            if lower.starts_with("mcp") || lower.contains("__") {
+            // Claude's MCP naming; collapses to a constant, so it's safe.
+            if lower.starts_with("mcp__") {
                 return "mcp".to_string();
             }
-            return if short_token(&lower) && lower.len() <= 32 {
-                format!("other.{lower}")
-            } else {
-                "other".to_string()
+            return match KNOWN_TOOLS.iter().find(|known| **known == lower) {
+                Some(known) => format!("other.{known}"),
+                None => "other".to_string(),
             };
         }
     };
     kind.to_string()
+}
+
+/// Requested and reported ids name the same model when they differ only by
+/// a snapshot date (`claude-haiku-4-5` vs `claude-haiku-4-5-20251001`), a
+/// context-size tag (`[1m]`) or a provider prefix (`anthropic/…`).
+pub fn same_model(a: &str, b: &str) -> bool {
+    fn base(id: &str) -> &str {
+        let id = id.rsplit('/').next().unwrap_or(id);
+        let id = id.split('[').next().unwrap_or(id);
+        let id = id.split('@').next().unwrap_or(id);
+        match id.rsplit_once('-') {
+            Some((head, date)) if date.len() == 8 && date.bytes().all(|c| c.is_ascii_digit()) => {
+                head
+            }
+            _ => id,
+        }
+    }
+    a == b || base(a).eq_ignore_ascii_case(base(b))
 }
 
 #[cfg(test)]
@@ -548,6 +606,45 @@ mod tests {
     }
 
     #[test]
+    fn snapshot_dates_and_tags_are_not_reroutes() {
+        assert!(same_model("claude-haiku-4-5", "claude-haiku-4-5-20251001"));
+        assert!(same_model("claude-opus-4-1[1m]", "claude-opus-4-1"));
+        assert!(same_model(
+            "anthropic/claude-sonnet-4-5",
+            "claude-sonnet-4-5"
+        ));
+        assert!(!same_model("gpt-5", "gpt-5-mini"));
+        let mut req = request();
+        req.model = Some("claude-haiku-4-5".into());
+        let mut t = TurnTracker::new(TurnMeta::from_request(HarnessId::ClaudeCode, &req));
+        t.observe(&AgentEvent::SessionStarted {
+            harness: HarnessId::ClaudeCode,
+            model: "claude-haiku-4-5-20251001".into(),
+            tools: vec![],
+            cwd: "/x".into(),
+            session_id: "s".into(),
+            assistant_message_id: "a".into(),
+        });
+        t.observe(&AgentEvent::usage(1, 1));
+        let p = t.finish(DoneStatus::Completed).props().clone();
+        assert_eq!(p["usage_complete"], true);
+        assert!(!p.contains_key("model_requested"));
+    }
+
+    #[test]
+    fn delivery_confirmation_is_not_a_steer() {
+        let mut t = TurnTracker::new(TurnMeta::from_request(HarnessId::Codex, &request()));
+        let steered = AgentEvent::Steered {
+            assistant_message_id: None,
+            next_assistant_message_id: None,
+        };
+        t.observe(&steered);
+        t.observe(&AgentEvent::TextDelta { text: "x".into() });
+        t.observe(&steered);
+        assert_eq!(t.finish(DoneStatus::Completed).props()["steers"], 1);
+    }
+
+    #[test]
     fn errors_are_classified_not_copied() {
         let meta = TurnMeta::from_request(HarnessId::Codex, &request());
         let mut t = TurnTracker::new(meta);
@@ -583,6 +680,11 @@ mod tests {
             Some("custom")
         );
         assert_eq!(model_token("my secret model").as_deref(), Some("custom"));
+        assert_eq!(model_token("alice@corp.com").as_deref(), Some("custom"));
+        assert_eq!(
+            model_token("claude-sonnet-4@20250514").as_deref(),
+            Some("claude-sonnet-4@20250514")
+        );
         assert_eq!(model_token(""), None);
     }
 
@@ -613,6 +715,13 @@ mod tests {
             input: None,
         };
         assert_eq!(tool_kind(&other), "other.notebookedit");
+        for private in ["acmecorp_payroll_export", "package.json", "Cargo.toml"] {
+            let call = ToolCall::Unknown {
+                name: private.into(),
+                input: None,
+            };
+            assert_eq!(tool_kind(&call), "other", "{private} leaked");
+        }
         let weird = ToolCall::Unknown {
             name: "has spaces/and slashes".into(),
             input: None,
