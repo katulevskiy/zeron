@@ -205,7 +205,13 @@ async fn happy_path_normalizes_events_and_tags_subagents() {
     // Informational rate-limit frames stay quiet.
     assert!(!events.iter().any(|e| matches!(e, AgentEvent::Error { .. })));
 
-    assert!(events.contains(&AgentEvent::usage(10, 20)));
+    assert!(
+        events.contains(
+            &AgentEvent::usage(10, 20)
+                .with_cache(Some(300), Some(40))
+                .with_cost_usd(Some(0.01))
+        )
+    );
     assert_eq!(
         events.last(),
         Some(&AgentEvent::Done {

@@ -958,10 +958,14 @@ fn map_shim_frame(frame: &Value, interrupted: bool) -> Vec<AgentEvent> {
                 _ => Vec::new(),
             }
         }
-        "usage" => vec![AgentEvent::usage(
-            frame.get("input").and_then(Value::as_u64).unwrap_or(0),
-            frame.get("output").and_then(Value::as_u64).unwrap_or(0),
-        )],
+        "usage" => {
+            let count = |key: &str| frame.get(key).and_then(Value::as_u64);
+            vec![
+                AgentEvent::usage(count("input").unwrap_or(0), count("output").unwrap_or(0))
+                    .with_cache(count("cacheRead"), count("cacheWrite"))
+                    .with_reasoning(count("reasoning")),
+            ]
+        }
         "turn" => {
             let status = frame.get("status").and_then(Value::as_str).unwrap_or("");
             let error = frame
@@ -1056,6 +1060,25 @@ mod tests {
         )
         .unwrap();
         assert_eq!(map_shim_frame(&nested, false).len(), 1);
+    }
+
+    #[test]
+    fn usage_frame_carries_cache_and_reasoning_when_reported() {
+        let frame: Value = serde_json::from_str(
+            r#"{"ev":"usage","input":120,"output":45,"cacheRead":3000,"cacheWrite":200,"reasoning":30}"#,
+        )
+        .unwrap();
+        assert_eq!(
+            map_shim_frame(&frame, false),
+            vec![
+                AgentEvent::usage(120, 45)
+                    .with_cache(Some(3000), Some(200))
+                    .with_reasoning(Some(30))
+            ]
+        );
+        // Older shims / SDKs that omit them leave the fields unknown.
+        let bare: Value = serde_json::from_str(r#"{"ev":"usage","input":11,"output":5}"#).unwrap();
+        assert_eq!(map_shim_frame(&bare, false), vec![AgentEvent::usage(11, 5)]);
     }
 
     #[test]

@@ -2942,8 +2942,16 @@ fn usage_from_response(res: &Result<Value, HarnessError>) -> Option<AgentEvent> 
     };
     let input = count(&["inputTokens", "input_tokens"]);
     let output = count(&["outputTokens", "output_tokens"]);
-    (input.is_some() || output.is_some())
-        .then(|| AgentEvent::usage(input.unwrap_or(0), output.unwrap_or(0)))
+    // ACP `Usage` extras; cost is deliberately not read — `usage_update.cost`
+    // is the session's cumulative spend, not this turn's.
+    let cache_read = count(&["cachedReadTokens", "cached_read_tokens"]);
+    let cache_write = count(&["cachedWriteTokens", "cached_write_tokens"]);
+    let reasoning = count(&["thoughtTokens", "thought_tokens"]);
+    (input.is_some() || output.is_some()).then(|| {
+        AgentEvent::usage(input.unwrap_or(0), output.unwrap_or(0))
+            .with_cache(cache_read, cache_write)
+            .with_reasoning(reasoning)
+    })
 }
 
 /// Map a finished `session/prompt` result to the run's terminal status.
@@ -5051,6 +5059,34 @@ async fn run_session(session: Session) {
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    #[test]
+    fn response_usage_carries_acp_cache_and_thought_tokens() {
+        let res = Ok(json!({"stopReason": "end_turn", "usage": {
+            "totalTokens": 3395, "inputTokens": 120, "outputTokens": 45,
+            "thoughtTokens": 30, "cachedReadTokens": 3000, "cachedWriteTokens": 200}}));
+        assert_eq!(
+            usage_from_response(&res),
+            Some(
+                AgentEvent::usage(120, 45)
+                    .with_cache(Some(3000), Some(200))
+                    .with_reasoning(Some(30))
+            )
+        );
+        let snake = Ok(json!({"usage": {"input_tokens": 5, "output_tokens": 2,
+            "cached_read_tokens": 9, "thought_tokens": 1}}));
+        assert_eq!(
+            usage_from_response(&snake),
+            Some(
+                AgentEvent::usage(5, 2)
+                    .with_cache(Some(9), None)
+                    .with_reasoning(Some(1))
+            )
+        );
+        // Grok-style `_meta` with only the basics leaves extras unknown.
+        let meta = Ok(json!({"_meta": {"inputTokens": 9, "outputTokens": 4}}));
+        assert_eq!(usage_from_response(&meta), Some(AgentEvent::usage(9, 4)));
+    }
 
     #[test]
     fn unix_browser_suppression_falls_back_to_zerons_noop_mode() {

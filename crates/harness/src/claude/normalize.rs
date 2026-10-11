@@ -694,7 +694,12 @@ impl Normalizer {
                 if let Some(id) = &f.session_id {
                     self.session_id = Some(id.clone());
                 }
-                let usage = AgentEvent::usage(f.usage.input_tokens, f.usage.output_tokens);
+                // `input_tokens` is already uncached; cache traffic and cost
+                // ride the optional fields.
+                let usage = AgentEvent::usage(f.usage.input_tokens, f.usage.output_tokens)
+                    .with_cache(f.usage.cache_read_tokens, f.usage.cache_write_tokens)
+                    .with_reasoning(f.usage.output_tokens_details.thinking_tokens)
+                    .with_cost_usd(f.total_cost_usd);
                 let done = if f.subtype == "success" {
                     AgentEvent::Done {
                         status: if interrupted {
@@ -870,6 +875,28 @@ mod tests {
         let events = normalize_one(raw);
         assert_eq!(events.len(), 2, "usage + done");
         events.into_iter().nth(1).expect("done event")
+    }
+
+    #[test]
+    fn result_usage_carries_cache_and_cost() {
+        let events = normalize_one(
+            r#"{"type":"result","subtype":"success","result":"ok","total_cost_usd":0.0421,"usage":{"input_tokens":12,"output_tokens":340,"cache_read_input_tokens":41000,"cache_creation_input_tokens":1800,"output_tokens_details":{"thinking_tokens":150}},"modelUsage":{"claude-opus-4-1":{"inputTokens":12,"outputTokens":340,"cacheReadInputTokens":41000,"cacheCreationInputTokens":1800,"costUSD":0.0421}}}"#,
+        );
+        assert_eq!(
+            events[0],
+            AgentEvent::usage(12, 340)
+                .with_cache(Some(41000), Some(1800))
+                .with_reasoning(Some(150))
+                .with_cost_usd(Some(0.0421))
+        );
+    }
+
+    #[test]
+    fn result_usage_leaves_unreported_fields_unknown() {
+        let events = normalize_one(
+            r#"{"type":"result","subtype":"success","usage":{"input_tokens":5,"output_tokens":6}}"#,
+        );
+        assert_eq!(events[0], AgentEvent::usage(5, 6));
     }
 
     #[test]

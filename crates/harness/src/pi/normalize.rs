@@ -86,11 +86,19 @@ impl Normalizer {
                 }
                 let usage = &message["usage"];
                 if usage.is_object() {
-                    let n = |key| usage[key].as_u64().unwrap_or(0);
-                    let input = n("input") + n("cacheRead") + n("cacheWrite");
-                    events.push(AgentEvent::usage(input, n("output")));
+                    let opt = |key: &str| usage[key].as_u64();
+                    let n = |key: &str| opt(key).unwrap_or(0);
+                    // Pi's `input` is already uncached; the prompt's context
+                    // footprint still counts the cache traffic.
+                    let prompt = n("input") + n("cacheRead") + n("cacheWrite");
+                    events.push(
+                        AgentEvent::usage(n("input"), n("output"))
+                            .with_cache(opt("cacheRead"), opt("cacheWrite"))
+                            .with_reasoning(opt("reasoning"))
+                            .with_cost_usd(usage["cost"]["total"].as_f64()),
+                    );
                     events.push(AgentEvent::ContextUsage {
-                        tokens: Some(input + n("output")),
+                        tokens: Some(prompt + n("output")),
                         window: self.window,
                     });
                 }
@@ -223,6 +231,32 @@ mod tests {
         assert_eq!(n.status(), DoneStatus::Errored);
         n.map(&json!({"type":"message_end","message":{"role":"assistant","stopReason":"stop","content":[]}}));
         assert_eq!(n.status(), DoneStatus::Completed);
+    }
+    #[test]
+    fn message_end_usage_splits_cache_out_of_input() {
+        let mut n = Normalizer::default();
+        let events = n.map(&json!({"type":"message_end","message":{"role":"assistant","stopReason":"stop","content":[],
+            "usage":{"input":120,"output":45,"cacheRead":3000,"cacheWrite":200,"reasoning":30,"totalTokens":3365,
+                     "cost":{"input":0.001,"output":0.002,"cacheRead":0.0003,"cacheWrite":0.0004,"total":0.0037}}}}));
+        assert_eq!(
+            events[0],
+            AgentEvent::usage(120, 45)
+                .with_cache(Some(3000), Some(200))
+                .with_reasoning(Some(30))
+                .with_cost_usd(Some(0.0037))
+        );
+        // Context occupancy still counts the whole prompt, cache included.
+        assert_eq!(
+            events[1],
+            AgentEvent::ContextUsage {
+                tokens: Some(120 + 3000 + 200 + 45),
+                window: None
+            }
+        );
+        // Fields the wire omits stay unknown.
+        let events = n.map(&json!({"type":"message_end","message":{"role":"assistant","stopReason":"stop","content":[],
+            "usage":{"input":7,"output":2}}}));
+        assert_eq!(events[0], AgentEvent::usage(7, 2));
     }
     #[test]
     fn tools_preserve_identity_and_edit_diff() {
