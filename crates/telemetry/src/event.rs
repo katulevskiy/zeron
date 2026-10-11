@@ -116,7 +116,7 @@ impl Event {
     }
 }
 
-const MAX_UI_PROPS: usize = 24;
+const MAX_UI_PROPS: usize = 64;
 const MAX_UI_STRING: usize = 64;
 const MAX_UI_LIST: usize = 32;
 

@@ -635,6 +635,7 @@ pub struct EngineRpc {
     harness_updates: Option<crate::harness_updates::HarnessUpdateCoordinator>,
     local_import: Option<crate::local_import::LocalImporter>,
     engine_info: EngineInfo,
+    origin: crate::telemetry::RpcOrigin,
 }
 
 impl EngineRpc {
@@ -683,7 +684,14 @@ impl EngineRpc {
             harness_updates: None,
             local_import: None,
             engine_info,
+            origin: crate::telemetry::RpcOrigin::Local,
         }
+    }
+
+    /// Tags calls for telemetry rollups (`rpc` vs `rpc_relay`).
+    pub fn with_origin(mut self, origin: crate::telemetry::RpcOrigin) -> Self {
+        self.origin = origin;
+        self
     }
 
     pub fn with_previews(mut self, previews: zeron_preview::PreviewService) -> Self {
@@ -1783,7 +1791,29 @@ impl RpcService for AuthRpc {
 
 #[async_trait]
 impl RpcService for EngineRpc {
+    /// Every call passes here once: telemetry methods answer locally, the
+    /// rest are timed into the hourly rollup (and a few become product
+    /// events) around the real dispatch.
     async fn handle(&self, method: &str, params: serde_json::Value) -> Result<RpcReply, RpcError> {
+        if let Some(reply) = crate::telemetry::handle_rpc(method, &params).await {
+            return reply;
+        }
+        let forwarded = forwardable(method)
+            && params
+                .get("targetDeviceId")
+                .and_then(|v| v.as_str())
+                .is_some_and(|target| target != self.doc_host.device_id());
+        let call = crate::telemetry::RpcCall::begin(self.origin, method, &params, forwarded);
+        let result = self.dispatch(method, params).await;
+        if let Some(call) = call {
+            call.finish(result.is_ok());
+        }
+        result
+    }
+}
+
+impl EngineRpc {
+    async fn dispatch(&self, method: &str, params: serde_json::Value) -> Result<RpcReply, RpcError> {
         // Device-addressed routing: forward calls that target another device over its
         // relay. The target compares the id to its own, so forwards cannot loop.
         if forwardable(method)

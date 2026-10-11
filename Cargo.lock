@@ -13563,6 +13563,7 @@ dependencies = [
  "zeron-proto",
  "zeron-rpc",
  "zeron-sync",
+ "zeron-telemetry",
  "zeron-update",
  "zip",
 ]

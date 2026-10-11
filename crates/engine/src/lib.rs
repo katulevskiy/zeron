@@ -38,6 +38,7 @@ pub mod run_journal;
 pub mod sessions;
 pub mod source_control;
 pub mod spaces;
+pub mod telemetry;
 pub mod terminals;
 pub mod titles;
 mod transcript_history;
@@ -441,8 +442,9 @@ impl EngineCore {
     /// re-reads auth on every (re)dial, so token refreshes take effect at reconnect.
     pub fn start_host_relay(&self, edge_url: &str) -> zeron_rpc::HostRelay {
         let auth = self.auth();
-        let config =
+        let mut config =
             zeron_rpc::HostRelayConfig::new(edge_url, self.device_id.clone(), Arc::new(auth));
+        config.observer = Some(telemetry::relay_observer());
         let doc_host = self.doc_host.clone();
         let on_nudge: zeron_rpc::NudgeHandler = Arc::new(move |chat_id: String| {
             match doc_host.enqueue_wakeup(&chat_id) {
@@ -453,7 +455,10 @@ impl EngineCore {
                 }
             }
         });
-        zeron_rpc::HostRelay::spawn(config, self.rpc_service(), on_nudge)
+        let service = Arc::new(
+            Arc::unwrap_or_clone(self.rpc_service()).with_origin(telemetry::RpcOrigin::Relay),
+        );
+        zeron_rpc::HostRelay::spawn(config, service, on_nudge)
     }
 
     pub fn rpc_service(&self) -> Arc<EngineRpc> {
@@ -555,6 +560,8 @@ pub struct Engine {
 pub struct EngineRuntime {
     core: EngineCore,
     host_relay: std::sync::Mutex<Option<zeron_rpc::HostRelay>>,
+    /// Heartbeat, auth attribution, usage import — end with the runtime.
+    _telemetry: telemetry::TelemetryTasks,
 }
 
 /// IPC-only lifecycle control owned by `zeron headless`. The regular
@@ -727,7 +734,8 @@ impl Engine {
         auth: Auth,
         profile: EngineProfile,
     ) -> anyhow::Result<EngineRuntime> {
-        Self::assemble_runtime_inner(config, auth, profile, None).await
+        Self::assemble_runtime_inner(config, auth, profile, None, telemetry::RunMode::Headless)
+            .await
     }
 
     /// Like [`Self::assemble_runtime`], but against an [`InstanceLock`] the
@@ -739,7 +747,8 @@ impl Engine {
         profile: EngineProfile,
         lock: InstanceLock,
     ) -> anyhow::Result<EngineRuntime> {
-        Self::assemble_runtime_inner(config, auth, profile, Some(lock)).await
+        Self::assemble_runtime_inner(config, auth, profile, Some(lock), telemetry::RunMode::Headed)
+            .await
     }
 
     async fn assemble_runtime_inner(
@@ -747,6 +756,7 @@ impl Engine {
         auth: Auth,
         profile: EngineProfile,
         lock: Option<InstanceLock>,
+        run_mode: telemetry::RunMode,
     ) -> anyhow::Result<EngineRuntime> {
         let edge_enabled = match profile.scope() {
             WorkspaceScope::Local => false,
@@ -780,6 +790,7 @@ impl Engine {
             zeron_sync::net_path::spawn_path_monitor();
         }
         let device_id = load_or_create_device_id(profile.device_root())?;
+        telemetry::start(profile.device_root(), run_mode, profile.scope(), &device_id);
         let edge = edge_enabled.then(|| {
             EdgeConfig::new(config.edge_url.clone(), Arc::new(auth.clone())).with_device(device_id)
         });
@@ -866,9 +877,18 @@ impl Engine {
             core.start_host_relay(&edge.url)
         });
 
+        let telemetry_tasks = telemetry::spawn_runtime_tasks(
+            auth.clone(),
+            telemetry::HeartbeatSources {
+                registry: core.registry.clone(),
+                workspace: core.workspace.clone(),
+                device_id: core.device_id.clone(),
+            },
+        );
         Ok(EngineRuntime {
             core,
             host_relay: std::sync::Mutex::new(host_relay),
+            _telemetry: telemetry_tasks,
         })
     }
 
@@ -935,6 +955,7 @@ impl Engine {
         tracing::info!("shutting down");
         server.abort();
         runtime.shutdown().await;
+        telemetry::process_exit().await;
         Ok(())
     }
 }

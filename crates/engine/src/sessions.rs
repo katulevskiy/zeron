@@ -235,6 +235,9 @@ struct Inner {
     /// dispatch or accepted steer) — the diff sync snapshots the checkout tree
     /// for the Changes pane's "Latest turn" scope. Absent in bare tests.
     turn_listener: OnceLock<TurnListener>,
+    /// Per chat: the turn in flight, folded for product telemetry and the
+    /// local usage ledger (`crate::telemetry`). Content never enters it.
+    turns: Mutex<HashMap<String, zeron_telemetry::turn::TurnTracker>>,
 }
 
 /// Turn-start hook: called with `(chat_id, cwd)`.
@@ -275,6 +278,7 @@ impl SessionsEngine {
                 titles: OnceLock::new(),
                 generated_images: OnceLock::new(),
                 turn_listener: OnceLock::new(),
+                turns: Mutex::new(HashMap::new()),
             }),
         }
     }
@@ -663,6 +667,7 @@ impl SessionsEngine {
                 let handle = self.doc_handle(chat_id)?;
                 handle.write_user_message(&user_id, &request.prompt, now_ms())?;
                 self.note_turn_start(chat_id, &request.cwd);
+                self.inner.turn_begin(chat_id, harness_id, &request);
                 if self.is_live(chat_id, &run_id) {
                     if bootstrap.is_some() {
                         history_sent.store(true, std::sync::atomic::Ordering::Release);
@@ -1290,6 +1295,57 @@ impl SessionsEngine {
 
     fn set_status(&self, chat_id: &str, status: SessionStatus, fresh_start: bool) {
         self.inner.set_status(chat_id, status, fresh_start);
+    }
+}
+
+impl Inner {
+    /// A user prompt reached the agent. A prompt landing while a turn is
+    /// still in flight is a steer into that turn, not a new one.
+    fn turn_begin(&self, chat_id: &str, harness: HarnessId, request: &RunRequest) {
+        use zeron_telemetry::turn::{TurnMeta, TurnTracker};
+        let mut turns = lock(&self.turns);
+        if let Some(turn) = turns.get_mut(chat_id) {
+            turn.observe(&AgentEvent::Steered {
+                assistant_message_id: None,
+                next_assistant_message_id: None,
+            });
+            return;
+        }
+        let turn = TurnTracker::new(TurnMeta::from_request(harness, request));
+        zeron_telemetry::capture(turn.started_event());
+        turns.insert(chat_id.to_string(), turn);
+    }
+
+    /// Folds one event into the chat's turn; a top-level `Done` closes it.
+    fn turn_observe(&self, chat_id: &str, event: &AgentEvent) {
+        let finished = {
+            let mut turns = lock(&self.turns);
+            let Some(turn) = turns.get_mut(chat_id) else {
+                return;
+            };
+            turn.observe(event);
+            match event {
+                AgentEvent::Done { status, .. } => {
+                    turns.remove(chat_id).map(|turn| turn.finish(*status))
+                }
+                _ => None,
+            }
+        };
+        if let Some(event) = finished {
+            crate::telemetry::turn_finished(event);
+        }
+    }
+
+    /// The run ended without a `Done` for the turn in flight.
+    fn turn_abandon(&self, chat_id: &str, interrupted: bool) {
+        let turn = lock(&self.turns).remove(chat_id);
+        if let Some(turn) = turn {
+            crate::telemetry::turn_finished(turn.finish(if interrupted {
+                DoneStatus::Interrupted
+            } else {
+                DoneStatus::Errored
+            }));
+        }
     }
 }
 
@@ -2182,6 +2238,10 @@ async fn drive_run(
     let harness_id = harness.id();
     let user_prompt = request.prompt.clone();
     let run_cwd = request.cwd.clone();
+    // An idle restart (parked session revived without a prompt) is not a turn.
+    if !resume_state.idle {
+        inner.turn_begin(&chat_id, harness_id, &request);
+    }
     if request.resume.is_none() {
         let _ = doc.clear_context_usage();
     }
@@ -2304,21 +2364,19 @@ async fn drive_run(
             ) {
                 tracing::warn!(chat = %chat_id, error = %err, "start failure entry failed");
             }
-            inner.publish(
-                &chat_id,
-                &AgentEvent::Error {
-                    message: message.clone(),
-                },
-            );
-            inner.publish(
-                &chat_id,
-                &AgentEvent::Done {
-                    status: DoneStatus::Errored,
-                    result: None,
-                    error: Some(message),
-                    session_id: None,
-                },
-            );
+            let error = AgentEvent::Error {
+                message: message.clone(),
+            };
+            inner.turn_observe(&chat_id, &error);
+            inner.publish(&chat_id, &error);
+            let done = AgentEvent::Done {
+                status: DoneStatus::Errored,
+                result: None,
+                error: Some(message),
+                session_id: None,
+            };
+            inner.turn_observe(&chat_id, &done);
+            inner.publish(&chat_id, &done);
             inner.remove_run(&chat_id, &run_id);
             inner.set_status(&chat_id, SessionStatus::Errored, false);
             return;
@@ -2712,6 +2770,7 @@ async fn drive_run(
             };
             event
         };
+        inner.turn_observe(&chat_id, &event);
 
         // ── subagent routing ───────────────────────────────────────────
         // Tagged events NEVER fold into the parent transcript: they stream
@@ -3354,6 +3413,7 @@ async fn drive_run(
         .map(|h| std::mem::take(&mut *lock(&h.routed_steers)).into())
         .unwrap_or_default();
     inner.remove_run(&chat_id, &run_id);
+    inner.turn_abandon(&chat_id, interrupted);
     inner.set_status_with_completion(&chat_id, final_status, false, final_completed_turn);
     // A Stop cancels the messages it found waiting; one accepted after it
     // began is still the user's next message and must run.
