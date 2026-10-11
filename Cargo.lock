@@ -13456,6 +13456,7 @@ name = "zeron"
 version = "0.2.111"
 dependencies = [
  "anyhow",
+ "chrono",
  "clap",
  "embed-resource",
  "libc",
@@ -13469,6 +13470,7 @@ dependencies = [
  "zeron-engine",
  "zeron-mcp",
  "zeron-rpc",
+ "zeron-telemetry",
  "zeron-ui",
  "zeron-update",
 ]

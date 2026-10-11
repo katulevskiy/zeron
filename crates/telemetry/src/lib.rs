@@ -212,9 +212,12 @@ impl Tuning {
         let env_override = EnvOverride::detect();
         let explicit_endpoint = env_nonempty("ZERON_TELEMETRY_ENDPOINT");
         let forced_on = matches!(env_override, Some(EnvOverride::ForcedOn));
-        // Dev builds never pollute production analytics by accident.
+        // Dev builds and CI runs (release-mode test jobs included) never
+        // pollute production analytics by accident.
+        let automated = env_nonempty("CI").is_some();
         let endpoint = explicit_endpoint.or_else(|| {
-            (!cfg!(debug_assertions) || forced_on).then(|| DEFAULT_ENDPOINT.to_string())
+            ((!cfg!(debug_assertions) && !automated) || forced_on)
+                .then(|| DEFAULT_ENDPOINT.to_string())
         });
         let tuning = Tuning {
             endpoint,
@@ -513,9 +516,9 @@ impl Telemetry {
         let override_reason = match self.inner.env_override {
             Some(EnvOverride::ForcedOff(var)) => Some(format!("disabled by {var}")),
             Some(EnvOverride::ForcedOn) => Some("enabled by ZERON_TELEMETRY".to_string()),
-            None if self.inner.tx.is_some() && self.inner.upload_endpoint.is_none() => {
-                Some("development build: events are recorded locally, not uploaded".to_string())
-            }
+            None if self.inner.tx.is_some() && self.inner.upload_endpoint.is_none() => Some(
+                "development build or CI: events are recorded locally, not uploaded".to_string(),
+            ),
             None => None,
         };
         TelemetryStatus {

@@ -7,6 +7,7 @@
 mod auth_cli;
 mod daemon;
 mod paths;
+mod telemetry_cli;
 mod update_cli;
 
 use clap::{Parser, Subcommand};
@@ -58,6 +59,11 @@ enum Command {
     Update {
         #[arg(long)]
         check: bool,
+    },
+    /// Anonymous usage data: status, on/off, what is sent, token usage.
+    Telemetry {
+        #[command(subcommand)]
+        command: telemetry_cli::TelemetryCommand,
     },
 }
 
@@ -263,6 +269,11 @@ fn main() -> anyhow::Result<()> {
         Some(Command::Appshot) => {
             zeron_ui::appshots::request_running_appshot(&engine_config_from_env().data_dir)
                 .map_err(anyhow::Error::msg)
+        }
+        Some(Command::Telemetry { command }) => {
+            let runtime = tokio::runtime::Runtime::new()?;
+            let config = engine_config_from_env();
+            runtime.block_on(telemetry_cli::run(command, &config.data_dir, config.ipc_port))
         }
         Some(Command::Update { check }) => {
             let runtime = tokio::runtime::Runtime::new()?;
