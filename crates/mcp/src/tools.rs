@@ -87,6 +87,21 @@ fn catalog() -> Vec<ToolDef> {
             input_schema: json!({ "type": "object", "properties": { "device": device_schema() } }),
         },
         ToolDef {
+            name: "set_harness_settings",
+            description: "Device-level harness settings. claude_chrome: start new Claude Code sessions on that device with the Claude in Chrome browser integration (--chrome). Applies to sessions started after the change; running sessions keep their current setting.",
+            input_schema: json!({
+                "type": "object",
+                "properties": {
+                    "device": device_schema(),
+                    "claude_chrome": {
+                        "type": "boolean",
+                        "description": "Start new Claude Code sessions with the Claude in Chrome browser integration (--chrome)."
+                    }
+                },
+                "required": ["claude_chrome"]
+            }),
+        },
+        ToolDef {
             name: "list_models",
             description: "Models a harness offers on the chosen device (local engine when omitted). Model ids are harness-specific strings; pass one to create_chat.",
             input_schema: json!({
@@ -496,6 +511,12 @@ struct DeviceArgs {
     device: Option<String>,
 }
 
+#[derive(Deserialize)]
+struct SetHarnessSettingsArgs {
+    device: Option<String>,
+    claude_chrome: bool,
+}
+
 /// Messages already in the transcript before a send. Replies are matched by
 /// id, not by time: `createdAt` is stamped on the host's clock, which can run
 /// behind the caller's when the chat lives on another device.
@@ -690,6 +711,7 @@ impl Tools {
             "list_devices" => self.list_devices().await,
             "list_projects" => self.list_projects(parse(args)?).await,
             "list_harnesses" => self.list_harnesses(parse(args)?).await,
+            "set_harness_settings" => self.set_harness_settings(parse(args)?).await,
             "list_models" => self.list_models(parse(args)?).await,
             "list_chats" => self.list_chats(parse(args)?).await,
             "get_chat" => self.get_chat(parse(args)?).await,
@@ -808,7 +830,7 @@ impl Tools {
             None => None,
         };
         let harnesses = self.zeron.harnesses_on(device.as_deref()).await?;
-        Ok(json!({
+        let mut value = json!({
             "harnesses": harnesses.iter().map(|h| json!({
                 "id": h.id,
                 "name": h.name,
@@ -817,7 +839,22 @@ impl Tools {
                 "steersMidTurn": h.steers_mid_turn(),
                 "reasoningLevels": h.reasoning_levels,
             })).collect::<Vec<_>>()
-        }))
+        });
+        // Older engines have no GetHarnessSettings. The catalog still stands.
+        if let Ok(settings) = self.zeron.harness_settings(device.as_deref()).await {
+            value["settings"] = settings;
+        }
+        Ok(value)
+    }
+
+    async fn set_harness_settings(&self, args: SetHarnessSettingsArgs) -> anyhow::Result<Value> {
+        let device = match args.device.as_deref() {
+            Some(key) => Some(self.zeron.resolve_device_id(Some(key)).await?),
+            None => None,
+        };
+        self.zeron
+            .set_harness_settings(device.as_deref(), args.claude_chrome)
+            .await
     }
 
     async fn list_models(&self, args: ListModelsArgs) -> anyhow::Result<Value> {
@@ -1564,6 +1601,9 @@ mod tests {
         extra_chats: Vec<Value>,
         catalog_error: Option<&'static str>,
         reads: Mutex<Vec<(String, Value)>>,
+        /// `None` is an engine that predates Get/SetHarnessSettings.
+        harness_settings: Mutex<Option<bool>>,
+        settings_calls: Mutex<Vec<(String, Value)>>,
     }
 
     fn stream(item: Value) -> RpcReply {
@@ -1640,6 +1680,32 @@ mod tests {
                 methods::LIST_MODELS => RpcReply::Value(json!([
                     { "id": "opus", "label": "Opus" }, { "id": "sonnet", "label": "Sonnet" }
                 ])),
+                methods::GET_HARNESS_SETTINGS => match *self.harness_settings.lock().unwrap() {
+                    Some(on) => {
+                        self.settings_calls
+                            .lock()
+                            .unwrap()
+                            .push((method.into(), params));
+                        RpcReply::Value(json!({"claudeChrome": on}))
+                    }
+                    None => return Err(RpcError::UnknownMethod(method.into())),
+                },
+                methods::SET_HARNESS_SETTINGS => {
+                    let on = params
+                        .get("claudeChrome")
+                        .and_then(Value::as_bool)
+                        .ok_or_else(|| RpcError::BadParams("claudeChrome".into()))?;
+                    let mut slot = self.harness_settings.lock().unwrap();
+                    if slot.is_none() {
+                        return Err(RpcError::UnknownMethod(method.into()));
+                    }
+                    *slot = Some(on);
+                    self.settings_calls
+                        .lock()
+                        .unwrap()
+                        .push((method.into(), params));
+                    RpcReply::Value(json!({"claudeChrome": on}))
+                }
                 methods::WATCH_DOC_MESSAGES => stream(json!({ "reset": [
                     { "id": "u1", "role": "user", "createdAt": 1, "deviceId": "dev-local",
                       "parts": [{ "kind": "text", "id": "t", "text": "hi" }] },
@@ -2428,6 +2494,65 @@ mod tests {
             );
             assert!(broken.writes.lock().unwrap().is_empty());
         }
+    }
+
+    #[tokio::test]
+    async fn harness_settings_round_trip_and_older_devices_omit_them() {
+        let world = Arc::new(World::default());
+        let tools = self::tools(world, Origin::default());
+        let listed = tools.call("list_harnesses", json!({})).await.unwrap();
+        assert!(listed.get("settings").is_none(), "{listed}");
+        assert_eq!(listed["harnesses"][0]["id"], "claude-code");
+        assert!(
+            tools
+                .call("set_harness_settings", json!({"claude_chrome": true}))
+                .await
+                .is_err()
+        );
+        assert!(tools.call("set_harness_settings", json!({})).await.is_err());
+
+        let world = Arc::new(World {
+            harness_settings: Mutex::new(Some(false)),
+            ..Default::default()
+        });
+        let tools = self::tools(world.clone(), Origin::default());
+        let listed = tools.call("list_harnesses", json!({})).await.unwrap();
+        assert_eq!(listed["settings"]["claudeChrome"], false);
+        let updated = tools
+            .call("set_harness_settings", json!({"claude_chrome": true}))
+            .await
+            .unwrap();
+        assert_eq!(updated["claudeChrome"], true);
+        let listed = tools.call("list_harnesses", json!({})).await.unwrap();
+        assert_eq!(listed["settings"]["claudeChrome"], true);
+
+        let updated = tools
+            .call(
+                "set_harness_settings",
+                json!({"device": "Worker", "claude_chrome": false}),
+            )
+            .await
+            .unwrap();
+        assert_eq!(updated["claudeChrome"], false);
+        let calls = world.settings_calls.lock().unwrap();
+        let set = calls
+            .iter()
+            .rev()
+            .find(|(method, _)| method == methods::SET_HARNESS_SETTINGS)
+            .unwrap();
+        assert_eq!(set.1["claudeChrome"], false);
+        assert_eq!(set.1["targetDeviceId"], "dev-remote");
+        drop(calls);
+        let listed = tools
+            .call("list_harnesses", json!({"device": "Worker"}))
+            .await
+            .unwrap();
+        assert_eq!(listed["harnesses"][0]["id"], "codex");
+        assert_eq!(listed["settings"]["claudeChrome"], false);
+        let calls = world.settings_calls.lock().unwrap();
+        let get = calls.last().unwrap();
+        assert_eq!(get.0, methods::GET_HARNESS_SETTINGS);
+        assert_eq!(get.1["targetDeviceId"], "dev-remote");
     }
 
     #[tokio::test]

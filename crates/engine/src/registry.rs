@@ -8,7 +8,9 @@
 //! another device and edits THAT device's set over the forwarded RPCs.
 
 use std::collections::{HashMap, HashSet};
+use std::ffi::OsStr;
 use std::path::{Path, PathBuf};
+use std::sync::atomic::{AtomicBool, Ordering};
 use std::sync::{Arc, Mutex, MutexGuard, PoisonError};
 
 use serde::{Deserialize, Serialize};
@@ -93,6 +95,9 @@ struct HarnessPrefsFile {
     /// on without a trip to Settings.
     disabled: Vec<HarnessId>,
     titles: TitleSettings,
+    /// Claude Code settings. `chrome: None` means the value has not been
+    /// imported from Claude's own config yet.
+    claude: ClaudeSettings,
     /// The allow-list written back when enablement was a fixed default set.
     /// Read once, folded into `disabled`, and never written again.
     #[serde(skip_serializing)]
@@ -107,6 +112,55 @@ pub struct TitleSettings {
     pub harness: Option<HarnessId>,
     /// None selects the cheapest model offered by the selected harness.
     pub model: Option<String>,
+}
+
+/// Persisted Claude Code settings inside `harness-prefs.json`.
+#[derive(Debug, Clone, Default, PartialEq, Eq, Serialize, Deserialize)]
+#[serde(default, rename_all = "camelCase")]
+struct ClaudeSettings {
+    /// `None` until the first load imports Claude's own default.
+    #[serde(skip_serializing_if = "Option::is_none")]
+    chrome: Option<bool>,
+}
+
+/// Per-device harness settings exposed over RPC (`claudeChrome`).
+#[derive(Debug, Clone, Copy, Default, PartialEq, Eq, Serialize, Deserialize)]
+#[serde(rename_all = "camelCase")]
+pub struct HarnessSettings {
+    /// Start new Claude Code sessions with `--chrome`.
+    pub claude_chrome: bool,
+}
+
+/// `$CLAUDE_CONFIG_DIR/.claude.json` when that variable is set and non-empty,
+/// otherwise `~/.claude.json`.
+fn default_claude_config_file() -> PathBuf {
+    claude_config_path_from(
+        std::env::var_os("CLAUDE_CONFIG_DIR").as_deref(),
+        &crate::repos::home_dir(),
+    )
+}
+
+fn claude_config_path_from(config_dir: Option<&OsStr>, home: &Path) -> PathBuf {
+    match config_dir {
+        Some(dir) if !dir.is_empty() => PathBuf::from(dir).join(".claude.json"),
+        _ => home.join(".claude.json"),
+    }
+}
+
+/// Top-level `claudeInChromeDefaultEnabled`. A missing file, unreadable
+/// file, bad JSON, missing key, or non-bool value is false.
+fn read_claude_in_chrome_default(path: &Path) -> bool {
+    let Ok(text) = std::fs::read_to_string(path) else {
+        return false;
+    };
+    serde_json::from_str::<serde_json::Value>(&text)
+        .ok()
+        .and_then(|value| {
+            value
+                .get("claudeInChromeDefaultEnabled")
+                .and_then(serde_json::Value::as_bool)
+        })
+        .unwrap_or(false)
 }
 
 type Factory = Box<dyn Fn() -> Result<Arc<dyn Harness>, HarnessError> + Send + Sync>;
@@ -160,6 +214,12 @@ pub struct HarnessRegistry {
     prefs: Mutex<HarnessPrefsFile>,
     /// Where the prefs persist; `None` (tests, bare registries) skips writes.
     prefs_path: Mutex<Option<PathBuf>>,
+    /// Shared with the cached Claude harness. Load and set publish into it
+    /// so the next spawned session sees the current default.
+    claude_chrome: Arc<AtomicBool>,
+    /// Overrides the Claude config file read when `claude.chrome` is absent.
+    /// `None` resolves `$CLAUDE_CONFIG_DIR/.claude.json` or `~/.claude.json`.
+    claude_config_file: Mutex<Option<PathBuf>>,
     /// Fair per-harness execution gates. Runs and title generation hold a
     /// shared lease; an accepted update queues an exclusive lease. Tokio's
     /// write-preferring FIFO policy prevents a stream of new runs from
@@ -465,6 +525,8 @@ impl HarnessRegistry {
             order: Mutex::new(Vec::new()),
             prefs: Mutex::new(HarnessPrefsFile::default()),
             prefs_path: Mutex::new(None),
+            claude_chrome: Arc::new(AtomicBool::new(false)),
+            claude_config_file: Mutex::new(None),
             gates: Mutex::new(HashMap::new()),
             pending_updates: Arc::new(Mutex::new(HashSet::new())),
             update_generation,
@@ -581,6 +643,51 @@ impl HarnessRegistry {
             .lock()
             .unwrap_or_else(PoisonError::into_inner) = Some(path);
         self.migrate_legacy_prefs();
+        self.import_claude_chrome_if_unset();
+        self.publish_claude_chrome();
+    }
+
+    /// Point the one-time chrome import at a Claude config file.
+    /// Call this before [`Self::load_prefs`]. Production leaves it unset.
+    #[cfg(test)]
+    pub(crate) fn set_claude_config_file(&self, path: impl Into<PathBuf>) {
+        *self
+            .claude_config_file
+            .lock()
+            .unwrap_or_else(PoisonError::into_inner) = Some(path.into());
+    }
+
+    fn resolved_claude_config_file(&self) -> PathBuf {
+        self.claude_config_file
+            .lock()
+            .unwrap_or_else(PoisonError::into_inner)
+            .clone()
+            .unwrap_or_else(default_claude_config_file)
+    }
+
+    /// Import `claudeInChromeDefaultEnabled` once. A later edit of Claude's
+    /// own config must not move the value Zeron already stored.
+    fn import_claude_chrome_if_unset(&self) {
+        if self.prefs().claude.chrome.is_some() {
+            return;
+        }
+        let value = read_claude_in_chrome_default(&self.resolved_claude_config_file());
+        let mut prefs = self.prefs();
+        if prefs.claude.chrome.is_none() {
+            prefs.claude.chrome = Some(value);
+            drop(prefs);
+            self.persist_prefs();
+        }
+    }
+
+    fn publish_claude_chrome(&self) {
+        let enabled = self.prefs().claude.chrome.unwrap_or(false);
+        self.claude_chrome.store(enabled, Ordering::Release);
+    }
+
+    #[cfg(test)]
+    pub(crate) fn claude_chrome_enabled(&self) -> bool {
+        self.claude_chrome.load(Ordering::Acquire)
     }
 
     /// Fold a legacy allow-list into the opt-out shape: a registered harness
@@ -696,6 +803,19 @@ impl HarnessRegistry {
         }
         settings.model = settings.model.filter(|model| !model.trim().is_empty());
         self.prefs().titles = settings;
+        self.persist_prefs();
+        Ok(())
+    }
+
+    pub fn harness_settings(&self) -> HarnessSettings {
+        HarnessSettings {
+            claude_chrome: self.prefs().claude.chrome.unwrap_or(false),
+        }
+    }
+
+    pub fn set_harness_settings(&self, settings: HarnessSettings) -> Result<(), String> {
+        self.prefs().claude.chrome = Some(settings.claude_chrome);
+        self.publish_claude_chrome();
         self.persist_prefs();
         Ok(())
     }
@@ -832,6 +952,9 @@ pub fn default_registry() -> HarnessRegistry {
             },
         ],
     }));
+    // The Arc is the registry's. Load and set publish into it; the factory
+    // captures that same flag so a harness resolved earlier still sees updates.
+    let claude_chrome = Arc::clone(&registry.claude_chrome);
     registry.register_lazy(
         HarnessDescriptor {
             id: HarnessId::ClaudeCode,
@@ -852,7 +975,11 @@ pub fn default_registry() -> HarnessRegistry {
             enabled: None,
         },
         Box::new(|| zeron_harness::ClaudeHarness::new().installed()),
-        Box::new(|| Ok(Arc::new(zeron_harness::ClaudeHarness::new()) as Arc<dyn Harness>)),
+        Box::new(move || {
+            Ok(Arc::new(
+                zeron_harness::ClaudeHarness::new().with_chrome_default(Arc::clone(&claude_chrome)),
+            ) as Arc<dyn Harness>)
+        }),
     );
     // Codex, same lazy pattern: the static descriptor mirrors AcpHarness::codex()
     // exactly (`describe()` after the first resolve must not change the
@@ -1543,6 +1670,155 @@ mod title_tests {
         let prefs: HarnessPrefsFile = serde_json::from_str(r#"{"disabled":["codex"]}"#).unwrap();
         assert_eq!(prefs.titles, TitleSettings::default());
         assert_eq!(prefs.disabled, vec![HarnessId::Codex]);
+        assert_eq!(prefs.claude.chrome, None);
+    }
+}
+
+#[cfg(test)]
+mod chrome_tests {
+    use std::ffi::OsStr;
+    use std::path::{Path, PathBuf};
+    use std::sync::Arc;
+    use std::sync::atomic::Ordering;
+
+    use super::*;
+
+    fn load(dir: &Path, config: &Path) -> HarnessRegistry {
+        let registry = HarnessRegistry::new();
+        registry.set_claude_config_file(config);
+        registry.load_prefs(dir);
+        registry
+    }
+
+    fn prefs_chrome(dir: &Path) -> Option<bool> {
+        let text = std::fs::read_to_string(dir.join("harness-prefs.json")).unwrap();
+        let prefs: HarnessPrefsFile = serde_json::from_str(&text).unwrap();
+        prefs.claude.chrome
+    }
+
+    #[test]
+    fn claude_config_path_prefers_a_non_empty_config_dir() {
+        let home = Path::new("/home/example");
+        assert_eq!(
+            claude_config_path_from(Some(OsStr::new("/tmp/claude")), home),
+            PathBuf::from("/tmp/claude/.claude.json")
+        );
+        assert_eq!(
+            claude_config_path_from(Some(OsStr::new("")), home),
+            home.join(".claude.json")
+        );
+        assert_eq!(
+            claude_config_path_from(None, home),
+            home.join(".claude.json")
+        );
+    }
+
+    #[test]
+    fn imports_true_once_and_ignores_later_source_changes() {
+        let dir = tempfile::tempdir().unwrap();
+        let config = dir.path().join(".claude.json");
+        std::fs::write(
+            &config,
+            r#"{"claudeInChromeDefaultEnabled":true,"theme":"dark"}"#,
+        )
+        .unwrap();
+        let registry = load(dir.path(), &config);
+        assert_eq!(
+            registry.harness_settings(),
+            HarnessSettings {
+                claude_chrome: true
+            }
+        );
+        assert!(registry.claude_chrome_enabled());
+        assert_eq!(prefs_chrome(dir.path()), Some(true));
+
+        std::fs::write(&config, r#"{"claudeInChromeDefaultEnabled":false}"#).unwrap();
+        let reloaded = load(dir.path(), &config);
+        assert!(reloaded.harness_settings().claude_chrome);
+        assert!(reloaded.claude_chrome_enabled());
+        assert_eq!(prefs_chrome(dir.path()), Some(true));
+    }
+
+    #[test]
+    fn imports_false_key() {
+        let dir = tempfile::tempdir().unwrap();
+        let config = dir.path().join(".claude.json");
+        std::fs::write(&config, r#"{"claudeInChromeDefaultEnabled":false}"#).unwrap();
+        let registry = load(dir.path(), &config);
+        assert!(!registry.harness_settings().claude_chrome);
+        assert!(!registry.claude_chrome_enabled());
+        assert_eq!(prefs_chrome(dir.path()), Some(false));
+    }
+
+    #[test]
+    fn missing_file_imports_false_and_stays_false_when_the_file_appears() {
+        let dir = tempfile::tempdir().unwrap();
+        let config = dir.path().join("missing.json");
+        let registry = load(dir.path(), &config);
+        assert!(!registry.harness_settings().claude_chrome);
+        assert_eq!(prefs_chrome(dir.path()), Some(false));
+
+        std::fs::write(&config, r#"{"claudeInChromeDefaultEnabled":true}"#).unwrap();
+        let reloaded = load(dir.path(), &config);
+        assert!(!reloaded.harness_settings().claude_chrome);
+        assert_eq!(prefs_chrome(dir.path()), Some(false));
+    }
+
+    #[test]
+    fn bad_json_and_missing_or_non_bool_key_import_false() {
+        for body in [
+            "{",
+            "not json",
+            r#"{"theme":"dark"}"#,
+            r#"{"claudeInChromeDefaultEnabled":"yes"}"#,
+            "",
+        ] {
+            let dir = tempfile::tempdir().unwrap();
+            let config = dir.path().join(".claude.json");
+            std::fs::write(&config, body).unwrap();
+            let registry = load(dir.path(), &config);
+            assert!(
+                !registry.harness_settings().claude_chrome,
+                "body {body:?} imported true"
+            );
+            assert_eq!(prefs_chrome(dir.path()), Some(false), "body {body:?}");
+        }
+    }
+
+    #[test]
+    fn set_harness_settings_persists_and_updates_the_shared_flag() {
+        let dir = tempfile::tempdir().unwrap();
+        let config = dir.path().join(".claude.json");
+        std::fs::write(&config, r#"{"claudeInChromeDefaultEnabled":false}"#).unwrap();
+        let registry = load(dir.path(), &config);
+        let flag = Arc::clone(&registry.claude_chrome);
+        registry
+            .set_harness_settings(HarnessSettings {
+                claude_chrome: true,
+            })
+            .unwrap();
+        assert!(registry.claude_chrome_enabled());
+        assert!(flag.load(Ordering::Acquire));
+        assert_eq!(prefs_chrome(dir.path()), Some(true));
+
+        std::fs::write(&config, r#"{"claudeInChromeDefaultEnabled":false}"#).unwrap();
+        let reloaded = load(dir.path(), &config);
+        assert_eq!(
+            reloaded.harness_settings(),
+            HarnessSettings {
+                claude_chrome: true
+            }
+        );
+        assert!(reloaded.claude_chrome_enabled());
+
+        reloaded
+            .set_harness_settings(HarnessSettings {
+                claude_chrome: false,
+            })
+            .unwrap();
+        let again = load(dir.path(), &config);
+        assert!(!again.harness_settings().claude_chrome);
+        assert!(!again.claude_chrome_enabled());
     }
 }
 

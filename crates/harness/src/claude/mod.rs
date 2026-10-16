@@ -50,6 +50,7 @@ mod wire;
 
 use std::path::PathBuf;
 use std::sync::Arc;
+use std::sync::atomic::{AtomicBool, Ordering};
 use std::time::Duration;
 
 use async_trait::async_trait;
@@ -149,6 +150,10 @@ pub struct ClaudeHarness {
     interrupt_grace: Duration,
     /// Grace between SIGTERM and SIGKILL.
     kill_grace: Duration,
+    /// When true, ordinary sessions launch with `--chrome`. Shared with the
+    /// engine so a settings change reaches the next spawn of this harness.
+    /// Title runs and discovery probes do not read it.
+    chrome: Arc<AtomicBool>,
     initialize: discovery::InitializeCache,
     models_cache: crate::catalog::Catalog,
     workspace_commands: crate::skills::CommandDiscovery,
@@ -160,6 +165,7 @@ impl Default for ClaudeHarness {
             executable: None,
             interrupt_grace: Duration::from_secs(2),
             kill_grace: Duration::from_secs(3),
+            chrome: Arc::new(AtomicBool::new(false)),
             initialize: discovery::InitializeCache::default(),
             models_cache: crate::catalog::Catalog::default(),
             workspace_commands: crate::skills::CommandDiscovery::default(),
@@ -185,6 +191,14 @@ impl ClaudeHarness {
         self
     }
 
+    /// Launch ordinary sessions with `--chrome` while `flag` is true.
+    /// The harness reads the flag when a runtime is spawned, so the engine
+    /// can flip one shared flag without rebuilding the cached harness.
+    pub fn with_chrome_default(mut self, flag: Arc<AtomicBool>) -> Self {
+        self.chrome = flag;
+        self
+    }
+
     fn resolve_executable(&self) -> Result<PathBuf, HarnessError> {
         if let Some(p) = &self.executable {
             return crate::executable::validate_native_override(p);
@@ -206,10 +220,14 @@ impl ClaudeHarness {
         })
     }
 
-    /// The configuration arguments a run launches with — everything the
-    /// process bakes in at spawn except the session to resume. Two requests
-    /// with equal arguments (and cwd) are the same runtime.
-    fn launch_args(request: &RunRequest) -> Vec<String> {
+    /// Arguments baked into a run at spawn, except the session to resume.
+    /// Two requests with equal arguments and the same cwd are the same
+    /// runtime. `chrome` adds `--chrome` for ordinary runs, before the
+    /// chat's own launch args, so a later `--no-chrome` wins. Title runs
+    /// pass false and carry no launch args; the discovery probe does not
+    /// use this list. Callers read the harness default at spawn, so a
+    /// settings change is picked up by the next new runtime.
+    fn launch_args(&self, request: &RunRequest, chrome: bool) -> Vec<String> {
         let mut args: Vec<String> = [
             "--print",
             "--input-format",
@@ -265,16 +283,21 @@ impl ClaudeHarness {
             args.push("--settings".into());
             args.push(Value::Object(settings).to_string());
         }
+        if chrome {
+            args.push("--chrome".into());
+        }
         // The chat's own launch args go last, verbatim, and are part of the
         // runtime identity: a changed list never reuses a live process.
+        // They follow `--chrome` so a chat's `--no-chrome` overrides the
+        // device default (the CLI honours the last flag).
         args.extend(request.launch_args.iter().cloned());
         args
     }
 
-    fn build_command(&self, exe: &PathBuf, request: &RunRequest) -> Command {
+    fn build_command(&self, exe: &PathBuf, request: &RunRequest, chrome: bool) -> Command {
         let mut cmd = Command::new(exe);
         crate::compose_child_path(&mut cmd, exe);
-        cmd.args(Self::launch_args(request));
+        cmd.args(self.launch_args(request, chrome));
         if let Some(resume) = &request.resume {
             cmd.arg(format!("--resume={resume}"));
         }
@@ -317,6 +340,8 @@ impl ClaudeHarness {
             cmd.current_dir(cwd);
         }
         crate::compose_child_path(&mut cmd, &exe);
+        // Discovery is the short initialize handshake. It does not pass
+        // `--chrome`; browser tools belong to ordinary session launches.
         cmd.args([
             "--print",
             "--input-format",
@@ -465,7 +490,8 @@ impl Harness for ClaudeHarness {
     /// Same launch arguments and cwd. The CLI ignores the sandbox level, and
     /// option spellings that launch the same flags are the same runtime.
     fn same_runtime(&self, live: &RunRequest, next: &RunRequest) -> bool {
-        live.cwd == next.cwd && Self::launch_args(live) == Self::launch_args(next)
+        let chrome = self.chrome.load(Ordering::Acquire);
+        live.cwd == next.cwd && self.launch_args(live, chrome) == self.launch_args(next, chrome)
     }
     /// Model, context window, effort, fast mode, thinking and ultracode all
     /// change on the live process (`set_model`, `apply_flag_settings`). Only
@@ -592,7 +618,11 @@ impl ClaudeHarness {
         zeron_proto::launch_args::validate(HarnessId::ClaudeCode, &request.launch_args)
             .map_err(|err| HarnessError::Protocol(format!("invalid launch args: {err}")))?;
         let exe = self.resolve_executable()?;
-        let mut cmd = self.build_command(&exe, &request);
+        let mut cmd = self.build_command(
+            &exe,
+            &request,
+            !title_only && self.chrome.load(Ordering::Acquire),
+        );
         if title_only {
             cmd.args([
                 "--system-prompt",
@@ -1516,8 +1546,9 @@ mod launch_args_tests {
 
     #[test]
     fn user_launch_args_end_the_argument_list() {
-        let plain = ClaudeHarness::launch_args(&request(&[]));
-        let with = ClaudeHarness::launch_args(&request(&["--add-dir", "../lib", "--chrome"]));
+        let harness = ClaudeHarness::new();
+        let plain = harness.launch_args(&request(&[]), false);
+        let with = harness.launch_args(&request(&["--add-dir", "../lib", "--chrome"]), false);
         assert_eq!(with[..plain.len()], plain[..]);
         assert_eq!(with[plain.len()..], ["--add-dir", "../lib", "--chrome"]);
     }
@@ -1557,5 +1588,66 @@ mod mcp_injection_tests {
             parsed["mcpServers"]["zeron"]["env"]["ZERON_CHAT_ID"],
             "chat-1"
         );
+    }
+}
+
+#[cfg(test)]
+mod chrome_tests {
+    use std::sync::atomic::{AtomicBool, Ordering};
+
+    use super::*;
+    use zeron_proto::SandboxLevel;
+
+    fn bare_request() -> RunRequest {
+        RunRequest {
+            prompt: "hi".into(),
+            harness: None,
+            model: None,
+            reasoning: None,
+            model_options: serde_json::Map::new(),
+            cwd: "/tmp".into(),
+            sandbox: SandboxLevel::WorkspaceWrite,
+            auto_approve: false,
+            resume: None,
+            attachments: Vec::new(),
+            worktree: None,
+            mcp: None,
+            launch_args: Vec::new(),
+        }
+    }
+
+    #[test]
+    fn device_chrome_precedes_a_chat_no_chrome() {
+        let flag = Arc::new(AtomicBool::new(true));
+        let harness = ClaudeHarness::new().with_chrome_default(Arc::clone(&flag));
+        let mut request = bare_request();
+        request.launch_args = vec!["--no-chrome".into()];
+        let args = harness.launch_args(&request, flag.load(Ordering::Acquire));
+        let chrome = args.iter().position(|arg| arg == "--chrome").unwrap();
+        let off = args.iter().position(|arg| arg == "--no-chrome").unwrap();
+        assert!(chrome < off, "{args:?}");
+        assert_eq!(args.last().map(String::as_str), Some("--no-chrome"));
+    }
+
+    fn has_chrome(args: &[String]) -> bool {
+        args.iter().any(|arg| arg == "--chrome")
+    }
+
+    #[test]
+    fn launch_args_include_chrome_iff_the_flag_is_set() {
+        let request = bare_request();
+        let flag = Arc::new(AtomicBool::new(false));
+        let harness = ClaudeHarness::new().with_chrome_default(Arc::clone(&flag));
+
+        assert!(!has_chrome(&harness.launch_args(&request, false)));
+        flag.store(true, Ordering::Release);
+        let chrome = flag.load(Ordering::Acquire);
+        let on = harness.launch_args(&request, chrome);
+        assert_eq!(on.iter().filter(|arg| *arg == "--chrome").count(), 1);
+        // Title runs pass false while the shared default stays on.
+        assert!(!has_chrome(&harness.launch_args(&request, false)));
+        assert!(has_chrome(
+            &harness.launch_args(&request, harness.chrome.load(Ordering::Acquire))
+        ));
     }
 }

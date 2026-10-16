@@ -5,6 +5,7 @@
 #![cfg(unix)]
 
 use std::path::PathBuf;
+use std::sync::atomic::{AtomicBool, Ordering};
 use std::sync::{Arc, Mutex};
 use std::time::Duration;
 
@@ -738,8 +739,17 @@ async fn live_commands_discovery() {
 
 #[tokio::test]
 async fn title_run_disables_tools_and_denies_unexpected_permissions() {
+    // The chrome default is on for one of the runs. Title launches still omit
+    // `--chrome` (the fixture exits if it sees the flag).
+    for chrome in [false, true] {
+        title_run_disables_tools(chrome).await;
+    }
+}
+
+async fn title_run_disables_tools(chrome: bool) {
     let (controls, _steer, token) = controls("Yes");
-    let mut stream = harness()
+    let harness = harness().with_chrome_default(Arc::new(AtomicBool::new(chrome)));
+    let mut stream = harness
         .run_title(request("scenario:title"), controls)
         .await
         .unwrap();
@@ -823,6 +833,32 @@ async fn reserved_launch_args_fail_the_run_before_spawning() {
     };
     assert!(matches!(err, HarnessError::Protocol(_)), "{err:?}");
     assert!(err.to_string().contains("--model"), "{err}");
+}
+
+#[tokio::test]
+async fn ordinary_runs_pass_chrome_iff_the_default_is_on() {
+    let flag = Arc::new(AtomicBool::new(false));
+    let harness = harness().with_chrome_default(Arc::clone(&flag));
+    for (chrome, expect) in [(false, "chrome-off"), (true, "chrome-on")] {
+        flag.store(chrome, Ordering::Release);
+        let (controls, _steer, _token) = controls("A");
+        let events = run_to_end(&harness, request("scenario:chrome-flag"), controls).await;
+        let text: String = events
+            .iter()
+            .filter_map(|event| match event {
+                AgentEvent::TextDelta { text } => Some(text.as_str()),
+                _ => None,
+            })
+            .collect();
+        assert_eq!(text, expect, "flag {chrome}: {events:?}");
+    }
+}
+
+#[tokio::test]
+async fn command_discovery_ignores_the_chrome_default() {
+    let harness = harness().with_chrome_default(Arc::new(AtomicBool::new(true)));
+    let commands = harness.commands().await.expect("discovery succeeds");
+    assert_eq!(commands[0].name, "review");
 }
 
 #[tokio::test]
