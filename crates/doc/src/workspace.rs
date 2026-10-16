@@ -417,7 +417,8 @@ impl WorkspaceDoc {
     ///
     /// `launch_args` are fixed at chat creation: a replacement that carries
     /// none (a model-picker write, or a client that predates the field)
-    /// keeps the stored ones instead of silently dropping them.
+    /// keeps the stored ones instead of silently dropping them. Switching
+    /// harness drops them: they were validated for the old one.
     pub fn set_chat_config(&self, chat_id: &str, config: &ChatConfig) -> Result<bool, DocError> {
         let Some(row) = self.existing_row("chats", chat_id) else {
             return Ok(false);
@@ -426,6 +427,7 @@ impl WorkspaceDoc {
         if config.launch_args.is_empty()
             && let Ok(Some(chat)) = self.chat(chat_id)
             && let Some(prior) = chat.config
+            && prior.harness == config.harness
         {
             config.launch_args = prior.launch_args;
         }
@@ -969,6 +971,11 @@ mod tests {
         let stored = ws.chat("chat-1").unwrap().unwrap().config.unwrap();
         assert_eq!(stored.model.as_deref(), Some("other"));
         assert_eq!(stored.launch_args, vec!["--chrome".to_string()]);
+        // Switching harness drops them: they were validated for the old one.
+        config.harness = HarnessId::Codex;
+        ws.set_chat_config("chat-1", &config).unwrap();
+        let stored = ws.chat("chat-1").unwrap().unwrap().config.unwrap();
+        assert!(stored.launch_args.is_empty());
     }
 
     #[test]
