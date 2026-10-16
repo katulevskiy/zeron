@@ -110,14 +110,21 @@ const DISPATCHERS: &[&str] = &[
     "busybox",
 ];
 
-/// Whether `path` reaches a [`DISPATCHERS`] binary under another name.
+/// Whether `path` reaches a [`DISPATCHERS`] binary under another name. mise also
+/// recognizes itself under versioned names (`mise-2026.10.10`), which a dotted
+/// `file_stem` would cut short, so names are compared whole, minus `.exe`.
 fn is_dispatcher_link(path: &Path, canonical: &Path) -> bool {
-    let stem = |p: &Path| {
-        p.file_stem()
-            .map(|stem| stem.to_string_lossy().to_ascii_lowercase())
+    let name = |p: &Path| {
+        let name = p.file_name()?.to_string_lossy().to_ascii_lowercase();
+        Some(name.strip_suffix(".exe").map(str::to_owned).unwrap_or(name))
     };
-    match (stem(path), stem(canonical)) {
-        (Some(link), Some(target)) => link != target && DISPATCHERS.contains(&target.as_str()),
+    match (name(path), name(canonical)) {
+        (Some(link), Some(target)) => {
+            link != target
+                && (DISPATCHERS.contains(&target.as_str())
+                    || target.starts_with("mise-")
+                    || target.starts_with("rtx-"))
+        }
         _ => false,
     }
 }
@@ -683,6 +690,14 @@ mod tests {
         let root = dir.path().canonicalize().unwrap();
         let links = dispatcher(&root, &["codex"]);
         assert_eq!(pinned_executable(&links[0]).unwrap(), links[0]);
+        // mise under a versioned file name is still mise.
+        let versioned = root.join("bin/mise-2026.10.10");
+        std::fs::copy(root.join("bin/mise"), &versioned).unwrap();
+        symlink(&versioned, root.join("wrappers/grok")).unwrap();
+        assert_eq!(
+            pinned_executable(&root.join("wrappers/grok")).unwrap(),
+            root.join("wrappers/grok")
+        );
         // Invoked under its own name, the dispatcher is just a binary.
         assert_eq!(
             pinned_executable(&root.join("bin/mise")).unwrap(),
