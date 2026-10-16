@@ -2099,6 +2099,10 @@ fn claude_package_manager_command(path: &Path) -> Option<String> {
         .to_ascii_lowercase();
     if text.contains("/winget/") || text.contains("/microsoft/winget/") {
         Some("winget upgrade Anthropic.ClaudeCode".into())
+    } else if is_mise_link(path, &canonical) {
+        // mise's wrappers and shims link to the mise binary (often
+        // /usr/bin/mise); mise owns the install, not the system package manager.
+        Some("mise upgrade claude".into())
     } else if canonical.starts_with("/usr/bin")
         || canonical.starts_with("/nix/store")
         || canonical.starts_with("/snap")
@@ -2107,6 +2111,13 @@ fn claude_package_manager_command(path: &Path) -> Option<String> {
     } else {
         None
     }
+}
+
+/// A mise (formerly rtx) wrapper or shim: a link, under the tool's own name, to
+/// the mise binary that dispatches on that name.
+fn is_mise_link(path: &Path, canonical: &Path) -> bool {
+    let stem = |p: &Path| p.file_stem().and_then(|s| s.to_str()).map(str::to_owned);
+    matches!(stem(canonical).as_deref(), Some("mise" | "rtx")) && stem(path) != stem(canonical)
 }
 
 /// Only actual cask paths establish Homebrew ownership. An npm install
@@ -3563,6 +3574,23 @@ esac
             HarnessId::Pi,
             std::path::Path::new("/usr/bin/pi")
         ));
+    }
+
+    #[cfg(unix)]
+    #[test]
+    fn mise_wrapped_claude_stays_manual_and_points_at_mise() {
+        let dir = tempfile::tempdir().unwrap();
+        let mise = dir.path().join("mise");
+        std::fs::write(&mise, "#!/bin/sh\n").unwrap();
+        let wrapper = dir.path().join("claude");
+        std::os::unix::fs::symlink(&mise, &wrapper).unwrap();
+        assert!(!super::can_apply_update(HarnessId::ClaudeCode, &wrapper));
+        assert_eq!(
+            super::claude_package_manager_command(&wrapper).as_deref(),
+            Some("mise upgrade claude")
+        );
+        // mise itself, invoked by name, is not a wrapper.
+        assert_eq!(super::claude_package_manager_command(&mise), None);
     }
 
     #[cfg(unix)]
