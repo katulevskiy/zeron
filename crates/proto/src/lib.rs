@@ -13,6 +13,7 @@ pub mod file_mentions;
 pub mod invocation;
 pub mod motion;
 pub mod preview;
+pub mod program_status;
 pub mod projectless;
 pub mod sidebar_pins;
 pub mod view;
@@ -22,6 +23,7 @@ pub mod workspace;
 pub use agent::*;
 pub use entities::*;
 pub use preview::*;
+pub use program_status::*;
 pub use sidebar_pins::*;
 pub use workspace::*;
 

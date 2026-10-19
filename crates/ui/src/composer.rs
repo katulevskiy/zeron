@@ -12671,6 +12671,8 @@ mod tests {
                 status: zeron_proto::SessionStatus::Working,
                 started_at: Some(updated),
                 updated_at: updated,
+                last_turn_outcome: None,
+                terminal_activity: None,
                 running_subagents: 0,
             }];
             state.selected_chat = Some("c".into());

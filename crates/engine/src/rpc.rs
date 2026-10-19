@@ -720,6 +720,7 @@ impl EngineRpc {
         agent_accounts: AgentAccounts,
         workspace_scope: WorkspaceScope,
     ) -> Self {
+        sessions.track_terminal_activity(terminals.clone(), workspace.clone());
         let engine_info = EngineInfo {
             device_id: doc_host.device_id().to_string(),
             workspace_scope,
@@ -3582,6 +3583,9 @@ impl RpcService for EngineRpc {
                     p.rows,
                 )
                 .map_err(|err| RpcError::Failed(err.to_string()))?;
+                self.terminals
+                    .associate_chat(&run.terminal.id, &p.chat_id)
+                    .map_err(|err| RpcError::Failed(err.to_string()))?;
                 RpcReply::value(&run)
             }
             methods::OPEN_TERMINAL => {
@@ -3613,6 +3617,11 @@ impl RpcService for EngineRpc {
                     .terminals
                     .open(&cwd, p.cols, p.rows)
                     .map_err(|e| RpcError::Failed(e.to_string()))?;
+                if self.workspace.chat(&p.chat_id).ok().flatten().is_some() {
+                    self.terminals
+                        .associate_chat(&session.id, &p.chat_id)
+                        .map_err(|e| RpcError::Failed(e.to_string()))?;
+                }
                 RpcReply::value(&session)
             }
             methods::SUBSCRIBE_TERMINAL => {

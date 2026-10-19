@@ -13700,7 +13700,7 @@ impl Render for Shell {
                     let unseen_selected = {
                         let s = self.state.read(cx);
                         s.selected_chat_row()
-                            .filter(|c| c.unseen())
+                            .filter(|c| zeron_proto::view::has_unseen_activity(c, s.session_for(&c.id)))
                             .map(|c| c.id.clone())
                     };
                     if let Some(chat_id) = unseen_selected {
@@ -14408,6 +14408,8 @@ mod tests {
             status,
             started_at: Some(updated_at),
             updated_at,
+            last_turn_outcome: None,
+            terminal_activity: None,
             running_subagents: 0,
         }
     }
