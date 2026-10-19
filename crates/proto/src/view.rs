@@ -437,6 +437,7 @@ mod gate_tests {
             ChatIndicator::Idle
         );
         session.terminal_activity.as_mut().unwrap().report.state = ProgramState::Blocked;
+        session.updated_at = later;
         assert_eq!(
             display_status(&chat, Some(&session), later),
             ChatIndicator::AwaitingInput

@@ -7,7 +7,7 @@ use std::time::Duration;
 use base64::Engine as _;
 use chrono::Utc;
 use zeron_engine::{EngineCore, HarnessRegistry};
-use zeron_mcp::{Origin, Tools, TurnOutcome, Zeron};
+use zeron_mcp::{Origin, Tools, Zeron};
 use zeron_proto::{ChatIndicator, HarnessId, Session, SessionStatus, TerminalEvent};
 use zeron_rpc::memory_client;
 
@@ -161,7 +161,7 @@ async fn pty_states_match_sidebar_mcp_and_synced_registry_without_a_viewport() {
             state(&mut rows, ChatIndicator::Completed, &core).await;
         }
     );
-    assert_eq!(waited.unwrap().0, TurnOutcome::TimedOut);
+    assert_eq!(serde_json::to_value(waited.unwrap().0).unwrap(), "timedOut");
 
     emit(
         &core,
@@ -200,11 +200,30 @@ async fn pty_states_match_sidebar_mcp_and_synced_registry_without_a_viewport() {
             .unwrap()["status"],
         "idle"
     );
+    // A lost terminal owner must not turn a blocked report into success.
+    let mut stale = blocked;
+    stale.updated_at = Utc::now() - chrono::Duration::seconds(46);
+    core.workspace.record_session(&stale);
+    let summary = tools
+        .call("get_chat", serde_json::json!({"chat":"chat"}))
+        .await
+        .unwrap();
+    assert_eq!(summary["status"], "idle");
+    assert_eq!(summary["statusStale"], true);
+    let waited = tools
+        .call(
+            "wait_for_turn",
+            serde_json::json!({"chat":"chat","timeout_secs":1}),
+        )
+        .await
+        .unwrap();
+    assert_eq!(waited["turn"]["outcome"], "timedOut");
+    assert_eq!(waited["turn"]["statusStale"], true);
     core.shutdown().await;
 }
 
 #[tokio::test]
-async fn feature_detection_is_answered_by_the_pty_owner_without_subscribers() {
+async fn feature_detection_is_answered_by_the_pty_owner_without_a_terminal_emulator() {
     let temp = tempfile::tempdir().unwrap();
     let core = assemble(temp.path());
     let terminal = core
