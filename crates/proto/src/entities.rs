@@ -318,8 +318,10 @@ pub(crate) fn chat_indicator_inner(
             ChatIndicator::Completed
         }
         _ if chat.unseen()
-            && !live
-                .is_some_and(|s| s.last_turn_outcome == Some(crate::DoneStatus::Interrupted)) =>
+            && !live.is_some_and(|s| {
+                s.last_turn_outcome
+                    .is_some_and(|o| o.status == crate::DoneStatus::Interrupted)
+            }) =>
         {
             ChatIndicator::Completed
         }
@@ -336,6 +338,15 @@ pub enum SessionStatus {
     Errored,
 }
 
+/// Native outcome evidence survives coalesced watches, including consecutive
+/// turns with the same outcome. Terminal leases never rewrite `finished_at`.
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Serialize, Deserialize)]
+#[serde(rename_all = "camelCase")]
+pub struct NativeTurnOutcome {
+    pub status: crate::DoneStatus,
+    pub finished_at: DateTime<Utc>,
+}
+
 /// Live run status for a chat — drives the Working indicator and sidebar status dots.
 /// Staleness-checked client-side against `updated_at` so a crashed backend never shows
 /// an eternal "Working".
@@ -345,7 +356,7 @@ pub struct Session {
     /// Latest native turn outcome, independently of process lifetime and
     /// unread activity. Missing on older peers.
     #[serde(default, skip_serializing_if = "Option::is_none")]
-    pub last_turn_outcome: Option<crate::DoneStatus>,
+    pub last_turn_outcome: Option<NativeTurnOutcome>,
     /// OSC 7501 activity is additive; it never changes native `status` or
     /// `last_completed_turn` (which command execution and waits rely on).
     #[serde(default, skip_serializing_if = "Option::is_none")]

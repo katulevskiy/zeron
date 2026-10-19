@@ -522,6 +522,7 @@ impl Zeron {
                 let advanced = baseline.is_none_or(|b| {
                     session.updated_at > b.updated_at
                         || session.last_completed_turn != b.last_completed_turn
+                        || session.last_turn_outcome != b.last_turn_outcome
                 });
                 // Liveness expiry is not a completion edge. Keep waiting for
                 // fresh evidence (or the deadline), just like the sidebar.
@@ -543,7 +544,9 @@ impl Zeron {
                         return Ok((TurnOutcome::Errored, Some(session)));
                     }
                     SessionStatus::Idle => {
-                        if session.last_turn_outcome == Some(zeron_proto::DoneStatus::Interrupted)
+                        if session
+                            .last_turn_outcome
+                            .is_some_and(|o| o.status == zeron_proto::DoneStatus::Interrupted)
                             && (!expect_turn
                                 || saw_working
                                 || advanced
@@ -684,6 +687,55 @@ pub fn short(id: &str) -> &str {
 mod tests {
     use super::*;
     use chrono::Utc;
+
+    #[tokio::test]
+    async fn coalesced_repeated_interrupts_need_fresh_native_outcome_evidence() {
+        use futures::StreamExt;
+        struct Service(Session);
+        #[async_trait::async_trait]
+        impl zeron_rpc::RpcService for Service {
+            async fn handle(&self, _: &str, _: Value) -> Result<zeron_rpc::RpcReply, RpcError> {
+                Ok(zeron_rpc::RpcReply::Stream(
+                    futures::stream::iter([json!([self.0])])
+                        .chain(futures::stream::pending())
+                        .boxed(),
+                ))
+            }
+        }
+        let now = Utc::now();
+        let earlier = now - chrono::Duration::seconds(1);
+        let baseline: Session = serde_json::from_value(json!({
+            "chatId":"chat", "deviceId":"dev", "status":"idle", "updatedAt":earlier,
+            "lastTurnOutcome":{"status":"interrupted", "finishedAt":earlier}
+        }))
+        .unwrap();
+        for native_finished in [false, true] {
+            let mut current = baseline.clone();
+            current.updated_at = now; // Could also be a terminal liveness update.
+            if native_finished {
+                current.last_turn_outcome.as_mut().unwrap().finished_at = now;
+            }
+            let rpc = zeron_rpc::memory_client(Arc::new(Service(current)));
+            let client = Zeron::with_client(rpc, Origin::default());
+            let (outcome, _) = client
+                .wait_for_turn(
+                    &chat("chat", None),
+                    Some(&baseline),
+                    true,
+                    Duration::from_millis(50),
+                )
+                .await
+                .unwrap();
+            assert_eq!(
+                outcome,
+                if native_finished {
+                    TurnOutcome::Interrupted
+                } else {
+                    TurnOutcome::TimedOut
+                }
+            );
+        }
+    }
 
     #[tokio::test]
     async fn one_shot_reads_release_quiet_watches() {

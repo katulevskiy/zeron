@@ -769,7 +769,7 @@ async fn interrupt_stamps_streaming_entry_aborted() {
         core.sessions
             .session_status(CHAT)
             .unwrap()
-            .last_turn_outcome,
+            .last_turn_outcome.map(|o| o.status),
         Some(DoneStatus::Interrupted)
     );
     wait_for(
@@ -778,7 +778,7 @@ async fn interrupt_stamps_streaming_entry_aborted() {
                 .watch_sessions()
                 .borrow()
                 .iter()
-                .any(|s| s.chat_id == CHAT && s.last_turn_outcome == Some(DoneStatus::Interrupted))
+                .any(|s| s.chat_id == CHAT && s.last_turn_outcome.is_some_and(|o| o.status == DoneStatus::Interrupted))
         },
         "interrupted activity projection",
     )
@@ -2646,7 +2646,7 @@ async fn parked_session_ignores_trailing_frames_and_stays_idle() {
             "trailing frames must not re-arm Working"
         );
         assert_eq!(
-            core.sessions.session_status(CHAT).unwrap().last_turn_outcome,
+            core.sessions.session_status(CHAT).unwrap().last_turn_outcome.map(|o| o.status),
             Some(DoneStatus::Completed),
             "parked teardown must preserve the real turn outcome"
         );

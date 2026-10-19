@@ -786,7 +786,7 @@ impl From<RawChat> for Chat {
 #[serde(rename_all = "camelCase")]
 pub(crate) struct RawSession {
     #[serde(default)]
-    last_turn_outcome: Option<zeron_proto::DoneStatus>,
+    last_turn_outcome: Option<zeron_proto::NativeTurnOutcome>,
     #[serde(default)]
     terminal_activity: Option<zeron_proto::TerminalActivity>,
     #[serde(default)]

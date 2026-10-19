@@ -312,10 +312,14 @@ fn program_activity_and_native_outcome_survive_replication_and_restart() {
     use zeron_proto::{
         DoneStatus, ProgramInputKind, ProgramState, ProgramStatus, TerminalActivity,
     };
+    let now = ts(3_500);
     let mut host = RegistryDoc::new("host");
     let mut viewer = RegistryDoc::new("viewer");
     let mut row = session("chat", "host", SessionStatus::Idle);
-    row.last_turn_outcome = Some(DoneStatus::Interrupted);
+    row.last_turn_outcome = Some(zeron_proto::NativeTurnOutcome {
+        status: DoneStatus::Interrupted,
+        finished_at: now,
+    });
     row.terminal_activity = Some(TerminalActivity {
         terminal_id: "pty".into(),
         updated_at: ts(3_400),
@@ -337,7 +341,10 @@ fn program_activity_and_native_outcome_survive_replication_and_restart() {
     let restored = RegistryDoc::from_bytes(&viewer.to_bytes().unwrap(), "viewer").unwrap();
     assert_eq!(restored.read_sessions().unwrap(), vec![row.clone()]);
     row.terminal_activity = None;
-    row.last_turn_outcome = Some(DoneStatus::Completed);
+    row.last_turn_outcome = Some(zeron_proto::NativeTurnOutcome {
+        status: DoneStatus::Completed,
+        finished_at: now,
+    });
     host.upsert_session(&row).unwrap();
     server_round(&mut server, &mut seq, &mut [&mut host, &mut viewer]);
     assert_eq!(viewer.read_sessions().unwrap(), vec![row]);

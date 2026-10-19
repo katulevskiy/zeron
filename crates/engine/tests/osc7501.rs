@@ -202,8 +202,23 @@ async fn pty_states_match_sidebar_mcp_and_synced_registry_without_a_viewport() {
     );
     // A lost terminal owner must not turn a blocked report into success.
     let mut stale = blocked;
-    stale.updated_at = Utc::now() - chrono::Duration::seconds(46);
+    // Our own registry rows are intentionally replaced by local live state.
+    // A remote owner's row exercises the offline/stale registry path instead.
+    stale.device_id = "offline-owner".into();
+    stale.updated_at =
+        chrono::DateTime::from_timestamp_millis(Utc::now().timestamp_millis() - 46_000).unwrap();
+    let mut registry = core.workspace.watch_session_rows();
     core.workspace.record_session(&stale);
+    tokio::time::timeout(Duration::from_secs(5), async {
+        loop {
+            if registry.borrow_and_update().iter().any(|row| row == &stale) {
+                break;
+            }
+            registry.changed().await.unwrap();
+        }
+    })
+    .await
+    .unwrap();
     let summary = tools
         .call("get_chat", serde_json::json!({"chat":"chat"}))
         .await

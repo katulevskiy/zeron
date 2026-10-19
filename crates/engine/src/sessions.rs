@@ -1557,9 +1557,15 @@ impl Inner {
             }
             entry.status = status;
             if let Some(outcome) = outcome {
-                entry.last_turn_outcome = Some(outcome);
+                entry.last_turn_outcome = Some(zeron_proto::NativeTurnOutcome {
+                    status: outcome,
+                    finished_at: now,
+                });
             } else if status == SessionStatus::Errored {
-                entry.last_turn_outcome = Some(DoneStatus::Errored);
+                entry.last_turn_outcome = Some(zeron_proto::NativeTurnOutcome {
+                    status: DoneStatus::Errored,
+                    finished_at: now,
+                });
             } else if status == SessionStatus::Working && (fresh_start || !was_active) {
                 entry.last_turn_outcome = None;
             }

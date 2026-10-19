@@ -47,7 +47,8 @@ fields distinguish the sources:
 
 - `sessionStatus`: native execution state, including idle while a terminal works.
 - `statusStale`: whether live evidence expired; expiry is not completion.
-- `lastTurnOutcome`: latest native outcome, when present.
+- `lastTurnOutcome`: latest native status and `finishedAt`, when present. A
+  repeated interruption is distinct even if its Working update was coalesced.
 - `terminalActivity`: terminal id, selected program record, and actual report time.
   The record includes its id, state, optional input kind, app, title, message,
   and progress. This timestamp is not rewritten by heartbeat refreshes.

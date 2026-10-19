@@ -392,12 +392,18 @@ mod gate_tests {
         assert!(session_stale(&session, later));
         session.terminal_activity = None;
         session.status = SessionStatus::Idle;
-        session.last_turn_outcome = Some(DoneStatus::Interrupted);
+        session.last_turn_outcome = Some(crate::NativeTurnOutcome {
+            status: DoneStatus::Interrupted,
+            finished_at: now,
+        });
         assert_eq!(
             display_status(&chat, Some(&session), now),
             ChatIndicator::Idle
         );
-        session.last_turn_outcome = Some(DoneStatus::Completed);
+        session.last_turn_outcome = Some(crate::NativeTurnOutcome {
+            status: DoneStatus::Completed,
+            finished_at: now,
+        });
         assert_eq!(
             display_status(&chat, Some(&session), now),
             ChatIndicator::Completed
