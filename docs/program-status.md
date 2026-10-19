@@ -83,3 +83,16 @@ malformed/oversized reports, hierarchical records, replacement, and lifecycle
 clearing. Registry tests verify replication, persistence, and clearing additive
 fields. Native interrupt integration coverage checks that sidebar/MCP do not
 report a cancelled turn as successful completion.
+
+For native visual evidence, run the isolated production Shell fixture:
+
+```sh
+cargo run -p zeron-ui --example program-status-fixture \
+  --features appshots-fixture,resource-profile -- /tmp/zeron-program-status-captures
+```
+
+It sends real OSC reports through three PTYs and captures working, needs input,
+and done in dark/light themes, then acknowledges the done result. The transcript
+table is generated from the shared status projection. Captures must be outside
+the checkout. Linux capture uses Hyprland and `grim`; macOS uses native window
+rendering. No agent or external provider is invoked.
