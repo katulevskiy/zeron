@@ -6985,6 +6985,8 @@ mod tests {
             started_at: Some(chrono::Utc::now()),
             updated_at: chrono::Utc::now(),
             running_subagents: 0,
+            last_turn_outcome: None,
+            terminal_activity: None,
         }
     }
 
@@ -7046,9 +7048,9 @@ mod tests {
             let (state, pickers) = side_chat_picker(false, cx);
             let providers = |pickers: &Pickers, cx: &App| {
                 pickers
-                    .compact_groups(cx)
+                    .rail_descriptors(cx)
                     .into_iter()
-                    .filter_map(|(harness, _)| harness)
+                    .map(|d| d.id)
                     .collect::<Vec<_>>()
             };
             pickers.update(cx, |pickers, cx| {
