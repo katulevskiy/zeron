@@ -4,7 +4,7 @@
 //!
 //! Ordering mirrors the desktop sidebar (`Shell::sidebar_visible_order`,
 //! "In one list" + "Last updated"): pinned sessions in their shared manual
-//! order, then the user's sections (each in recency order), then everything
+//! order, then the user's sections (each in its placed order), then everything
 //! else by recency ([`zeron_proto::view::sort_active`] keys). Archived and
 //! child (side/subagent) chats never appear in the active lists, and a chat
 //! pointing at a deleted project is hidden (projectless chats are first-class).
@@ -15,7 +15,7 @@ use std::sync::Arc;
 
 use chrono::{DateTime, Utc};
 use zeron_doc::WorkspaceState;
-use zeron_proto::view::{attention_rank, display_status};
+use zeron_proto::view::{attention_rank, display_status, project_key, representative_space};
 use zeron_proto::{
     ChangeRequestState, ChangeRequestSummary, Chat, ChatIndicator, CheckoutChangeRequestStatus,
     Device, Session, SidebarPreferences, Space,
@@ -32,9 +32,9 @@ pub const PROJECT_COLOR_COUNT: u32 = 8;
 /// monogram tone: 32-bit FNV-1a of the project's path (`"home"` without a
 /// project), so a project has the same color on every device.
 pub fn project_color_index(space_path: &str) -> u32 {
-    let hash = space_path
-        .bytes()
-        .fold(2_166_136_261u32, |h, b| (h ^ u32::from(b)).wrapping_mul(16_777_619));
+    let hash = space_path.bytes().fold(2_166_136_261u32, |h, b| {
+        (h ^ u32::from(b)).wrapping_mul(16_777_619)
+    });
     hash % PROJECT_COLOR_COUNT
 }
 
@@ -72,6 +72,8 @@ pub struct SessionRow {
     pub device_id: String,
     pub device_name: Option<String>,
     pub device_online: bool,
+    /// Runs on its own Cloud machine (which a send wakes).
+    pub is_cloud: bool,
     pub harness: Option<String>,
     pub harness_label: Option<String>,
     pub model: Option<String>,
@@ -80,9 +82,8 @@ pub struct SessionRow {
     pub branch: Option<String>,
     pub cwd: Option<String>,
     pub indicator: ChatIndicator,
-    /// The host-reported status alone (45s staleness-gated) — `indicator`
-    /// minus the "a send of mine is in flight" override. What stop/busy
-    /// logic keys off (a send parked for an offline host is not a turn).
+    /// Host-reported status (45s staleness-gated). Stop/busy logic keys off
+    /// this; an outgoing send is not evidence of a running turn.
     pub host_indicator: ChatIndicator,
     /// Run start of the live turn while Working/AwaitingInput.
     pub working_since_ms: Option<i64>,
@@ -129,8 +130,20 @@ pub struct ProjectView {
     pub device_id: String,
     pub device_name: Option<String>,
     pub device_online: bool,
+    /// Lives on Cloud alone: a GitHub repository each session clones.
+    pub is_cloud: bool,
+    /// The GitHub repository (`owner/name`) behind it, when known: Cloud
+    /// can run its sessions when it reaches it.
+    pub github_repo: Option<String>,
     pub git_detected: bool,
     pub created_at_ms: i64,
+    /// The repository project this checkout belongs to
+    /// ([`zeron_proto::view::project_key`]): clones and worktrees of one
+    /// repository, on any device, share it.
+    pub group_key: String,
+    /// The group's name — its representative checkout's — shared by every
+    /// member, like `color_index`.
+    pub group_name: String,
     /// Most urgent indicator among its active sessions (Idle when none).
     pub indicator: ChatIndicator,
     pub unseen_count: u32,
@@ -326,6 +339,14 @@ pub(crate) fn device_display_name(device: &Device) -> Option<String> {
     (!name.is_empty() && name != "unknown-device").then(|| name.to_owned())
 }
 
+const CLOUD_NAME: &str = "Cloud";
+
+/// A Cloud device: the logical one Cloud projects belong to, or a session's
+/// own machine.
+pub(crate) fn is_cloud_device(device_id: &str) -> bool {
+    device_id.starts_with(zeron_proto::CLOUD_DEVICE_PREFIX)
+}
+
 fn is_execution_host(device: &Device) -> bool {
     !matches!(device.platform.as_str(), "ios" | "android" | "ipados")
 }
@@ -383,6 +404,7 @@ fn hash_row(row: &SessionRow) -> u64 {
     row.device_id.hash(&mut h);
     row.device_name.hash(&mut h);
     row.device_online.hash(&mut h);
+    row.is_cloud.hash(&mut h);
     row.harness.hash(&mut h);
     row.model.hash(&mut h);
     row.reasoning.hash(&mut h);
@@ -411,6 +433,7 @@ fn hash_row(row: &SessionRow) -> u64 {
 }
 
 struct RowContext<'a> {
+    all_spaces: &'a [Space],
     spaces: HashMap<&'a str, &'a Space>,
     devices: HashMap<&'a str, &'a Device>,
     sessions: HashMap<&'a str, &'a Session>,
@@ -423,21 +446,13 @@ fn build_row(chat: &Chat, rc: &RowContext<'_>, cx: &DeriveContext<'_>) -> Arc<Se
     let session = rc.sessions.get(chat.id.as_str()).copied();
     let send_state = cx.send_states.get(&chat.id).copied();
     let host_indicator = display_status(chat, session, cx.now);
-    let mut indicator = host_indicator;
-    let mut working_since_ms = match indicator {
+    let indicator = host_indicator;
+    let working_since_ms = match indicator {
         ChatIndicator::Working | ChatIndicator::AwaitingInput => session
             .and_then(|s| s.started_at)
             .map(|t| t.timestamp_millis()),
         _ => None,
     };
-    // A send in flight reads as Working (desktop `display_status_for`).
-    if matches!(send_state, Some(SendState::Sending | SendState::Queued))
-        && indicator != ChatIndicator::Working
-        && indicator != ChatIndicator::AwaitingInput
-    {
-        indicator = ChatIndicator::Working;
-        working_since_ms = None;
-    }
     let project = chat
         .space_id
         .as_deref()
@@ -445,7 +460,8 @@ fn build_row(chat: &Chat, rc: &RowContext<'_>, cx: &DeriveContext<'_>) -> Arc<Se
         .map(|space| ProjectRef {
             id: space.id.clone(),
             name: space.display_name().to_owned(),
-            color_index: project_color_index(&space.path),
+            // Clones of one repository share their representative's color.
+            color_index: project_color_index(&representative_space(rc.all_spaces, space).path),
         });
     let device = rc.devices.get(chat.device_id.as_str());
     let config = chat.config.as_ref();
@@ -476,8 +492,14 @@ fn build_row(chat: &Chat, rc: &RowContext<'_>, cx: &DeriveContext<'_>) -> Arc<Se
             .filter(|p| !p.is_empty()),
         project,
         device_id: chat.device_id.clone(),
-        device_name: device.and_then(|d| device_display_name(d)),
-        device_online: device_online(&chat.device_id, cx.presence, cx.self_device_id, now_ms),
+        device_name: if is_cloud_device(&chat.device_id) {
+            Some(CLOUD_NAME.to_owned())
+        } else {
+            device.and_then(|d| device_display_name(d))
+        },
+        device_online: is_cloud_device(&chat.device_id)
+            || device_online(&chat.device_id, cx.presence, cx.self_device_id, now_ms),
+        is_cloud: is_cloud_device(&chat.device_id),
         harness_label: harness.as_deref().map(catalog::harness_label),
         model_label: match (harness.as_deref(), model.as_deref()) {
             (Some(h), Some(m)) => Some(catalog::model_label(h, m)),
@@ -536,6 +558,7 @@ pub(crate) fn derive(
         }
     }
     let rc = RowContext {
+        all_spaces: &state.spaces,
         spaces: state.spaces.iter().map(|s| (s.id.as_str(), s)).collect(),
         devices: state.devices.iter().map(|d| (d.id.as_str(), d)).collect(),
         sessions: state
@@ -557,7 +580,7 @@ pub(crate) fn derive(
     let mut active: Vec<&Chat> = state
         .chats
         .iter()
-        .filter(|c| !c.archived && c.parent_chat_id.is_none())
+        .filter(|c| !c.archived && c.is_top_level())
         .filter(|c| {
             c.space_id
                 .as_deref()
@@ -581,11 +604,14 @@ pub(crate) fn derive(
             id: section.id.clone(),
             name: section.name.clone(),
             collapsed: section.collapsed,
-            sessions: active
+            // Members keep their placed order, as on desktop.
+            sessions: section
+                .session_ids
                 .iter()
-                .filter(|c| !rc.pinned.contains(c.id.as_str()))
-                .filter(|c| rc.section_of.get(c.id.as_str()) == Some(&section.id.as_str()))
-                .map(|c| row(c))
+                .filter(|id| active_ids.contains(id.as_str()) && !rc.pinned.contains(id.as_str()))
+                .filter(|id| rc.section_of.get(id.as_str()) == Some(&section.id.as_str()))
+                .filter(|id| seen.insert(id.as_str()))
+                .map(|id| rows[id].clone())
                 .collect(),
         })
         .collect();
@@ -617,24 +643,28 @@ pub(crate) fn derive(
                 .map(|r| r.indicator)
                 .min_by_key(|i| attention_rank(*i))
                 .unwrap_or(ChatIndicator::Idle);
+            let representative = representative_space(&state.spaces, space);
             ProjectView {
                 id: space.id.clone(),
                 name: space.display_name().to_owned(),
                 path: space.path.clone(),
-                color_index: project_color_index(&space.path),
+                color_index: project_color_index(&representative.path),
                 device_id: space.device_id.clone(),
-                device_name: rc
-                    .devices
-                    .get(space.device_id.as_str())
-                    .and_then(|d| device_display_name(d)),
-                device_online: device_online(
-                    &space.device_id,
-                    cx.presence,
-                    cx.self_device_id,
-                    now_ms,
-                ),
+                device_name: if is_cloud_device(&space.device_id) {
+                    Some(CLOUD_NAME.to_owned())
+                } else {
+                    rc.devices
+                        .get(space.device_id.as_str())
+                        .and_then(|d| device_display_name(d))
+                },
+                device_online: is_cloud_device(&space.device_id)
+                    || device_online(&space.device_id, cx.presence, cx.self_device_id, now_ms),
+                is_cloud: is_cloud_device(&space.device_id),
+                github_repo: space.github_repo.clone(),
                 git_detected: space.git_detected,
                 created_at_ms: space.created_at.timestamp_millis(),
+                group_key: project_key(space),
+                group_name: representative.display_name().to_owned(),
                 indicator,
                 unseen_count: sessions.iter().filter(|r| r.unseen).count() as u32,
                 sessions,
@@ -661,7 +691,7 @@ pub(crate) fn derive(
     let mut archived_chats: Vec<&Chat> = state
         .chats
         .iter()
-        .filter(|c| c.archived && c.parent_chat_id.is_none())
+        .filter(|c| c.archived && c.is_top_level())
         .collect();
     sort_recency(&mut archived_chats);
     let archived: Vec<Arc<SessionRow>> = archived_chats.iter().map(|c| row(c)).collect();
@@ -682,6 +712,14 @@ pub(crate) fn derive(
     let mut devices: Vec<DeviceView> = state
         .devices
         .iter()
+        // Cloud's per-session machines aren't devices to pick or list; Cloud
+        // is offered on its own.
+        .filter(|device| {
+            !device
+                .capabilities
+                .iter()
+                .any(|c| c == zeron_proto::CLOUD_SESSION_CAPABILITY)
+        })
         .map(|device| DeviceView {
             id: device.id.clone(),
             name: device_display_name(device).unwrap_or_else(|| "Unknown device".to_owned()),
@@ -751,8 +789,13 @@ fn snapshot_hash(s: &WorkspaceSnapshot) -> u64 {
         project.id.hash(&mut h);
         project.name.hash(&mut h);
         project.path.hash(&mut h);
+        project.color_index.hash(&mut h);
+        project.group_key.hash(&mut h);
+        project.group_name.hash(&mut h);
         project.device_name.hash(&mut h);
         project.device_online.hash(&mut h);
+        project.is_cloud.hash(&mut h);
+        project.github_repo.hash(&mut h);
         project.git_detected.hash(&mut h);
         ids(&mut h, &project.sessions);
     }
@@ -792,5 +835,52 @@ mod tests {
         assert_eq!(relative_time_label(now - 34 * 60_000, now), "34m");
         assert_eq!(relative_time_label(now - 4 * 3_600_000 - 1, now), "4h");
         assert_eq!(relative_time_label(now - 2 * 86_400_000, now), "2d");
+    }
+
+    #[test]
+    fn cloud_projects_and_sessions_read_as_cloud_and_its_machines_arent_devices() {
+        let state: WorkspaceState = serde_json::from_value(serde_json::json!({
+            "devices": [
+                {"id": "mac", "name": "Studio", "platform": "macos", "lastSeenAt": null},
+                {"id": "cloud-s1", "name": "Cloud session", "platform": "linux",
+                 "lastSeenAt": null, "capabilities": ["cloud-session"]}
+            ],
+            "spaces": [
+                {"id": "web", "deviceId": "cloud-acct", "path": "/home/user/web",
+                 "githubRepo": "acme/web", "gitDetected": true,
+                 "createdAt": "2026-10-19T12:00:00Z"}
+            ],
+            "chats": [
+                {"id": "c", "deviceId": "cloud-s1", "spaceId": "web", "archived": false,
+                 "createdAt": "2026-10-19T12:00:00Z"}
+            ],
+            "sessions": []
+        }))
+        .unwrap();
+        let presence = HashMap::new();
+        let snapshot = derive(
+            &state,
+            None,
+            &DeriveContext {
+                self_device_id: "phone",
+                now: Utc::now(),
+                presence: &presence,
+                change_requests: &[],
+                send_states: &HashMap::new(),
+                synced: true,
+                previous: None,
+            },
+        );
+        let project = &snapshot.projects[0];
+        assert!(project.is_cloud && project.device_online);
+        assert_eq!(project.device_name.as_deref(), Some("Cloud"));
+        let row = &project.sessions[0];
+        assert!(
+            row.is_cloud && row.device_online,
+            "a send wakes the machine"
+        );
+        assert_eq!(row.device_name.as_deref(), Some("Cloud"));
+        let devices: Vec<&str> = snapshot.devices.iter().map(|d| d.id.as_str()).collect();
+        assert_eq!(devices, ["mac"]);
     }
 }

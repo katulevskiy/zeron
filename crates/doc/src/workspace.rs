@@ -7,7 +7,7 @@
 //! to the *same* row settle field-by-field LWW (exactly right for renames/archives):
 //! - `devices`: LoroMap keyed by deviceId → row map {id, name, platform, lastSeenAt}
 //! - `spaces`: LoroMap keyed by spaceId → row map {id, deviceId, path, name?,
-//!   gitDetected, gitCheckedAt?, checkoutId?, createdAt}
+//!   gitDetected, gitCheckedAt?, checkoutId?, repositoryId?, createdAt}
 //! - `chats`: LoroMap keyed by chatId → row map {id, deviceId, title?, archived, cwd?,
 //!   branch?, checkoutId?, config?(json), lastMessagePreview?, lastMessageAt?, createdAt,
 //!   harnessSessionId?, harnessSessionCwd?, spaceId?, lastSeenAt?}
@@ -170,6 +170,8 @@ impl WorkspaceDoc {
         row.insert("gitDetected", space.git_detected)?;
         set_opt_ms(&row, "gitCheckedAt", space.git_checked_at)?;
         set_opt_str(&row, "checkoutId", space.checkout_id.as_deref())?;
+        set_opt_str(&row, "repositoryId", space.repository_id.as_deref())?;
+        set_opt_str(&row, "githubRepo", space.github_repo.as_deref())?;
         row.insert("createdAt", space.created_at.timestamp_millis())?;
         self.doc.commit();
         Ok(())
@@ -208,6 +210,8 @@ impl WorkspaceDoc {
         space_id: &str,
         detected: bool,
         checkout_id: Option<&str>,
+        repository_id: Option<&str>,
+        github_repo: Option<&str>,
         checked_at: DateTime<Utc>,
     ) -> Result<bool, DocError> {
         let Some(row) = self.existing_row("spaces", space_id) else {
@@ -215,6 +219,8 @@ impl WorkspaceDoc {
         };
         row.insert("gitDetected", detected)?;
         set_opt_str(&row, "checkoutId", checkout_id)?;
+        set_opt_str(&row, "repositoryId", repository_id)?;
+        set_opt_str(&row, "githubRepo", github_repo)?;
         row.insert("gitCheckedAt", checked_at.timestamp_millis())?;
         self.doc.commit();
         Ok(true)
@@ -491,6 +497,7 @@ impl WorkspaceDoc {
         )?;
         set_opt_ms(&row, "startedAt", session.started_at)?;
         row.insert("updatedAt", session.updated_at.timestamp_millis())?;
+        row.insert("runningSubagents", i64::from(session.running_subagents))?;
         self.doc.commit();
         Ok(())
     }
@@ -662,6 +669,9 @@ pub(crate) struct RawSpace {
     #[serde(default)]
     checkout_id: Option<String>,
     #[serde(default)]
+    repository_id: Option<String>,
+    github_repo: Option<String>,
+    #[serde(default)]
     created_at: i64,
 }
 
@@ -675,6 +685,8 @@ impl From<RawSpace> for Space {
             git_detected: raw.git_detected,
             git_checked_at: raw.git_checked_at.map(dt),
             checkout_id: raw.checkout_id,
+            repository_id: raw.repository_id,
+            github_repo: raw.github_repo,
             created_at: dt(raw.created_at),
         }
     }
@@ -783,6 +795,8 @@ pub(crate) struct RawSession {
     started_at: Option<i64>,
     #[serde(default)]
     updated_at: i64,
+    #[serde(default)]
+    running_subagents: u32,
 }
 
 impl From<RawSession> for Session {
@@ -794,6 +808,7 @@ impl From<RawSession> for Session {
             status: raw.status,
             started_at: raw.started_at.map(dt),
             updated_at: dt(raw.updated_at),
+            running_subagents: raw.running_subagents,
         }
     }
 }
@@ -889,6 +904,8 @@ mod tests {
             git_detected: false,
             git_checked_at: None,
             checkout_id: None,
+            repository_id: None,
+            github_repo: None,
             created_at: ts(1_500),
         }
     }
@@ -901,6 +918,7 @@ mod tests {
             status,
             started_at: Some(ts(3_000)),
             updated_at: ts(3_500),
+            running_subagents: 0,
         }
     }
 
@@ -994,6 +1012,14 @@ mod tests {
             state.sessions,
             vec![session("chat-1", "dev-a", SessionStatus::Working)]
         );
+
+        // The running-subagent count rides the row and survives the round trip.
+        let mut busy = session("chat-1", "dev-a", SessionStatus::Working);
+        busy.running_subagents = 4;
+        ws.upsert_session(&busy).unwrap();
+        assert_eq!(ws.read_sessions().unwrap(), vec![busy]);
+        ws.upsert_session(&session("chat-1", "dev-a", SessionStatus::Working))
+            .unwrap();
 
         // Upsert refreshes in place — no duplicate rows, cleared options removed.
         let mut updated = chat("chat-1", "dev-a");
@@ -1107,17 +1133,32 @@ mod tests {
         assert_eq!(ws.space("sp-1").unwrap().unwrap().display_name(), "project");
 
         assert!(
-            ws.set_space_git("sp-1", true, Some("checkout-abc"), ts(4_000))
-                .unwrap()
+            ws.set_space_git(
+                "sp-1",
+                true,
+                Some("checkout-abc"),
+                Some("github.com/owner/project"),
+                Some("acme/app"),
+                ts(4_000),
+            )
+            .unwrap()
         );
         let row = ws.space("sp-1").unwrap().unwrap();
         assert!(row.git_detected);
         assert_eq!(row.checkout_id.as_deref(), Some("checkout-abc"));
+        assert_eq!(
+            row.repository_id.as_deref(),
+            Some("github.com/owner/project")
+        );
+        assert_eq!(row.github_repo.as_deref(), Some("acme/app"));
         assert_eq!(row.git_checked_at, Some(ts(4_000)));
 
         // Unknown rows report false, never invent rows.
         assert!(!ws.rename_space("nope", Some("x")).unwrap());
-        assert!(!ws.set_space_git("nope", true, None, ts(1)).unwrap());
+        assert!(
+            !ws.set_space_git("nope", true, None, None, None, ts(1))
+                .unwrap()
+        );
     }
 
     #[test]

@@ -175,11 +175,21 @@ pub(crate) fn chats() -> Vec<DemoChat> {
             )
         },
         DemoChat {
+            last_ago_ms: 2 * MIN,
+            ..chat(
+                "chat-visuals",
+                None,
+                MAC,
+                "Agent visuals",
+                "A dashboard, a canvas, a scene and a shader.",
+            )
+        },
+        DemoChat {
             last_ago_ms: 10 * MIN,
             ..chat(
                 "chat-cjk",
-                Some("space-zeron"),
-                MAC,
+                Some("space-zeron-vps"),
+                VPS,
                 "多言語テキストのレイアウト 🌏",
                 "日本語の長い段落です。",
             )
@@ -246,8 +256,16 @@ pub(crate) fn spaces(now: i64) -> Vec<Space> {
             git_detected: git,
             git_checked_at: git.then(|| ms(now)),
             checkout_id: git.then(|| format!("co-{id}")),
+            repository_id: None,
+            github_repo: None,
             created_at: ms(now - ago),
         };
+    let zeron = |mut space: Space| {
+        space.repository_id = Some("github.com/zeronsh/zeron".into());
+        // Cloud reaches it in the demo (its fixture repositories).
+        space.github_repo = Some("acme/web".into());
+        space
+    };
     vec![
         space(
             "space-blog",
@@ -257,7 +275,23 @@ pub(crate) fn spaces(now: i64) -> Vec<Space> {
             false,
             20 * DAY,
         ),
-        space("space-zeron", MAC, "/Users/dev/zeron", None, true, 9 * DAY),
+        zeron(space(
+            "space-zeron",
+            MAC,
+            "/Users/dev/zeron",
+            None,
+            true,
+            9 * DAY,
+        )),
+        // A second clone of the same repository on the VPS.
+        zeron(space(
+            "space-zeron-vps",
+            VPS,
+            "/srv/src/zeron",
+            None,
+            true,
+            6 * DAY,
+        )),
         space("space-edge", VPS, "/srv/deploys/edge", None, true, 4 * DAY),
         space(
             "space-mobile",
@@ -332,8 +366,8 @@ pub(crate) struct Seeded {
     pub change_requests: Vec<CheckoutChangeRequestStatus>,
 }
 
-/// Write the whole dataset into the replica (as local writes; the demo
-/// server settles them).
+/// Write the whole dataset into the replica (as local writes, which the
+/// local-only demo replica folds straight into its rows).
 pub(crate) fn seed(
     doc: &mut RegistryDoc,
     fixture: DemoFixture,
@@ -415,6 +449,7 @@ pub(crate) fn seed(
         if let Some(status) = demo.status {
             doc.upsert_session(&Session {
                 last_completed_turn: None,
+                running_subagents: 0,
                 chat_id: demo.id.into(),
                 device_id: demo.device.into(),
                 status,
@@ -470,6 +505,8 @@ pub(crate) fn seed(
                 change: SidebarSectionChange::Assign {
                     session_id: (*member).into(),
                     section_id: Some(section.into()),
+                    after: None,
+                    before: None,
                 },
             })?;
         }

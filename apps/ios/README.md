@@ -48,6 +48,11 @@ Zeron/
   Shell/       Tab bar (Sessions, Settings, search; "New session" accessory
                with live summary), sign-in
   Debug/       Transcript lab + hitch meter
+ZeronLiveActivity/  Widget extension: the voice call's Live Activity (Dynamic
+               Island + Lock Screen), with the orb's states exported from
+               zeron-orb as vector assets
+ZeronShared/   Compiled into the app and the extension: the activity's
+               attributes and its mute/end App Intents
 ```
 
 ### Transcript pipeline
@@ -65,6 +70,12 @@ Zeron/
    paints runs with CoreText at the Rust coordinates — measurement and
    rendering can't disagree. Display models for rows beyond the viewport are
    prefetched off the main thread.
+5. Agent visuals (`show_visual` Luau scripts) get a worker thread each
+   (`crates/mobile/src/visual`): it runs the script, lays the node tree out,
+   draws canvases and charts as vector paint, renders scenes and shaders with
+   wgpu, and reports its height back to the row. `VisualView` paints what
+   arrives (rasterized on the worker thread) and forwards touches; the demo's
+   "Agent visuals" chat (`-demo -route chat:chat-visuals`) has one of each.
 
 ## Launch arguments
 

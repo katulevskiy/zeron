@@ -20,6 +20,9 @@ pub(super) fn notification_key(device: &str, status: &HarnessUpdateStatus) -> Op
 }
 
 const CHIP_HEIGHT: f32 = 38.0;
+/// The summary row inside the card's 1px border, top and bottom. A row as
+/// tall as the whole card overflows the border box and sits a point low.
+const SUMMARY_HEIGHT: f32 = CHIP_HEIGHT - 2.0;
 const ROW_HEIGHT: f32 = 64.0;
 const MAX_VISIBLE_ROWS: f32 = 3.5;
 const LIST_FADE_BAND: f32 = 32.0;
@@ -427,14 +430,8 @@ impl Shell {
             .any(|row| row.connected && active(&row.status))
         {
             Some(
-                loaders::mini_glyph_spinner(
-                    "home-agent-update-activity",
-                    2.0,
-                    theme.glyph,
-                    cx.entity_id(),
-                    cx,
-                )
-                .into_any_element(),
+                crate::loaders::ring_spinner("home-agent-update-activity", 14.0, theme.text_muted)
+                    .into_any_element(),
             )
         } else if all_updated {
             Some(
@@ -512,7 +509,7 @@ impl Shell {
         let list_bottom_radius = (radius - 1.0).max(0.0);
         let summary = div()
             .id("home-harness-update-summary")
-            .h(px(CHIP_HEIGHT))
+            .h(px(SUMMARY_HEIGHT))
             .w_full()
             .flex_none()
             .pl(px(12.0))
@@ -723,12 +720,13 @@ impl Shell {
             div()
                 .id("home-harness-update-list-host")
                 .absolute()
-                .top(px(CHIP_HEIGHT))
+                .top(px(SUMMARY_HEIGHT))
                 // Keep the final layout centered as the shell widens, so
                 // neither edge appears attached to a moving clipping boundary.
-                .left(px((size[0] - list_width) * 0.5 + 1.0))
+                // Absolute offsets start inside the card's border already.
+                .left(px((size[0] - list_width) * 0.5))
                 .w(px((list_width - 2.0).max(0.0)))
-                .h(px((list_height - CHIP_HEIGHT - 1.0).max(0.0)))
+                .h(px((list_height - SUMMARY_HEIGHT - 1.0).max(0.0)))
                 .rounded_bl(px(list_bottom_radius))
                 .rounded_br(px(list_bottom_radius))
                 .overflow_hidden()
@@ -781,7 +779,7 @@ impl Shell {
                 el.child(
                     div()
                         .absolute()
-                        .top(px(CHIP_HEIGHT))
+                        .top(px(SUMMARY_HEIGHT))
                         .left(px(0.0))
                         .right(px(0.0))
                         .h(px(1.0))
@@ -903,7 +901,7 @@ impl Shell {
                     && !matches!(&error, zeron_rpc::RpcError::Failed(message)
                         if method == methods::APPLY_HARNESS_UPDATE && message == "update cancelled")
                 {
-                    shell.sidebar_notice = Some(format!("Agent update ({device}): {error}").into());
+                    shell.show_notice(crate::toast::ToastKind::Error, format!("Agent update ({device}): {error}"), cx);
                 }
                 cx.notify();
             })

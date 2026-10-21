@@ -177,6 +177,18 @@ fn activity_pulse_every(view: EntityId, stride: u64, cx: &mut App) -> ActivityPu
     ActivityPulse { phase, subtle }
 }
 
+/// Where a loading spinner is in its turn (0..1, one turn per `period`), and
+/// keep `view` repainting on the loader clock while it shows. `None` when
+/// motion is reduced: the spinner rests in place.
+pub fn spin_phase(view: EntityId, period: Duration, cx: &mut App) -> Option<f32> {
+    if cx.reduce_motion() {
+        return None;
+    }
+    schedule_pulse_every(view, 1, cx);
+    let clock = cx.default_global::<PulseClock>();
+    Some((clock.epoch.elapsed().as_secs_f32() / period.as_secs_f32()).fract())
+}
+
 /// Schedule cosmetic animation through the same bounded clock as loaders.
 /// Renew only while painting an active animation; the clock parks after the
 /// last lease expires, including when a view is hidden or removed.
@@ -442,6 +454,9 @@ pub const DIALOG_IN: MotionSpec = MotionSpec::new(180, EASE);
 pub const SPLASH_OUT: MotionSpec = MotionSpec::new(500, EASE).with_delay(150);
 /// Sidebar / pane width+height transitions: 200ms ease-out.
 pub const RESIZE: MotionSpec = MotionSpec::new(200, EASE_OUT);
+/// Panel columns share the dialog entrance's gentle acceleration and soft
+/// landing. Wide moves stretch this base to at most 240ms in the shell.
+pub const PANEL_RESIZE: MotionSpec = DIALOG_IN;
 /// Terminal tab drag-reorder sliding transforms: 150ms (§1.10).
 pub const TAB_SLIDE: MotionSpec = MotionSpec::new(150, EASE_OUT);
 /// Diff-pane per-file collapse: 180ms height (§1.11).
@@ -464,6 +479,13 @@ pub const EASE_TAILWIND: CubicBezier = CubicBezier::new(0.4, 0.0, 0.2, 1.0);
 /// CSS `transition-colors` default: 150ms over [`EASE_TAILWIND`] — the temporal
 /// blend every interactive hover wash rides in the original.
 pub const HOVER_FADE: MotionSpec = MotionSpec::new(150, EASE_TAILWIND);
+/// Zeron Icons (icons.zeron.sh) state morph: `--zi-duration: 280ms` over
+/// `cubic-bezier(.22, 1, .36, 1)` — the sidebar glyph's panel open ↔ closed.
+pub const GLYPH_STATE: MotionSpec = MotionSpec::new(280, EASE_OUT_QUINT);
+/// CSS `cubic-bezier(0.2, 0, 0, 1)` — fast start, long soft landing.
+pub const EASE_OUT_SOFT: CubicBezier = CubicBezier::new(0.2, 0.0, 0.0, 1.0);
+/// Selection indicator glide between the segments of a pill nav: 260ms.
+pub const INDICATOR_SLIDE: MotionSpec = MotionSpec::new(260, EASE_OUT_SOFT);
 /// Zeron loader pulse period: 2.4s.
 pub const ZERON_PULSE: MotionSpec = MotionSpec::new(2400, EASE);
 /// Gradient matrix spinner wave period: 750ms.
@@ -743,6 +765,95 @@ impl FadeEntry {
     }
 }
 
+/// Interruptible height tween for the shared collapsible sections.
+/// The rendered element owns the frame clock; this state preserves the current
+/// interpolated height when a second click reverses an in-flight transition.
+#[derive(Clone, Copy)]
+pub(crate) struct DisclosureMotion {
+    pub(crate) epoch: u64,
+    pub(crate) from: f32,
+    pub(crate) to: f32,
+    pub(crate) started: std::time::Instant,
+}
+
+impl DisclosureMotion {
+    pub(crate) fn new(epoch: u64, from: f32, to: f32) -> Self {
+        Self {
+            epoch,
+            from,
+            to,
+            started: std::time::Instant::now(),
+        }
+    }
+
+    pub(crate) fn current(self) -> f32 {
+        let total = COLLAPSE.total().as_secs_f32();
+        let raw = if total > 0.0 {
+            self.started.elapsed().as_secs_f32() / total
+        } else {
+            1.0
+        };
+        lerp(self.from, self.to, COLLAPSE.progress(raw))
+    }
+
+    pub(crate) fn animating(self) -> bool {
+        self.started.elapsed() < COLLAPSE.total() + Duration::from_millis(120)
+    }
+}
+
+/// Interruptible slide of a selection indicator between segment slots.
+/// `position` is measured in segments (`1.5` sits halfway between the second
+/// and third), so a retarget mid-flight continues from the drawn position
+/// instead of jumping. Pure core — callers pass `now`.
+#[derive(Debug, Clone, Copy)]
+pub struct IndicatorSlide {
+    from: f32,
+    to: f32,
+    started: Instant,
+}
+
+impl IndicatorSlide {
+    pub fn at(position: f32, now: Instant) -> Self {
+        Self {
+            from: position,
+            to: position,
+            started: now,
+        }
+    }
+
+    fn duration() -> Duration {
+        INDICATOR_SLIDE.total().mul_f32(speed_scale())
+    }
+
+    fn progress(&self, now: Instant) -> f32 {
+        let duration = Self::duration();
+        if duration.is_zero() {
+            return 1.0;
+        }
+        let raw =
+            now.saturating_duration_since(self.started).as_secs_f32() / duration.as_secs_f32();
+        INDICATOR_SLIDE.progress(raw)
+    }
+
+    pub fn value_at(&self, now: Instant) -> f32 {
+        lerp(self.from, self.to, self.progress(now))
+    }
+
+    /// Aim at a new slot. Reduced motion snaps.
+    pub fn retarget(&mut self, to: f32, reduced: bool, now: Instant) {
+        let from = if reduced { to } else { self.value_at(now) };
+        *self = Self {
+            from,
+            to,
+            started: now,
+        };
+    }
+
+    pub fn animating_at(&self, now: Instant) -> bool {
+        self.from != self.to && now.saturating_duration_since(self.started) < Self::duration()
+    }
+}
+
 /// Per-key hover progress store. Pure core (explicit `now`) — unit-testable;
 /// the thread-local wrappers below feed it wall time.
 #[derive(Default)]
@@ -887,6 +998,128 @@ pub fn mix(from: Hsla, to: Hsla, t: f32) -> Hsla {
 /// The standard hover blend: rest → hover color at `key`'s current progress.
 pub fn hover_blend(key: &str, rest: Hsla, hover: Hsla) -> Hsla {
     mix(rest, hover, hover_t(key))
+}
+
+// ---------------------------------------------------------------------------
+// Two-state glyph morphs (CSS `transition` on a `data-state` flip)
+// ---------------------------------------------------------------------------
+//
+// Zeron Icons morph between two states (the sidebar glyph's panel narrows when
+// the sidebar closes). Same manual clock and liveness rules as the hover
+// fades, but keyed by the element's *state* rather than pointer events: the
+// first read of a key snaps to its state (mounting never replays a morph), a
+// flip re-anchors at the current value so a mid-flight toggle reverses
+// smoothly, and an entry unread for a full frame is pruned.
+
+#[derive(Debug, Clone, Copy)]
+struct StateEntry {
+    origin: f32,
+    target: f32,
+    started: Instant,
+    spec: MotionSpec,
+    seen: u64,
+}
+
+impl StateEntry {
+    fn duration(&self) -> Duration {
+        self.spec.total().mul_f32(speed_scale())
+    }
+
+    fn value(&self, now: Instant) -> f32 {
+        let duration = self.duration();
+        let elapsed = now.saturating_duration_since(self.started);
+        if duration.is_zero() || elapsed >= duration {
+            return self.target;
+        }
+        let raw = elapsed.as_secs_f32() / duration.as_secs_f32();
+        lerp(self.origin, self.target, self.spec.progress(raw))
+    }
+
+    fn settled(&self, now: Instant) -> bool {
+        self.origin == self.target || now.saturating_duration_since(self.started) >= self.duration()
+    }
+}
+
+/// Per-key state-morph store. Pure core (explicit `now`) — unit-testable.
+#[derive(Default)]
+pub struct StateMorphs {
+    entries: HashMap<String, StateEntry>,
+    frame: u64,
+}
+
+impl StateMorphs {
+    /// Progress (0 = off, 1 = on) of `key` toward `on` at `now`; stamps
+    /// liveness. Reduced motion snaps a flip straight to its endpoint.
+    pub fn value_at(
+        &mut self,
+        key: &str,
+        on: bool,
+        spec: MotionSpec,
+        reduced: bool,
+        now: Instant,
+    ) -> f32 {
+        let target = if on { 1.0 } else { 0.0 };
+        let frame = self.frame;
+        let Some(entry) = self.entries.get_mut(key) else {
+            self.entries.insert(
+                key.to_string(),
+                StateEntry {
+                    origin: target,
+                    target,
+                    started: now,
+                    spec,
+                    seen: frame,
+                },
+            );
+            return target;
+        };
+        if entry.target != target {
+            let current = entry.value(now);
+            *entry = StateEntry {
+                origin: if reduced { target } else { current },
+                target,
+                started: now,
+                spec,
+                seen: frame,
+            };
+        }
+        entry.seen = frame;
+        entry.value(now)
+    }
+
+    /// Once-per-frame bookkeeping: prune unmounted entries and report whether
+    /// any morph is still mid-flight (→ keep frames coming).
+    pub fn tick_at(&mut self, now: Instant) -> bool {
+        self.frame += 1;
+        let frame = self.frame;
+        let mut active = false;
+        self.entries.retain(|_, entry| {
+            if entry.seen + 1 < frame {
+                return false;
+            }
+            active |= !entry.settled(now);
+            true
+        });
+        active
+    }
+}
+
+thread_local! {
+    static STATE_MORPHS: RefCell<StateMorphs> = RefCell::new(StateMorphs::default());
+}
+
+/// Morph progress (0..1) of `key` toward `on` this frame.
+pub fn state_t(key: &str, on: bool, spec: MotionSpec, reduced: bool) -> f32 {
+    STATE_MORPHS.with(|morphs| {
+        morphs
+            .borrow_mut()
+            .value_at(key, on, spec, reduced, Instant::now())
+    })
+}
+
+/// Frame-drive hook, beside [`hover_fades_active`]: call ONCE per window frame.
+pub fn state_morphs_active() -> bool {
+    STATE_MORPHS.with(|morphs| morphs.borrow_mut().tick_at(Instant::now()))
 }
 
 // ---------------------------------------------------------------------------
@@ -1129,6 +1362,28 @@ fn refresh_system(_cx: &mut App) {}
 
 #[cfg(test)]
 mod tests {
+
+    #[test]
+    fn indicator_slide_is_interruptible_and_snaps_when_reduced() {
+        let t0 = Instant::now();
+        let mut slide = IndicatorSlide::at(0.0, t0);
+        assert!(!slide.animating_at(t0));
+        slide.retarget(2.0, false, t0);
+        assert_eq!(slide.value_at(t0), 0.0);
+        assert!(slide.animating_at(t0 + Duration::from_millis(50)));
+        let mid = t0 + Duration::from_millis(80);
+        let drawn = slide.value_at(mid);
+        assert!(drawn > 0.0 && drawn < 2.0);
+        // Reversing continues from where the thumb is drawn.
+        slide.retarget(0.0, false, mid);
+        assert_eq!(slide.value_at(mid), drawn);
+        let end = mid + INDICATOR_SLIDE.total();
+        assert_eq!(slide.value_at(end), 0.0);
+        assert!(!slide.animating_at(end));
+        slide.retarget(1.0, true, end);
+        assert_eq!(slide.value_at(end), 1.0);
+        assert!(!slide.animating_at(end));
+    }
     #[test]
     fn reduced_activity_pulse_is_slow_uniform_and_gentle() {
         for phase in [0.0, 0.1, 0.25, 0.5, 0.75, 0.9] {
@@ -1510,6 +1765,38 @@ mod tests {
         let falling = fades.value_at("pill", ms(140));
         assert!(falling < after_flip, "fades back down");
         assert_eq!(fades.value_at("pill", ms(225)), 0.0, "lands at rest");
+    }
+
+    #[test]
+    fn state_morph_snaps_on_mount_and_reverses_continuously() {
+        let mut morphs = StateMorphs::default();
+        let t0 = Instant::now();
+        let ms = |m: u64| t0 + Duration::from_millis(m);
+        let morph = |m: &mut StateMorphs, on, at| m.value_at("glyph", on, GLYPH_STATE, false, at);
+
+        // First sight lands on the state — no replay at mount.
+        assert_eq!(morph(&mut morphs, true, t0), 1.0);
+        assert!(!morphs.tick_at(t0));
+
+        // Flip: starts from 1, mid-flight strictly between, lands at 0.
+        assert_eq!(morph(&mut morphs, false, ms(10)), 1.0);
+        let mid = morph(&mut morphs, false, ms(80));
+        assert!(mid > 0.0 && mid < 1.0, "mid-flight: {mid}");
+        assert!(morphs.tick_at(ms(80)));
+
+        // Reverse mid-flight re-anchors — no jump — then lands at 1.
+        let at_flip = morph(&mut morphs, true, ms(80));
+        assert!((at_flip - mid).abs() < 1e-4, "continuity: {mid} vs {at_flip}");
+        assert_eq!(morph(&mut morphs, true, ms(400)), 1.0);
+        assert!(!morphs.tick_at(ms(400)));
+
+        // Reduced motion snaps a flip.
+        assert_eq!(morphs.value_at("glyph", false, GLYPH_STATE, true, ms(500)), 0.0);
+
+        // Unread for a full frame: pruned (a remount snaps again).
+        morphs.tick_at(ms(600));
+        morphs.tick_at(ms(700));
+        assert!(morphs.entries.is_empty());
     }
 
     #[test]

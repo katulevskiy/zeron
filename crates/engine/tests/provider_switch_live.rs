@@ -29,6 +29,7 @@ fn request(harness: HarnessId, prompt: &str, cwd: &str) -> RunRequest {
         resume: None,
         attachments: vec![],
         worktree: None,
+        env: Default::default(),
     }
 }
 

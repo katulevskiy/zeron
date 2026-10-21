@@ -9,11 +9,12 @@ protocol AppRouter: AnyObject {
     func showSearch()
 }
 
-/// iPad shell: Zeron mobile with a sidebar. The sidebar is the phone's
+/// The app's shell: Zeron mobile with a sidebar. The sidebar is the phone's
 /// Sessions page (same rows, sections, wallpaper) over a bottom toolbar;
 /// the main column shows the open session or the phone's new-session page.
-/// Compact widths (Slide Over, narrow Split View) collapse to the iPhone tab
-/// shell.
+/// It shows when the window is regular in both directions (iPad, an unfolded
+/// iPhone Duo); anything else (iPhone, the Duo folded, Slide Over, narrow
+/// Split View) collapses to the iPhone tab shell.
 final class SplitRootController: UISplitViewController, UISplitViewControllerDelegate, AppRouter {
     private let app: AppModel
     private let sidebar: SidebarViewController
@@ -47,7 +48,38 @@ final class SplitRootController: UISplitViewController, UISplitViewControllerDel
         detail.navigationBar.tintColor = Palette.text
         setViewController(detail, for: .secondary)
         setViewController(tabs, for: .compact)
-        showDraft(prompt: nil, focus: false)
+        // A phone in landscape is compact in height but can be regular in
+        // width (the larger models); it keeps the tab shell. The split
+        // collapses on its own horizontal class, so pin that to compact.
+        registerForTraitChanges([UITraitVerticalSizeClass.self]) { (self: SplitRootController, _) in
+            self.syncCollapse()
+        }
+        syncCollapse()
+    }
+
+    private func syncCollapse() {
+        if traitCollection.verticalSizeClass == .compact {
+            traitOverrides.horizontalSizeClass = .compact
+        } else if traitOverrides.contains(UITraitHorizontalSizeClass.self) {
+            traitOverrides.remove(UITraitHorizontalSizeClass.self)
+        }
+    }
+
+    /// The main column starts on the new-session page, built only once the
+    /// sidebar is actually on screen (an iPhone may never expand).
+    override func viewIsAppearing(_ animated: Bool) {
+        super.viewIsAppearing(animated)
+        if !isCollapsed, detail.viewControllers.isEmpty { showDraft(prompt: nil, focus: false) }
+    }
+
+    /// Narrow windows hold the sidebar at its minimum (an iPad mini in
+    /// portrait gets 320). The unfolded iPhone Duo is narrower still (669pt
+    /// in portrait): it goes lower so the session column keeps a phone's
+    /// width for the transcript and composer.
+    override func viewWillLayoutSubviews() {
+        super.viewWillLayoutSubviews()
+        let minimum: CGFloat = view.bounds.width < 700 ? 280 : 320
+        if minimumPrimaryColumnWidth != minimum { minimumPrimaryColumnWidth = minimum }
     }
 
     override var keyCommands: [UIKeyCommand]? {
@@ -72,9 +104,21 @@ final class SplitRootController: UISplitViewController, UISplitViewControllerDel
         if presentedViewController != nil { dismiss(animated: true) }
         guard !isCollapsed else { return tabs.openSession(chatId) }
         if currentChatId == chatId, detail.viewControllers.first is SessionViewController { return }
+        guard let session = SessionViewController(app: app, chatId: chatId) else {
+            return showSessionOpenError()
+        }
         currentChatId = chatId
         sidebar.currentChatId = chatId
-        detail.setViewControllers([SessionViewController(app: app, chatId: chatId)], animated: false)
+        detail.setViewControllers([session], animated: false)
+    }
+
+    private func showSessionOpenError() {
+        if presentedViewController != nil { dismiss(animated: false) }
+        view.endEditing(true)
+        showDraft(prompt: nil, focus: false)
+        sidebar.showSessions()
+        show(.primary)
+        Toast.show("Couldn't open session. Try again.", in: view.window)
     }
 
     func presentNewSession(prompt: String?) {
@@ -94,9 +138,11 @@ final class SplitRootController: UISplitViewController, UISplitViewControllerDel
             }
             // In place: the chat replaces the draft in the column and the
             // handoff carries the composer and message across.
+            guard let session = SessionViewController(app: self.app, chatId: chatId) else {
+                return self.showSessionOpenError()
+            }
             self.currentChatId = chatId
             self.sidebar.currentChatId = chatId
-            let session = SessionViewController(app: self.app, chatId: chatId)
             UIView.performWithoutAnimation {
                 self.detail.setViewControllers([session], animated: false)
                 self.view.layoutIfNeeded()
@@ -163,7 +209,10 @@ final class SplitRootController: UISplitViewController, UISplitViewControllerDel
             let shown = (self.detail.viewControllers.first as? SessionViewController)?.chatId
             if let chatId = current {
                 if shown != chatId {
-                    self.detail.setViewControllers([SessionViewController(app: self.app, chatId: chatId)], animated: false)
+                    guard let session = SessionViewController(app: self.app, chatId: chatId) else {
+                        return self.showSessionOpenError()
+                    }
+                    self.detail.setViewControllers([session], animated: false)
                 }
                 self.sidebar.currentChatId = chatId
             } else if self.detail.viewControllers.isEmpty {
@@ -183,6 +232,9 @@ final class SidebarViewController: UIViewController, UISearchResultsUpdating {
     private let list: SessionsViewController
     private let nav: UINavigationController
     private let search = UISearchController(searchResultsController: nil)
+    private var voiceBar: VoiceBarItem?
+    private var voiceToken: AnyObject?
+    private var workspaceToken: AnyObject?
 
     var currentChatId: String? {
         get { list.currentChatId }
@@ -233,6 +285,19 @@ final class SidebarViewController: UIViewController, UISearchResultsUpdating {
         list.navigationItem.rightBarButtonItem = nil
         list.toolbarItems = [settings, options, .flexibleSpace(), compose]
         nav.isToolbarHidden = false
+        // Voice beside compose, once a host can run it.
+        let voiceBar = VoiceBarItem(app: app, host: self)
+        self.voiceBar = voiceBar
+        let syncVoice = { [weak self, weak voiceBar] in
+            guard let self, let voiceBar else { return }
+            let items = voiceBar.visible ? [settings, options, .flexibleSpace(), voiceBar.item, compose] : [settings, options, .flexibleSpace(), compose]
+            if self.list.toolbarItems?.count != items.count {
+                self.list.setToolbarItems(items, animated: self.view.window != nil)
+            }
+        }
+        voiceToken = app.voice.observe(syncVoice)
+        workspaceToken = app.observe(syncVoice)
+        syncVoice()
 
         // A hairline between the sidebar and the main column.
         let edge = UIView()
@@ -254,6 +319,13 @@ final class SidebarViewController: UIViewController, UISearchResultsUpdating {
     func focusSearch() {
         nav.popToRootViewController(animated: false)
         search.searchBar.becomeFirstResponder()
+    }
+
+    func showSessions() {
+        search.isActive = false
+        search.searchBar.text = ""
+        list.query = ""
+        nav.popToRootViewController(animated: false)
     }
 }
 

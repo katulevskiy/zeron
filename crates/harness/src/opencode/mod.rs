@@ -38,6 +38,12 @@
 //!   after busy is authoritative, not a lull.
 //! - reasoning streams as reasoning parts on both wires →
 //!   [`AgentEvent::ReasoningDelta`], the thinking feed.
+//! - the agent's `question` tool reaches the engine's input bridge on both
+//!   wires: 1.x emits `question.asked` (reply `POST /question/{id}/reply`),
+//!   while 2.x (2.0.24+) creates a session FORM titled "Questions"
+//!   (`form.created`, reply `POST /api/session/{id}/form/{formID}/reply`
+//!   with `{answer:{q0:..}}`; verified live against 2.0.24), folded into
+//!   the same question flow.
 //!
 //! Failure surfacing (the #169 class): a dying provider is VISIBLE here —
 //! `session.status{type:"retry", attempt, message}` streams per attempt.
@@ -66,7 +72,7 @@ use zeron_proto::{
 };
 
 use crate::process::{Child, Command, Stdio};
-use crate::{Harness, HarnessError, RunControls, shutdown_child};
+use crate::{Harness, HarnessError, RunControls};
 
 /// opencode loads plugins and MCP config before the server answers; cold
 /// plugin-heavy starts can take minutes. Shared by chat startup and model
@@ -284,11 +290,22 @@ impl OpencodeHarness {
         cwd: Option<&str>,
         mcp: Option<&zeron_proto::McpServer>,
     ) -> Result<Server, HarnessError> {
+        self.server_with_env(cwd, mcp, &Default::default()).await
+    }
+
+    /// [`Self::server`] for a run: the host-resolved run environment
+    /// ([`RunRequest::env`]) rides the spawned `opencode serve`.
+    async fn server_with_env(
+        &self,
+        cwd: Option<&str>,
+        mcp: Option<&zeron_proto::McpServer>,
+        run_env: &std::collections::BTreeMap<String, String>,
+    ) -> Result<Server, HarnessError> {
         if let Some(base) = &self.base_url {
             return Ok(Server::attached(base.clone()));
         }
         let exe = self.resolve_executable()?;
-        Server::spawn(&exe, cwd, self.startup_timeout, mcp).await
+        Server::spawn_with_env(&exe, cwd, self.startup_timeout, mcp, run_env).await
     }
 
     /// One short-lived server answers both discovery calls. Also primes the
@@ -372,6 +389,19 @@ impl Harness for OpencodeHarness {
     fn deterministic_turn_end(&self) -> bool {
         true
     }
+    /// Aborting the session ends the turn; the server and the session take
+    /// the next prompt.
+    fn stops_turn_in_place(&self) -> bool {
+        true
+    }
+    /// The model and effort ride each prompt (1.x) or are set on the
+    /// session (2.x), so a change applies from the next prompt without a new
+    /// server. Clearing one back to the default cannot be expressed that way.
+    fn reconfigures_in_place(&self, live: &RunRequest, next: &RunRequest) -> bool {
+        live.cwd == next.cwd
+            && (next.model.is_some() || live.model.is_none())
+            && (next.reasoning.is_some() || live.reasoning.is_none())
+    }
 
     /// Live discovery off `GET /provider` (what the desktop app populates its
     /// picker from). Account/config changes invalidate the last-good catalog;
@@ -448,7 +478,9 @@ impl Harness for OpencodeHarness {
         let initial_native_command_selected = selected_native_command(&request.prompt, self.id());
         request.prompt = zeron_proto::invocation::harness_prompt(&request.prompt, self.id());
         let cwd = (!request.cwd.is_empty()).then(|| request.cwd.clone());
-        let server = self.server(cwd.as_deref(), request.mcp.as_ref()).await?;
+        let server = self
+            .server_with_env(cwd.as_deref(), request.mcp.as_ref(), &request.env)
+            .await?;
         let (event_tx, event_rx) = mpsc::channel::<Result<AgentEvent, HarnessError>>(256);
         tokio::spawn(run_session(Session {
             server,
@@ -587,14 +619,26 @@ impl Server {
             .await
     }
 
-    /// Spawn `opencode serve` on a free loopback port with a per-run Basic
-    /// password, and wait for a generation-bearing health answer (which
-    /// also resolves [`Protocol`]).
+    #[cfg(test)]
     async fn spawn(
         exe: &std::path::Path,
         cwd: Option<&str>,
         startup: Duration,
         mcp: Option<&zeron_proto::McpServer>,
+    ) -> Result<Self, HarnessError> {
+        Self::spawn_with_env(exe, cwd, startup, mcp, &Default::default()).await
+    }
+
+    /// Spawn `opencode serve` on a free loopback port with a per-run Basic
+    /// password, and wait for a generation-bearing health answer (which
+    /// also resolves [`Protocol`]). `run_env` is the host-resolved run
+    /// environment ([`RunRequest::env`]).
+    async fn spawn_with_env(
+        exe: &std::path::Path,
+        cwd: Option<&str>,
+        startup: Duration,
+        mcp: Option<&zeron_proto::McpServer>,
+        run_env: &std::collections::BTreeMap<String, String>,
     ) -> Result<Self, HarnessError> {
         let port = free_localhost_port().ok_or_else(|| {
             HarnessError::Protocol("no free localhost port for opencode serve".into())
@@ -637,6 +681,7 @@ impl Server {
             }
         }
         crate::compose_child_path(&mut cmd, exe);
+        crate::apply_run_env(&mut cmd, run_env);
         if let Some(cwd) = cwd {
             cmd.current_dir(cwd);
         }
@@ -845,7 +890,8 @@ impl Server {
 
     async fn shutdown(&mut self, kill_grace: Duration) {
         if let Some(child) = self.child.as_mut() {
-            shutdown_child(child, kill_grace).await;
+            // The server and every command it started.
+            crate::shutdown_agent(child, Vec::new(), kill_grace).await;
         }
     }
 
@@ -1483,10 +1529,12 @@ async fn run_session(session: Session) {
         initial_native_command_selected,
     } = session;
     let RunControls {
+        realtime: _,
         execution_lease: _execution_lease,
         request_input,
         mut steering,
         interrupt,
+        turn: turn_control,
     } = controls;
     let request_input = Arc::new(request_input);
     let directory = (!request.cwd.is_empty()).then(|| request.cwd.clone());
@@ -1581,14 +1629,7 @@ async fn run_session(session: Session) {
         }
     };
 
-    let model = request
-        .model
-        .as_deref()
-        .and_then(|m| m.split_once('/'))
-        .map(|(provider, model)| (provider.to_owned(), model.to_owned()));
-    let variant = model.as_ref().and_then(|(provider, model_id)| {
-        pick_variant(&providers, provider, model_id, request.reasoning)
-    });
+    let (mut model, mut variant) = model_selection(&providers, &request);
     let context_windows: HashMap<String, u64> = providers
         .all
         .iter()
@@ -1728,9 +1769,15 @@ async fn run_session(session: Session) {
     let mut pending_spawns: VecDeque<PendingSpawn> = VecDeque::new();
     // Child sessions created before their spawn chip was seen (id → title).
     let mut unbound_children: HashMap<String, String> = HashMap::new();
-    let mut queued_steers: VecDeque<(String, bool)> = VecDeque::new();
+    let mut queued_steers: VecDeque<QueuedSteer> = VecDeque::new();
     let mut steering_open = true;
     let mut interrupt_requested = false;
+    // A turn stop (`TurnControl::stop_turn`) in flight: the session is
+    // aborted like an interrupt, but the server and session stay up.
+    let mut stopping = false;
+    // A stop the server never acknowledged: the turn may still be running,
+    // so the runtime is torn down and the stop reported only once it is gone.
+    let mut stop_teardown = false;
     let mut pending_usage: Option<AgentEvent> = None;
     let mut done_sent = false;
 
@@ -1751,11 +1798,12 @@ async fn run_session(session: Session) {
             turn.active = false;
             if let Some(usage) = pending_usage.take()
                 && !interrupt_requested
+                && !stopping
                 && !send(&event_tx, usage).await
             {
                 break $label;
             }
-            if interrupt_requested {
+            if interrupt_requested || stopping {
                 settle_children(&mut children, &event_tx, DoneStatus::Interrupted).await;
                 let _ = send(&event_tx, AgentEvent::Done {
                     status: DoneStatus::Interrupted,
@@ -1764,18 +1812,32 @@ async fn run_session(session: Session) {
                     session_id: Some(session_id.clone()),
                 }).await;
                 done_sent = true;
-                break $label;
+                if interrupt_requested {
+                    break $label;
+                }
+                // A stopped turn: the server and session take the next prompt.
+                stopping = false;
+                abort_deadline = None;
+                continue $label;
             }
-            if let Some((first, native_command_selected)) = queued_steers.pop_front() {
+            if let Some(first) = queued_steers.pop_front() {
                 turn_generation = turn_generation.wrapping_add(1);
+                let native_command_selected = first.native;
+                let config = first.config;
+                let mut attachments = first.attachments;
                 // Plain-text steers waiting together go out as one prompt,
                 // each confirmed by its own Steered boundary; a native
-                // command always travels alone.
-                let mut texts = vec![first];
+                // command always travels alone, and a changed configuration
+                // starts a new prompt (the ones after it were sent with it).
+                let mut texts = vec![first.text];
                 while !native_command_selected
-                    && queued_steers.front().is_some_and(|(_, native)| !native)
+                    && queued_steers
+                        .front()
+                        .is_some_and(|next| !next.native && next.config.is_none())
                 {
-                    texts.push(queued_steers.pop_front().expect("front checked").0);
+                    let next = queued_steers.pop_front().expect("front checked");
+                    texts.push(next.text);
+                    attachments.extend(next.attachments);
                 }
                 let mut consumer_gone = false;
                 for _ in &texts {
@@ -1792,24 +1854,33 @@ async fn run_session(session: Session) {
                     break $label;
                 }
                 let steer = texts.join("\n\n");
-                match post_prompt(
-                    &server,
-                    &bus_tx,
-                    &session_id,
-                    dir,
-                    &commands,
-                    &steer,
-                    native_command_selected,
-                    turn_generation,
-                    &command_failure_tx,
-                    TurnSpec {
-                        model: model.as_ref(),
-                        variant: variant.as_deref(),
-                        attachments: &[],
-                    },
-                )
-                .await
-                {
+                let adopted = match config {
+                    Some(next) => adopt_config(&server, &session_id, dir, &next)
+                        .await
+                        .map(|selection| (model, variant) = selection),
+                    None => Ok(()),
+                };
+                let sent = match adopted {
+                    Ok(()) => post_prompt(
+                        &server,
+                        &bus_tx,
+                        &session_id,
+                        dir,
+                        &commands,
+                        &steer,
+                        native_command_selected,
+                        turn_generation,
+                        &command_failure_tx,
+                        TurnSpec {
+                            model: model.as_ref(),
+                            variant: variant.as_deref(),
+                            attachments: &attachments,
+                        },
+                    )
+                    .await,
+                    Err(e) => Err(e),
+                };
+                match sent {
                     Ok(()) => {
                         turn = TurnState::begin(stall);
                         continue $label;
@@ -1861,6 +1932,7 @@ async fn run_session(session: Session) {
             if turn.active
                 && !turn.preempted
                 && !interrupt_requested
+                && !stopping
                 && !queued_steers.is_empty()
                 && turn.open_tools.is_empty()
             {
@@ -1904,6 +1976,44 @@ async fn run_session(session: Session) {
 
             _ = event_tx.closed() => break 'main,
 
+            // End the turn, not the server: abort the session's generation
+            // and keep both up for the next prompt. Steers still waiting for
+            // this turn's end go with it.
+            _ = turn_control.stop_requested(), if !interrupt_requested => {
+                queued_steers.clear();
+                if turn.active && !stopping {
+                    stopping = true;
+                    turn.idle_ready = true;
+                    let abort = tokio::time::timeout(
+                        Duration::from_secs(5),
+                        server.abort_session(&session_id, dir),
+                    )
+                    .await;
+                    if matches!(abort, Ok(Ok(_))) {
+                        abort_deadline = Some(tokio::time::Instant::now() + interrupt_grace);
+                    } else {
+                        // The turn may still be running: this session must
+                        // never take a prompt on top of it.
+                        tracing::warn!(
+                            target: "zeron_harness::opencode",
+                            "turn stop abort failed; tearing the runtime down"
+                        );
+                        stop_teardown = true;
+                        break 'main;
+                    }
+                } else if !turn.active {
+                    // Between turns: nothing to abort. Settle the stop so the
+                    // host sees the turn over.
+                    let _ = send(&event_tx, AgentEvent::Done {
+                        status: DoneStatus::Interrupted,
+                        result: None,
+                        error: None,
+                        session_id: Some(session_id.clone()),
+                    }).await;
+                    done_sent = true;
+                }
+            }
+
             _ = interrupt.cancelled(), if !interrupt_requested => {
                 interrupt_requested = true;
                 if turn.active {
@@ -1944,7 +2054,7 @@ async fn run_session(session: Session) {
 
             failure = command_failure_rx.recv() => {
                 let Some(failure) = failure else { continue 'main; };
-                if failure.generation != turn_generation || !turn.active || interrupt_requested {
+                if failure.generation != turn_generation || !turn.active || interrupt_requested || stopping {
                     tracing::debug!(
                         target: "zeron_harness::opencode",
                         failed_generation = failure.generation,
@@ -1984,35 +2094,49 @@ async fn run_session(session: Session) {
                             HarnessId::Opencode,
                         );
                         if turn.active {
-                            queued_steers.push_back((prompt, native_command_selected));
+                            queued_steers.push_back(QueuedSteer {
+                                text: prompt,
+                                native: native_command_selected,
+                                attachments: steer.attachments,
+                                config: steer.config,
+                            });
                             maybe_preempt!();
                         } else {
                             turn_generation = turn_generation.wrapping_add(1);
-                            // Between turns (shouldn't happen — the engine
-                            // steers live runs — but deliver, don't drop).
+                            // Between turns: the engine routes the next message
+                            // of a parked session here — images included.
                             let (prev, next) = rotate(&mut assistant_message_id);
                             let _ = send(&event_tx, AgentEvent::Steered {
                                 assistant_message_id: Some(prev),
                                 next_assistant_message_id: Some(next),
                             }).await;
-                            match post_prompt(
-                                &server,
-                                &bus_tx,
-                                &session_id,
-                                dir,
-                                &commands,
-                                &prompt,
-                                native_command_selected,
-                                turn_generation,
-                                &command_failure_tx,
-                                TurnSpec {
-                                    model: model.as_ref(),
-                                    variant: variant.as_deref(),
-                                    attachments: &[],
-                                },
-                            )
-                            .await
-                            {
+                            let adopted = match &steer.config {
+                                Some(next) => adopt_config(&server, &session_id, dir, next)
+                                    .await
+                                    .map(|selection| (model, variant) = selection),
+                                None => Ok(()),
+                            };
+                            let sent = match adopted {
+                                Ok(()) => post_prompt(
+                                    &server,
+                                    &bus_tx,
+                                    &session_id,
+                                    dir,
+                                    &commands,
+                                    &prompt,
+                                    native_command_selected,
+                                    turn_generation,
+                                    &command_failure_tx,
+                                    TurnSpec {
+                                        model: model.as_ref(),
+                                        variant: variant.as_deref(),
+                                        attachments: &steer.attachments,
+                                    },
+                                )
+                                .await,
+                                Err(e) => Err(e),
+                            };
+                            match sent {
                                 Ok(()) => turn = TurnState::begin(stall),
                                 Err(error) => {
                                     let message = error.to_string();
@@ -2047,6 +2171,16 @@ async fn run_session(session: Session) {
             }
 
             _ = stall_sleep => {
+                if abort_deadline.is_some() && stopping {
+                    // The stop's abort acknowledged nothing within the grace:
+                    // the turn may still be running. Tear the runtime down.
+                    tracing::warn!(
+                        target: "zeron_harness::opencode",
+                        "turn stop unacknowledged; tearing the runtime down"
+                    );
+                    stop_teardown = true;
+                    break 'main;
+                }
                 if abort_deadline.is_some() {
                     // Abort acknowledged nothing within the grace: hard stop.
                     settle_children(&mut children, &event_tx, DoneStatus::Interrupted).await;
@@ -2090,7 +2224,7 @@ async fn run_session(session: Session) {
             msg = bus_rx.recv() => {
                 let Some(msg) = msg else { break 'main };
                 match msg {
-                    BusMsg::CommandFailed(_) if interrupt_requested => {}
+                    BusMsg::CommandFailed(_) if interrupt_requested || stopping => {}
                     BusMsg::CommandFailed(message) => {
                         let _ = send(&event_tx, AgentEvent::Done {
                             status: DoneStatus::Errored, result: None,
@@ -2142,13 +2276,18 @@ async fn run_session(session: Session) {
                         break 'main;
                     }
                     BusMsg::Event(event) => {
-                        if interrupt_requested {
+                        if interrupt_requested || stopping {
                             // Only the terminal idle/interrupt acknowledgement may
                             // affect an aborted turn; discard late content and usage.
-                            let kind = event.get("type").and_then(Value::as_str);
-                            let ours = event.pointer("/properties/sessionID").and_then(Value::as_str) == Some(session_id.as_str());
+                            // v1's /global/event wraps it ({payload}), like
+                            // `handle_bus_event` reads: matching the envelope
+                            // missed every acknowledgement, and each stop
+                            // waited out the grace.
+                            let payload = event.get("payload").unwrap_or(&event);
+                            let kind = payload.get("type").and_then(Value::as_str);
+                            let ours = payload.pointer("/properties/sessionID").and_then(Value::as_str) == Some(session_id.as_str());
                             let idle = kind == Some("session.idle") || kind == Some("session.interrupted")
-                                || (kind == Some("session.status") && event.pointer("/properties/status/type").and_then(Value::as_str) == Some("idle"));
+                                || (kind == Some("session.status") && payload.pointer("/properties/status/type").and_then(Value::as_str) == Some("idle"));
                             if ours && idle { settle_idle!('main); }
                             continue;
                         }
@@ -2173,7 +2312,7 @@ async fn run_session(session: Session) {
                             BusOutcome::TurnIdle => settle_idle!('main),
                             // Our own steer preempt: a steer boundary.
                             BusOutcome::TurnInterrupted
-                                if turn.preempted && !interrupt_requested =>
+                                if turn.preempted && !interrupt_requested && !stopping =>
                             {
                                 settle_idle!('main)
                             }
@@ -2188,6 +2327,25 @@ async fn run_session(session: Session) {
         }
     }
 
+    if stop_teardown {
+        // Close the mailbox before the stop reads settled: the next prompt
+        // must start a fresh runtime, never land in this one.
+        drop(steering);
+        bus_handle.abort();
+        server.shutdown(kill_grace).await;
+        settle_children(&mut children, &event_tx, DoneStatus::Interrupted).await;
+        let _ = send(
+            &event_tx,
+            AgentEvent::Done {
+                status: DoneStatus::Interrupted,
+                result: None,
+                error: None,
+                session_id: Some(session_id.clone()),
+            },
+        )
+        .await;
+        return;
+    }
     if !done_sent {
         // Consumer went away (stream dropped): nothing to report to.
         tracing::debug!(target: "zeron_harness::opencode", "run loop ended without settling");
@@ -2290,6 +2448,53 @@ fn context_usage_event(info: &Value, context_windows: &HashMap<String, u64>) -> 
 }
 
 /// The requested effort as a variant id the model actually advertises.
+/// A message waiting for the turn's end.
+struct QueuedSteer {
+    text: String,
+    /// It selects a native command (which always travels alone).
+    native: bool,
+    attachments: Vec<String>,
+    /// The configuration it was sent with, adopted before its prompt.
+    config: Option<Box<RunRequest>>,
+}
+
+/// The `provider/model` pair and reasoning variant a request runs with.
+fn model_selection(
+    providers: &ProviderCatalog,
+    request: &RunRequest,
+) -> (Option<(String, String)>, Option<String>) {
+    let model = request
+        .model
+        .as_deref()
+        .and_then(|m| m.split_once('/'))
+        .map(|(provider, model)| (provider.to_owned(), model.to_owned()));
+    let variant = model.as_ref().and_then(|(provider, model_id)| {
+        pick_variant(providers, provider, model_id, request.reasoning)
+    });
+    (model, variant)
+}
+
+/// Adopt `next`'s model and effort for the prompts that follow: 1.x carries
+/// them on each prompt, 2.x sets them on the session first. The catalog is
+/// fetched again here rather than held for the session's life.
+async fn adopt_config(
+    server: &Server,
+    session_id: &str,
+    dir: Option<&str>,
+    next: &RunRequest,
+) -> Result<(Option<(String, String)>, Option<String>), HarnessError> {
+    let providers = server.provider_catalog(dir).await.unwrap_or_default();
+    let (model, variant) = model_selection(&providers, next);
+    if server.protocol().await == Protocol::V2
+        && let Some((provider, model_id)) = &model
+    {
+        server
+            .set_model(session_id, provider, model_id, variant.as_deref(), dir)
+            .await?;
+    }
+    Ok((model, variant))
+}
+
 fn pick_variant(
     providers: &ProviderCatalog,
     provider_id: &str,
@@ -3028,37 +3233,40 @@ async fn handle_bus_event(ctx: BusCtx<'_>) -> BusOutcome {
             BusOutcome::Continue
         }
         "question.asked" => {
-            if !event_session.is_some_and(|session| {
-                session == session_id
-                    || children.get(session).is_some_and(|child| !child.done)
-                    || unbound_children.contains_key(session)
-            }) {
+            // A global bus includes unrelated sessions. Never answer their
+            // requests, or a malformed request without an explicit owner.
+            let Some(session) = event_session.filter(|session| {
+                *session == session_id
+                    || children.get(*session).is_some_and(|child| !child.done)
+                    || unbound_children.contains_key(*session)
+            }) else {
                 return BusOutcome::Continue;
-            }
+            };
+            let session = session.to_owned();
             let Some(id) = props.get("id").and_then(Value::as_str) else {
                 return BusOutcome::Continue;
             };
-            let questions = map_questions(props);
-            if questions.is_empty() {
+            // Panel ids are minted per question, like Claude and Codex; the
+            // paired key is what a 2.x form reply addresses.
+            let pairs = map_questions(props);
+            if pairs.is_empty() {
                 return BusOutcome::Continue;
             }
-            if !send(
-                event_tx,
-                AgentEvent::InputRequested {
-                    request_id: id.to_owned(),
-                    questions: questions.clone(),
-                },
-            )
-            .await
-            {
-                return BusOutcome::ConsumerGone;
-            }
-            let rx = (request_input)(questions.clone());
+            // 2.x (2.0.24+) ships the `question` tool as a session form; its
+            // answers ride the session's form route, keyed by field.
+            let is_form = props.get("form").and_then(Value::as_bool).unwrap_or(false);
+            // The engine's input bridge is the SOLE emitter of
+            // `InputRequested`/`InputResolved`: it mints the request id,
+            // parks the resolver for `respond_input`, and surfaces both
+            // events. Emitting our own copy here (keyed by opencode's id)
+            // folded a SECOND, unanswerable input part into the doc whose id
+            // no resolver knew — the QuestionPanel answered that twin and the
+            // run never resumed (the same fix Claude and Codex got).
+            let rx = (request_input)(pairs.iter().map(|(_, question)| question.clone()).collect());
             let base = server.base.clone();
             let auth = server.auth.clone();
             let dir_owned = dir.map(str::to_owned);
             let request_id = id.to_owned();
-            let tx = event_tx.clone();
             let protocol_cell = server.protocol.clone();
             tokio::spawn(async move {
                 let server = Server {
@@ -3071,10 +3279,19 @@ async fn handle_bus_event(ctx: BusCtx<'_>) -> BusOutcome {
                     version: tokio::sync::OnceCell::new(),
                 };
                 let reply = match rx.await {
+                    Ok(answers) if is_form => {
+                        server
+                            .post_json(
+                                &format!("/api/session/{session}/form/{request_id}/reply"),
+                                dir_owned.as_deref(),
+                                &form_answer_body(&pairs, &answers),
+                            )
+                            .await
+                    }
                     Ok(answers) => {
-                        let ordered: Vec<Vec<String>> = questions
+                        let ordered: Vec<Vec<String>> = pairs
                             .iter()
-                            .map(|q| {
+                            .map(|(_, q)| {
                                 answers
                                     .iter()
                                     .find(|a| a.question_id == q.id)
@@ -3090,6 +3307,12 @@ async fn handle_bus_event(ctx: BusCtx<'_>) -> BusOutcome {
                             )
                             .await
                     }
+                    // A dropped resolver means the run — and with it this
+                    // OpenCode child — is already going away. Pending forms
+                    // are instance state and die with it, so there is nothing
+                    // left to cancel; only the 1.x route gets an explicit
+                    // reject.
+                    Err(_) if is_form => Ok(Value::Null),
                     Err(_) => {
                         server
                             .post_json(
@@ -3106,11 +3329,6 @@ async fn handle_bus_event(ctx: BusCtx<'_>) -> BusOutcome {
                         "question reply failed: {e}"
                     );
                 }
-                let _ = tx
-                    .send(Ok(AgentEvent::InputResolved {
-                        request_id: request_id.clone(),
-                    }))
-                    .await;
             });
             BusOutcome::Continue
         }
@@ -3517,8 +3735,11 @@ fn part_delta_events(
     }]
 }
 
-/// `question.asked` → the input panel's questions (ids are positional).
-fn map_questions(props: &Value) -> Vec<UserInputQuestion> {
+/// `question.asked` → the input panel's questions, each paired with the key a
+/// form reply must address (the form field key; positional `q0`.. when the
+/// payload carries none). Panel ids are minted per question, like Claude and
+/// Codex — wire values never become panel identity.
+fn map_questions(props: &Value) -> Vec<(String, UserInputQuestion)> {
     props
         .get("questions")
         .and_then(Value::as_array)
@@ -3527,32 +3748,65 @@ fn map_questions(props: &Value) -> Vec<UserInputQuestion> {
                 .enumerate()
                 .filter_map(|(ix, q)| {
                     let question = q.get("question").and_then(Value::as_str)?;
-                    Some(UserInputQuestion {
-                        id: format!("q{ix}"),
-                        header: q
-                            .get("header")
-                            .and_then(Value::as_str)
-                            .unwrap_or("Question")
-                            .to_owned(),
-                        question: question.to_owned(),
-                        options: q
-                            .get("options")
-                            .and_then(Value::as_array)
-                            .map(|opts| {
-                                opts.iter()
-                                    .filter_map(|o| o.get("label").and_then(Value::as_str))
-                                    .map(str::to_owned)
-                                    .collect()
-                            })
-                            .unwrap_or_default(),
-                        prefill: None,
-                        multiline: false,
-                        multi_select: q.get("multiple").and_then(Value::as_bool).unwrap_or(false),
-                    })
+                    let key = q
+                        .get("key")
+                        .and_then(Value::as_str)
+                        .filter(|key| !key.is_empty())
+                        .map(str::to_owned)
+                        .unwrap_or_else(|| format!("q{ix}"));
+                    Some((
+                        key,
+                        UserInputQuestion {
+                            id: new_message_id(),
+                            header: q
+                                .get("header")
+                                .and_then(Value::as_str)
+                                .unwrap_or("Question")
+                                .to_owned(),
+                            question: question.to_owned(),
+                            options: q
+                                .get("options")
+                                .and_then(Value::as_array)
+                                .map(|opts| {
+                                    opts.iter()
+                                        .filter_map(|o| o.get("label").and_then(Value::as_str))
+                                        .map(str::to_owned)
+                                        .collect()
+                                })
+                                .unwrap_or_default(),
+                            prefill: None,
+                            multiline: false,
+                            multi_select: q
+                                .get("multiple")
+                                .and_then(Value::as_bool)
+                                .unwrap_or(false),
+                        },
+                    ))
                 })
                 .collect()
         })
         .unwrap_or_default()
+}
+
+/// 2.x question forms take answers keyed by field (`q0`..): one label for a
+/// single-select `string` field (empty when unanswered), the label array for
+/// a `multiselect` field.
+fn form_answer_body(pairs: &[(String, UserInputQuestion)], answers: &[UserInputAnswer]) -> Value {
+    let mut answer = serde_json::Map::new();
+    for (key, q) in pairs {
+        let labels = answers
+            .iter()
+            .find(|a| a.question_id == q.id)
+            .map(|a| a.labels.clone())
+            .unwrap_or_default();
+        let value = if q.multi_select {
+            json!(labels)
+        } else {
+            json!(labels.into_iter().next().unwrap_or_default())
+        };
+        answer.insert(key.clone(), value);
+    }
+    json!({ "answer": answer })
 }
 
 /// Cap for tool outputs entering the event stream (journal keeps the rest).
@@ -3699,6 +3953,11 @@ fn normalize_v2_frame_with_session_models(
 ) -> Vec<Value> {
     let kind = event.get("type").and_then(Value::as_str).unwrap_or("");
     let data = event.get("data").cloned().unwrap_or(Value::Null);
+    // Form frames keep their owner inside `data.form` (the question tool's
+    // 2.0.24+ transport); everything else must name a session.
+    if kind == "form.created" {
+        return v2_question_form_payload(data.get("form").unwrap_or(&data));
+    }
     if data
         .get("sessionID")
         .and_then(Value::as_str)
@@ -3955,6 +4214,85 @@ fn normalize_v2_frame_with_session_models(
         }
         _ => Vec::new(),
     }
+}
+
+/// 2.x (2.0.24+) implements the agent's `question` tool as a session FORM:
+/// `form.created` carries `form.metadata.kind == "question"` and one field
+/// per question (`q0`..: `title` = header, `description` = question text,
+/// `options`, `multiselect` for multi-select; observed live against 2.0.24).
+/// Fold it into the 1.x `question.asked` payload — the shared question flow —
+/// carrying each field's key so the reply, which rides the session's form
+/// route, can address it (panel ids are minted downstream). Forms from other
+/// features (metadata kind absent) are not the question panel's to answer.
+fn v2_question_form_payload(form: &Value) -> Vec<Value> {
+    if form.pointer("/metadata/kind").and_then(Value::as_str) != Some("question") {
+        return Vec::new();
+    }
+    let (Some(id), Some(session_id)) = (
+        form.get("id").and_then(Value::as_str),
+        form.get("sessionID").and_then(Value::as_str),
+    ) else {
+        return Vec::new();
+    };
+    let questions: Vec<Value> = form
+        .get("fields")
+        .and_then(Value::as_array)
+        .map(|fields| {
+            fields
+                .iter()
+                .filter_map(|field| {
+                    let question = field
+                        .get("description")
+                        .and_then(Value::as_str)
+                        .filter(|q| !q.trim().is_empty())
+                        .or_else(|| field.get("title").and_then(Value::as_str))
+                        .filter(|q| !q.trim().is_empty())?;
+                    Some(json!({
+                        "key": field
+                            .get("key")
+                            .and_then(Value::as_str)
+                            .unwrap_or_default(),
+                        "header": field
+                            .get("title")
+                            .and_then(Value::as_str)
+                            .filter(|h| !h.is_empty())
+                            .unwrap_or("Question"),
+                        "question": question,
+                        "multiple": field.get("type").and_then(Value::as_str)
+                            == Some("multiselect"),
+                        // The answer is the option's VALUE (the question tool
+                        // sets value == label, so display stays right).
+                        "options": field
+                            .get("options")
+                            .and_then(Value::as_array)
+                            .map(|opts| {
+                                opts.iter()
+                                    .filter_map(|o| {
+                                        o.get("value")
+                                            .and_then(Value::as_str)
+                                            .or_else(|| o.get("label").and_then(Value::as_str))
+                                            .map(|label| json!({ "label": label }))
+                                    })
+                                    .collect::<Vec<_>>()
+                            })
+                            .unwrap_or_default(),
+                    }))
+                })
+                .collect()
+        })
+        .unwrap_or_default();
+    if questions.is_empty() {
+        return Vec::new();
+    }
+    vec![json!({
+        "type": "question.asked",
+        "properties": {
+            "id": id,
+            "sessionID": session_id,
+            "form": true,
+            "questions": questions,
+        }
+    })]
 }
 
 /// The 2.x error shape (`{type, message}`) folded into the 1.x

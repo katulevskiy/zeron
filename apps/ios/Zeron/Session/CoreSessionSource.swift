@@ -11,7 +11,10 @@ final class CoreSessionSource: SessionSource {
     private let chatId: String
     private var token: AnyObject?
     private var appToken: AnyObject?
-    private var hostDevice = ""
+    private var hostDevice = "" {
+        didSet { if hostDevice != oldValue { connectVisuals() } }
+    }
+    private weak var engine: TranscriptView?
 
     init(app: AppModel, client: CoreClient, handle: SessionHandle, chatId: String) {
         self.app = app
@@ -25,7 +28,15 @@ final class CoreSessionSource: SessionSource {
 
     func attach(_ engine: TranscriptView) {
         _ = engine.attach(client: client, chatId: chatId)
+        self.engine = engine
+        connectVisuals()
         handle.setViewAttached(attached: true)
+    }
+
+    /// Agent visuals load their scripts from the chat's host device.
+    private func connectVisuals() {
+        guard let engine, !hostDevice.isEmpty else { return }
+        engine.setVisualSource(client: client, deviceId: hostDevice, pixelScale: Float(max(2, UITraitCollection.current.displayScale)))
     }
 
     func detach() {
@@ -78,6 +89,8 @@ final class CoreSessionSource: SessionSource {
             next.banner = .notDelivered
         } else if c.sendState == .queued {
             next.banner = .failed("\(c.host.name ?? "Host") is offline — will send when it's back")
+        } else if c.sendState == .sending {
+            next.banner = .sending
         } else if app?.connectivity?.state == .offline {
             next.banner = .offline
         } else if !c.room.connected, let retry = c.room.retryAtMs {
@@ -111,6 +124,7 @@ final class CoreSessionSource: SessionSource {
         do {
             if mode == .interrupt, chrome.running { try handle.interrupt() }
             _ = try handle.send(request: SendRequest(text: text, attachments: images.map(\.outgoing), worktree: nil, busy: mode == .steer ? .steer : .queue))
+            app?.noteDeliveryActivity()
             sendFailure = nil
             return true
         } catch {
@@ -246,6 +260,15 @@ final class CoreSessionSource: SessionSource {
     }
 
     private static let images = NSCache<NSString, UIImage>()
+
+    func image(_ reference: String) async -> UIImage? {
+        if let hit = Self.images.object(forKey: reference as NSString) { return hit }
+        guard let data = try? await client.readAttachment(deviceId: hostDevice, path: reference),
+              let image = await UIImage(data: data)?.byPreparingForDisplay()
+        else { return nil }
+        Self.images.setObject(image, forKey: reference as NSString)
+        return image
+    }
 
     func loadImage(_ reference: String, into view: UIImageView) {
         // Claim the view first: a slower load for a row it used to show

@@ -49,7 +49,14 @@ Delegation is provider-agnostic: `list_harnesses` shows every provider, and \
 those marked `connected` can take work from you whichever provider you run \
 on (a claude-code agent may hand a task to codex, and the reverse). Pass \
 `harness` (and a model from `list_models`) to `create_chat` to choose one. \
-A delegate may itself delegate, up to 3 levels deep.";
+A delegate may itself delegate, up to 3 levels deep.\n\
+\n\
+When a chart, table, diagram, dashboard, or 3D view would say more than prose and \
+`show_visual` is available, write a Luau visual script and show it with `show_visual` before \
+your final reply. Zeron renders it with its own native interface and enforces its style: \
+content sits directly on the chat with no cards or boxed panels, text uses the interface font \
+and type scale, and colors are theme tokens that work on frosted glass or opaque, light or dark. \
+The reader sees the visual above that reply, so don't announce or restate it.";
 
 const PARSE_ERROR: i64 = -32700;
 const INVALID_REQUEST: i64 = -32600;
