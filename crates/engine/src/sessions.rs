@@ -180,6 +180,10 @@ struct RunHandle {
     /// is unambiguously before the stop (cancelled with it) or after it
     /// (re-dispatched to a fresh runtime — never lost).
     retiring: Arc<std::sync::atomic::AtomicBool>,
+    /// The credential the run started with (a Cloud device's broker; `None`
+    /// elsewhere): a parked session whose account has since changed is
+    /// replaced before its next turn.
+    credential: Option<String>,
 }
 
 /// One accepted-but-unconfirmed steer: enough to re-dispatch it verbatim.
@@ -211,6 +215,9 @@ struct Inner {
     /// Loopback IPC port this engine serves, once known (0 = not serving):
     /// what the injected `zeron mcp` server dials back into.
     ipc_port: std::sync::atomic::AtomicU16,
+    /// Where this engine publishes its IPC bearer (`{data_dir}/ipc-token`),
+    /// handed to the injected `zeron mcp` as a PATH, never the token itself.
+    ipc_token_file: Mutex<Option<std::path::PathBuf>>,
     journal: Arc<RunJournal>,
     registry: Arc<HarnessRegistry>,
     /// Set-once (first wins), cleared on runtime retirement: sessions and
@@ -273,6 +280,7 @@ impl SessionsEngine {
                 shutting_down: std::sync::atomic::AtomicBool::new(false),
                 cancelled_sends: Mutex::new(HashMap::new()),
                 ipc_port: std::sync::atomic::AtomicU16::new(0),
+                ipc_token_file: Mutex::new(None),
                 journal,
                 registry,
                 doc_host: Mutex::new(None),
@@ -303,6 +311,13 @@ impl SessionsEngine {
         self.inner
             .ipc_port
             .store(port, std::sync::atomic::Ordering::Relaxed);
+    }
+
+    /// Record where the served port's bearer lives (`{data_dir}/ipc-token`).
+    /// The injected MCP server gets `ZERON_IPC_TOKEN_FILE` and reads the file
+    /// at dial time, so it follows token rotation across engine restarts.
+    pub fn set_ipc_token_file(&self, path: std::path::PathBuf) {
+        *lock(&self.inner.ipc_token_file) = Some(path);
     }
 
     /// Wire the doc host (called once at engine assembly; the two services are mutually
@@ -403,6 +418,15 @@ impl SessionsEngine {
         lock(&self.inner.runs)
             .get(chat_id)
             .is_some_and(|h| h.turn.background_live())
+    }
+
+    /// How many chats have a turn in flight (the Cloud runner heartbeat's
+    /// `activeRuns`).
+    pub fn active_count(&self) -> usize {
+        lock(&self.inner.statuses)
+            .values()
+            .filter(|session| is_active(session))
+            .count()
     }
 
     /// Any run currently working or blocked on input — the auto-updater's
@@ -613,9 +637,20 @@ impl SessionsEngine {
                 h.routed_steers.clone(),
                 h.fork_history_sent.clone(),
                 h.retiring.clone(),
+                h.credential.clone(),
             )
         });
-        if let Some((run_id, steerable, route, steer_tx, ledger, history_sent, retiring)) = routed {
+        if let Some((
+            run_id,
+            steerable,
+            route,
+            steer_tx,
+            ledger,
+            history_sent,
+            retiring,
+            credential,
+        )) = routed
+        {
             if idle {
                 // No prompt rides an idle start, so nothing could carry an
                 // in-place reconfiguration: only the runtime as is will do.
@@ -625,6 +660,15 @@ impl SessionsEngine {
                     Err(EngineError::Other("incompatible live runtime".into()))
                 };
             }
+            // A parked session started with another account (Cloud): replace it.
+            let route = if self
+                .credential_changed(chat_id, harness_id, credential.as_deref())
+                .await
+            {
+                None
+            } else {
+                route
+            };
             let user_id = message_id.clone().unwrap_or_else(new_id);
             let mut bootstrap = None;
             let same_runtime = route.is_some();
@@ -750,6 +794,7 @@ impl SessionsEngine {
         if !idle {
             handle.write_user_message(&user_id, &request.prompt, now_ms())?;
         }
+        let credential = self.inner.registry.run_credential(harness_id).await;
 
         // Engine-owned resume (zeron sessions.ts:736 — every dispatch read the
         // chat's stored harness session): callers always send `resume: None`;
@@ -834,6 +879,7 @@ impl SessionsEngine {
                 routed_steers: Arc::new(Mutex::new(std::collections::VecDeque::new())),
                 fork_history_sent: fork_history_sent.clone(),
                 retiring: Arc::new(std::sync::atomic::AtomicBool::new(false)),
+                credential,
             },
         );
         self.set_status(
@@ -882,6 +928,31 @@ impl SessionsEngine {
             turn,
         ));
         Ok(run_id)
+    }
+
+    /// Whether a session parked between turns started with a credential other
+    /// than the one a run would use now (the Cloud account was switched, or
+    /// its token rotated). Never mid-turn or with background work still
+    /// running, and never on an unknown credential.
+    async fn credential_changed(
+        &self,
+        chat_id: &str,
+        harness_id: HarnessId,
+        started_with: Option<&str>,
+    ) -> bool {
+        // Mid-turn, or with background work (subagents, shells) still on it:
+        // replacing the runtime would kill that work. The switch waits.
+        if self.turn_in_flight(chat_id) || self.holds_background_work(chat_id) {
+            return false;
+        }
+        match self.inner.registry.run_credential(harness_id).await {
+            Some(now) if Some(now.as_str()) != started_with => {
+                tracing::info!(chat = %chat_id, harness = ?harness_id,
+                    "credential changed; replacing the parked session");
+                true
+            }
+            _ => false,
+        }
     }
 
     /// A warm send's prompt with the fork's copied history in front, when the
@@ -1285,6 +1356,7 @@ impl SessionsEngine {
                             attachments: Vec::new(),
                             resume: None,
                             worktree: None,
+                            env: Default::default(),
                         })
                     });
                 let Some(mut request) = request else {
@@ -1613,23 +1685,38 @@ impl Inner {
     /// mcp` subcommand, dialing the engine's IPC port and stamped with the
     /// originating chat + device so the agent's side chats link back here.
     /// None when the engine serves no port or its executable is unknown.
+    ///
+    /// The IPC bearer travels as a file PATH (`ZERON_IPC_TOKEN_FILE`), not as
+    /// `ZERON_IPC_TOKEN`: some harnesses hand this env to their CLI on the
+    /// command line (Claude's inline `--mcp-config`), where any local user can
+    /// read it with `ps`. The file is owner-only and always current.
     fn zeron_mcp(&self, chat_id: &str) -> Option<zeron_proto::McpServer> {
         let port = self.ipc_port.load(std::sync::atomic::Ordering::Relaxed);
         if port == 0 {
             return None;
         }
         let command = std::env::current_exe().ok()?.to_str()?.to_owned();
+        let mut env: std::collections::BTreeMap<String, String> = [
+            ("ZERON_IPC_PORT".to_owned(), port.to_string()),
+            ("ZERON_CHAT_ID".to_owned(), chat_id.to_owned()),
+            ("ZERON_DEVICE_ID".to_owned(), self.device_id.clone()),
+        ]
+        .into_iter()
+        .collect();
+        if let Some(path) = lock(&self.ipc_token_file)
+            .as_ref()
+            .and_then(|path| path.to_str())
+        {
+            env.insert(
+                zeron_rpc::ipc_auth::TOKEN_FILE_ENV.to_owned(),
+                path.to_owned(),
+            );
+        }
         Some(zeron_proto::McpServer {
             name: "zeron".into(),
             command,
             args: vec!["mcp".into()],
-            env: [
-                ("ZERON_IPC_PORT".to_owned(), port.to_string()),
-                ("ZERON_CHAT_ID".to_owned(), chat_id.to_owned()),
-                ("ZERON_DEVICE_ID".to_owned(), self.device_id.clone()),
-            ]
-            .into_iter()
-            .collect(),
+            env,
         })
     }
 
@@ -2294,6 +2381,77 @@ async fn drive_run(
     // Startup can stop before the SDK saves user text, with no new session
     // ID or receipt. Bridge that unacknowledged tail from our transcript;
     // a fresh session needs all prior user text, not just the latest tail.
+    let doc_ref: &SessionDoc = &doc;
+    let mut folded: Vec<MessagePart> = Vec::new();
+    // Every tool id this run has folded, across segment resets. Adapters
+    // re-emit shape-bearing `tool_call_update`s (title/rawInput refreshes,
+    // long-running completions) as full ToolCall events; once the fold has
+    // reset at a steer/park boundary those ids are gone from `folded`, and
+    // folding the echo would mint an orphan chip mid-text in the NEXT
+    // segment — the mid-word transcript splits.
+    let mut seen_tools: std::collections::HashSet<String> = std::collections::HashSet::new();
+    let mut seen_images = std::collections::HashSet::new();
+    for entry in doc_ref.read_entries().unwrap_or_default() {
+        for part in entry.parts {
+            if let MessagePart::Image { id, .. } = part {
+                seen_images.insert(format!("{chat_id}\0{id}"));
+                if let Some(tool_id) = id.strip_suffix(":image") {
+                    seen_tools.insert(tool_id.to_owned());
+                }
+            }
+        }
+    }
+    let mut prepared_events = std::collections::VecDeque::new();
+    let mut entry_id = new_id();
+    let mut segment_started = now_ms();
+    let mut writer: Option<SegmentWriter<'_>> = None;
+    // A Cloud session machine's own setup (started or woke, cloning,
+    // checked out) opens its first answer after it boots, as tool chips
+    // under the message that brought it up, updated live while the clone
+    // runs; the harness starts once the checkout is ready. The entry id is
+    // derived from that message so the sender's placeholder chip (its
+    // optimistic echo) is replaced in place.
+    if crate::runner::setup_pending() {
+        let user_id = resume_state.user_message_id.clone();
+        entry_id = zeron_proto::cloud_setup_entry_id(&user_id);
+        let sent_at = doc_ref.read_entries().ok().and_then(|entries| {
+            entries
+                .iter()
+                .find(|entry| entry.id == user_id)
+                .map(|entry| entry.created_at)
+        });
+        let waited = sent_at.map(|sent| {
+            std::time::Duration::from_millis(now_ms().saturating_sub(sent).max(0) as u64)
+        });
+        let mut changes = crate::runner::watch_setup();
+        loop {
+            let (parts, done) = crate::runner::setup_snapshot(&user_id, waited);
+            folded = parts;
+            if let Err(err) = sync_segment(
+                doc_ref,
+                &mut writer,
+                &entry_id,
+                &device_id,
+                segment_started,
+                &folded,
+            ) {
+                tracing::warn!(chat = %chat_id, error = %err, "cloud setup steps write failed");
+            }
+            if done {
+                break;
+            }
+            tokio::select! {
+                changed = changes.changed() => if changed.is_err() { break },
+                _ = controls.interrupt.cancelled() => break,
+            }
+        }
+        // The turn began at the send, not when this machine got to it:
+        // "Worked for" counts the machine's setup too.
+        if let (Some(writer), Some(sent)) = (writer.as_mut(), sent_at) {
+            writer.count_duration_from(sent);
+        }
+        crate::runner::mark_setup_shown();
+    }
     let prepared = if harness_id == HarnessId::Cursor {
         cursor_unstarted_history(
             &doc,
@@ -2328,10 +2486,16 @@ async fn drive_run(
                     wire_request.prompt =
                         zeron_proto::invocation::harness_prompt(&wire_request.prompt, harness_id);
                 }
-                if resume_state.idle {
-                    harness.start_idle(wire_request, controls).await
-                } else {
-                    harness.run(wire_request, controls).await
+                // Host-resolved spawn env (a Cloud device's credential broker);
+                // `RunRequest::env` is serde-skipped, never persisted.
+                match inner
+                    .registry
+                    .prepare_run(harness_id, &mut wire_request)
+                    .await
+                {
+                    Ok(()) if resume_state.idle => harness.start_idle(wire_request, controls).await,
+                    Ok(()) => harness.run(wire_request, controls).await,
+                    Err(message) => Err(zeron_harness::HarnessError::NotSignedIn(message)),
                 }
             } else {
                 Ok(futures::stream::once(async {
@@ -2360,16 +2524,24 @@ async fn drive_run(
             // The journal alone is live-only: without an entry the transcript
             // shows "Run failed" with no reason (an OpenCode server that never
             // booted looked exactly like that).
-            let parts = [MessagePart::Error {
+            // After a Cloud machine's setup chips, the error closes that
+            // same entry.
+            let mut parts = std::mem::take(&mut folded);
+            parts.push(MessagePart::Error {
                 id: "e0".into(),
                 message: message.clone(),
-            }];
+            });
+            let started_at = if writer.is_some() {
+                segment_started
+            } else {
+                now_ms()
+            };
             if let Err(err) = finish_segment(
-                &doc,
-                None,
-                &new_id(),
+                doc_ref,
+                writer.take(),
+                &entry_id,
                 &device_id,
-                now_ms(),
+                started_at,
                 &parts,
                 MessageStatus::Complete,
             ) {
@@ -2396,30 +2568,6 @@ async fn drive_run(
         }
     };
 
-    let doc_ref: &SessionDoc = &doc;
-    let mut folded: Vec<MessagePart> = Vec::new();
-    // Every tool id this run has folded, across segment resets. Adapters
-    // re-emit shape-bearing `tool_call_update`s (title/rawInput refreshes,
-    // long-running completions) as full ToolCall events; once the fold has
-    // reset at a steer/park boundary those ids are gone from `folded`, and
-    // folding the echo would mint an orphan chip mid-text in the NEXT
-    // segment — the mid-word transcript splits.
-    let mut seen_tools: std::collections::HashSet<String> = std::collections::HashSet::new();
-    let mut seen_images = std::collections::HashSet::new();
-    for entry in doc_ref.read_entries().unwrap_or_default() {
-        for part in entry.parts {
-            if let MessagePart::Image { id, .. } = part {
-                seen_images.insert(format!("{chat_id}\0{id}"));
-                if let Some(tool_id) = id.strip_suffix(":image") {
-                    seen_tools.insert(tool_id.to_owned());
-                }
-            }
-        }
-    }
-    let mut prepared_events = std::collections::VecDeque::new();
-    let mut entry_id = new_id();
-    let mut segment_started = now_ms();
-    let mut writer: Option<SegmentWriter<'_>> = None;
     let mut dirty = false;
     let mut flush_at = tokio::time::Instant::now();
     // Set when the engine interrupts the run: the harness gets this long to end its own
@@ -3812,6 +3960,7 @@ mod tests {
             resume: None,
             attachments: Vec::new(),
             worktree: None,
+            env: Default::default(),
         }
     }
 

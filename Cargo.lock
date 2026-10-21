@@ -13574,6 +13574,7 @@ dependencies = [
  "windows-sys 0.61.2",
  "zeron-engine",
  "zeron-mcp",
+ "zeron-notify",
  "zeron-rpc",
  "zeron-ui",
  "zeron-update",
@@ -13596,12 +13597,14 @@ name = "zeron-client"
 version = "0.2.114"
 dependencies = [
  "async-trait",
+ "base64 0.22.1",
  "chrono",
  "futures",
  "loro",
  "reqwest",
  "serde",
  "serde_json",
+ "sha2",
  "tempfile",
  "thiserror 2.0.20",
  "tokio",
@@ -13649,6 +13652,7 @@ dependencies = [
  "notify 7.0.0",
  "portable-pty",
  "reqwest",
+ "ring",
  "rusqlite",
  "same-file",
  "serde",
@@ -13667,6 +13671,7 @@ dependencies = [
  "zeron-doc",
  "zeron-harness",
  "zeron-mcp",
+ "zeron-notify",
  "zeron-preview",
  "zeron-proto",
  "zeron-rpc",
@@ -13758,6 +13763,14 @@ dependencies = [
 ]
 
 [[package]]
+name = "zeron-notify"
+version = "0.2.114"
+dependencies = [
+ "objc",
+ "tracing",
+]
+
+[[package]]
 name = "zeron-orb"
 version = "0.2.114"
 
@@ -13807,8 +13820,10 @@ dependencies = [
  "anyhow",
  "async-trait",
  "futures",
+ "getrandom 0.4.3",
  "serde",
  "serde_json",
+ "tempfile",
  "thiserror 2.0.20",
  "tokio",
  "tokio-tungstenite",
@@ -13974,6 +13989,7 @@ dependencies = [
  "zeron-engine",
  "zeron-harness",
  "zeron-markdown",
+ "zeron-notify",
  "zeron-orb",
  "zeron-proto",
  "zeron-rpc",

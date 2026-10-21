@@ -120,6 +120,9 @@ const TOOL_FOLD: motion::MotionSpec = motion::MotionSpec::new(140, motion::EASE_
 const TOOL_GROUP_SHIMMER_DURATION: Duration = Duration::from_millis(3_400);
 const TOOL_GROUP_SHIMMER_HALF_WIDTH: f32 = 0.36;
 const TOOL_GROUP_SHIMMER_STRIP_WIDTH: f32 = 2.0;
+/// A send waiting on its Cloud machine names that in the working line only
+/// after this long: a send from this device shows its setup chip by then.
+const CLOUD_BOOT_WORD_AFTER_MS: i64 = 1_500;
 const TOOL_ROW_REVEAL: motion::MotionSpec = motion::MotionSpec::new(360, motion::EASE_OUT_EXPO);
 /// The connector draws briskly, then eases into the branch tip so its arrival
 /// remains visible without feeling mechanically linear.
@@ -7113,78 +7116,115 @@ impl Transcript {
         // `turn` (the turn's start, ms) keys the rolling word and timer, so a
         // new turn's labels appear fresh instead of rolling from the last
         // turn's final values.
-        let (sending, queued, elapsed_secs, seed, turn) = if let Some(doc_id) = &self.doc_override {
-            // A subagent doc has no Session row — `indicator_for` would read
-            // the PARENT chat's live state into this tab. Liveness rides the
-            // doc itself instead: the sink's assistant entry streams until
-            // the subagent settles (run teardown finalizes abandoned sinks),
-            // and a trailing USER entry is a steer still awaiting its reply
-            // segment. Frozen snapshots never spin, whatever they claim.
-            if !self.doc_live {
-                return None;
-            }
-            let state = self.state.read(cx);
-            let last = state.sub_transcript(doc_id).last()?;
-            let live =
-                last.status == Some(MessageStatus::Streaming) || last.role == MessageRole::User;
-            if !live {
-                return None;
-            }
-            let elapsed = ((now.timestamp_millis() - last.created_at).max(0) / 1000) as i64;
-            (false, false, elapsed, flavour_seed(doc_id), last.created_at)
-        } else {
-            let chat_id = self.chat_id.clone()?;
-            // Failed-send state first: past the grace window the trailer IS
-            // the retry affordance, whatever the indicator fell back to.
-            if self.state.read(cx).send_undelivered(&chat_id, now) {
-                let theme = Theme::of(cx).clone();
-                return Some(
-                    div()
-                        .id("undelivered-retry")
-                        .flex()
-                        .flex_row()
-                        .items_center()
-                        .gap(px(Theme::SPACE_SM))
-                        .pt(px(Theme::SPACE_LG))
-                        .text_size(crate::typography::ui_rems(12.0))
-                        .text_color(theme.danger)
-                        .cursor_pointer()
-                        .on_click(cx.listener(|this, _, _, cx| this.retry_send(cx)))
-                        .child(SharedString::from("Not delivered — click to retry"))
-                        .into_any_element(),
-                );
-            }
-            let (sending, queued, elapsed, turn) = {
-                let state = self.state.read(cx);
-                if state.indicator_for(&chat_id, now) != crate::state::Indicator::Working {
+        let (sending, queued, elapsed_secs, seed, turn, booting) =
+            if let Some(doc_id) = &self.doc_override {
+                // A subagent doc has no Session row — `indicator_for` would read
+                // the PARENT chat's live state into this tab. Liveness rides the
+                // doc itself instead: the sink's assistant entry streams until
+                // the subagent settles (run teardown finalizes abandoned sinks),
+                // and a trailing USER entry is a steer still awaiting its reply
+                // segment. Frozen snapshots never spin, whatever they claim.
+                if !self.doc_live {
                     return None;
                 }
-                // During the send→turn window the session row's `started_at`
-                // still belongs to the PREVIOUS turn — a timer based on the
-                // send counted the round-trip and then restarted when the
-                // turn actually began (user report). Bridge it as "Sending…"
-                // with no timer instead; the word + timer start with the
-                // turn.
-                let turn_started = state.session_for(&chat_id).and_then(|s| s.started_at);
-                let send_started = state.pending_send_started(&chat_id, now);
-                let sending = sending_bridge(send_started, turn_started);
-                // Degraded delivery path: the send is a durable local write
-                // waiting on connectivity — say so instead of faking
-                // progress. (The overlay holds while degraded, so this line
-                // owns the surface until the ack or the failed state.)
-                let queued = sending && state.chat_delivery_degraded(&chat_id);
-                let elapsed = turn_started
-                    .map(|t| now.signed_duration_since(t).num_seconds().max(0))
-                    .unwrap_or(0);
-                // While sending, the session row still carries the PREVIOUS
-                // turn: the bridge keys on its own send instead, so it never
-                // rolls out of that turn's word or an earlier send's.
-                let turn = if sending { send_started } else { turn_started }
-                    .map_or(0, |t| t.timestamp_millis());
-                (sending, queued, elapsed, turn)
+                let state = self.state.read(cx);
+                let last = state.sub_transcript(doc_id).last()?;
+                let live =
+                    last.status == Some(MessageStatus::Streaming) || last.role == MessageRole::User;
+                if !live {
+                    return None;
+                }
+                let elapsed = ((now.timestamp_millis() - last.created_at).max(0) / 1000) as i64;
+                (
+                    false,
+                    false,
+                    elapsed,
+                    flavour_seed(doc_id),
+                    last.created_at,
+                    None,
+                )
+            } else {
+                let chat_id = self.chat_id.clone()?;
+                // Failed-send state first: past the grace window the trailer IS
+                // the retry affordance, whatever the indicator fell back to.
+                if self.state.read(cx).send_undelivered(&chat_id, now) {
+                    let theme = Theme::of(cx).clone();
+                    return Some(
+                        div()
+                            .id("undelivered-retry")
+                            .flex()
+                            .flex_row()
+                            .items_center()
+                            .gap(px(Theme::SPACE_SM))
+                            .pt(px(Theme::SPACE_LG))
+                            .text_size(crate::typography::ui_rems(12.0))
+                            .text_color(theme.danger)
+                            .cursor_pointer()
+                            .on_click(cx.listener(|this, _, _, cx| this.retry_send(cx)))
+                            .child(SharedString::from("Not delivered — click to retry"))
+                            .into_any_element(),
+                    );
+                }
+                let (sending, queued, elapsed, turn, booting) = {
+                    let state = self.state.read(cx);
+                    if state.indicator_for(&chat_id, now) != crate::state::Indicator::Working {
+                        return None;
+                    }
+                    // The Cloud setup steps say what the send waits on; the
+                    // line under them is the turn's working word, timed from
+                    // the send — setting the machine up is part of the work —
+                    // and keyed on it, so neither restarts when the machine's
+                    // turn begins.
+                    if let Some(sent) = state.cloud_setup_turn_started() {
+                        let elapsed = ((now.timestamp_millis() - sent).max(0) / 1000) as i64;
+                        (false, false, elapsed, sent, None)
+                    } else {
+                        // During the send→turn window the session row's `started_at`
+                        // still belongs to the PREVIOUS turn — a timer based on the
+                        // send counted the round-trip and then restarted when the
+                        // turn actually began (user report). Bridge it as "Sending…"
+                        // with no timer instead; the word + timer start with the
+                        // turn.
+                        let turn_started = state.session_for(&chat_id).and_then(|s| s.started_at);
+                        let send_started = state.pending_send_started(&chat_id, now);
+                        let sending = sending_bridge(send_started, turn_started);
+                        // Degraded delivery path: the send is a durable local write
+                        // waiting on connectivity — say so instead of faking
+                        // progress. (The overlay holds while degraded, so this line
+                        // owns the surface until the ack or the failed state.)
+                        let queued = sending && state.chat_delivery_degraded(&chat_id);
+                        let elapsed = turn_started
+                            .map(|t| now.signed_duration_since(t).num_seconds().max(0))
+                            .unwrap_or(0);
+                        // While sending, the session row still carries the PREVIOUS
+                        // turn: the bridge keys on its own send instead, so it never
+                        // rolls out of that turn's word or an earlier send's.
+                        let turn = if sending { send_started } else { turn_started }
+                            .map_or(0, |t| t.timestamp_millis());
+                        // The send waits for the chat's own Cloud machine to come up.
+                        // (Past the beat in which this device's own send puts
+                        // up its setup chip, so the words never flash twice.)
+                        let booting = if sending
+                            && send_started.is_some_and(|t| {
+                                now.signed_duration_since(t).num_milliseconds()
+                                    >= CLOUD_BOOT_WORD_AFTER_MS
+                            }) {
+                            state.cloud_machine_booting(&chat_id)
+                        } else {
+                            None
+                        };
+                        (sending, queued, elapsed, turn, booting)
+                    }
+                };
+                (
+                    sending,
+                    queued,
+                    elapsed,
+                    flavour_seed(&chat_id),
+                    turn,
+                    booting,
+                )
             };
-            (sending, queued, elapsed, flavour_seed(&chat_id), turn)
-        };
         if self.compact_mode && !sending && !queued && elapsed_secs > 0 {
             let entry_id = if let Some(doc_id) = &self.doc_override {
                 self.state
@@ -7207,6 +7247,13 @@ impl Transcript {
         }
         let word = if queued {
             "Queued — will send automatically"
+        } else if let Some(state) = booting {
+            // The send waits for the chat's own Cloud machine.
+            if state == zeron_proto::CloudState::Provisioning {
+                "Starting a Cloud machine"
+            } else {
+                "Waking the Cloud machine"
+            }
         } else if sending {
             "Sending"
         } else {
@@ -9162,6 +9209,12 @@ fn input_chip(header: SharedString, resolved: bool, theme: &Theme) -> AnyElement
 /// quiet monochrome character keeps the tile without shipping SVGs).
 /// The glyph for a tool call (zeron tool-chip.tsx `toolIcon`, Solar set).
 fn tool_icon_path(call: &ToolCall) -> &'static str {
+    // A Cloud machine's own setup: the machine, then its git steps.
+    match zeron_proto::cloud_setup_step(call) {
+        Some("clone" | "branch") => return crate::icons::GIT_BRANCH,
+        Some(_) => return crate::icons::CLOUD,
+        None => {}
+    }
     match call {
         ToolCall::Exec { .. } => crate::icons::TERMINAL,
         ToolCall::ReadFile { .. } | ToolCall::ApplyPatch { .. } => crate::icons::DOCUMENT,

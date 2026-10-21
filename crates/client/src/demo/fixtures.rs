@@ -257,10 +257,13 @@ pub(crate) fn spaces(now: i64) -> Vec<Space> {
             git_checked_at: git.then(|| ms(now)),
             checkout_id: git.then(|| format!("co-{id}")),
             repository_id: None,
+            github_repo: None,
             created_at: ms(now - ago),
         };
     let zeron = |mut space: Space| {
         space.repository_id = Some("github.com/zeronsh/zeron".into());
+        // Cloud reaches it in the demo (its fixture repositories).
+        space.github_repo = Some("acme/web".into());
         space
     };
     vec![
