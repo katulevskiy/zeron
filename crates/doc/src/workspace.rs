@@ -498,6 +498,20 @@ impl WorkspaceDoc {
         set_opt_ms(&row, "startedAt", session.started_at)?;
         row.insert("updatedAt", session.updated_at.timestamp_millis())?;
         row.insert("runningSubagents", i64::from(session.running_subagents))?;
+        match session.last_turn_outcome {
+            Some(outcome) => row.insert(
+                "lastTurnOutcome",
+                LoroValue::from(serde_json::to_value(outcome)?),
+            )?,
+            None => row.delete("lastTurnOutcome")?,
+        }
+        match &session.terminal_activity {
+            Some(activity) => row.insert(
+                "terminalActivity",
+                LoroValue::from(serde_json::to_value(activity)?),
+            )?,
+            None => row.delete("terminalActivity")?,
+        }
         self.doc.commit();
         Ok(())
     }
@@ -787,6 +801,10 @@ impl From<RawChat> for Chat {
 #[serde(rename_all = "camelCase")]
 pub(crate) struct RawSession {
     #[serde(default)]
+    last_turn_outcome: Option<zeron_proto::NativeTurnOutcome>,
+    #[serde(default)]
+    terminal_activity: Option<zeron_proto::TerminalActivity>,
+    #[serde(default)]
     last_completed_turn: Option<String>,
     chat_id: String,
     device_id: String,
@@ -808,6 +826,8 @@ impl From<RawSession> for Session {
             status: raw.status,
             started_at: raw.started_at.map(dt),
             updated_at: dt(raw.updated_at),
+            last_turn_outcome: raw.last_turn_outcome,
+            terminal_activity: raw.terminal_activity,
             running_subagents: raw.running_subagents,
         }
     }
@@ -918,6 +938,8 @@ mod tests {
             status,
             started_at: Some(ts(3_000)),
             updated_at: ts(3_500),
+            last_turn_outcome: None,
+            terminal_activity: None,
             running_subagents: 0,
         }
     }
