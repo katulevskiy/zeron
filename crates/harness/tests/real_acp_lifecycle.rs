@@ -14,6 +14,7 @@ async fn live_run(cancel: bool) {
     let (steer, steering) = mpsc::channel(8);
     let interrupt = CancellationToken::new();
     let controls = RunControls {
+        realtime: None,
         execution_lease: None,
         steering,
         interrupt: interrupt.clone(),
@@ -22,6 +23,7 @@ async fn live_run(cancel: bool) {
             let _ = tx.send(Vec::new());
             rx
         }),
+        turn: Default::default(),
     };
     let request = RunRequest {
         mcp: None,
@@ -30,6 +32,7 @@ async fn live_run(cancel: bool) {
         model_options: serde_json::Map::new(), cwd: cwd.path().display().to_string(),
         sandbox: SandboxLevel::WorkspaceWrite, auto_approve: true,
         attachments: Vec::new(), worktree: None, resume: None,
+        env: Default::default(),
     };
     let mut stream = zeron_harness::PiHarness::new()
         .run(request, controls)
@@ -58,7 +61,7 @@ async fn live_run(cancel: bool) {
                     // Both messages must queue until the slow original prompt
                     // responds. The real adapter rejects overlapping prompts.
                     for word in ["SECOND-DONE", "THIRD-DONE"] {
-                        steer.send(SteerMessage { prompt: format!("Do not call tools. Reply exactly {word}."), message_id: None }).await.unwrap();
+                        steer.send(SteerMessage { prompt: format!("Do not call tools. Reply exactly {word}."), message_id: None, attachments: Vec::new(), config: None }).await.unwrap();
                     }
                 }
                 AgentEvent::TextDelta { text: delta } => text.push_str(&delta),

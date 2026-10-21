@@ -27,6 +27,43 @@ pub enum HarnessId {
     Mock,
 }
 
+impl HarnessId {
+    /// Every harness, in declaration order.
+    pub const ALL: [HarnessId; 10] = [
+        HarnessId::ClaudeCode,
+        HarnessId::Codex,
+        HarnessId::Cursor,
+        HarnessId::Devin,
+        HarnessId::Grok,
+        HarnessId::Hermes,
+        HarnessId::Pi,
+        HarnessId::Opencode,
+        HarnessId::Antigravity,
+        HarnessId::Mock,
+    ];
+
+    /// The wire slug (`claude-code`, `codex`, ...) — what serde writes.
+    pub fn as_str(self) -> &'static str {
+        match self {
+            HarnessId::ClaudeCode => "claude-code",
+            HarnessId::Codex => "codex",
+            HarnessId::Cursor => "cursor",
+            HarnessId::Devin => "devin",
+            HarnessId::Grok => "grok",
+            HarnessId::Hermes => "hermes",
+            HarnessId::Pi => "pi",
+            HarnessId::Opencode => "opencode",
+            HarnessId::Antigravity => "antigravity",
+            HarnessId::Mock => "mock",
+        }
+    }
+
+    /// Inverse of [`Self::as_str`]; `None` for a slug this build does not know.
+    pub fn from_slug(slug: &str) -> Option<HarnessId> {
+        Self::ALL.into_iter().find(|id| id.as_str() == slug)
+    }
+}
+
 /// Durable user preference for one agent's independently-installed CLI.
 #[derive(Debug, Clone, Copy, PartialEq, Eq, Default, Serialize, Deserialize)]
 #[serde(rename_all = "kebab-case")]
@@ -208,7 +245,7 @@ pub struct ModelOptionChoice {
     pub label: String,
 }
 
-#[derive(Debug, Clone, PartialEq, Serialize, Deserialize)]
+#[derive(Clone, PartialEq, Serialize, Deserialize)]
 #[serde(rename_all = "camelCase")]
 pub struct RunRequest {
     pub prompt: String,
@@ -251,6 +288,53 @@ pub struct RunRequest {
     /// no Zeron tools; title runs never carry it.
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub mcp: Option<McpServer>,
+    /// Host-resolved environment for the spawned agent process (credential
+    /// broker secrets on a Cloud device: `CODEX_HOME`, `GH_TOKEN`,
+    /// `ANTHROPIC_API_KEY`, …). Filled by the HOST right before the request
+    /// reaches the harness; every driver applies it to the child it spawns.
+    /// `serde(skip)` in BOTH directions: secrets must never ride the command
+    /// plane, the session doc, the run journal, or a log line — and a remote
+    /// sender can never inject environment into a host's agents.
+    #[serde(skip)]
+    pub env: std::collections::BTreeMap<String, String>,
+}
+
+/// Hand-written so a `{:?}` can never print a credential: `env` shows its
+/// keys only. Destructured without `..`, so a new field fails to compile
+/// until it is listed here.
+impl std::fmt::Debug for RunRequest {
+    fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
+        let RunRequest {
+            prompt,
+            harness,
+            model,
+            reasoning,
+            model_options,
+            cwd,
+            sandbox,
+            auto_approve,
+            resume,
+            attachments,
+            worktree,
+            mcp,
+            env,
+        } = self;
+        f.debug_struct("RunRequest")
+            .field("prompt", prompt)
+            .field("harness", harness)
+            .field("model", model)
+            .field("reasoning", reasoning)
+            .field("model_options", model_options)
+            .field("cwd", cwd)
+            .field("sandbox", sandbox)
+            .field("auto_approve", auto_approve)
+            .field("resume", resume)
+            .field("attachments", attachments)
+            .field("worktree", worktree)
+            .field("mcp", mcp)
+            .field("env", &env.keys().collect::<Vec<_>>())
+            .finish()
+    }
 }
 
 /// A stdio MCP server the harness should add to the agent's session, on top
@@ -415,11 +499,104 @@ pub const SUBAGENT_INPUT_KEEP: [&str; 5] = [
     "subagent_type",
 ];
 
+/// Bounds on an agent's inline visual ([`AgentEvent::Visual`]): a Luau
+/// script Zeron runs in a sandbox and renders natively.
+pub const VISUAL_MAX_BYTES: usize = 256 * 1024;
+pub const VISUAL_MAX_TITLE_CHARS: usize = 200;
+/// Files a visual may ship with (models, textures, environment maps).
+pub const VISUAL_MAX_ASSETS: usize = 16;
+pub const VISUAL_MAX_ASSET_BYTES: usize = 8 * 1024 * 1024;
+pub const VISUAL_MAX_TOTAL_ASSET_BYTES: usize = 10 * 1024 * 1024;
+
+// The MCP server sends a visual to the engine in one WebSocket message, its
+// assets base64-encoded; that message must fit the engine's 16 MiB frame
+// (tungstenite's default), with room for the script escaped as JSON.
+const _: () = assert!(
+    VISUAL_MAX_TOTAL_ASSET_BYTES.div_ceil(3) * 4 + VISUAL_MAX_BYTES * 6 + 64 * 1024 < 16 * 1024 * 1024
+);
+
+/// Whether `name` can name a visual's asset: a plain file name.
+pub fn valid_visual_asset_name(name: &str) -> bool {
+    !name.is_empty()
+        && name.len() <= 64
+        && !name.starts_with('.')
+        && name
+            .chars()
+            .all(|c| c.is_ascii_alphanumeric() || matches!(c, '.' | '-' | '_'))
+}
+
+/// Where one checklist item stands. Claude's TodoWrite, OpenCode and ACP plans
+/// distinguish the item being worked on from those still waiting; Codex and
+/// Cursor only report done / not done.
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Hash, Default, Serialize, Deserialize)]
+#[serde(rename_all = "camelCase")]
+pub enum TodoStatus {
+    #[default]
+    Pending,
+    InProgress,
+    Completed,
+}
+
+impl TodoStatus {
+    /// Decode a harness status string. Anything unrecognised (including
+    /// `cancelled`) is `Pending`: not finished, not being worked on.
+    pub fn parse(raw: &str) -> Self {
+        match raw {
+            "completed" | "complete" | "done" => Self::Completed,
+            "in_progress" | "inProgress" | "in-progress" | "active" => Self::InProgress,
+            _ => Self::Pending,
+        }
+    }
+}
+
+/// One checklist entry.
+///
+/// `done` is the original wire field and stays authoritative for completion,
+/// so docs written before `status` existed (and readers that ignore it) keep
+/// working. `status` is additive and written only when it adds information —
+/// i.e. for an in-progress item; a missing or unreadable value derives from
+/// `done`. Build items with [`TodoItem::new`] to keep the two consistent.
 #[derive(Debug, Clone, PartialEq, Serialize, Deserialize)]
 #[serde(rename_all = "camelCase")]
 pub struct TodoItem {
     pub text: String,
     pub done: bool,
+    #[serde(
+        default,
+        skip_serializing_if = "Option::is_none",
+        deserialize_with = "lenient_todo_status"
+    )]
+    pub status: Option<TodoStatus>,
+}
+
+impl TodoItem {
+    pub fn new(text: impl Into<String>, status: TodoStatus) -> Self {
+        Self {
+            text: text.into(),
+            done: status == TodoStatus::Completed,
+            status: (status == TodoStatus::InProgress).then_some(status),
+        }
+    }
+
+    /// Effective status: `done` wins, then the explicit status, else pending.
+    pub fn status(&self) -> TodoStatus {
+        if self.done {
+            TodoStatus::Completed
+        } else {
+            self.status.unwrap_or_default()
+        }
+    }
+}
+
+/// A status this build does not know (a future `blocked`, say) must not fail
+/// the whole tool call — the part would vanish from the transcript. Treat it
+/// as absent so the item falls back to `done`.
+fn lenient_todo_status<'de, D>(deserializer: D) -> Result<Option<TodoStatus>, D::Error>
+where
+    D: serde::Deserializer<'de>,
+{
+    let value = Option::<serde_json::Value>::deserialize(deserializer)?;
+    Ok(value.and_then(|v| serde_json::from_value(v).ok()))
 }
 
 /// A slash command advertised by the agent (ACP `availableCommands`): typed as
@@ -503,6 +680,15 @@ pub enum AgentEvent {
         path: String,
         name: String,
         mime_type: String,
+    },
+    /// An agent-authored visual shown inline in the reply: a Luau script
+    /// that builds native UI (`zeron-visual`). The engine emits it when the
+    /// agent calls Zeron's `show_visual` MCP tool; `path` is the stored
+    /// script on the host device.
+    Visual {
+        id: String,
+        path: String,
+        title: String,
     },
     ReasoningDelta {
         text: String,
@@ -715,6 +901,38 @@ mod tests {
         assert_eq!(round.worktree, req.worktree);
     }
 
+    /// Credential-broker secrets ride `RunRequest::env` from the host to the
+    /// harness only: they must never reach the wire, the session doc, or the
+    /// journal, and a sender can never inject them.
+    #[test]
+    fn run_request_env_never_serializes_or_deserializes() {
+        let old = r#"{"prompt":"p","model":null,"reasoning":null,"cwd":".","sandbox":"workspace-write","resume":null}"#;
+        let mut req: RunRequest = serde_json::from_str(old).unwrap();
+        assert!(req.env.is_empty());
+        req.env
+            .insert("GH_TOKEN".into(), "ghu_secret_token_value".into());
+        req.env
+            .insert("ANTHROPIC_API_KEY".into(), "sk-ant-secret".into());
+        let json = serde_json::to_string(&req).unwrap();
+        assert!(!json.contains("ghu_secret_token_value"), "{json}");
+        assert!(!json.contains("sk-ant-secret"), "{json}");
+        assert!(!json.contains("GH_TOKEN"), "{json}");
+        assert!(!json.contains("\"env\""), "{json}");
+        let round: RunRequest = serde_json::from_str(&json).unwrap();
+        assert!(round.env.is_empty());
+        // A hostile sender spelling the field out is ignored too.
+        let injected = r#"{"prompt":"p","model":null,"reasoning":null,"cwd":".","sandbox":"workspace-write","resume":null,"env":{"LD_PRELOAD":"/tmp/x.so"}}"#;
+        let req: RunRequest = serde_json::from_str(injected).unwrap();
+        assert!(req.env.is_empty());
+        // Debug shows which variables were set, never their values.
+        let mut req = req;
+        req.env
+            .insert("GH_TOKEN".into(), "ghu_secret_token_value".into());
+        let printed = format!("{req:?}");
+        assert!(printed.contains("GH_TOKEN"), "{printed}");
+        assert!(!printed.contains("ghu_secret_token_value"), "{printed}");
+    }
+
     #[test]
     fn harness_id_uses_kebab_case() {
         assert_eq!(
@@ -809,5 +1027,70 @@ mod generated_image_tests {
         assert_eq!(value["type"], "generatedImage");
         assert_eq!(value["mimeType"], "image/png");
         assert_eq!(serde_json::from_value::<AgentEvent>(value).unwrap(), event);
+    }
+}
+
+#[cfg(test)]
+mod todo_item_tests {
+    use super::*;
+    use serde_json::json;
+
+    #[test]
+    fn legacy_items_without_status_derive_from_done() {
+        let done: TodoItem = serde_json::from_value(json!({ "text": "a", "done": true })).unwrap();
+        let open: TodoItem = serde_json::from_value(json!({ "text": "b", "done": false })).unwrap();
+        assert_eq!(done.status(), TodoStatus::Completed);
+        assert_eq!(open.status(), TodoStatus::Pending);
+        assert_eq!(open.status, None);
+    }
+
+    #[test]
+    fn only_in_progress_adds_a_field_so_other_docs_are_unchanged() {
+        let pending = serde_json::to_value(TodoItem::new("a", TodoStatus::Pending)).unwrap();
+        let done = serde_json::to_value(TodoItem::new("b", TodoStatus::Completed)).unwrap();
+        let active = serde_json::to_value(TodoItem::new("c", TodoStatus::InProgress)).unwrap();
+        assert_eq!(pending, json!({ "text": "a", "done": false }));
+        assert_eq!(done, json!({ "text": "b", "done": true }));
+        assert_eq!(
+            active,
+            json!({ "text": "c", "done": false, "status": "inProgress" })
+        );
+    }
+
+    #[test]
+    fn unknown_status_falls_back_to_done_instead_of_failing_the_call() {
+        let call: ToolCall = serde_json::from_value(json!({
+            "kind": "todo",
+            "items": [
+                { "text": "a", "done": false, "status": "blocked" },
+                { "text": "b", "done": true, "status": 7 },
+            ]
+        }))
+        .unwrap();
+        let ToolCall::Todo { items } = call else {
+            panic!("expected a todo call");
+        };
+        assert_eq!(items[0].status(), TodoStatus::Pending);
+        assert_eq!(items[1].status(), TodoStatus::Completed);
+    }
+
+    #[test]
+    fn done_outranks_a_stale_status() {
+        let item = TodoItem {
+            text: "a".into(),
+            done: true,
+            status: Some(TodoStatus::InProgress),
+        };
+        assert_eq!(item.status(), TodoStatus::Completed);
+    }
+
+    #[test]
+    fn harness_status_strings_decode() {
+        assert_eq!(TodoStatus::parse("completed"), TodoStatus::Completed);
+        assert_eq!(TodoStatus::parse("in_progress"), TodoStatus::InProgress);
+        assert_eq!(TodoStatus::parse("inProgress"), TodoStatus::InProgress);
+        assert_eq!(TodoStatus::parse("pending"), TodoStatus::Pending);
+        assert_eq!(TodoStatus::parse("cancelled"), TodoStatus::Pending);
+        assert_eq!(TodoStatus::parse(""), TodoStatus::Pending);
     }
 }

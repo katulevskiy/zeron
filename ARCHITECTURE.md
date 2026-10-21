@@ -30,15 +30,38 @@ gpui UI ─ in-proc/localhost RPC ─ engine A ══ DeviceRoom DO relay ══
   no current client dials it) + DeviceRoom DO (per device) + R2 attachments + WorkOS JWKS auth.
   Absorbs the old `apps/server` responsibilities (WorkOS code exchange/refresh, orgs) so
   **Postgres, the Hono server, and the WebRTC/signaling stack are all gone**.
+- **Cloud** (`docs/design/cloud-device.md`): a checkout option — a session in any project
+  whose GitHub repository the Zeron GitHub App reaches can run on its own hosted sandbox,
+  with Cloud's own providers — an ordinary headless engine
+  provisioned per session by the edge's CloudAccount DO + Workflows behind a provider-neutral
+  sandbox interface, sleeping when idle, authenticated with its own device key (runner tokens
+  scoped to that one session's device), and fed provider credentials by the separate
+  service-binding-only `zeron-vault` Worker (one Durable Object per account serializes
+  refreshes, so parallel sessions never race a refresh token).
 
 ### Headed / headless
-Single binary `zeron`:
-- `zeron` — headed. If a local engine daemon is already listening on the IPC port, connect to it;
-  otherwise run the engine **in-process** (RPC over an in-memory duplex — same protocol, zero
-  serialization shortcuts, so the boundary stays honest) **and serve that same engine on the IPC
-  port**. The embedded engine is not private: any other viewport can attach to the running app
-  without it first being restarted as a daemon. Binding is best-effort — if the port is taken the
-  window still opens, having lost only the ability to host peers.
+Binaries `zeron` (app + CLI) and `zeron-engine` (the app's background engine, no UI linked):
+- `zeron` — headed. If an engine is already listening on the IPC port, connect to it. Otherwise
+  start the **background engine** (`crates/engine/src/managed.rs`) — `zeron-engine` beside the app
+  ("Zeron Engine" inside the macOS bundle), or `zeron engine` where no separate executable ships
+  (Windows, which updates as a single `zeron.exe`) — and attach to it. It is spawned detached from
+  the app (own session/process group, no inherited pipes), not through a service manager, so on
+  macOS privacy permissions stay attributed to the app and no background-item approval is needed.
+  Closing or quitting the app leaves it running with every session; it shows up as its own process.
+  The app reconnects when the connection drops (starting it again if it is gone) without resetting
+  what's on screen, and stops it itself only to replace the runtime (sign-out, the local→synced
+  switch). After an app update it restarts into the new version once no run or terminal is live.
+  If it can't start — or the port is 0, or something else holds the port — the app embeds the
+  engine **in-process** as before (RPC over an in-memory duplex — same protocol — and serving that
+  engine on the IPC port); `ZERON_EMBED_ENGINE=1` forces it. An engine that went away unasked is
+  started again after 1, 2, 5 and 15 s; a fifth loss within five minutes stops and shows the failure
+  (with Retry) rather than embedding — an engine bug would crash an in-process engine too.
+  The engine stops by itself once idle if its app is moved to the Trash or uninstalled, and its log
+  (like every long-running mode's) moves to `.old` past 64 MB rather than growing for weeks.
+- Desktop banners are the engine's (`desktop_notify.rs`, advertised as `desktop-notifications-v1`):
+  finished runs, questions, failures, connection loss and agent updates keep arriving with the app
+  closed. Preferences come from the app's `ui-settings.json`; "only in the background" uses window
+  focus the app reports (`SetViewportFocus`). The app keeps the chimes, decided by the same baselines.
 - `zeron headless` — engine only. A clean installation immediately serves its local profile over localhost IPC; when a saved account selects the synced profile at startup and a bearer is available, it also hosts its DeviceRoom for remote control. A VPS can run this while a laptop's UI drives it.
 
 ### Local-first workspace profiles
@@ -104,7 +127,7 @@ Two persistent doc kinds. When sync is enabled, session docs ride the chat2 row 
    run journal), tail/diff sidecars. Constants carried over (`STREAM_COMMIT_MS=120`,
    `DO_FLUSH_MS=5s`, compaction at 8MB, retain 30d, tail 64).
 
-2. **Workspace registry doc** (per profile) — the `registry1` snapshot stores spaces (id, deviceId, path, name?, gitDetected, checkoutId), the chats index (id, deviceId, title, archived, cwd, branch, checkoutId, spaceId, lastSeenAt, lastMessagePreview/At, config), devices, session-status rows, and checkout-diff summary pointers. A space is a device+folder pair in the active profile; the owning device's `SpacesSync` stamps git presence so branch pickers and the diff sidebar can gate without another RPC. Local scope keeps the registry entirely in its profile store. Synced and development scopes join `/registry/{orgId}/ws`, backed by the private per-user room `reg1/{orgId}/{userId}`; rows are never visible to every member of an organization.
+2. **Workspace registry doc** (per profile) — the `registry1` snapshot stores spaces (id, deviceId, path, name?, gitDetected, checkoutId, repositoryId), the chats index (id, deviceId, title, archived, cwd, branch, checkoutId, spaceId, lastSeenAt, lastMessagePreview/At, config), devices, session-status rows, and checkout-diff summary pointers. A space is a device+folder pair in the active profile; the owning device's `SpacesSync` stamps git presence so branch pickers and the diff sidebar can gate without another RPC, plus a repository identity (the trunk's root commit, so renames, transfers and remote spellings don't split a repository; a shallow or empty history falls back to the normalized origin remote, then a device-scoped common-git-dir hash) that groups clones and worktrees of one repository in the sidebar's project mode. Local scope keeps the registry entirely in its profile store. Synced and development scopes join `/registry/{orgId}/ws`, backed by the private per-user room `reg1/{orgId}/{userId}`; rows are never visible to every member of an organization.
 
    Writer discipline: each device writes its own device and session-status rows, rows for chats it hosts, and git stamps for spaces it owns. Creates, renames, archives, and seen marks are LWW sets accepted from any device. `deleteSpace` tombstones the space and every chat/session row in it in one commit. Presence uses ephemeral room frames rather than durable heartbeat writes.
 
@@ -152,6 +175,7 @@ zeron/
                                  # sockets ({s,k,to,from} frames)
     theme/        zeron-theme    # source-neutral theme schema + built-in/custom registry,
                                  # validation, provenance, and local VS Code compiler
+    voice/        zeron-voice    # desktop-local optional Parakeet model, capture and inference; no RPC/sync
     ui/           zeron-ui       # gpui app: shell, sidebar, conversation, composer,
                                  # terminal view, diff pane, settings, animation kit
   apps/

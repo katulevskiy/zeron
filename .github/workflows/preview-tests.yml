@@ -9,19 +9,10 @@ permissions:
   contents: read
 concurrency:
   group: preview-tests-${{ github.ref }}
-  cancel-in-progress: true
+  cancel-in-progress: ${{ github.event_name == 'pull_request' }}
 jobs:
-  networking:
-    strategy:
-      matrix:
-        os: [ubuntu-latest, macos-latest]
-    runs-on: ${{ matrix.os }}
-    timeout-minutes: 30
-    steps:
-      - uses: actions/checkout@v4
-      - uses: dtolnay/rust-toolchain@stable
-      - uses: Swatinem/rust-cache@v2
-      - run: cargo test --locked -p zeron-preview
+  # The Rust networking tests run in `core-tests` (ui-tests.yml, Linux) and
+  # `macos-native` (macos.yml); this workflow keeps the edge coordinator.
   coordinator:
     runs-on: ubuntu-latest
     timeout-minutes: 10
@@ -29,8 +20,8 @@ jobs:
       run:
         working-directory: edge
     steps:
-      - uses: actions/checkout@v4
-      - uses: actions/setup-node@v4
+      - uses: actions/checkout@11d5960a326750d5838078e36cf38b85af677262 # v4.4.0
+      - uses: actions/setup-node@49933ea5288caeca8642d1e84afbd3f7d6820020 # v4.4.0
         with:
           node-version: 24
           cache: npm
@@ -38,3 +29,43 @@ jobs:
       - run: npm ci
       - run: npm run typecheck
       - run: npm test
+  # The credential vault (edge/vault) has its own package and tests; run them
+  # whenever it (or this workflow) changes.
+  vault:
+    runs-on: ubuntu-latest
+    timeout-minutes: 10
+    defaults:
+      run:
+        working-directory: edge/vault
+    steps:
+      - uses: actions/checkout@v4
+        with:
+          fetch-depth: 0
+      - name: detect vault changes
+        id: changed
+        working-directory: .
+        shell: bash
+        run: |
+          if [ "${{ github.event_name }}" = "pull_request" ]; then
+            base="${{ github.event.pull_request.base.sha }}"
+          else
+            base="${{ github.event.before }}"
+          fi
+          if [ -z "$base" ] || ! git cat-file -e "$base" 2>/dev/null \
+            || git diff --name-only "$base" "$GITHUB_SHA" | grep -qE '^(edge/vault/|\.github/workflows/preview-tests\.yml)'; then
+            echo "changed=true" >> "$GITHUB_OUTPUT"
+          else
+            echo "changed=false" >> "$GITHUB_OUTPUT"
+          fi
+      - uses: actions/setup-node@v4
+        if: steps.changed.outputs.changed == 'true'
+        with:
+          node-version: 24
+          cache: npm
+          cache-dependency-path: edge/vault/package-lock.json
+      - if: steps.changed.outputs.changed == 'true'
+        run: npm ci
+      - if: steps.changed.outputs.changed == 'true'
+        run: npm run typecheck
+      - if: steps.changed.outputs.changed == 'true'
+        run: npm test

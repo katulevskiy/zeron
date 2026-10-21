@@ -17,6 +17,7 @@
 
 use loro::{ExportMode, LoroDoc, LoroError, LoroList, LoroMap, LoroText, LoroValue, ToJson};
 use serde::{Deserialize, Serialize};
+use std::collections::BTreeMap;
 
 use crate::commands::{SessionCommandEntry, SessionCommandStatus};
 use crate::constants::{SESSION_SCHEMA_VERSION, TAIL_MESSAGE_COUNT};
@@ -98,6 +99,17 @@ struct DocPartJson {
     source_chat_id: Option<String>,
     #[serde(default, skip_serializing_if = "Option::is_none")]
     source_title: Option<String>,
+    /// Provider switch seam (`kind: "switch"`, additive): display names of
+    /// the provider before and after.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    from_provider: Option<String>,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    to_provider: Option<String>,
+    /// Harness slugs of the same two providers, for their logos.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    from_harness: Option<String>,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    to_harness: Option<String>,
     /// Tool output summary (additive — absent on old rows and old writers;
     /// pre-strip writers stored up to 4KB of capped output here).
     #[serde(default, skip_serializing_if = "Option::is_none")]
@@ -142,6 +154,14 @@ fn to_doc_part(part: &MessagePart) -> Result<DocPartJson, DocError> {
             path: Some(path.clone()),
             name: Some(name.clone()),
             mime_type: Some(mime_type.clone()),
+            ..Default::default()
+        },
+        // The script path and title ride `path` and `name`.
+        MessagePart::Visual { id, path, title } => DocPartJson {
+            id: id.clone(),
+            kind: "visual".into(),
+            path: Some(path.clone()),
+            name: Some(title.clone()),
             ..Default::default()
         },
         MessagePart::Text { id, text } => DocPartJson {
@@ -224,6 +244,21 @@ fn to_doc_part(part: &MessagePart) -> Result<DocPartJson, DocError> {
             source_title: Some(source_title.clone()),
             ..Default::default()
         },
+        MessagePart::Switch {
+            id,
+            from,
+            to,
+            from_harness,
+            to_harness,
+        } => DocPartJson {
+            id: id.clone(),
+            kind: "switch".into(),
+            from_provider: Some(from.clone()),
+            to_provider: Some(to.clone()),
+            from_harness: from_harness.clone(),
+            to_harness: to_harness.clone(),
+            ..Default::default()
+        },
     })
 }
 
@@ -231,6 +266,17 @@ fn to_doc_part(part: &MessagePart) -> Result<DocPartJson, DocError> {
 fn from_doc_part(p: DocPartJson) -> MessagePart {
     match p.kind.as_str() {
         "image" => image_part(p.id, p.path, p.name, p.mime_type),
+        "visual" => match p.path.filter(|path| !path.is_empty()) {
+            Some(path) => MessagePart::Visual {
+                id: p.id,
+                path,
+                title: p.name.unwrap_or_default(),
+            },
+            None => MessagePart::Error {
+                id: p.id,
+                message: "Visual unavailable".into(),
+            },
+        },
         "tool" => match p.call.and_then(|c| serde_json::from_value(c).ok()) {
             Some(call) => MessagePart::Tool {
                 id: p.id,
@@ -279,6 +325,13 @@ fn from_doc_part(p: DocPartJson) -> MessagePart {
             source_chat_id: p.source_chat_id.unwrap_or_default(),
             source_title: p.source_title.unwrap_or_default(),
         },
+        "switch" => MessagePart::Switch {
+            id: p.id,
+            from: p.from_provider.unwrap_or_default(),
+            to: p.to_provider.unwrap_or_default(),
+            from_harness: p.from_harness,
+            to_harness: p.to_harness,
+        },
         _ => MessagePart::Text {
             id: p.id,
             text: p.text.unwrap_or_default(),
@@ -313,6 +366,21 @@ fn image_part(
             message: "Generated image unavailable".into(),
         },
     }
+}
+
+/// One provider's own session in a chat that changed provider (see
+/// [`SessionDoc::provider_sessions`]).
+#[derive(Debug, Clone, PartialEq, Eq, Default, Serialize, Deserialize)]
+#[serde(rename_all = "camelCase")]
+pub struct ProviderSessionMark {
+    pub session_id: String,
+    /// Where the provider created the session; resume is cwd-gated.
+    #[serde(default)]
+    pub cwd: String,
+    /// The last transcript entry this session has seen. Everything after it
+    /// ran elsewhere and is owed to the session when the chat comes back.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub seen: Option<String>,
 }
 
 /// A session doc handle: typed access over a LoroDoc with the schema above.
@@ -391,6 +459,60 @@ impl SessionDoc {
                 .insert("forkHistorySession", session_id)?;
             self.doc.commit();
         }
+        Ok(())
+    }
+
+    /// Whether this chat has ever changed provider. Its transcript then holds
+    /// turns the current provider session never saw, so a fresh session is
+    /// owed the history. A cheap meta read: the warm-send path checks it on
+    /// every message, and must not decode the transcript to do so.
+    pub fn provider_switched(&self) -> bool {
+        matches!(
+            self.doc.get_map("meta").get("providerSwitched"),
+            Some(loro::ValueOrContainer::Value(LoroValue::Bool(true)))
+        )
+    }
+
+    pub fn mark_provider_switched(&self) -> Result<(), DocError> {
+        if !self.provider_switched() {
+            self.doc.get_map("meta").insert("providerSwitched", true)?;
+            self.doc.commit();
+        }
+        Ok(())
+    }
+
+    /// Each provider's own session in a chat that changed provider, keyed by
+    /// harness slug. Switching back resumes that session and hands it only
+    /// the turns after its `seen` entry, so its native history (and the
+    /// provider's prompt cache over it) stays intact. One atomic value so a
+    /// synced reader never sees half a record.
+    pub fn provider_sessions(&self) -> BTreeMap<String, ProviderSessionMark> {
+        let Some(loro::ValueOrContainer::Value(LoroValue::String(value))) =
+            self.doc.get_map("meta").get("providerSessions")
+        else {
+            return BTreeMap::new();
+        };
+        serde_json::from_str(&value).unwrap_or_default()
+    }
+
+    pub fn provider_session(&self, harness: &str) -> Option<ProviderSessionMark> {
+        self.provider_sessions().remove(harness)
+    }
+
+    pub fn set_provider_session(
+        &self,
+        harness: &str,
+        mark: &ProviderSessionMark,
+    ) -> Result<(), DocError> {
+        let mut marks = self.provider_sessions();
+        if marks.get(harness) == Some(mark) {
+            return Ok(());
+        }
+        marks.insert(harness.to_owned(), mark.clone());
+        self.doc
+            .get_map("meta")
+            .insert("providerSessions", serde_json::to_string(&marks)?)?;
+        self.doc.commit();
         Ok(())
     }
 
@@ -868,6 +990,10 @@ fn push_part(parts: &LoroList, part: &MessagePart) -> Result<(), DocError> {
     for (key, value) in [
         ("sourceChatId", &doc_part.source_chat_id),
         ("sourceTitle", &doc_part.source_title),
+        ("fromProvider", &doc_part.from_provider),
+        ("toProvider", &doc_part.to_provider),
+        ("fromHarness", &doc_part.from_harness),
+        ("toHarness", &doc_part.to_harness),
     ] {
         if let Some(value) = value {
             map.insert(key, value.as_str())?;
@@ -1123,6 +1249,9 @@ pub struct SegmentWriter<'a> {
     /// Mirror of what we've written so far (part id → app part).
     written: Vec<MessagePart>,
     created_at: i64,
+    /// What `durationMs` counts from: `created_at`, or an earlier moment the
+    /// turn really began ([`Self::count_duration_from`]).
+    duration_from: i64,
 }
 
 impl<'a> SegmentWriter<'a> {
@@ -1156,7 +1285,18 @@ impl<'a> SegmentWriter<'a> {
             entry_index,
             written: Vec::new(),
             created_at,
+            duration_from: created_at,
         })
+    }
+
+    /// Count this entry's `durationMs` from `started_at` (ms) rather than its
+    /// `createdAt` — never from a later moment. A Cloud machine's setup entry
+    /// opens the turn of the message that brought the machine up, and that
+    /// turn began at the send: starting the machine is part of the work.
+    pub fn count_duration_from(&mut self, started_at: i64) {
+        if started_at > 0 && started_at < self.duration_from {
+            self.duration_from = started_at;
+        }
     }
 
     /// Reattach to a streaming entry a prior [`Self::begin`] pushed on the
@@ -1178,6 +1318,7 @@ impl<'a> SegmentWriter<'a> {
             entry_index,
             written,
             created_at,
+            duration_from: created_at,
         }
     }
 
@@ -1281,8 +1422,8 @@ impl<'a> SegmentWriter<'a> {
             .duration_since(std::time::UNIX_EPOCH)
             .map(|d| d.as_millis() as i64)
             .unwrap_or(self.created_at);
-        if self.created_at > 0 {
-            map.insert("durationMs", (now - self.created_at).max(0))?;
+        if self.duration_from > 0 {
+            map.insert("durationMs", (now - self.duration_from).max(0))?;
         }
         self.doc.doc.commit();
         Ok(())
@@ -1435,6 +1576,33 @@ mod tests {
         assert_eq!(entries[0].role, MessageRole::System);
         assert_eq!(entries[0].parts, vec![seam]);
     }
+
+    #[test]
+    fn provider_switch_seam_round_trips_and_flags_the_doc() {
+        let doc = SessionDoc::init("switch").unwrap();
+        assert!(!doc.provider_switched());
+        let seam = MessagePart::Switch {
+            id: "switch:1".into(),
+            from: "Claude Code".into(),
+            to: "Codex".into(),
+            from_harness: Some("claude-code".into()),
+            to_harness: Some("codex".into()),
+        };
+        doc.push_message(&SessionMessageEntry {
+            duration_ms: None,
+            id: "switch:1".into(),
+            role: MessageRole::System,
+            parts: vec![seam.clone()],
+            created_at: 1,
+            device_id: "dev".into(),
+            status: Some(MessageStatus::Complete),
+            continuation_of: None,
+        })
+        .unwrap();
+        doc.mark_provider_switched().unwrap();
+        assert_eq!(doc.read_entries().unwrap()[0].parts, vec![seam]);
+        assert!(doc.provider_switched());
+    }
     use zeron_proto::{AgentEvent, ToolCall};
 
     #[test]
@@ -1519,6 +1687,40 @@ mod tests {
         }
     }
 
+    #[test]
+    fn visual_round_trips_and_degrades_without_a_path() {
+        let doc = SessionDoc::init("visuals").unwrap();
+        let mut writer = SegmentWriter::begin(&doc, "a", "owner", 1).unwrap();
+        let mut parts = vec![];
+        fold_event_into_parts(
+            &mut parts,
+            &AgentEvent::Visual {
+                id: "v:1".into(),
+                path: "/uploads/v-1-visual.luau".into(),
+                title: "Latency by region".into(),
+            },
+        );
+        writer.sync(&parts).unwrap();
+        let imported = LoroDoc::new();
+        imported.import(&doc.export_snapshot().unwrap()).unwrap();
+        let loaded = SessionDoc::from_doc(imported);
+        assert_eq!(loaded.read_entries().unwrap()[0].parts, parts);
+        assert!(matches!(
+            from_doc_part(
+                serde_json::from_value(serde_json::json!({"kind":"visual", "id":"v", "name":"t"}))
+                    .unwrap()
+            ),
+            MessagePart::Error { .. }
+        ));
+        assert!(matches!(
+            from_doc_part(
+                serde_json::from_value(serde_json::json!({"kind":"visual", "id":"v", "path":"/p"}))
+                    .unwrap()
+            ),
+            MessagePart::Visual { .. }
+        ));
+    }
+
     fn user_entry(id: &str, text: &str) -> SessionMessageEntry {
         SessionMessageEntry {
             id: id.into(),
@@ -1550,6 +1752,83 @@ mod tests {
             }]
         );
         assert_eq!(doc.chat_id().as_deref(), Some("chat-1"));
+    }
+
+    #[test]
+    fn a_turn_counts_its_duration_from_when_it_really_began() {
+        let now = std::time::SystemTime::now()
+            .duration_since(std::time::UNIX_EPOCH)
+            .unwrap()
+            .as_millis() as i64;
+        let doc = SessionDoc::init("c1").unwrap();
+        // The entry opens 5s ago; its turn began a minute ago (the send that
+        // had to wait for a Cloud machine). A later moment never shortens it.
+        let mut w = SegmentWriter::begin(&doc, "e1", "dev", now - 5_000).unwrap();
+        w.count_duration_from(now - 60_000);
+        w.count_duration_from(now - 1_000);
+        w.finish(&[], MessageStatus::Complete).unwrap();
+        let entry = &doc.read_entries().unwrap()[0];
+        assert_eq!(entry.created_at, now - 5_000, "the entry's own time is kept");
+        let duration = entry.duration_ms.unwrap();
+        assert!((60_000..65_000).contains(&duration), "{duration}");
+    }
+
+    #[test]
+    fn todo_status_survives_the_doc_and_refreshes_in_place() {
+        use zeron_proto::{TodoItem, TodoStatus};
+        let todo = |items: Vec<TodoItem>| MessagePart::Tool {
+            // The ACP/Codex plan reuses one id for every update.
+            id: zeron_proto::LIVE_PLAN_TOOL_ID.into(),
+            call: ToolCall::Todo { items },
+            is_error: false,
+            resolved: true,
+            output: None,
+            diff: None,
+            output_ref: None,
+            output_bytes: None,
+            diff_ref: None,
+            diff_stats: None,
+            subagent_ref: None,
+            subagent_status: None,
+            subagent_tail: None,
+        };
+        let doc = SessionDoc::init("c1").unwrap();
+        let mut w = SegmentWriter::begin(&doc, "e1", "dev", 1).unwrap();
+        let first = todo(vec![
+            TodoItem::new("read", TodoStatus::InProgress),
+            TodoItem::new("fix", TodoStatus::Pending),
+        ]);
+        w.sync(std::slice::from_ref(&first)).unwrap();
+        assert_eq!(doc.read_entries().unwrap()[0].parts, vec![first]);
+        // The next plan update rewrites the same part, in-progress moved on.
+        let second = todo(vec![
+            TodoItem::new("read", TodoStatus::Completed),
+            TodoItem::new("fix", TodoStatus::InProgress),
+        ]);
+        w.sync(std::slice::from_ref(&second)).unwrap();
+        let entries = doc.read_entries().unwrap();
+        assert_eq!(entries[0].parts, vec![second]);
+    }
+
+    #[test]
+    fn legacy_todo_part_without_status_still_reads() {
+        // Written by a build that only knew `done`.
+        let part: DocPartJson = serde_json::from_value(serde_json::json!({
+            "id": "t", "kind": "tool", "isError": false,
+            "call": { "kind": "todo", "items": [
+                { "text": "a", "done": true }, { "text": "b", "done": false }
+            ]}
+        }))
+        .unwrap();
+        let MessagePart::Tool {
+            call: ToolCall::Todo { items },
+            ..
+        } = from_doc_part(part)
+        else {
+            panic!("a legacy todo part must still decode");
+        };
+        assert_eq!(items[0].status(), zeron_proto::TodoStatus::Completed);
+        assert_eq!(items[1].status(), zeron_proto::TodoStatus::Pending);
     }
 
     #[test]

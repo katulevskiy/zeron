@@ -205,6 +205,33 @@ final class SessionFlowTests: XCTestCase {
         snapshot(app, "notification-opened")
     }
 
+    /// An unknown chat stays on Sessions and reports the failed open.
+    /// `-route` calls the same AppRouter.openSession entry point as a push
+    /// tap, without needing APNs or a host-side sender. This reproduces the
+    /// failed-open path, not the original notification's delivery or
+    /// the sync timing that may have made its chat unavailable.
+    func testUnknownChatRouteReturnsToSessions() {
+        let chatId = "missing-notification-chat-\(UUID().uuidString)"
+        let app = launch(["-route", "chat:\(chatId)"])
+        XCTAssertTrue(app.staticTexts["Couldn't open session. Try again."].waitForExistence(timeout: 10))
+        XCTAssertTrue(app.navigationBars["Sessions"].waitForExistence(timeout: 5))
+        XCTAssertTrue(app.buttons["new-session"].waitForExistence(timeout: 5))
+        XCTAssertFalse(app.scrollViews["transcript"].exists, "failed open must not present a conversation")
+        XCTAssertFalse(app.staticTexts["Unavailable"].exists)
+
+        let prompt = app.staticTexts.matching(NSPredicate(
+            format: "label == %@",
+            "You: How does the layout engine avoid measuring text on the main thread?"
+        )).firstMatch
+        let reply = app.staticTexts.matching(NSPredicate(
+            format: "label CONTAINS %@", "Plan for the rewrite"
+        )).firstMatch
+        XCTAssertFalse(prompt.exists, "fixture prompt must never appear for a missing chat")
+        XCTAssertFalse(reply.exists, "fixture reply must never appear for a missing chat")
+        XCTAssertFalse(app.cells["session-\(chatId)"].exists)
+        snapshot(app, "unknown-chat-returned-to-sessions")
+    }
+
     func testTabsAndSearch() {
         let app = launch()
         XCTAssertTrue(app.staticTexts["Sessions"].waitForExistence(timeout: 10))
@@ -213,6 +240,48 @@ final class SessionFlowTests: XCTestCase {
         snapshot(app, "settings")
         app.tabBars.buttons["Sessions"].tap()
         XCTAssertTrue(app.navigationBars["Sessions"].waitForExistence(timeout: 5))
+    }
+
+    /// Render Math toggles the Math Font row; the font picks from a sheet of
+    /// every face.
+    func testMathSettings() {
+        let app = launch()
+        XCTAssertTrue(app.staticTexts["Sessions"].waitForExistence(timeout: 10))
+        app.tabBars.buttons["Settings"].tap()
+        XCTAssertTrue(app.navigationBars["Settings"].waitForExistence(timeout: 5))
+        let toggle = app.switches["toggle-math:render"]
+        for _ in 0..<6 where !toggle.exists || !toggle.isHittable { app.swipeUp() }
+        XCTAssertTrue(toggle.waitForExistence(timeout: 5))
+        if (toggle.value as? String) != "1" { toggle.tap() }
+        let font = app.cells["settings-math:font"]
+        XCTAssertTrue(font.waitForExistence(timeout: 5), "font row shown while rendering")
+        font.tap()
+        for label in ["Fira Math", "STIX Two", "Computer Modern", "Libertinus", "Palatino", "Euler"] {
+            XCTAssertTrue(app.buttons[label].waitForExistence(timeout: 5), label)
+        }
+        app.buttons["Computer Modern"].tap()
+        XCTAssertTrue(app.descendants(matching: .any).matching(NSPredicate(format: "label CONTAINS 'The classic LaTeX look.'")).firstMatch.waitForExistence(timeout: 5))
+        font.tap()
+        XCTAssertTrue(app.buttons["Fira Math"].waitForExistence(timeout: 5))
+        app.buttons["Fira Math"].tap()
+        let size = app.cells["settings-math:size"]
+        XCTAssertTrue(size.waitForExistence(timeout: 5), "size row shown while rendering")
+        for _ in 0..<3 where !size.isHittable { app.swipeUp() }
+        size.tap()
+        XCTAssertTrue(app.buttons["150%"].waitForExistence(timeout: 5))
+        app.buttons["135%"].tap()
+        XCTAssertTrue(app.descendants(matching: .any).matching(NSPredicate(format: "label CONTAINS '135% of the text around it'")).firstMatch.waitForExistence(timeout: 5))
+        size.tap()
+        XCTAssertTrue(app.buttons["100%"].waitForExistence(timeout: 5))
+        app.buttons["100%"].tap()
+        XCTAssertTrue(app.descendants(matching: .any).matching(NSPredicate(format: "label CONTAINS '100% of the text around it'")).firstMatch.waitForExistence(timeout: 5))
+        toggle.tap()
+        XCTAssertFalse(font.waitForExistence(timeout: 1), "font row hidden while off")
+        XCTAssertFalse(size.exists, "size row hidden while off")
+        snapshot(app, "math-settings-off")
+        toggle.tap()
+        XCTAssertTrue(font.waitForExistence(timeout: 5))
+        XCTAssertTrue(size.waitForExistence(timeout: 5))
     }
 
     func testNewSessionFromAccessory() {
@@ -282,6 +351,36 @@ final class SessionFlowTests: XCTestCase {
         use.tap()
         XCTAssertTrue(chip.waitForExistence(timeout: 10), "sheet dismissed after creating")
         XCTAssertFalse(use.exists)
+    }
+
+    /// Clones of one repository are one project; the host chip then picks
+    /// which checkout runs the session.
+    func testProjectPickerGroupsClonesAndHostPicksCheckout() {
+        let app = launch(["-route", "new"])
+        let project = app.buttons["composer-chip-project"]
+        XCTAssertTrue(project.waitForExistence(timeout: 10))
+        project.tap()
+        let zeron = app.buttons.matching(NSPredicate(format: "label BEGINSWITH 'zeron'"))
+        XCTAssertTrue(zeron.firstMatch.waitForExistence(timeout: 5))
+        XCTAssertEqual(zeron.count, 1, "one entry for both clones")
+        snapshot(app, "project-menu")
+        zeron.firstMatch.tap()
+        let host = app.buttons["composer-chip-host"]
+        XCTAssertTrue(host.waitForExistence(timeout: 5))
+        host.tap()
+        func item(_ name: String) -> XCUIElement {
+            app.buttons.matching(NSPredicate(format: "label BEGINSWITH %@", name)).firstMatch
+        }
+        XCTAssertTrue(item("hetzner-01").waitForExistence(timeout: 5))
+        XCTAssertTrue(item("MacBook Pro").exists)
+        XCTAssertFalse(item("Mac Studio").exists, "only hosts with a checkout")
+        snapshot(app, "host-menu")
+        item("hetzner-01").tap()
+        let moved = NSPredicate(format: "label CONTAINS 'hetzner-01'")
+        expectation(for: moved, evaluatedWith: host)
+        waitForExpectations(timeout: 5)
+        XCTAssertTrue(project.label.contains("zeron"), "the project stays picked")
+        snapshot(app, "picked-clone")
     }
 
     func testToolGroupExpandsAndShowsDetail() {

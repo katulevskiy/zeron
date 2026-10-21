@@ -54,6 +54,7 @@ async fn main() {
         attachments: Vec::new(),
         resume: None,
         worktree: None,
+        env: Default::default(),
     };
     let mut harness = OpencodeHarness::new();
     if let Some(exe) = exe {
@@ -63,6 +64,7 @@ async fn main() {
         .run(
             request,
             RunControls {
+                realtime: None,
                 execution_lease: None,
                 request_input: Box::new(move |questions| {
                     assert!(
@@ -85,6 +87,7 @@ async fn main() {
                 }),
                 steering,
                 interrupt: interrupt.clone(),
+                turn: Default::default(),
             },
         )
         .await
