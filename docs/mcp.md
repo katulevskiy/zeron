@@ -71,7 +71,9 @@ Children record `Chat.parent_chat_id` (proto) ⇄ `parentChatId` on the registry
 row (`Mutate createChat { parentChatId? }`). Any chat may delegate to any provider.
 Children may themselves delegate, up to 3 levels below a top-level chat.
 `create_chat` and `create_chats` reject a parent already at that depth, including
-an explicit `parent` override. Standalone sessions have no parent.
+an explicit `parent` override. Standalone sessions have no parent. A chat that
+has a parent only creates side chats of its own (no `kind: chat`, no other
+`parent`), so the depth count can't be restarted from inside a delegation.
 
 For children, `parent` (id, prefix, or title) overrides the origin (`ZERON_CHAT_ID`).
 `list_chats { parent }` returns children, and chat summaries carry `parentChatId`.

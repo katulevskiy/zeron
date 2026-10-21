@@ -124,7 +124,7 @@ fn catalog() -> Vec<ToolDef> {
         },
         ToolDef {
             name: "create_chat",
-            description: "Create a standalone session with kind chat, or a child with kind side. Omitted kind defaults to side with an origin/parent, standalone otherwise. Any connected provider works (see list_harnesses), whichever provider you run on; children may delegate up to 3 levels deep. Select a project and/or device; catalogs are validated on that host. Optionally send a first prompt and wait for the reply. For parallel delegation use create_chats, or launch with wait=false and wait only after all chats have started.",
+            description: "Create a standalone session with kind chat, or a child with kind side. Omitted kind defaults to side with an origin/parent, standalone otherwise. Any connected provider works (see list_harnesses), whichever provider you run on; children may delegate through side chats of their own, up to 3 levels deep. Select a project and/or device; catalogs are validated on that host. Optionally send a first prompt and wait for the reply. For parallel delegation use create_chats, or launch with wait=false and wait only after all chats have started.",
             input_schema: json!({
                 "type": "object",
                 "properties": {
@@ -938,6 +938,19 @@ impl Tools {
             ChatKind::Chat
         };
 
+        // A delegate (a chat that has a parent itself) only creates its own
+        // children: naming a shallower parent, or none, would restart the
+        // depth count and let agents spawn agents without bound.
+        if let Some(origin) = self.zeron.origin().chat_id.as_deref()
+            && !zeron_proto::voice::is_orchestrator_chat(origin)
+        {
+            let origin = self.zeron.resolve_chat(origin).await?;
+            anyhow::ensure!(
+                origin.parent_chat_id.is_none()
+                    || parent_chat_id.as_deref() == Some(origin.id.as_str()),
+                "A delegated chat can only create side chats of its own. Leave out parent and kind, or ask the chat that started you."
+            );
+        }
         if let Some(parent) = parent_chat_id.as_deref() {
             self.ensure_delegation_depth(parent).await?;
         }
@@ -2262,24 +2275,23 @@ mod tests {
         assert_eq!(listed["harnesses"][0]["signedIn"], true);
         assert_eq!(listed["harnesses"][0]["connected"], true);
         assert_eq!(listed["harnesses"][1]["connected"], false);
-        for (args, kind, parent) in [
-            (
-                json!({"kind":"side", "device":"Worker"}),
-                "side",
-                json!("chat-beta-2"),
-            ),
-            (
-                json!({"kind":"chat", "device":"Worker"}),
-                "chat",
-                Value::Null,
-            ),
+        let created = side
+            .call("create_chat", json!({"kind":"side", "device":"Worker"}))
+            .await
+            .unwrap();
+        assert_eq!(created["kind"], "side");
+        assert_eq!(created["parentChatId"], "chat-beta-2");
+        assert_eq!(created["deviceId"], "dev-remote");
+        assert_eq!(created["harness"], "codex");
+        assert!(created.get("warning").is_none(), "{created}");
+        // A delegate cannot step out of its own lineage: no standalone chat,
+        // no child of a shallower chat.
+        for args in [
+            json!({"kind":"chat", "device":"Worker"}),
+            json!({"parent":"Alpha", "device":"Worker"}),
         ] {
-            let created = side.call("create_chat", args).await.unwrap();
-            assert_eq!(created["kind"], kind);
-            assert_eq!(created["parentChatId"], parent);
-            assert_eq!(created["deviceId"], "dev-remote");
-            assert_eq!(created["harness"], "codex");
-            assert!(created.get("warning").is_none(), "{created}");
+            let refused = side.call("create_chat", args).await.unwrap_err();
+            assert!(refused.contains("side chats of its own"), "{refused}");
         }
         let deepest = tools(world.clone(), origin("chat-delta-4"));
         let batch = deepest
@@ -2299,9 +2311,13 @@ mod tests {
                 .unwrap()
                 .contains("limited to 3 levels")
         );
-        assert_eq!(batch["results"][1]["isError"], false);
-        assert_eq!(batch["results"][1]["result"]["kind"], "chat");
-        assert!(batch["results"][1]["result"]["parentChatId"].is_null());
+        assert_eq!(batch["results"][1]["isError"], true);
+        assert!(
+            batch["results"][1]["error"]
+                .as_str()
+                .unwrap()
+                .contains("side chats of its own")
+        );
         let reads = world.reads.lock().unwrap();
         assert!(
             reads

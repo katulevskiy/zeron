@@ -692,6 +692,25 @@ impl Drop for ChatDocHandle {
     }
 }
 
+/// The provider the chat's own latest switch seam moved to: `None` when the
+/// chat never switched, `Some(None)` for a seam naming no known harness.
+/// Seams above a fork's seam were copied from the source chat and don't
+/// count: the fork's own provider history starts there.
+pub(crate) fn latest_switch(entries: &[SessionMessageEntry]) -> Option<Option<HarnessId>> {
+    for entry in entries.iter().rev() {
+        for part in &entry.parts {
+            match part {
+                MessagePart::Switch { to_harness, .. } => {
+                    return Some(to_harness.as_deref().and_then(HarnessId::from_slug));
+                }
+                MessagePart::Fork { .. } => return None,
+                _ => {}
+            }
+        }
+    }
+    None
+}
+
 impl ChatDocHandle {
     /// The turn ending now is followed at once by a message the user has
     /// already sent: one still on its way through the command log (a burst
@@ -886,8 +905,8 @@ impl ChatDocHandle {
     /// system entry carrying the [`MessagePart::Switch`] seam, plus the
     /// `providerSwitched` meta flag that makes the next fresh provider session
     /// owe the transcript. Idempotent against a retried dispatch: nothing is
-    /// written while the latest seam already points at `to` and no turn ran
-    /// since. Returns whether a seam was written.
+    /// written while the chat's latest seam already points at `to`. Returns
+    /// whether a seam was written.
     pub fn write_provider_switch(
         &self,
         from: (HarnessId, &str),
@@ -899,13 +918,7 @@ impl ChatDocHandle {
         if entries.is_empty() {
             return Ok(false);
         }
-        let latest = entries.iter().rev().find_map(|entry| {
-            entry.parts.iter().find_map(|part| match part {
-                MessagePart::Switch { to, .. } => Some(to.as_str()),
-                _ => None,
-            })
-        });
-        if latest == Some(to) {
+        if latest_switch(&entries) == Some(Some(to_id)) {
             return Ok(false);
         }
         let id = format!("switch:{created_at}");

@@ -1,6 +1,7 @@
 //! A chat can change provider mid-conversation: the new harness never sees the
 //! old harness's resume id, is handed the prior transcript once, and the
-//! switch is marked in the transcript.
+//! switch is marked in the transcript. Switching back resumes the provider's
+//! own session and hands it only the turns it missed.
 
 use async_trait::async_trait;
 use futures::{StreamExt, stream::BoxStream};
@@ -26,6 +27,8 @@ struct Fake {
     seen: Seen,
     /// When set, the turn blocks until notified — a turn that is "running".
     gate: Option<Arc<Notify>>,
+    /// Runs left that fail before a session starts (signed out, say).
+    failures: Arc<std::sync::atomic::AtomicUsize>,
 }
 
 #[async_trait]
@@ -54,6 +57,23 @@ impl Harness for Fake {
         _: RunControls,
     ) -> Result<BoxStream<'static, Result<AgentEvent, HarnessError>>, HarnessError> {
         self.seen.lock().unwrap().push((self.id, request));
+        let fail = self
+            .failures
+            .fetch_update(
+                std::sync::atomic::Ordering::SeqCst,
+                std::sync::atomic::Ordering::SeqCst,
+                |n| n.checked_sub(1),
+            )
+            .is_ok();
+        if fail {
+            return Ok(futures::stream::iter(vec![Ok(AgentEvent::Done {
+                status: DoneStatus::Errored,
+                result: None,
+                error: Some("not signed in".into()),
+                session_id: None,
+            })])
+            .boxed());
+        }
         let session = format!("{}-session", self.name.to_lowercase());
         let gate = self.gate.clone();
         let name = self.name;
@@ -98,6 +118,10 @@ struct Rig {
 }
 
 fn rig(gated: Option<HarnessId>) -> Rig {
+    rig_with(gated, 0)
+}
+
+fn rig_with(gated: Option<HarnessId>, codex_failures: usize) -> Rig {
     let dir = tempfile::tempdir().unwrap();
     let seen: Seen = Arc::default();
     let gate = Arc::new(Notify::new());
@@ -108,6 +132,9 @@ fn rig(gated: Option<HarnessId>) -> Rig {
             name,
             seen: seen.clone(),
             gate: (gated == Some(id)).then(|| gate.clone()),
+            failures: Arc::new(std::sync::atomic::AtomicUsize::new(
+                if id == CODEX { codex_failures } else { 0 },
+            )),
         }));
     }
     let core = EngineCore::assemble(dir.path(), Arc::new(registry), CLAUDE, None).unwrap();
@@ -150,11 +177,12 @@ impl Rig {
     async fn wait_idle(&self, count: usize) {
         tokio::time::timeout(Duration::from_secs(5), async {
             while self.seen.lock().unwrap().len() < count
-                || self
-                    .core
-                    .sessions
-                    .session_status("main")
-                    .is_some_and(|s| s.status != SessionStatus::Idle)
+                || self.core.sessions.session_status("main").is_some_and(|s| {
+                    matches!(
+                        s.status,
+                        SessionStatus::Working | SessionStatus::AwaitingInput
+                    )
+                })
             {
                 tokio::time::sleep(Duration::from_millis(5)).await;
             }
@@ -302,14 +330,33 @@ async fn switching_provider_drops_the_foreign_resume_id_and_replays_the_history_
     );
     assert_eq!(rig.seams().len(), 1);
 
-    // And back: Claude's old session is stale (Codex has moved the
-    // conversation on), so it gets a fresh session carrying everything.
+    // And back: Claude resumes its own session, which already holds the
+    // first two turns, and is handed only what Codex did since.
     let back = rig.turn(CLAUDE, "one more thing", "u5").await;
-    assert_eq!(back.resume, None);
-    assert!(back.prompt.contains("Codex answer"), "{}", back.prompt);
-    assert!(back.prompt.contains("What fruit did I mention?"));
+    assert_eq!(back.resume.as_deref(), Some("claude-session"));
+    for needle in ["What fruit did I mention?", "Codex answer", "thanks"] {
+        assert!(back.prompt.contains(needle), "missing {needle:?}: {}", back.prompt);
+    }
+    for seen in ["PINEAPPLE", "MANGO", "Claude answer"] {
+        assert!(!back.prompt.contains(seen), "replayed {seen:?}: {}", back.prompt);
+    }
+    assert!(back.prompt.ends_with("one more thing"), "{}", back.prompt);
     assert_eq!(rig.seams().len(), 2);
     assert_eq!(rig.seams()[1], ("Codex".to_string(), "Claude".to_string()));
+
+    // Claude is caught up: its next turn is unwrapped again.
+    let settled = rig.turn(CLAUDE, "and done", "u6").await;
+    assert_eq!(settled.resume.as_deref(), Some("claude-session"));
+    assert_eq!(settled.prompt, "and done");
+
+    // Over to Codex again: it resumes its own session too, catching up on
+    // Claude's two turns only.
+    let codex = rig.turn(CODEX, "your turn", "u7").await;
+    assert_eq!(codex.resume.as_deref(), Some("codex-session"));
+    assert!(codex.prompt.contains("one more thing"), "{}", codex.prompt);
+    assert!(codex.prompt.contains("and done"), "{}", codex.prompt);
+    assert!(!codex.prompt.contains("What fruit did I mention?"), "{}", codex.prompt);
+    assert_eq!(rig.seams().len(), 3);
 }
 
 #[tokio::test]
@@ -324,6 +371,7 @@ async fn a_switch_survives_an_engine_restart_and_a_retried_dispatch_writes_one_s
                 name,
                 seen: seen.clone(),
                 gate: None,
+                failures: Arc::default(),
             }));
         }
         EngineCore::assemble(dir, Arc::new(registry), CLAUDE, None).unwrap()
@@ -411,6 +459,32 @@ async fn a_switch_survives_an_engine_restart_and_a_retried_dispatch_writes_one_s
         .filter(|p| matches!(p, MessagePart::Switch { .. }))
         .count();
     assert_eq!(seams, 1, "a retried dispatch does not stack seams");
+
+    // Restart again: switching back still finds Claude's own session.
+    core.shutdown().await;
+    drop(core);
+    let core = make(dir.path());
+    let before = seen.lock().unwrap().len();
+    core.sessions
+        .dispatch(
+            "main",
+            CLAUDE,
+            run_request(CLAUDE, "back to you"),
+            Some("u3".into()),
+        )
+        .await
+        .unwrap();
+    tokio::time::timeout(Duration::from_secs(5), async {
+        while seen.lock().unwrap().len() <= before {
+            tokio::time::sleep(Duration::from_millis(5)).await;
+        }
+    })
+    .await
+    .unwrap();
+    let back = seen.lock().unwrap()[before].1.clone();
+    assert_eq!(back.resume.as_deref(), Some("claude-session"));
+    assert!(back.prompt.contains("continue please"), "{}", back.prompt);
+    assert!(!back.prompt.contains("hello"), "{}", back.prompt);
 }
 
 #[tokio::test]
@@ -541,4 +615,87 @@ async fn provider_cannot_change_while_a_turn_is_running() {
     rig.wait_idle(1).await;
     client.call(methods::MUTATE, to(CODEX)).await.unwrap();
     assert_eq!(rig.row().config.unwrap().harness, CODEX);
+}
+
+#[tokio::test]
+async fn returning_after_a_failed_switch_resumes_the_owner_without_replaying_its_own_turns() {
+    let rig = rig_with(None, 1);
+    rig.turn(CLAUDE, "Remember PINEAPPLE", "u1").await;
+    // Codex fails before it starts a session: nothing of it to resume.
+    rig.turn(CODEX, "What fruit?", "u2").await;
+    let back = rig.turn(CLAUDE, "Which fruit was it?", "u3").await;
+    assert_eq!(back.resume.as_deref(), Some("claude-session"));
+    assert!(
+        !back.prompt.contains("PINEAPPLE"),
+        "Claude's own session already holds its turn: {}",
+        back.prompt
+    );
+    // The message Codex never answered is all Claude missed.
+    assert!(back.prompt.contains("What fruit?"), "{}", back.prompt);
+    assert!(back.prompt.ends_with("Which fruit was it?"), "{}", back.prompt);
+}
+
+#[tokio::test]
+async fn every_switch_writes_its_own_seam() {
+    let rig = rig_with(None, 1);
+    rig.turn(CLAUDE, "Remember PINEAPPLE", "u1").await;
+    rig.turn(CODEX, "What fruit?", "u2").await;
+    rig.turn(CLAUDE, "Which fruit was it?", "u3").await;
+    let again = rig.turn(CODEX, "And now?", "u4").await;
+    assert_eq!(again.resume, None, "Codex never started a session");
+    assert!(again.prompt.contains("PINEAPPLE"), "{}", again.prompt);
+    let (claude, codex) = ("Claude".to_string(), "Codex".to_string());
+    assert_eq!(
+        rig.seams(),
+        vec![
+            (claude.clone(), codex.clone()),
+            (codex.clone(), claude.clone()),
+            (claude, codex),
+        ]
+    );
+}
+
+#[tokio::test]
+async fn a_switched_side_chat_counts_only_its_own_seams() {
+    let rig = rig(None);
+    // History copied from a parent that had switched to Codex, then the fork
+    // seam: the side chat's own provider history starts below it.
+    let doc = rig.core.doc_host.open("main").unwrap();
+    for (id, part) in [
+        (
+            "switch:1",
+            MessagePart::Switch {
+                id: "switch:1".into(),
+                from: "Claude".into(),
+                to: "Codex".into(),
+                from_harness: Some("claude-code".into()),
+                to_harness: Some("codex".into()),
+            },
+        ),
+        (
+            "fork:main",
+            MessagePart::Fork {
+                id: "fork:main".into(),
+                source_chat_id: "parent".into(),
+                source_title: "Parent".into(),
+            },
+        ),
+    ] {
+        doc.doc()
+            .push_message(&SessionMessageEntry {
+                duration_ms: None,
+                id: id.into(),
+                role: MessageRole::System,
+                parts: vec![part],
+                created_at: 1,
+                device_id: "device".into(),
+                status: Some(MessageStatus::Complete),
+                continuation_of: None,
+            })
+            .unwrap();
+    }
+    rig.turn(CLAUDE, "hello", "u1").await;
+    assert_eq!(rig.seams().len(), 1, "no seam for the side chat's first run");
+    rig.turn(CODEX, "over to you", "u2").await;
+    assert_eq!(rig.seams().len(), 2, "the side chat's own switch is marked");
 }

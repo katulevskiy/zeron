@@ -49,7 +49,7 @@ Delegation is provider-agnostic: `list_harnesses` shows every provider, and \
 those marked `connected` can take work from you whichever provider you run \
 on (a claude-code agent may hand a task to codex, and the reverse). Pass \
 `harness` (and a model from `list_models`) to `create_chat` to choose one. \
-A delegate may itself delegate, up to 3 levels deep.\n\
+A delegate may itself delegate, through side chats of its own, up to 3 levels deep.\n\
 \n\
 When a chart, table, diagram, dashboard, or 3D view would say more than prose and \
 `show_visual` is available, write a Luau visual script and show it with `show_visual` before \

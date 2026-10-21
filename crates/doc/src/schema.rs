@@ -17,6 +17,7 @@
 
 use loro::{ExportMode, LoroDoc, LoroError, LoroList, LoroMap, LoroText, LoroValue, ToJson};
 use serde::{Deserialize, Serialize};
+use std::collections::BTreeMap;
 
 use crate::commands::{SessionCommandEntry, SessionCommandStatus};
 use crate::constants::{SESSION_SCHEMA_VERSION, TAIL_MESSAGE_COUNT};
@@ -367,6 +368,21 @@ fn image_part(
     }
 }
 
+/// One provider's own session in a chat that changed provider (see
+/// [`SessionDoc::provider_sessions`]).
+#[derive(Debug, Clone, PartialEq, Eq, Default, Serialize, Deserialize)]
+#[serde(rename_all = "camelCase")]
+pub struct ProviderSessionMark {
+    pub session_id: String,
+    /// Where the provider created the session; resume is cwd-gated.
+    #[serde(default)]
+    pub cwd: String,
+    /// The last transcript entry this session has seen. Everything after it
+    /// ran elsewhere and is owed to the session when the chat comes back.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub seen: Option<String>,
+}
+
 /// A session doc handle: typed access over a LoroDoc with the schema above.
 pub struct SessionDoc {
     doc: LoroDoc,
@@ -462,6 +478,41 @@ impl SessionDoc {
             self.doc.get_map("meta").insert("providerSwitched", true)?;
             self.doc.commit();
         }
+        Ok(())
+    }
+
+    /// Each provider's own session in a chat that changed provider, keyed by
+    /// harness slug. Switching back resumes that session and hands it only
+    /// the turns after its `seen` entry, so its native history (and the
+    /// provider's prompt cache over it) stays intact. One atomic value so a
+    /// synced reader never sees half a record.
+    pub fn provider_sessions(&self) -> BTreeMap<String, ProviderSessionMark> {
+        let Some(loro::ValueOrContainer::Value(LoroValue::String(value))) =
+            self.doc.get_map("meta").get("providerSessions")
+        else {
+            return BTreeMap::new();
+        };
+        serde_json::from_str(&value).unwrap_or_default()
+    }
+
+    pub fn provider_session(&self, harness: &str) -> Option<ProviderSessionMark> {
+        self.provider_sessions().remove(harness)
+    }
+
+    pub fn set_provider_session(
+        &self,
+        harness: &str,
+        mark: &ProviderSessionMark,
+    ) -> Result<(), DocError> {
+        let mut marks = self.provider_sessions();
+        if marks.get(harness) == Some(mark) {
+            return Ok(());
+        }
+        marks.insert(harness.to_owned(), mark.clone());
+        self.doc
+            .get_map("meta")
+            .insert("providerSessions", serde_json::to_string(&marks)?)?;
+        self.doc.commit();
         Ok(())
     }
 
