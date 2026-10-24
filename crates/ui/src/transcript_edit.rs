@@ -31,6 +31,9 @@ use crate::icons::{self, icon};
 use crate::state::EngineHandle;
 use crate::theme::Theme;
 
+/// How far an edit field's wash reaches past the text column.
+const FIELD_INSET: f32 = 10.0;
+
 /// Fields grow with their text; only a reply longer than this scrolls inside.
 const FIELD_MAX_HEIGHT: f32 = 100_000.0;
 
@@ -324,6 +327,29 @@ impl TranscriptEditor {
         cx.notify();
     }
 
+    /// Visual fixtures: stage an edit without a keyboard.
+    #[doc(hidden)]
+    pub fn fixture_replace(&mut self, id: &str, text: &str, cx: &mut Context<Self>) {
+        if let Some(input) = self.drafts.get(id).and_then(|draft| draft.input.clone()) {
+            input.update(cx, |input, cx| input.set_text(text, cx));
+        }
+    }
+
+    #[doc(hidden)]
+    pub fn fixture_remove(&mut self, id: &str, cx: &mut Context<Self>) {
+        self.toggle_removed(id, cx);
+    }
+
+    #[doc(hidden)]
+    pub fn fixture_expand(&mut self, id: &str, cx: &mut Context<Self>) {
+        self.toggle_expanded(id, cx);
+    }
+
+    #[doc(hidden)]
+    pub fn is_loaded(&self) -> bool {
+        matches!(self.phase, Phase::Ready)
+    }
+
     fn toggle_removed(&mut self, id: &str, cx: &mut Context<Self>) {
         if let Some(draft) = self.drafts.get_mut(id) {
             draft.removed = !draft.removed;
@@ -370,13 +396,9 @@ impl TranscriptEditor {
         } else if saving {
             "Saving…".into()
         } else if blank {
-            "A message can't be empty. Remove it or add text.".into()
+            "A message can't be empty.".into()
         } else if edits == 0 {
-            format!(
-                "Edit any message, then save. {} keeps the code as it is.",
-                editor.agent()
-            )
-            .into()
+            "Edit any message, then save.".into()
         } else if edits == 1 {
             "1 change".into()
         } else {
@@ -507,7 +529,7 @@ impl TranscriptEditor {
                 )
                 .into_any_element(),
             (NativeItemKind::Text { .. }, Some(input)) => {
-                editable_block(&item.id, input.clone(), edited, theme)
+                editable_block(&item.id, input.clone(), edited, content_width, theme)
             }
             (NativeItemKind::CompactionSummary { .. }, Some(input)) => div()
                 .w_full()
@@ -519,7 +541,13 @@ impl TranscriptEditor {
                     icons::FOLD_VERTICAL,
                     "Summary of the earlier conversation. The agent reads this instead of it.",
                 ))
-                .child(editable_block(&item.id, input.clone(), edited, theme))
+                .child(editable_block(
+                    &item.id,
+                    input.clone(),
+                    edited,
+                    content_width,
+                    theme,
+                ))
                 .into_any_element(),
             (NativeItemKind::Reasoning { text, seal }, _) => {
                 self.render_reasoning(item, text.as_deref(), *seal, draft, theme, cx)
@@ -806,13 +834,17 @@ fn editable_block(
     id: &str,
     input: Entity<ComposerInput>,
     edited: bool,
+    width: f32,
     theme: &Theme,
 ) -> AnyElement {
+    // The field's wash overhangs the column so its text stays aligned with
+    // the rows around it.
     div()
         .id(SharedString::from(format!("native-text-{id}")))
         .relative()
-        .w_full()
-        .px(px(10.0))
+        .w(px(width + 2.0 * FIELD_INSET))
+        .ml(px(-FIELD_INSET))
+        .px(px(FIELD_INSET))
         .py(px(6.0))
         .rounded(px(8.0))
         .when(edited, |el| el.bg(theme.accent_wash.opacity(0.35)))

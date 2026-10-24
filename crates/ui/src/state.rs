@@ -518,8 +518,9 @@ impl EngineHandle {
         }
     }
 
-    #[cfg(test)]
-    pub(crate) fn from_test_client(client: RpcClient) -> Self {
+    /// An engine reached over `client` alone: tests and visual fixtures.
+    #[doc(hidden)]
+    pub fn from_test_client(client: RpcClient) -> Self {
         Self {
             inner: Arc::new(RemoteEngine {
                 client: Arc::new(client),
