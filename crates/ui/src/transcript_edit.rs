@@ -79,6 +79,16 @@ pub struct TranscriptEditor {
     scroll: ScrollHandle,
     /// The transcript column's width, kept in step by the shell.
     column_width: f32,
+    /// The message the editor opened from, kept where it was on screen.
+    anchor: Option<EditAnchor>,
+    /// The anchored item, until it is laid out and placed.
+    pending_anchor: Option<usize>,
+    /// The scroll offset right after placing the anchor.
+    anchored_offset: Option<gpui::Point<gpui::Pixels>>,
+    /// Room above the first item and below the last, grown so an anchored
+    /// message near either end can still sit where it was on screen.
+    lead_space: f32,
+    tail_space: f32,
     task: Option<Task<()>>,
     _inputs: Vec<Subscription>,
 }
@@ -98,6 +108,7 @@ impl TranscriptEditor {
         device_id: String,
         harness: HarnessId,
         engine: EngineHandle,
+        anchor: Option<EditAnchor>,
         cx: &mut Context<Self>,
     ) -> Self {
         let mut editor = Self {
@@ -112,6 +123,11 @@ impl TranscriptEditor {
             focus: cx.focus_handle(),
             scroll: ScrollHandle::new(),
             column_width: crate::settings::TRANSCRIPT_WIDTH_DEFAULT,
+            anchor,
+            pending_anchor: None,
+            anchored_offset: None,
+            lead_space: 0.0,
+            tail_space: 0.0,
             task: None,
             _inputs: Vec::new(),
         };
@@ -205,6 +221,9 @@ impl TranscriptEditor {
         self._inputs = subscriptions;
         self.history = Some(history);
         self.phase = Phase::Ready;
+        if self.anchored_offset.is_none() {
+            self.pending_anchor = self.anchor.as_ref().and_then(|a| self.anchor_item(a));
+        }
     }
 
     /// The edits the user made, in history order.
@@ -708,78 +727,233 @@ impl TranscriptEditor {
             .into_any_element()
     }
 
-    fn render_body(&self, theme: &Theme, content_width: f32, cx: &Context<Self>) -> AnyElement {
+    fn render_body(
+        &self,
+        theme: &Theme,
+        content_width: f32,
+        cx: &Context<Self>,
+    ) -> Vec<AnyElement> {
         let agent = self.agent();
         match &self.phase {
             Phase::Loading => {
-                return centered_note(theme, format!("Reading what {agent} remembers…"));
+                return vec![centered_note(
+                    theme,
+                    format!("Reading what {agent} remembers…"),
+                )];
             }
             Phase::Failed(error) => {
-                return div()
-                    .size_full()
-                    .flex()
-                    .flex_col()
-                    .items_center()
-                    .justify_center()
-                    .gap(px(12.0))
-                    .child(
-                        div()
-                            .max_w(px(420.0))
-                            .text_center()
-                            .text_size(crate::typography::ui_rems(13.0))
-                            .text_color(theme.text_muted)
-                            .child(error.clone()),
-                    )
-                    .child(
-                        crate::popover::btn_ghost(theme, "Try again", "transcript-edit-retry")
-                            .id("transcript-edit-retry")
-                            .on_click(cx.listener(|this, _, _, cx| this.load(cx))),
-                    )
-                    .into_any_element();
+                return vec![
+                    div()
+                        .size_full()
+                        .flex()
+                        .flex_col()
+                        .items_center()
+                        .justify_center()
+                        .gap(px(12.0))
+                        .child(
+                            div()
+                                .max_w(px(420.0))
+                                .text_center()
+                                .text_size(crate::typography::ui_rems(13.0))
+                                .text_color(theme.text_muted)
+                                .child(error.clone()),
+                        )
+                        .child(
+                            crate::popover::btn_ghost(theme, "Try again", "transcript-edit-retry")
+                                .id("transcript-edit-retry")
+                                .on_click(cx.listener(|this, _, _, cx| this.load(cx))),
+                        )
+                        .into_any_element(),
+                ];
             }
             Phase::Ready | Phase::Saving => {}
         }
         let Some(history) = &self.history else {
-            return gpui::Empty.into_any_element();
+            return vec![gpui::Empty.into_any_element()];
         };
-        let mut column = div()
-            .w(px(content_width))
-            .mx_auto()
-            .flex()
-            .flex_col()
-            .gap(px(14.0))
-            .child(note_line(
+        // Every note and item is a direct child of the scroll container, so
+        // the scroll handle can place any item (see `Self::item_child`).
+        let row = |el: AnyElement| div().flex_none().w(px(content_width)).mx_auto().child(el);
+        let mut children = vec![
+            div().flex_none().h(px(self.lead_space)).into_any_element(),
+            row(note_line(
                 theme,
                 icons::INFO_CIRCLE,
                 &format!(
                     "This is what {agent} reads on its next turn. Edits change its memory of the \
                      chat, not the files it touched."
                 ),
-            ));
+            ))
+            .into_any_element(),
+        ];
         if history.compacted {
-            column = column.child(note_line(
-                theme,
-                icons::FOLD_VERTICAL,
-                &format!("{agent} compacted earlier messages, so editing starts at its summary."),
-            ));
+            children.push(
+                row(note_line(
+                    theme,
+                    icons::FOLD_VERTICAL,
+                    &format!(
+                        "{agent} compacted earlier messages, so editing starts at its summary."
+                    ),
+                ))
+                .into_any_element(),
+            );
         }
         if history.items.is_empty() {
-            column = column.child(centered_note(theme, "Nothing to edit yet.".into()));
+            children
+                .push(row(centered_note(theme, "Nothing to edit yet.".into())).into_any_element());
         }
         let mut turn = None;
         for item in &history.items {
-            if turn.is_some() && turn != Some(item.turn) && item.role == NativeRole::User {
-                column = column.child(div().h(px(10.0)));
-            }
+            let new_turn =
+                turn.is_some() && turn != Some(item.turn) && item.role == NativeRole::User;
             turn = Some(item.turn);
-            column = column.child(self.render_item(item, content_width, theme, cx));
+            children.push(
+                row(self.render_item(item, content_width, theme, cx))
+                    .when(new_turn, |el| el.pt(px(10.0)))
+                    .into_any_element(),
+            );
         }
-        column.into_any_element()
+        children.push(div().flex_none().h(px(self.tail_space)).into_any_element());
+        children
+    }
+
+    /// The scroll container's child index of `items[ix]`: the notes come
+    /// first.
+    fn item_child(&self, ix: usize) -> usize {
+        let notes = 1 + self.history.as_ref().is_some_and(|h| h.compacted) as usize;
+        1 + notes + ix
+    }
+
+    /// The anchored message's item: the editable text of the same role whose
+    /// text matches the message's, the `occurrence`th such match when the
+    /// same words appear more than once.
+    fn anchor_item(&self, anchor: &EditAnchor) -> Option<usize> {
+        let history = self.history.as_ref()?;
+        let norm = |text: &str| text.split_whitespace().collect::<Vec<_>>().join(" ");
+        let wanted: Vec<String> = anchor.texts.iter().map(|t| norm(t)).collect();
+        let candidates = |exact: bool| -> Vec<usize> {
+            history
+                .items
+                .iter()
+                .enumerate()
+                .filter(|(_, item)| item.role == anchor.role)
+                .filter_map(|(ix, item)| Some((ix, norm(item_text(item)?))))
+                .filter(|(_, text)| !text.is_empty())
+                .filter(|(_, text)| {
+                    wanted.iter().any(|want| {
+                        if exact {
+                            want == text
+                        } else {
+                            want.contains(text.as_str()) || text.contains(want.as_str())
+                        }
+                    })
+                })
+                .map(|(ix, _)| ix)
+                .collect()
+        };
+        let exact = candidates(true);
+        let matches = if exact.is_empty() {
+            candidates(false)
+        } else {
+            exact
+        };
+        matches.get(anchor.occurrence).or(matches.last()).copied()
+    }
+
+    /// Land the anchored item at its message's screen position once laid
+    /// out, and put the caret in it.
+    fn apply_anchor(&mut self, window: &mut Window, cx: &mut Context<Self>) {
+        let Some(ix) = self.pending_anchor else {
+            // Opened without an anchor: the first laid-out position is the
+            // baseline closing compares against.
+            if self.anchored_offset.is_none() && self.history.is_some() {
+                if self.scroll.bounds_for_item(0).is_some() {
+                    self.anchored_offset = Some(self.scroll.offset());
+                } else {
+                    window.request_animation_frame();
+                }
+            }
+            return;
+        };
+        let Some(content_top) = self.anchor.as_ref().map(|a| a.content_top) else {
+            self.pending_anchor = None;
+            return;
+        };
+        let Some(bounds) = self.scroll.bounds_for_item(self.item_child(ix)) else {
+            window.request_animation_frame();
+            return;
+        };
+        let delta = f32::from(bounds.top()) - content_top;
+        let offset = self.scroll.offset();
+        let target = f32::from(offset.y) - delta;
+        let max = f32::from(self.scroll.max_offset().y);
+        // Past either end the scroll range can't reach: make room, then
+        // place it on the next frame.
+        if target > 0.5 {
+            self.lead_space += target;
+            self.scroll.set_offset(gpui::point(offset.x, px(0.0)));
+            window.request_animation_frame();
+            cx.notify();
+            return;
+        }
+        if -target > max + 0.5 {
+            self.tail_space += -target - max;
+            window.request_animation_frame();
+            cx.notify();
+            return;
+        }
+        self.scroll.set_offset(gpui::point(offset.x, px(target)));
+        self.pending_anchor = None;
+        let id = self.history.as_ref().map(|h| h.items[ix].id.clone());
+        if let Some(input) = id.and_then(|id| self.drafts.get(&id)?.input.clone()) {
+            input.update(cx, |input, cx| input.focus_handle(cx).focus(window, cx));
+        }
+        window.request_animation_frame();
+        self.anchored_offset = Some(self.scroll.offset());
+    }
+
+    /// Where the editor sits when it closes: the first text item still in
+    /// view, its current words and its screen y. None when nothing moved
+    /// since it opened, so the transcript stays exactly as it was.
+    pub fn exit_anchor(&self, cx: &App) -> Option<(NativeRole, Vec<String>, f32)> {
+        if self.anchored_offset == Some(self.scroll.offset()) {
+            return None;
+        }
+        let history = self.history.as_ref()?;
+        let top = f32::from(self.scroll.bounds().top()) + Theme::TITLEBAR_HEIGHT;
+        history.items.iter().enumerate().find_map(|(ix, item)| {
+            let bounds = self.scroll.bounds_for_item(self.item_child(ix))?;
+            if f32::from(bounds.bottom()) <= top {
+                return None;
+            }
+            let draft = self.drafts.get(&item.id)?;
+            // The words as edited and as they were: Zeron's transcript takes
+            // the edit asynchronously, so either may be what it shows.
+            let original = item_text(item)?.to_string();
+            let mut texts = vec![original];
+            if let Some(input) = &draft.input {
+                texts.insert(0, input.read(cx).text().to_string());
+            }
+            Some((item.role, texts, f32::from(bounds.top())))
+        })
     }
 }
 
+/// The message an editor opened from: its role, its words and where its
+/// content starts on screen.
+#[derive(Debug, Clone)]
+pub struct EditAnchor {
+    pub role: NativeRole,
+    /// The message's text parts.
+    pub texts: Vec<String>,
+    /// How many earlier messages of the same role carry the same words.
+    pub occurrence: usize,
+    pub content_top: f32,
+}
+
 impl Render for TranscriptEditor {
-    fn render(&mut self, _: &mut Window, cx: &mut Context<Self>) -> impl IntoElement {
+    fn render(&mut self, window: &mut Window, cx: &mut Context<Self>) -> impl IntoElement {
+        self.apply_anchor(window, cx);
         let theme = Theme::of(cx).clone();
         let content_width = self.column_width;
         let body = self.render_body(&theme, content_width, cx);
@@ -793,7 +967,10 @@ impl Render for TranscriptEditor {
             .track_scroll(&self.scroll)
             .pt(px(Theme::TITLEBAR_HEIGHT + 12.0))
             .pb(px(160.0))
-            .child(body)
+            .flex()
+            .flex_col()
+            .gap(px(14.0))
+            .children(body)
     }
 }
 
@@ -1099,6 +1276,7 @@ mod tests {
                 "host".into(),
                 HarnessId::ClaudeCode,
                 engine,
+                None,
                 cx,
             )
         });
@@ -1174,7 +1352,14 @@ mod tests {
                 calls: calls.clone(),
             })));
         let (editor, cx) = cx.add_window_view(|_, cx| {
-            TranscriptEditor::new("chat".into(), "host".into(), HarnessId::Codex, engine, cx)
+            TranscriptEditor::new(
+                "chat".into(),
+                "host".into(),
+                HarnessId::Codex,
+                engine,
+                None,
+                cx,
+            )
         });
         settle(cx, &runtime, |cx| {
             editor.read_with(cx, |editor, _| matches!(editor.phase, Phase::Ready))
@@ -1195,5 +1380,72 @@ mod tests {
                 .iter()
                 .any(|(method, _)| method == methods::APPLY_NATIVE_EDITS)
         );
+    }
+
+    /// Opened from a message, the editor puts that message's field where
+    /// the message was on screen; closing untouched leaves the transcript
+    /// where it is.
+    #[gpui::test]
+    fn an_anchored_editor_keeps_the_message_in_place(cx: &mut TestAppContext) {
+        let runtime = runtime();
+        let _guard = runtime.enter();
+        cx.update(|cx| {
+            cx.set_global(Theme::default());
+            crate::composer::init(cx, Default::default());
+        });
+        let engine =
+            EngineHandle::from_test_client(zeron_rpc::memory_client(Arc::new(NativeRpc {
+                calls: Arc::default(),
+            })));
+        let anchor = EditAnchor {
+            role: NativeRole::Assistant,
+            texts: vec!["The code word is  APPLE.".into()],
+            occurrence: 0,
+            content_top: 300.0,
+        };
+        let (editor, cx) = cx.add_window_view(|_, cx| {
+            TranscriptEditor::new(
+                "chat".into(),
+                "host".into(),
+                HarnessId::ClaudeCode,
+                engine,
+                Some(anchor),
+                cx,
+            )
+        });
+        cx.simulate_resize(gpui::size(px(900.0), px(360.0)));
+        settle(cx, &runtime, |cx| {
+            editor.read_with(cx, |editor, _| matches!(editor.phase, Phase::Ready))
+        });
+        // Layout first, then the anchor lands over the next frames (room
+        // past either end is made one frame before placing).
+        for _ in 0..6 {
+            cx.update(|window, cx| window.draw(cx).clear());
+            cx.run_until_parked();
+        }
+        assert!(editor.read_with(cx, |editor, _| editor.anchored_offset.is_some()));
+        editor.read_with(cx, |editor, cx| {
+            // Whitespace differences still match the reply "a0" (item 3).
+            let child = editor.item_child(3);
+            let top = f32::from(editor.scroll.bounds_for_item(child).unwrap().top());
+            assert!(
+                (top - 300.0).abs() < 1.0,
+                "the reply sits at {top}, not 300"
+            );
+            assert_eq!(editor.exit_anchor(cx), None, "nothing moved");
+        });
+        // Scrolling inside the editor makes closing report the message now
+        // on top, so the transcript can follow.
+        editor.update(cx, |editor, cx| {
+            let offset = editor.scroll.offset();
+            editor
+                .scroll
+                .set_offset(gpui::point(offset.x, offset.y - px(60.0)));
+            cx.notify();
+        });
+        cx.run_until_parked();
+        cx.update(|window, cx| window.draw(cx).clear());
+        let place = editor.read_with(cx, |editor, cx| editor.exit_anchor(cx));
+        assert!(place.is_some(), "a scrolled editor reports where it is");
     }
 }

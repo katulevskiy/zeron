@@ -159,6 +159,7 @@ fn main() -> anyhow::Result<()> {
                     "host".into(),
                     zeron_proto::HarnessId::ClaudeCode,
                     engine,
+                    None,
                     cx,
                 );
                 editor.set_column_width(COLUMN, cx);

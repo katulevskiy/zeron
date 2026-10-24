@@ -2274,6 +2274,18 @@ struct ImageMenu {
     active: Option<usize>,
 }
 
+/// The menu a right-click on a prompt or reply opens.
+struct MessageMenu {
+    entry_id: SharedString,
+    /// Where the message's content starts on screen, so an editor opened
+    /// from here can keep it in place.
+    content_top: f32,
+    /// "Edit transcript" is offered (experiment on, agent supports it).
+    editable: bool,
+    position: Point<Pixels>,
+    active: Option<usize>,
+}
+
 /// Spawn chips never expand, so they never preview images either.
 fn chip_has_images(tool: &ToolItem) -> bool {
     !tool.images.is_empty() && !is_spawn_link(tool)
@@ -3429,6 +3441,11 @@ pub struct Transcript {
     image_menu: crate::popover::Popup<ImageMenu>,
     image_menu_focus: gpui::FocusHandle,
     image_copy: Option<Task<()>>,
+    /// Right-click menu over a prompt or reply (Copy message / Edit transcript).
+    message_menu: crate::popover::Popup<MessageMenu>,
+    message_menu_focus: gpui::FocusHandle,
+    /// A row to land at a window y once it is laid out: (row, content top).
+    pending_align: Option<(usize, f32)>,
     /// In-flight ReadAttachmentChunk loads, keyed by device, path and validation
     /// policy; results land in the global attachment cache.
     attachment_loads: HashMap<crate::attachments::AttachmentKey, Task<()>>,
@@ -3475,6 +3492,9 @@ pub enum TranscriptEvent {
         title: String,
         frozen: bool,
     },
+    /// "Edit transcript" from a message's menu: open the editor with this
+    /// entry's content at `content_top` (window y), where it is now.
+    EditTranscript { entry_id: String, content_top: f32 },
 }
 
 impl gpui::EventEmitter<TranscriptEvent> for Transcript {}
@@ -3733,6 +3753,9 @@ impl Transcript {
             image_menu: Default::default(),
             image_menu_focus: cx.focus_handle(),
             image_copy: None,
+            message_menu: Default::default(),
+            message_menu_focus: cx.focus_handle(),
+            pending_align: None,
             attachment_loads: HashMap::new(),
             visuals: HashMap::new(),
             attachment_retries: HashMap::new(),
@@ -6182,6 +6205,219 @@ impl Transcript {
         cx.notify();
     }
 
+    /// A prompt or reply's right-click menu. Its content top is taken from
+    /// the entry's first row when laid out, else the clicked row's.
+    fn open_message_menu(
+        &mut self,
+        entry_id: SharedString,
+        position: Point<Pixels>,
+        window: &mut Window,
+        cx: &mut Context<Self>,
+    ) {
+        let first = self.rows.iter().position(|row| row.entry_id == entry_id);
+        let content_top = first
+            .and_then(|ix| Some((ix, self.list.bounds_for_item(ix)?)))
+            .map(|(ix, bounds)| {
+                let gap = if ix == 0 {
+                    Theme::TITLEBAR_HEIGHT + Theme::SPACE_LG + 10.0
+                } else {
+                    top_gap_for(self.rows.get(ix - 1), &self.rows[ix])
+                };
+                f32::from(bounds.top()) + gap
+            })
+            .unwrap_or(f32::from(position.y));
+        let editable = crate::settings::experimental_transcript_editing(cx)
+            && self
+                .chat_harness(cx)
+                .is_some_and(crate::transcript_edit::supports);
+        self.message_menu.open(MessageMenu {
+            entry_id,
+            content_top,
+            editable,
+            position,
+            active: None,
+        });
+        window.focus(&self.message_menu_focus, cx);
+        cx.notify();
+    }
+
+    fn chat_harness(&self, cx: &gpui::App) -> Option<zeron_proto::HarnessId> {
+        let state = self.state.read(cx);
+        self.chat_id
+            .as_deref()
+            .and_then(|chat_id| state.chats.iter().find(|chat| chat.id == chat_id))
+            .or_else(|| state.selected_chat_row())
+            .and_then(|chat| chat.config.as_ref())
+            .map(|config| config.harness)
+    }
+
+    fn close_message_menu(&mut self, cx: &mut Context<Self>) {
+        if self.message_menu.begin_close() {
+            crate::popover::reap_popup(cx, |this: &mut Self| &mut this.message_menu);
+            cx.notify();
+        }
+    }
+
+    fn message_menu_rows(menu: &MessageMenu) -> usize {
+        if menu.editable { 2 } else { 1 }
+    }
+
+    fn message_menu_key(&mut self, event: &gpui::KeyDownEvent, cx: &mut Context<Self>) {
+        use crate::popover::MenuKey;
+        let Some(menu) = self.message_menu.open_mut() else {
+            return;
+        };
+        let rows = Self::message_menu_rows(menu);
+        match crate::popover::classify_key(
+            &event.keystroke.key,
+            event.keystroke.modifiers.platform,
+            event.keystroke.modifiers.control,
+        ) {
+            MenuKey::Escape => self.close_message_menu(cx),
+            MenuKey::Up => menu.active = crate::popover::menu_step(menu.active, rows, -1),
+            MenuKey::Down => menu.active = crate::popover::menu_step(menu.active, rows, 1),
+            MenuKey::Enter => {
+                if let Some(action) = menu.active {
+                    self.dispatch_message_menu(action, cx);
+                }
+            }
+            _ => return,
+        }
+        cx.stop_propagation();
+        cx.notify();
+    }
+
+    fn dispatch_message_menu(&mut self, action: usize, cx: &mut Context<Self>) {
+        let Some(menu) = self.message_menu.as_open() else {
+            return;
+        };
+        let (entry_id, content_top) = (menu.entry_id.clone(), menu.content_top);
+        self.close_message_menu(cx);
+        match action {
+            0 => {
+                if let Some(text) = self.entry_text(&entry_id, cx) {
+                    cx.write_to_clipboard(gpui::ClipboardItem::new_string(text));
+                }
+            }
+            1 => cx.emit(TranscriptEvent::EditTranscript {
+                entry_id: entry_id.to_string(),
+                content_top,
+            }),
+            _ => {}
+        }
+    }
+
+    /// A message's own words: a prompt's text, or a reply's text parts.
+    fn entry_text(&self, entry_id: &str, cx: &gpui::App) -> Option<String> {
+        let entry = self
+            .state
+            .read(cx)
+            .transcript
+            .iter()
+            .find(|entry| entry.id == entry_id)?;
+        let text = entry
+            .parts
+            .iter()
+            .filter_map(|part| match part {
+                MessagePart::Text { text, .. } => Some(text.trim()),
+                _ => None,
+            })
+            .filter(|text| !text.is_empty())
+            .collect::<Vec<_>>()
+            .join("\n\n");
+        (!text.is_empty()).then_some(text)
+    }
+
+    fn render_message_menu(&self, cx: &mut Context<Self>) -> Option<AnyElement> {
+        let menu = self.message_menu.get()?;
+        let theme = Theme::of(cx).for_popup();
+        let mut card = crate::popover::popover_card(&theme)
+            .id("transcript-message-menu-card")
+            .track_focus(&self.message_menu_focus)
+            .role(gpui::Role::Menu)
+            .w(px(190.0))
+            .flex()
+            .flex_col()
+            .on_key_down(cx.listener(|this, event, _, cx| this.message_menu_key(event, cx)))
+            .on_mouse_down_out(cx.listener(|this, _, _, cx| this.close_message_menu(cx)))
+            .on_mouse_down(gpui::MouseButton::Left, |_, _, cx| cx.stop_propagation());
+        let rows = [
+            ("Copy message", crate::icons::COPY),
+            ("Edit transcript", crate::icons::PEN),
+        ];
+        for (index, (label, icon)) in rows
+            .into_iter()
+            .take(Self::message_menu_rows(menu))
+            .enumerate()
+        {
+            let id = SharedString::from(format!("transcript-message-menu-{index}"));
+            card = card.child(
+                crate::popover::menu_row(&theme, menu.active == Some(index), id.clone())
+                    .id(id.clone())
+                    .debug_selector(move || id.to_string())
+                    .role(gpui::Role::MenuItem)
+                    .aria_label(label)
+                    .on_click(
+                        cx.listener(move |this, _, _, cx| this.dispatch_message_menu(index, cx)),
+                    )
+                    .child(
+                        crate::icons::icon(icon)
+                            .size(px(16.0))
+                            .text_color(theme.text_muted),
+                    )
+                    .child(div().flex_1().child(label))
+                    .when(index == 1, |row| {
+                        row.child(crate::settings::widgets::badge(&theme, "Beta"))
+                    }),
+            );
+        }
+        Some(crate::popover::menu_at(
+            "transcript-message-menu",
+            menu.position,
+            card.into_any_element(),
+            self.message_menu.closing_since(),
+        ))
+    }
+
+    /// Scroll so `entry_id`'s content starts at window y `content_top`: the
+    /// way back from the transcript editor to the same place on screen.
+    pub(crate) fn align_entry(&mut self, entry_id: &str, content_top: f32, cx: &mut Context<Self>) {
+        let Some(ix) = self.rows.iter().position(|row| row.entry_id == entry_id) else {
+            return;
+        };
+        self.begin_scroll_navigation();
+        if self.list.bounds_for_item(ix).is_none() {
+            self.list.scroll_to(ListOffset {
+                item_ix: ix,
+                offset_in_item: px(0.0),
+            });
+        }
+        self.pending_align = Some((ix, content_top));
+        cx.notify();
+    }
+
+    /// Finish [`Self::align_entry`] once its row is laid out.
+    fn apply_pending_align(&mut self, window: &mut Window) {
+        let Some((ix, content_top)) = self.pending_align else {
+            return;
+        };
+        let Some(bounds) = self.list.bounds_for_item(ix) else {
+            window.request_animation_frame();
+            return;
+        };
+        let gap = if ix == 0 {
+            Theme::TITLEBAR_HEIGHT + Theme::SPACE_LG + 10.0
+        } else {
+            top_gap_for(self.rows.get(ix - 1), &self.rows[ix])
+        };
+        let delta = f32::from(bounds.top()) + gap - content_top;
+        if delta.abs() > 0.5 {
+            self.list.scroll_by(px(delta));
+            window.request_animation_frame();
+        }
+        self.pending_align = None;
+    }
+
     fn close_image_menu(&mut self, cx: &mut Context<Self>) {
         if self.image_menu.begin_close() {
             crate::popover::reap_popup(cx, |this: &mut Self| &mut this.image_menu);
@@ -7758,8 +7994,26 @@ impl Transcript {
         });
         let entry_id = row.entry_id.clone();
         let row_id = row.id.clone();
+        // Prompts and replies of the conversation itself (not a subagent's
+        // read-only transcript) open the message menu on right-click.
+        let message_row = self.doc_override.is_none()
+            && match &row.kind {
+                RowKind::User { text, .. } => !text.is_empty(),
+                RowKind::Markdown { .. } | RowKind::LiveMarkdown { .. } => true,
+                _ => false,
+            };
+        let menu_entry = row.entry_id.clone();
         let outer = div()
             .id(row.id.clone())
+            .when(message_row, |el| {
+                el.on_mouse_down(
+                    gpui::MouseButton::Right,
+                    cx.listener(move |this, event: &gpui::MouseDownEvent, window, cx| {
+                        cx.stop_propagation();
+                        this.open_message_menu(menu_entry.clone(), event.position, window, cx);
+                    }),
+                )
+            })
             .on_hover(cx.listener(move |this, hovered: &bool, _, cx| {
                 if *hovered {
                     let next = Some((row_id.clone(), entry_id.clone()));
@@ -10464,6 +10718,7 @@ fn entry_fingerprint(entry: &SessionMessageEntry, pending: bool) -> u64 {
 
 impl Render for Transcript {
     fn render(&mut self, window: &mut Window, cx: &mut Context<Self>) -> impl IntoElement {
+        self.apply_pending_align(window);
         if record_view_frame("transcript") {
             tracing::warn!(
                 distance = self.distance_from_bottom(),
@@ -10711,7 +10966,9 @@ impl Render for Transcript {
             ))
             .child(content)
             .child(rail);
-        let root = root.children(self.render_image_menu(cx));
+        let root = root
+            .children(self.render_image_menu(cx))
+            .children(self.render_message_menu(cx));
         // Full-size viewer for a clicked user-bubble thumbnail
         // (AttachmentPreviewDialog: bare lightbox, click closes).
         if let Some(preview) = self.attachment_preview.clone() {
@@ -10758,6 +11015,68 @@ mod tests {
         assert!(!jump_visibility(shown, AT_BOTTOM_PX));
         assert!(!jump_visibility(false, 319.0));
         assert!(jump_visibility(false, 321.0));
+    }
+
+    /// A message's right-click menu offers "Edit transcript" only with the
+    /// experiment on and an agent that supports it, and choosing it hands
+    /// the shell the message and where it sits.
+    #[gpui::test]
+    fn message_menu_offers_edit_where_the_agent_supports_it(cx: &mut gpui::TestAppContext) {
+        let dir = tempfile::tempdir().unwrap();
+        cx.update(|cx| {
+            gpui_base::init(cx);
+            cx.set_global(Theme::dark());
+            let mut settings = crate::settings::UiSettings::default();
+            settings.experimental_transcript_editing = true;
+            crate::settings::init(settings, dir.path(), cx);
+        });
+        let chat = |harness: &str| -> zeron_proto::Chat {
+            serde_json::from_value(serde_json::json!({
+                "id": "chat", "deviceId": "local", "archived": false,
+                "createdAt": "2026-10-01T00:00:00Z",
+                "config": {"harness": harness, "model": null, "reasoning": null,
+                           "sandbox": "workspace-write"},
+            }))
+            .unwrap()
+        };
+        let state = cx.new(|_| {
+            let mut state = AppState::new();
+            state.selected_chat = Some("chat".into());
+            state.chats = vec![chat("claude-code")];
+            state
+        });
+        let (transcript, cx) = cx.add_window_view(|_, cx| Transcript::new(state.clone(), cx));
+        let events: Rc<RefCell<Vec<(String, f32)>>> = Rc::default();
+        let recorded = events.clone();
+        cx.update(|_, cx| {
+            cx.subscribe(&transcript, move |_, event, _| {
+                if let TranscriptEvent::EditTranscript {
+                    entry_id,
+                    content_top,
+                } = event
+                {
+                    recorded.borrow_mut().push((entry_id.clone(), *content_top));
+                }
+            })
+            .detach();
+        });
+        let at = Point::new(px(40.0), px(300.0));
+        transcript.update_in(cx, |transcript, window, cx| {
+            transcript.open_message_menu("reply".into(), at, window, cx);
+            assert!(transcript.message_menu.get().unwrap().editable);
+            transcript.dispatch_message_menu(1, cx);
+        });
+        cx.run_until_parked();
+        // Unlaid-out rows fall back to the pointer's height.
+        assert_eq!(*events.borrow(), vec![("reply".to_string(), 300.0)]);
+        // An agent whose history can't be edited gets only Copy.
+        state.update(cx, |state, _| state.chats = vec![chat("cursor")]);
+        transcript.update_in(cx, |transcript, window, cx| {
+            transcript.open_message_menu("reply".into(), at, window, cx);
+            let menu = transcript.message_menu.get().unwrap();
+            assert!(!menu.editable);
+            assert_eq!(Transcript::message_menu_rows(menu), 1);
+        });
     }
 
     #[gpui::test]

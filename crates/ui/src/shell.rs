@@ -4414,11 +4414,21 @@ impl Shell {
     /// transcripts (nested spawns open their own tabs).
     fn on_transcript_event(
         &mut self,
-        _: Entity<Transcript>,
+        source: Entity<Transcript>,
         event: &TranscriptEvent,
         cx: &mut Context<Self>,
     ) {
         match event {
+            // The editor takes the main column; a side chat's transcript
+            // offers nothing to open it from.
+            TranscriptEvent::EditTranscript {
+                entry_id,
+                content_top,
+            } => {
+                if source == self.transcript {
+                    self.edit_transcript_from(entry_id, *content_top, cx);
+                }
+            }
             TranscriptEvent::OpenSubagent {
                 chat_id,
                 doc_id,
@@ -11101,7 +11111,7 @@ impl Shell {
                         .id("chat-menu-edit-transcript")
                         .debug_selector(|| "chat-menu-edit-transcript".into())
                         .on_click(cx.listener(move |this, _, _, cx| {
-                            this.open_transcript_editor(edit_id.clone(), cx)
+                            this.open_transcript_editor(edit_id.clone(), None, cx)
                         }))
                         .child(
                             icon(icons::PEN_NEW_SQUARE)
