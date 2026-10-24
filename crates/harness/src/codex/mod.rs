@@ -53,6 +53,7 @@
 
 pub(crate) mod catalog;
 mod elicitation;
+mod history;
 mod normalize;
 pub mod npm_repair;
 pub mod realtime;
@@ -708,6 +709,31 @@ impl Harness for CodexHarness {
         ])
     }
 
+    fn supports_native_history(&self) -> bool {
+        true
+    }
+
+    async fn read_native_history(
+        &self,
+        session_id: &str,
+        cwd: &Path,
+        env: &std::collections::BTreeMap<String, String>,
+    ) -> Result<crate::NativeHistoryRead, HarnessError> {
+        self.read_history(session_id, cwd, env).await
+    }
+
+    async fn write_edited_session(
+        &self,
+        session_id: &str,
+        cwd: &Path,
+        env: &std::collections::BTreeMap<String, String>,
+        revision: &str,
+        edits: &[zeron_proto::native_history::NativeEdit],
+    ) -> Result<String, HarnessError> {
+        self.write_history(session_id, cwd, env, revision, edits)
+            .await
+    }
+
     async fn run(
         &self,
         request: RunRequest,
@@ -796,7 +822,7 @@ impl CodexHarness {
             client,
             incoming,
             stderr_tail,
-        } = spawn_app_server(&exe, &request)?;
+        } = spawn_app_server(&exe, &request.cwd, &request.env)?;
         let (event_tx, event_rx) = mpsc::channel::<Result<AgentEvent, HarnessError>>(256);
         tokio::spawn(run_session(Session {
             title_only,
@@ -828,22 +854,26 @@ struct AppServer {
     stderr_tail: crate::StderrTail,
 }
 
-fn spawn_app_server(exe: &Path, request: &RunRequest) -> Result<AppServer, HarnessError> {
+fn spawn_app_server(
+    exe: &Path,
+    cwd: &str,
+    env: &std::collections::BTreeMap<String, String>,
+) -> Result<AppServer, HarnessError> {
     let mut cmd = Command::new(exe);
     cmd.arg("app-server");
     crate::compose_child_path(&mut cmd, exe);
     // Host-resolved credentials (a Cloud device's managed CODEX_HOME,
     // GH_TOKEN, …). Absent on laptops: the CLI's own login is used.
-    crate::apply_run_env(&mut cmd, &request.env);
-    if !request.cwd.is_empty() {
-        cmd.current_dir(&request.cwd);
+    crate::apply_run_env(&mut cmd, env);
+    if !cwd.is_empty() {
+        cmd.current_dir(cwd);
     }
     cmd.stdin(Stdio::piped())
         .stdout(Stdio::piped())
         .stderr(Stdio::piped())
         .kill_on_drop(true);
     let mut child = cmd.spawn().map_err(|e| {
-        let cwd = (!request.cwd.is_empty()).then(|| Path::new(&request.cwd));
+        let cwd = (!cwd.is_empty()).then(|| Path::new(cwd));
         crate::executable::spawn_error(e, cwd, || crate::executable::binary_hint(exe))
     })?;
     let stdin = child
@@ -1390,7 +1420,7 @@ async fn run_session(session: Session) {
                 }
             }
             attempt += 1;
-            match spawn_app_server(&executable, &request) {
+            match spawn_app_server(&executable, &request.cwd, &request.env) {
                 Ok(next) => {
                     child = next.child;
                     client = next.client;
