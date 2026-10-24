@@ -57,6 +57,7 @@ mod history;
 mod normalize;
 pub mod npm_repair;
 pub mod realtime;
+mod stop;
 mod subagents;
 
 use std::collections::{HashMap, HashSet, VecDeque};
@@ -631,6 +632,11 @@ impl Harness for CodexHarness {
     /// agent threads included — stay up for the next `turn/start`.
     fn stops_turn_in_place(&self) -> bool {
         true
+    }
+    /// A command is ended by signaling its process (see [`stop`]); a
+    /// subagent by interrupting its thread's turn and ending its commands.
+    fn stops_tools(&self) -> bool {
+        cfg!(unix)
     }
     /// What the app-server launch and its turns read: the sandbox is forced
     /// to full access, and `serviceTier` is the only model option used.
@@ -1700,6 +1706,9 @@ async fn run_session(session: Session) {
     // later (live, 0.159.3). The host's idle reaper must not retire the
     // app-server — and the process with it — while it runs.
     let mut open_commands: HashMap<String, (Option<String>, Option<String>)> = HashMap::new();
+    // Every command and turn the app-server is running, for stopping one
+    // command or one subagent (see [`stop`]).
+    let mut running = stop::Running::default();
     // An interrupted turn's foreground command is killed WITHOUT an
     // `item/completed`: once its process has had a moment to go, drop the
     // turn's commands whose process is gone (background ones live on).
@@ -1727,6 +1736,7 @@ async fn run_session(session: Session) {
         tokio::select! {
             inc = incoming.recv() => match inc {
                 Some(Incoming::Notification { method, params }) => {
+                running.observe(&method, &params);
                 // Foreign-thread traffic FIRST: a child thread's turn/thread
                 // bookkeeping must never reach the parent turn router below
                 // (a child's turn/completed would settle the PARENT turn).
@@ -2246,6 +2256,50 @@ async fn run_session(session: Session) {
                             break 'main;
                         }
                     }
+                }
+            },
+
+            // End one command, or one subagent's work; the turn goes on and
+            // the agent sees the command fail.
+            tool = turn.stop_tool_requested(), if !interrupted => {
+                let Some(app_server) = child.id() else { continue };
+                if let Some(command) = running.command(&tool) {
+                    let command = command.to_owned();
+                    tokio::spawn(async move {
+                        if let Err(why) = stop::kill_command(app_server, &command).await {
+                            tracing::warn!(target: "zeron_harness::codex", "command not stopped: {why}");
+                        }
+                    });
+                } else if let Some(child_thread) = children.child_of(&tool) {
+                    // A subagent is its thread's turn, and the commands that
+                    // turn started keep running when it is interrupted.
+                    let child_thread = child_thread.to_owned();
+                    let child_turn = running.turn(&child_thread).map(str::to_owned);
+                    let commands = running.commands_of(&child_thread);
+                    let client = client.clone();
+                    tokio::spawn(async move {
+                        if let Some(turn_id) = child_turn
+                            && let Err(e) = client
+                                .request(
+                                    "turn/interrupt",
+                                    json!({ "threadId": child_thread, "turnId": turn_id }),
+                                )
+                                .await
+                        {
+                            tracing::warn!(target: "zeron_harness::codex", "subagent turn/interrupt failed: {e}");
+                        }
+                        for command in commands {
+                            if let Err(why) = stop::kill_command(app_server, &command).await {
+                                tracing::warn!(target: "zeron_harness::codex", "subagent command not stopped: {why}");
+                            }
+                        }
+                    });
+                } else {
+                    tracing::debug!(
+                        target: "zeron_harness::codex",
+                        tool = %tool,
+                        "tool stop for a call that is not running"
+                    );
                 }
             },
 

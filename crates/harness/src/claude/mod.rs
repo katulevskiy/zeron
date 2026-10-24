@@ -654,6 +654,11 @@ impl Harness for ClaudeHarness {
     fn deterministic_turn_end(&self) -> bool {
         true
     }
+    /// `stop_task` kills one task (a command, a subagent) by the id its
+    /// `task_started` reported; the turn goes on.
+    fn stops_tools(&self) -> bool {
+        true
+    }
     /// The `interrupt` control request ends the turn and the CLI keeps
     /// reading stdin; background agents and shells run on.
     fn stops_turn_in_place(&self) -> bool {
@@ -1135,6 +1140,11 @@ async fn run_session(session: Session) {
     // Top-level tool calls in flight: a steer must not abort them (see
     // `wire::steer_message_line`).
     let mut open_tools = std::collections::HashSet::new();
+    // Tool calls the host asked to stop before the CLI reported the task
+    // behind them (a command's `task_started` follows its start by a few
+    // seconds): sent the moment it does, dropped if the call ends first.
+    let mut pending_tool_stops = std::collections::HashSet::<String>::new();
+    let mut tool_stops_sent = 0u64;
     let mut steering_open = true;
     let mut interrupted = false;
     let mut interrupt_sent = false;
@@ -1391,6 +1401,7 @@ async fn run_session(session: Session) {
                             }
                             AgentEvent::ToolResult { id, .. } => {
                                 open_tools.remove(id);
+                                norm.tool_finished(id);
                             }
                             AgentEvent::Done { .. } => open_tools.clear(),
                             _ => {}
@@ -1444,6 +1455,18 @@ async fn run_session(session: Session) {
                             }
                         }
                     }
+                    // A task the CLI just reported may be one a stop waits on.
+                    let mut written = true;
+                    pending_tool_stops.retain(|tool| match norm.task_for_tool(tool) {
+                        Some(task) => {
+                            tool_stops_sent += 1;
+                            let id = format!("zeron_stop_task_{tool_stops_sent}");
+                            written &= stdin.line(wire::stop_task_request_line(&id, task));
+                            false
+                        }
+                        None => open_tools.contains(tool),
+                    });
+                    if !written { break 'main; }
                 }
                 // stdout EOF: the CLI exited. An older CLI says it has no
                 // conversation for the session on stderr alone.
@@ -1535,6 +1558,26 @@ async fn run_session(session: Session) {
                         *status = DoneStatus::Interrupted;
                     }
                     stopped_end = Some(done);
+                }
+            },
+
+            // End one running command or subagent; the turn goes on and the
+            // agent sees the call fail.
+            tool = turn.stop_tool_requested(), if !interrupted => {
+                if let Some(task) = norm.task_for_tool(&tool) {
+                    tool_stops_sent += 1;
+                    let id = format!("zeron_stop_task_{tool_stops_sent}");
+                    if !stdin.line(wire::stop_task_request_line(&id, task)) {
+                        break 'main;
+                    }
+                } else if open_tools.contains(&tool) {
+                    pending_tool_stops.insert(tool);
+                } else {
+                    tracing::debug!(
+                        target: "zeron_harness::claude",
+                        tool = %tool,
+                        "tool stop for a call that is not running"
+                    );
                 }
             },
 
