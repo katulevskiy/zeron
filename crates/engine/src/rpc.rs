@@ -2027,6 +2027,9 @@ fn forwardable(method: &str) -> bool {
     matches!(
         method,
         methods::FORK_SIDE_CHAT
+            | methods::GET_NATIVE_HISTORY
+            | methods::APPLY_NATIVE_EDITS
+            | methods::UNDO_NATIVE_EDIT
             | methods::LIST_HARNESSES
             | methods::INSTALL_HARNESS
             | methods::CANCEL_INSTALL

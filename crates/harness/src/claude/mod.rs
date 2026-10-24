@@ -45,6 +45,7 @@
 
 pub mod catalog;
 mod discovery;
+mod history;
 mod normalize;
 pub mod refresh_lock;
 mod wire;
@@ -123,6 +124,18 @@ fn config_root(env: &std::collections::BTreeMap<String, String>) -> PathBuf {
         "CLAUDE_CONFIG_DIR",
         crate::executable::home_or_current_dir().join(".claude"),
     )
+}
+
+/// The stored session file of a chat's Claude session, for history edits.
+fn stored_session(
+    env: &std::collections::BTreeMap<String, String>,
+    session_id: &str,
+) -> Result<PathBuf, HarnessError> {
+    history::session_file(&config_root(env), session_id).ok_or_else(|| {
+        HarnessError::History(
+            "This chat's Claude session is no longer stored on this device".into(),
+        )
+    })
 }
 
 /// An administrator's `managed-mcp.json` (at the paths Claude Code reads).
@@ -738,6 +751,47 @@ impl Harness for ClaudeHarness {
         self.workspace_commands
             .get(cwd, self.discover_commands(Some(cwd)))
             .await
+    }
+
+    fn supports_native_history(&self) -> bool {
+        true
+    }
+
+    async fn read_native_history(
+        &self,
+        session_id: &str,
+        _cwd: &std::path::Path,
+        env: &std::collections::BTreeMap<String, String>,
+    ) -> Result<crate::NativeHistoryRead, HarnessError> {
+        let file = stored_session(env, session_id)?;
+        tokio::task::spawn_blocking(move || {
+            let text = std::fs::read_to_string(&file)?;
+            Ok(history::read(&text))
+        })
+        .await
+        .map_err(|e| HarnessError::Protocol(e.to_string()))?
+    }
+
+    async fn write_edited_session(
+        &self,
+        session_id: &str,
+        _cwd: &std::path::Path,
+        env: &std::collections::BTreeMap<String, String>,
+        revision: &str,
+        edits: &[zeron_proto::native_history::NativeEdit],
+    ) -> Result<String, HarnessError> {
+        let file = stored_session(env, session_id)?;
+        let (session_id, revision, edits) =
+            (session_id.to_owned(), revision.to_owned(), edits.to_vec());
+        tokio::task::spawn_blocking(move || {
+            let text = std::fs::read_to_string(&file)?;
+            let (new_id, target) = history::copy_target(&file);
+            let edited = history::rewrite(&text, &session_id, &new_id, &revision, &edits)?;
+            history::write_atomic(&target, &edited)?;
+            Ok(new_id)
+        })
+        .await
+        .map_err(|e| HarnessError::Protocol(e.to_string()))?
     }
 
     async fn run(

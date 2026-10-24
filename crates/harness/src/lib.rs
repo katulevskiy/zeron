@@ -42,6 +42,11 @@ pub enum HarnessError {
     /// nothing connected for it). The message says where to sign in.
     #[error("{0}")]
     NotSignedIn(String),
+    /// A native-history read or edit the agent's stored session cannot take
+    /// (changed since listed, unsupported, nothing stored). The message is
+    /// written for the person editing.
+    #[error("{0}")]
+    History(String),
 }
 
 /// A steer prompt pushed into a live run; delivered at the harness's steering boundary.
@@ -163,6 +168,18 @@ pub struct ModelContext {
     pub binary_version: Option<String>,
 }
 
+/// An agent session's stored conversation, as the transcript editor lists
+/// it: the model-visible history of the active branch, newest edit applied.
+#[derive(Debug, Clone, PartialEq)]
+pub struct NativeHistoryRead {
+    /// Fingerprint of the model-visible history; edits name it and are
+    /// refused once the stored session moved past it.
+    pub revision: String,
+    pub items: Vec<zeron_proto::native_history::NativeHistoryItem>,
+    /// Earlier history was compacted into a summary.
+    pub compacted: bool,
+}
+
 #[async_trait]
 pub trait Harness: Send + Sync {
     fn id(&self) -> HarnessId;
@@ -277,6 +294,42 @@ pub trait Harness: Send + Sync {
         _controls: RunControls,
     ) -> Result<BoxStream<'static, Result<AgentEvent, HarnessError>>, HarnessError> {
         Err(HarnessError::Protocol("idle runtime unsupported".into()))
+    }
+
+    /// Whether this driver can list and rewrite the conversation its CLI
+    /// stores for a session (experimental transcript editing).
+    fn supports_native_history(&self) -> bool {
+        false
+    }
+
+    /// Read the stored conversation of `session_id` as the agent will see it
+    /// on resume. `env` is the run's environment (config dir overrides).
+    async fn read_native_history(
+        &self,
+        _session_id: &str,
+        _cwd: &std::path::Path,
+        _env: &std::collections::BTreeMap<String, String>,
+    ) -> Result<NativeHistoryRead, HarnessError> {
+        Err(HarnessError::History(
+            "This agent's history cannot be edited".into(),
+        ))
+    }
+
+    /// Write a NEW session holding `session_id`'s history with `edits`
+    /// applied and answer its id. The original is never touched. Refused
+    /// (`HarnessError::History`) when the stored session no longer matches
+    /// `revision`.
+    async fn write_edited_session(
+        &self,
+        _session_id: &str,
+        _cwd: &std::path::Path,
+        _env: &std::collections::BTreeMap<String, String>,
+        _revision: &str,
+        _edits: &[zeron_proto::native_history::NativeEdit],
+    ) -> Result<String, HarnessError> {
+        Err(HarnessError::History(
+            "This agent's history cannot be edited".into(),
+        ))
     }
 
     /// Run one (persistent) session; the stream ends with `AgentEvent::Done`.
