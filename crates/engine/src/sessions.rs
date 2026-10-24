@@ -1334,6 +1334,28 @@ impl SessionsEngine {
             .extend(message_ids);
     }
 
+    /// The provider session this chat resumes next, with the cwd it was
+    /// created under and the harness that owns it: what a native-history
+    /// edit rewrites.
+    pub fn provider_session(&self, chat_id: &str) -> Option<(HarnessId, String, String)> {
+        let session = self.inner.owned_session(chat_id)?;
+        Some((session.harness?, session.session_id, session.cwd))
+    }
+
+    /// Point the chat at another provider session of its harness (a native
+    /// history edit or its undo). The next run resumes it; a parked runtime
+    /// still holding the old one must be retired first.
+    pub fn repoint_provider_session(
+        &self,
+        chat_id: &str,
+        session_id: &str,
+        cwd: &str,
+        harness: HarnessId,
+    ) {
+        self.inner
+            .remember_harness_session(chat_id, session_id, cwd, harness);
+    }
+
     /// The user's Stop: a hard boundary. The in-flight turn ends `aborted`
     /// and the runtime goes with it — background subagents, background
     /// shells, everything the agent runs. The next message resumes the
