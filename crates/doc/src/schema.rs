@@ -2413,6 +2413,46 @@ mod tests {
     }
 
     #[test]
+    fn stop_tool_commands_round_trip_beside_other_commands() {
+        use crate::commands::{SessionCommandPayload, SessionCommandStatus};
+        let doc = SessionDoc::init("chat-1").unwrap();
+        let entry = |id: &str, payload| SessionCommandEntry {
+            id: id.into(),
+            payload,
+            issued_by: "dev-b".into(),
+            issued_at: 10,
+            based_on: None,
+            expires_at: None,
+            status: SessionCommandStatus::Pending,
+            resolution: None,
+        };
+        let stop = |tool: &str| SessionCommandPayload::StopTool {
+            tool_call_id: tool.into(),
+        };
+        doc.queue_command(&entry("s1", stop("toolu_a"))).unwrap();
+        doc.queue_command(&entry("i1", SessionCommandPayload::Interrupt {}))
+            .unwrap();
+        doc.queue_command(&entry("s2", stop("toolu_b"))).unwrap();
+        doc.set_command_status("s1", SessionCommandStatus::Rejected, Some("not running"))
+            .unwrap();
+        let commands = doc.read_commands().unwrap();
+        let stops: Vec<_> = commands
+            .iter()
+            .filter(|c| matches!(c.payload, SessionCommandPayload::StopTool { .. }))
+            .map(|c| (c.id.as_str(), c.status, c.resolution.as_deref()))
+            .collect();
+        assert_eq!(
+            stops,
+            [
+                ("s1", SessionCommandStatus::Rejected, Some("not running")),
+                ("s2", SessionCommandStatus::Pending, None),
+            ]
+        );
+        assert_eq!(commands[1].payload, SessionCommandPayload::Interrupt {});
+        assert_eq!(commands[2].payload, stop("toolu_b"));
+    }
+
+    #[test]
     fn tail_materializes_last_n_joined() {
         let doc = SessionDoc::init("chat-1").unwrap();
         for i in 0..5 {
