@@ -1373,11 +1373,25 @@ impl Tools {
         }))
     }
 
+    /// The calling chat is mid-turn, so the engine would refuse anyway;
+    /// say why in words a model can act on.
+    fn refuse_own_memory(&self, chat: &Chat) -> anyhow::Result<()> {
+        if self.zeron.origin().chat_id.as_deref() == Some(chat.id.as_str()) {
+            anyhow::bail!(
+                "refusing to edit your own chat's memory ({}): it is running this turn; \
+                 edit another chat, or ask the user to edit this one in the app",
+                short(&chat.id)
+            );
+        }
+        Ok(())
+    }
+
     async fn edit_agent_memory(&self, args: EditMemoryArgs) -> anyhow::Result<Value> {
         if args.edits.is_empty() {
             anyhow::bail!("edits is empty");
         }
         let chat = self.zeron.resolve_chat(&args.chat).await?;
+        self.refuse_own_memory(&chat)?;
         let changes: Vec<String> = args
             .edits
             .iter()
@@ -1411,6 +1425,7 @@ impl Tools {
 
     async fn undo_agent_memory_edit(&self, args: ChatArgs) -> anyhow::Result<Value> {
         let chat = self.zeron.resolve_chat(&args.chat).await?;
+        self.refuse_own_memory(&chat)?;
         let history = self
             .native_history(zeron_rpc::methods::UNDO_NATIVE_EDIT, &chat, json!({}))
             .await?;
@@ -2128,6 +2143,30 @@ mod tests {
         let calls = world.native_calls.lock().unwrap();
         assert_eq!(calls[0].0, methods::GET_NATIVE_HISTORY);
         assert_eq!(calls[0].1["chatId"], "chat-alpha-1");
+    }
+
+    #[tokio::test]
+    async fn a_chat_cannot_edit_its_own_memory() {
+        let world = Arc::new(World::default());
+        let tools = tools(
+            world.clone(),
+            Origin {
+                chat_id: Some("chat-alpha-1".into()),
+                device_id: None,
+            },
+        );
+        for (tool, args) in [
+            (
+                "edit_agent_memory",
+                json!({ "chat": "alpha", "revision": "r1",
+                        "edits": [{ "op": "remove", "id": "a:1" }] }),
+            ),
+            ("undo_agent_memory_edit", json!({ "chat": "alpha" })),
+        ] {
+            let err = tools.call(tool, args).await.unwrap_err().to_string();
+            assert!(err.contains("your own chat"), "{tool}: {err}");
+        }
+        assert!(world.native_calls.lock().unwrap().is_empty());
     }
 
     #[tokio::test]
