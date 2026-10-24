@@ -158,6 +158,51 @@ impl Shell {
         }
     }
 
+    /// The chat behind a right-pane surface, when it is a saved side chat:
+    /// only those can move to the sidebar (an unsent one has no row yet).
+    pub(super) fn saved_side_chat(&self, surface: RightSurface, cx: &App) -> Option<String> {
+        let RightSurface::SideChat(id) = surface else {
+            return None;
+        };
+        let chat_id = self
+            .side_chats
+            .get(&id)?
+            .state
+            .read(cx)
+            .selected_chat
+            .clone()?;
+        self.state
+            .read(cx)
+            .chats
+            .iter()
+            .any(|chat| chat.id == chat_id && chat.parent_chat_id.is_some())
+            .then_some(chat_id)
+    }
+
+    /// The sidebar's hint while a side chat is carried over it.
+    pub(super) fn side_chat_drop_overlay(theme: &Theme) -> gpui::Stateful<gpui::Div> {
+        div()
+            .id("side-chat-drop-overlay")
+            .absolute()
+            .inset_0()
+            .opacity(0.0)
+            .bg(theme.scrim().opacity(0.4 / 0.6))
+            .flex()
+            .items_center()
+            .justify_center()
+            .text_size(crate::typography::ui_rems(13.0))
+            .text_color(theme.text)
+            .drag_over::<SideChatDrag>(|style, _, _, _| style.opacity(1.0))
+            .drag_over::<RightTabDrag>(|style, tab, _, _| {
+                if tab.side_chat.is_some() {
+                    style.opacity(1.0)
+                } else {
+                    style
+                }
+            })
+            .child("Drop to move to the sidebar")
+    }
+
     pub(super) fn open_side_chat(
         &mut self,
         chat: zeron_proto::Chat,

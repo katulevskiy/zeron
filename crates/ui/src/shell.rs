@@ -1167,6 +1167,17 @@ struct RightTabDrag {
     from: usize,
     title: SharedString,
     workspace_path: Option<WorkspacePathDrag>,
+    /// A saved side chat's tab: dropping it on the sidebar moves the chat
+    /// there as a session of its own.
+    side_chat: Option<String>,
+}
+
+/// A side chat's row carried out of the session card's lanes. Dropped on
+/// the sidebar, the chat moves there as a session of its own.
+#[derive(Clone)]
+struct SideChatDrag {
+    chat_id: String,
+    title: SharedString,
 }
 
 /// Live drag-over state for the surface-tab strip — the terminal drawer's
@@ -1965,11 +1976,36 @@ impl Render for SidebarPane {
         let Some(shell) = self.shell.upgrade() else {
             return div().into_any_element();
         };
-        let inner = shell.update(cx, |shell, cx| {
+        let (inner, theme) = shell.update(cx, |shell, cx| {
             let theme = Theme::of(cx).clone();
-            shell.render_chat_sidebar(&theme, cx)
+            (shell.render_chat_sidebar(&theme, cx), theme)
         });
-        div().size_full().child(inner).into_any_element()
+        // A side chat dragged here from the session card or its tab moves
+        // into the sidebar. Rows take only their own payloads, so these
+        // drops bubble up to the pane.
+        let lanes_shell = shell.clone();
+        let tab_shell = shell.clone();
+        div()
+            .id("sidebar-pane")
+            .debug_selector(|| "sidebar-pane".into())
+            .size_full()
+            .relative()
+            .child(inner)
+            .on_drop::<SideChatDrag>(move |payload, _, cx| {
+                lanes_shell.update(cx, |shell, cx| {
+                    shell.promote_side_chat(payload.chat_id.clone(), cx)
+                });
+            })
+            .on_drop::<RightTabDrag>(move |payload, _, cx| {
+                if let Some(chat_id) = payload.side_chat.clone() {
+                    tab_shell.update(cx, |shell, cx| {
+                        shell.right_tab_drag = None;
+                        shell.promote_side_chat(chat_id, cx)
+                    });
+                }
+            })
+            .child(Shell::side_chat_drop_overlay(&theme))
+            .into_any_element()
     }
 }
 
@@ -12746,6 +12782,7 @@ impl Shell {
                     from: ix,
                     title: ghost_title,
                     workspace_path,
+                    side_chat: self.saved_side_chat(surface, cx),
                 },
                 |payload, _point, _, cx| {
                     let title = payload.title.clone();
