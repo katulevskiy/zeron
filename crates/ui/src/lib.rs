@@ -76,6 +76,7 @@ pub mod syntax_cache;
 pub mod terminal;
 mod todo_panel;
 pub(crate) mod tool_images;
+pub(crate) mod tool_stop;
 pub mod theme;
 pub mod theme_library;
 pub mod toast;
