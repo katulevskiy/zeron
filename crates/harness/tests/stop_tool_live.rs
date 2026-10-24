@@ -123,6 +123,12 @@ async fn claude_stops_one_command_and_keeps_going() {
 #[ignore = "runs the real codex CLI"]
 async fn codex_stops_one_command_and_keeps_going() {
     let dir = scratch();
-    let (events, elapsed) = stop_the_command(&CodexHarness::new(), request(dir.path())).await;
+    // `ZERON_LIVE_CODEX` names the real binary when `codex` is a version
+    // manager's shim that wants a project directory.
+    let harness = match std::env::var_os("ZERON_LIVE_CODEX") {
+        Some(path) => CodexHarness::new().with_executable(path),
+        None => CodexHarness::new(),
+    };
+    let (events, elapsed) = stop_the_command(&harness, request(dir.path())).await;
     assert_command_killed_and_turn_went_on(&events, elapsed);
 }
