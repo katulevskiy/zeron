@@ -500,6 +500,74 @@ mod tests {
             .unwrap();
     }
 
+    /// "Move to sidebar" asks the engine first: the tab stays on a refusal
+    /// and only closes, opening the chat in the main area, once it is taken.
+    #[gpui::test]
+    fn moving_a_side_chat_to_the_sidebar_waits_for_the_engine(cx: &mut TestAppContext) {
+        let runtime = tokio::runtime::Builder::new_current_thread()
+            .enable_all()
+            .build()
+            .unwrap();
+        let _guard = runtime.enter();
+        let (out, mut requests) = tokio::sync::mpsc::channel(16);
+        let (replies, inbound) = tokio::sync::mpsc::channel(16);
+        let engine =
+            crate::state::EngineHandle::from_test_client(zeron_rpc::RpcClient::new(out, inbound));
+        let dir = tempfile::tempdir().unwrap();
+        let window = shell_window(dir.path(), cx);
+        let chat: zeron_proto::Chat = serde_json::from_value(serde_json::json!({
+            "id": "side", "parentChatId": "main", "deviceId": "local",
+            "archived": false, "createdAt": Utc::now(),
+        }))
+        .unwrap();
+        window
+            .update(cx, |shell, _, cx| {
+                shell.active_chat = "main".into();
+                shell.toggle_right_pane(cx);
+                shell.open_side_chat(chat.clone(), shell.panel_key(cx), cx);
+                shell.state.update(cx, |state, _| {
+                    state.chats = vec![chat];
+                    state.set_test_engine(engine);
+                });
+                shell.promote_side_chat("side".into(), cx);
+            })
+            .unwrap();
+        let mut answer = |cx: &mut TestAppContext, reply: serde_json::Value| {
+            cx.run_until_parked();
+            let request: serde_json::Value =
+                serde_json::from_str(&requests.try_recv().expect("a Mutate request")).unwrap();
+            assert_eq!(request["method"], "Mutate");
+            assert_eq!(request["params"]["op"], "promoteSideChat");
+            assert_eq!(request["params"]["chatId"], "side");
+            let mut reply = reply;
+            reply["id"] = request["id"].clone();
+            runtime.block_on(async {
+                replies.send(reply.to_string()).await.unwrap();
+                while replies.capacity() < replies.max_capacity() {
+                    tokio::task::yield_now().await;
+                }
+            });
+            cx.run_until_parked();
+        };
+        answer(cx, serde_json::json!({ "err": "Chat no longer exists" }));
+        window
+            .update(cx, |shell, _, cx| {
+                assert_eq!(shell.side_chats.len(), 1, "a refusal keeps the tab");
+                assert!(shell.state.read(cx).selected_chat.is_none());
+                assert!(shell.sidebar_notice.is_some());
+                shell.promote_side_chat("side".into(), cx);
+            })
+            .unwrap();
+        answer(cx, serde_json::json!({ "ok": { "ok": true } }));
+        window
+            .update(cx, |shell, _, cx| {
+                assert!(shell.side_chats.is_empty());
+                assert!(shell.right_surface_rows(cx).is_empty());
+                assert_eq!(shell.state.read(cx).selected_chat.as_deref(), Some("side"));
+            })
+            .unwrap();
+    }
+
     /// "New side chat" writes nothing: the tab opens on a chat only its
     /// first send mints, and closing it before then leaves nothing behind.
     #[gpui::test]
