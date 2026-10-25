@@ -27,6 +27,7 @@ pub mod files;
 pub mod harnesses;
 pub mod notifications;
 pub mod shortcuts;
+pub mod system_prompt;
 pub mod thread_naming;
 pub mod wallpaper;
 pub mod wallpaper_colors;

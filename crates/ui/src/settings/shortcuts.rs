@@ -84,6 +84,7 @@ pub struct ShortcutsPage {
     semantic_access_prompted: bool,
     /// Settings → General's thread naming card (its own title-bound picker).
     thread_naming: Entity<crate::settings::thread_naming::ThreadNamingCard>,
+    system_prompt: Entity<crate::settings::system_prompt::SystemPromptCard>,
     worktrees: Entity<super::worktrees::WorktreeSettingsCard>,
     _state: Entity<AppState>,
 }
@@ -130,6 +131,9 @@ impl ShortcutsPage {
                 cx.new(|cx| crate::settings::thread_naming::ThreadNamingCard::new(state, cx))
             },
             worktrees: cx.new(|cx| super::worktrees::WorktreeSettingsCard::new(state.clone(), cx)),
+            system_prompt: cx.new(|cx| {
+                crate::settings::system_prompt::SystemPromptCard::new(state.clone(), cx)
+            }),
             _state: state,
         }
     }
@@ -1004,6 +1008,7 @@ impl Render for ShortcutsPage {
                                             .mt_0()
                                             .child(transcript_editing_row),
                                     ))
+                                    .child(self.system_prompt.clone())
                                     .child(self.thread_naming.clone())
                                     .child(self.worktrees.clone()),
                             ),
