@@ -165,6 +165,8 @@ name (default: the local engine's device).
 | `read_agent_memory` | `GetNativeHistory {chatId, targetDeviceId}` (the chat's device) |
 | `edit_agent_memory` | `ApplyNativeEdits {chatId, revision, edits, targetDeviceId}` |
 | `undo_agent_memory_edit` | `UndoNativeEdit {chatId, targetDeviceId}`            |
+| `get_system_prompt` | `GetSystemPrompt {targetDeviceId}` (device argument, else the origin chat's device, else local) |
+| `set_system_prompt` | `SetSystemPrompt {text, targetDeviceId}` (empty `text` sends null and clears) |
 | `archive_chat`     | `Mutate setChatArchived`                                  |
 | `show_visual`      | `PublishVisual {chatId, title, script, assets}` (origin chat only; assets base64 by name, read by the MCP server from the agent's cwd) |
 
@@ -187,6 +189,16 @@ own chat is mid-turn, so these tools are for other chats (a worker or side
 chat), and the engine's refusals ("Stop the agent before editing", "The
 conversation changed since you started editing") come back as tool errors.
 `undo_agent_memory_edit` points the chat back at the version before the last edit.
+
+`get_system_prompt` and `set_system_prompt` read and write a device's system
+prompt: text added to the instructions of every Claude Code and Codex run on
+that device. It is the same per-device setting as Settings → General → System
+prompt in the app. `device` takes an id or exact name; omitted, it is the device
+the calling chat runs on (the local engine's device outside a chat). Both return
+`{device: {id, name}, text}`, with `text` null when no prompt is set. A change
+applies from each chat's next message (a running agent restarts to take it).
+`set_system_prompt` replaces the whole prompt; an empty `text` clears it, and the
+engine's refusal of a prompt over 64 KB comes back as a tool error.
 
 Watch streams are the engine's only read surface (there is no one-shot "get
 transcript" RPC); a snapshot is "subscribe, take the first item, drop" — drop

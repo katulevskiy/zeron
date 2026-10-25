@@ -67,6 +67,10 @@ fn device_schema() -> Value {
     json!({ "type": "string", "description": "Host device id or exact name. Omit for the local engine." })
 }
 
+fn system_prompt_device_schema() -> Value {
+    json!({ "type": "string", "description": "Host device id or exact name. Omit for the device this chat runs on (the local engine outside a chat)." })
+}
+
 fn catalog() -> Vec<ToolDef> {
     let mut tools = vec![
         ToolDef {
@@ -223,6 +227,23 @@ fn catalog() -> Vec<ToolDef> {
             name: "undo_agent_memory_edit",
             description: "Undo the last edit_agent_memory on a chat: its agent goes back to the conversation it remembered before that edit. The agent must be idle. Returns the restored revision and whether another edit can still be undone.",
             input_schema: chat_key_schema(json!({})),
+        },
+        ToolDef {
+            name: "get_system_prompt",
+            description: "Read a device's system prompt: the text added to the instructions of every Claude Code and Codex run on that device. Returns the device and its text (null when none is set). It is the same setting as Settings → General → System prompt in the app.",
+            input_schema: json!({ "type": "object", "properties": { "device": system_prompt_device_schema() } }),
+        },
+        ToolDef {
+            name: "set_system_prompt",
+            description: "Set a device's system prompt: text added to the instructions of Claude Code and Codex runs on that device. It applies from each chat's next message (a running agent restarts to take it), is kept per device, and is the same setting as Settings → General → System prompt in the app. An empty text clears it; text over 64 KB is refused. Replaces the whole prompt, so read it with get_system_prompt first to extend it. Returns the device and the saved text.",
+            input_schema: json!({
+                "type": "object",
+                "properties": {
+                    "text": { "type": "string", "description": "The full system prompt. Empty string clears it." },
+                    "device": system_prompt_device_schema()
+                },
+                "required": ["text"]
+            }),
         },
         ToolDef {
             name: "archive_chat",
@@ -599,6 +620,12 @@ struct WaitArgs {
 }
 
 #[derive(Deserialize)]
+struct SetSystemPromptArgs {
+    text: String,
+    device: Option<String>,
+}
+
+#[derive(Deserialize)]
 struct ArchiveArgs {
     chat: String,
     archived: Option<bool>,
@@ -804,6 +831,8 @@ impl Tools {
             "read_agent_memory" => self.read_agent_memory(parse(args)?).await,
             "edit_agent_memory" => self.edit_agent_memory(parse(args)?).await,
             "undo_agent_memory_edit" => self.undo_agent_memory_edit(parse(args)?).await,
+            "get_system_prompt" => self.get_system_prompt(parse(args)?).await,
+            "set_system_prompt" => self.set_system_prompt(parse(args)?).await,
             "archive_chat" => self.archive_chat(parse(args)?).await,
             SHOW_VISUAL => self.show_visual(parse(args)?).await,
             other => return Err(format!("unknown tool: {other}")),
@@ -1454,6 +1483,51 @@ impl Tools {
         serde_json::from_value(value).with_context(|| format!("{method}: unexpected shape"))
     }
 
+    /// The device a system prompt call is about: the one named, else the
+    /// device this chat runs on, else the local engine's.
+    async fn system_prompt_device(&self, key: Option<&str>) -> anyhow::Result<(String, String)> {
+        let key = key.map(str::trim).filter(|k| !k.is_empty());
+        let id = match (key, self.zeron.origin().device_id.as_deref()) {
+            (Some(key), _) => self.zeron.resolve_device_id(Some(key)).await?,
+            (None, Some(origin)) => origin.to_owned(),
+            (None, None) => self.zeron.local_device_id().await?,
+        };
+        let name = self
+            .zeron
+            .devices()
+            .await?
+            .into_iter()
+            .find(|d| d.id == id)
+            .map_or_else(|| id.clone(), |d| d.name);
+        Ok((id, name))
+    }
+
+    async fn get_system_prompt(&self, args: DeviceArgs) -> anyhow::Result<Value> {
+        let (id, name) = self.system_prompt_device(args.device.as_deref()).await?;
+        let reply = self
+            .zeron
+            .call(
+                zeron_rpc::methods::GET_SYSTEM_PROMPT,
+                json!({ "targetDeviceId": id }),
+            )
+            .await?;
+        Ok(json!({ "device": { "id": id, "name": name }, "text": reply["text"] }))
+    }
+
+    async fn set_system_prompt(&self, args: SetSystemPromptArgs) -> anyhow::Result<Value> {
+        let (id, name) = self.system_prompt_device(args.device.as_deref()).await?;
+        // Blank clears: send null so the intent is explicit to the engine.
+        let text = (!args.text.trim().is_empty()).then_some(args.text);
+        let reply = self
+            .zeron
+            .call(
+                zeron_rpc::methods::SET_SYSTEM_PROMPT,
+                json!({ "text": text, "targetDeviceId": id }),
+            )
+            .await?;
+        Ok(json!({ "device": { "id": id, "name": name }, "text": reply["text"] }))
+    }
+
     async fn archive_chat(&self, args: ArchiveArgs) -> anyhow::Result<Value> {
         let chat = self.zeron.resolve_chat(&args.chat).await?;
         let archived = args.archived.unwrap_or(true);
@@ -1818,6 +1892,11 @@ mod tests {
         /// Fails the native-history writes the way the engine refuses an edit.
         native_error: Option<&'static str>,
         native_calls: Mutex<Vec<(String, Value)>>,
+        /// The system prompt per `targetDeviceId`, with every call recorded.
+        prompts: Mutex<HashMap<String, String>>,
+        prompt_calls: Mutex<Vec<(String, Value)>>,
+        /// The engine refuses a prompt over this many bytes, as the real one does at 64 KB.
+        prompt_limit: Option<usize>,
     }
 
     /// An agent's stored history: a user prompt, readable and sealed
@@ -1962,6 +2041,26 @@ mod tests {
                         }
                         _ => RpcReply::Value(native_history("r1", false)),
                     }
+                }
+                methods::GET_SYSTEM_PROMPT | methods::SET_SYSTEM_PROMPT => {
+                    self.prompt_calls
+                        .lock()
+                        .unwrap()
+                        .push((method.to_owned(), params.clone()));
+                    let device = params["targetDeviceId"].as_str().unwrap_or("dev-local");
+                    let mut prompts = self.prompts.lock().unwrap();
+                    if method == methods::SET_SYSTEM_PROMPT {
+                        match params["text"].as_str().filter(|t| !t.trim().is_empty()) {
+                            Some(text) if self.prompt_limit.is_some_and(|max| text.len() > max) => {
+                                return Err(RpcError::Failed(
+                                    "That system prompt is too long (the limit is 64 KB).".into(),
+                                ));
+                            }
+                            Some(text) => prompts.insert(device.to_owned(), text.to_owned()),
+                            None => prompts.remove(device),
+                        };
+                    }
+                    RpcReply::Value(json!({ "text": prompts.get(device) }))
                 }
                 methods::PUBLISH_VISUAL => {
                     self.writes
@@ -2272,6 +2371,137 @@ mod tests {
         let calls = world.native_calls.lock().unwrap();
         assert_eq!(calls[0].0, methods::UNDO_NATIVE_EDIT);
         assert_eq!(calls[0].1["chatId"], "chat-alpha-1");
+    }
+
+    #[tokio::test]
+    async fn system_prompt_defaults_to_the_calling_chats_device() {
+        let world = Arc::new(World::default());
+        let outside = tools(world.clone(), Origin::default());
+        let read = outside.call("get_system_prompt", json!({})).await.unwrap();
+        assert_eq!(
+            read["device"],
+            json!({ "id": "dev-local", "name": "Laptop" })
+        );
+        assert_eq!(read["text"], Value::Null);
+
+        let inside = tools(
+            world.clone(),
+            Origin {
+                chat_id: Some("chat-beta-2".into()),
+                device_id: Some("dev-remote".into()),
+            },
+        );
+        let read = inside.call("get_system_prompt", json!({})).await.unwrap();
+        assert_eq!(
+            read["device"],
+            json!({ "id": "dev-remote", "name": "Worker" })
+        );
+        inside
+            .call("set_system_prompt", json!({ "text": "Be brief." }))
+            .await
+            .unwrap();
+        let calls = world.prompt_calls.lock().unwrap();
+        let routed: Vec<_> = calls
+            .iter()
+            .map(|(method, params)| (method.as_str(), params["targetDeviceId"].as_str()))
+            .collect();
+        assert_eq!(
+            routed,
+            [
+                (methods::GET_SYSTEM_PROMPT, Some("dev-local")),
+                (methods::GET_SYSTEM_PROMPT, Some("dev-remote")),
+                (methods::SET_SYSTEM_PROMPT, Some("dev-remote")),
+            ]
+        );
+    }
+
+    #[tokio::test]
+    async fn system_prompt_device_by_name_or_id_sets_the_target() {
+        let world = Arc::new(World::default());
+        let tools = tools(world.clone(), Origin::default());
+        let set = tools
+            .call(
+                "set_system_prompt",
+                json!({ "text": "Use tabs.", "device": "worker" }),
+            )
+            .await
+            .unwrap();
+        assert_eq!(
+            set["device"],
+            json!({ "id": "dev-remote", "name": "Worker" })
+        );
+        let read = tools
+            .call("get_system_prompt", json!({ "device": "dev-remote" }))
+            .await
+            .unwrap();
+        assert_eq!(read["device"]["name"], "Worker");
+        assert_eq!(read["text"], "Use tabs.");
+        {
+            let calls = world.prompt_calls.lock().unwrap();
+            assert!(
+                calls
+                    .iter()
+                    .all(|(_, p)| p["targetDeviceId"] == "dev-remote")
+            );
+        }
+        // Per device: the local one is untouched.
+        let local = tools.call("get_system_prompt", json!({})).await.unwrap();
+        assert_eq!(local["text"], Value::Null);
+        let err = tools
+            .call("get_system_prompt", json!({ "device": "nowhere" }))
+            .await
+            .unwrap_err();
+        assert!(err.contains("nowhere"), "{err}");
+    }
+
+    #[tokio::test]
+    async fn system_prompt_round_trips_and_clears_with_empty_text() {
+        let world = Arc::new(World::default());
+        let tools = tools(world.clone(), Origin::default());
+        let set = tools
+            .call("set_system_prompt", json!({ "text": "Answer in French." }))
+            .await
+            .unwrap();
+        assert_eq!(set["text"], "Answer in French.");
+        let read = tools.call("get_system_prompt", json!({})).await.unwrap();
+        assert_eq!(read["text"], "Answer in French.");
+        assert_eq!(read["device"]["id"], "dev-local");
+
+        let cleared = tools
+            .call("set_system_prompt", json!({ "text": "" }))
+            .await
+            .unwrap();
+        assert_eq!(cleared["text"], Value::Null);
+        let read = tools.call("get_system_prompt", json!({})).await.unwrap();
+        assert_eq!(read["text"], Value::Null);
+        {
+            let calls = world.prompt_calls.lock().unwrap();
+            assert_eq!(calls[2].0, methods::SET_SYSTEM_PROMPT);
+            assert_eq!(calls[2].1["text"], Value::Null);
+        }
+        // `text` is required: a missing one is not a clear.
+        assert!(tools.call("set_system_prompt", json!({})).await.is_err());
+    }
+
+    #[tokio::test]
+    async fn system_prompt_refusals_come_back_as_tool_errors() {
+        let world = Arc::new(World {
+            prompt_limit: Some(65_536),
+            ..Default::default()
+        });
+        let tools = tools(world.clone(), Origin::default());
+        tools
+            .call("set_system_prompt", json!({ "text": "kept" }))
+            .await
+            .unwrap();
+        let err = tools
+            .call("set_system_prompt", json!({ "text": "x".repeat(65_537) }))
+            .await
+            .unwrap_err();
+        assert!(err.contains("too long"), "{err}");
+        // The refused write changed nothing.
+        let read = tools.call("get_system_prompt", json!({})).await.unwrap();
+        assert_eq!(read["text"], "kept");
     }
 
     #[tokio::test]
