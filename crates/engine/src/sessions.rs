@@ -719,6 +719,12 @@ impl SessionsEngine {
         // cross-harness delivery before recording or routing the user turn.
         zeron_proto::invocation::validate_harness_invocations(&request.prompt, harness_id)
             .map_err(EngineError::Other)?;
+        // This device's own system prompt, stamped before routing so a change
+        // replaces a live runtime instead of steering into the old one. The
+        // voice orchestrator keeps the instructions Zeron gives it.
+        request.system_prompt = (!zeron_proto::voice::is_orchestrator_chat(chat_id))
+            .then(|| self.inner.registry.system_prompt())
+            .flatten();
         // A revival reaching a chat that has a run again (a message sent
         // since boot): that run owns the chat, and reviving the old turn into
         // it would deliver the old request a second time. Checked again as
@@ -1803,6 +1809,7 @@ impl SessionsEngine {
                     resume: None,
                     worktree: None,
                     env: Default::default(),
+                    system_prompt: None,
                 })
             })?;
         request.prompt = prompt.to_owned();
@@ -5275,6 +5282,7 @@ mod tests {
             attachments: Vec::new(),
             worktree: None,
             env: Default::default(),
+            system_prompt: None,
         }
     }
 

@@ -51,6 +51,12 @@ pub mod methods {
     /// replies with the device's fresh `ListHarnesses` catalog.
     pub const GET_TITLE_SETTINGS: &str = "GetTitleSettings";
     pub const SET_TITLE_SETTINGS: &str = "SetTitleSettings";
+    /// The device's own system prompt for its agent runs. `GetSystemPrompt`
+    /// → `{text}` (null when unset); `SetSystemPrompt {text}` (null or blank
+    /// clears it) → `{text}`. Device-forwarded; applies from each chat's
+    /// next message.
+    pub const GET_SYSTEM_PROMPT: &str = "GetSystemPrompt";
+    pub const SET_SYSTEM_PROMPT: &str = "SetSystemPrompt";
     /// Whether agents' commits on this device credit Zeron
     /// (`{enabled, cloud}`; set with `{enabled}`).
     pub const GET_COMMIT_CREDIT: &str = "GetCommitCredit";

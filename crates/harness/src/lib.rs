@@ -172,6 +172,14 @@ pub fn same_model_options(
         .all(|key| a.get(key).and_then(canonical) == b.get(key).and_then(canonical))
 }
 
+/// The user's system prompt for this run, when there is one to add.
+pub(crate) fn system_prompt(request: &RunRequest) -> Option<&str> {
+    request
+        .system_prompt
+        .as_deref()
+        .filter(|prompt| !prompt.trim().is_empty())
+}
+
 /// Host-side controls handed to a run: input-request bridge + steering mailbox.
 pub struct RunControls {
     pub realtime: Option<codex::realtime::RealtimeControls>,

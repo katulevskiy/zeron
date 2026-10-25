@@ -269,6 +269,7 @@ fn request(prompt: &str, resume: Option<&str>) -> RunRequest {
         attachments: Vec::new(),
         worktree: None,
         resume: resume.map(str::to_owned),
+        system_prompt: None,
     }
 }
 

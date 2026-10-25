@@ -106,6 +106,7 @@ fn request(prompt: &str) -> RunRequest {
         worktree: None,
         resume: None,
         env: Default::default(),
+        system_prompt: None,
     }
 }
 
@@ -173,6 +174,20 @@ async fn reasoning_preserves_summary_parts_and_item_boundaries_per_thread() {
         "**Implementing file badges**\n\n**Preparing fixture screenshots**\n\nChecking the final result."
     );
     assert_eq!(child, "**Checking layout**\n\nInspecting the output panel.");
+}
+
+#[tokio::test]
+async fn the_system_prompt_starts_the_thread_as_developer_instructions() {
+    let (controls, _steer, _token) = controls("Yes");
+    let mut req = request("scenario:happy");
+    req.cwd = "/tmp".into();
+    req.system_prompt = Some("Answer in French.".into());
+    let events = run_to_end(&harness(), req, controls).await;
+    let started = events.iter().find_map(|e| match e {
+        AgentEvent::SessionStarted { session_id, .. } => Some(session_id.clone()),
+        _ => None,
+    });
+    assert_eq!(started.as_deref(), Some("th-instructed"));
 }
 
 #[tokio::test]

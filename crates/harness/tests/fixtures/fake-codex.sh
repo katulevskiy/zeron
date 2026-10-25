@@ -106,6 +106,9 @@ if has "$line" '"method":"thread/resume"'; then
   else
     emit "{\"id\":$(rid "$line"),\"result\":{\"thread\":{\"id\":\"th-resumed\"}}}"
   fi
+elif has "$line" '"method":"thread/start"' && has "$line" '"developerInstructions":"Answer in French."'; then
+  # The user's system prompt rides thread/start as developer instructions.
+  emit "{\"id\":$(rid "$line"),\"result\":{\"thread\":{\"id\":\"th-instructed\"}}}"
 elif has "$line" '"method":"thread/start"'; then
   emit "{\"id\":$(rid "$line"),\"result\":{\"thread\":{\"id\":\"th-1\"}}}"
 else

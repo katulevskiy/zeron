@@ -1631,6 +1631,7 @@ impl Tools {
                     attachments: Vec::new(),
                     worktree: None,
                     env: Default::default(),
+                    system_prompt: None,
                 };
                 self.zeron
                     .queue_command(

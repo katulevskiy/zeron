@@ -639,13 +639,15 @@ impl Harness for CodexHarness {
         cfg!(unix)
     }
     /// What the app-server launch and its turns read: the sandbox is forced
-    /// to full access, and `serviceTier` is the only model option used.
+    /// to full access, `serviceTier` is the only model option used, and the
+    /// system prompt is set as the thread starts or resumes.
     fn same_runtime(&self, live: &RunRequest, next: &RunRequest) -> bool {
         live.cwd == next.cwd
             && live.model == next.model
             && to_effort(live.reasoning) == to_effort(next.reasoning)
             && service_tier(live) == service_tier(next)
             && live.auto_approve == next.auto_approve
+            && crate::system_prompt(live) == crate::system_prompt(next)
     }
     /// `turn/start` carries model, effort and service tier, and each sticks
     /// for later turns — so a change applies from the next turn without a
@@ -654,6 +656,7 @@ impl Harness for CodexHarness {
     fn reconfigures_in_place(&self, live: &RunRequest, next: &RunRequest) -> bool {
         live.cwd == next.cwd
             && live.auto_approve == next.auto_approve
+            && crate::system_prompt(live) == crate::system_prompt(next)
             && (next.model.is_some() || live.model.is_none())
             && (to_effort(next.reasoning).is_some() || to_effort(live.reasoning).is_none())
             && (service_tier(next).is_some() || service_tier(live).is_none())
@@ -1342,6 +1345,10 @@ async fn run_session(session: Session) {
             );
         }
         p.insert("cwd".into(), Value::String(request.cwd.clone()));
+        // The user's system prompt, on both thread/start and thread/resume.
+        if let Some(prompt) = crate::system_prompt(&request).filter(|_| !title_only) {
+            p.insert("developerInstructions".into(), prompt.into());
+        }
         if let Some(mcp) = request.mcp.as_ref().filter(|_| !title_only) {
             // Zeron's own MCP server as dotted config overrides on top of the
             // user's `mcp_servers` table (the same layer the title run uses

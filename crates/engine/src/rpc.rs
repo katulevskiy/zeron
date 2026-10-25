@@ -2044,6 +2044,8 @@ fn forwardable(method: &str) -> bool {
             | methods::CANCEL_INSTALL
             | methods::GET_TITLE_SETTINGS
             | methods::SET_TITLE_SETTINGS
+            | methods::GET_SYSTEM_PROMPT
+            | methods::SET_SYSTEM_PROMPT
             | methods::GET_COMMIT_CREDIT
             | methods::SET_COMMIT_CREDIT
             | methods::SET_HARNESS_ENABLED
@@ -2533,6 +2535,21 @@ impl RpcService for EngineRpc {
                 RpcReply::value(&serde_json::json!({}))
             }
             methods::GET_TITLE_SETTINGS => RpcReply::value(&self.registry.title_settings()),
+            methods::GET_SYSTEM_PROMPT => {
+                RpcReply::value(&serde_json::json!({ "text": self.registry.system_prompt() }))
+            }
+            methods::SET_SYSTEM_PROMPT => {
+                #[derive(serde::Deserialize)]
+                struct Params {
+                    #[serde(default)]
+                    text: Option<String>,
+                }
+                let p: Params = parse_params(params)?;
+                self.registry
+                    .set_system_prompt(p.text)
+                    .map_err(RpcError::Failed)?;
+                RpcReply::value(&serde_json::json!({ "text": self.registry.system_prompt() }))
+            }
             methods::GET_COMMIT_CREDIT => match self.registry.commit_credit() {
                 Some(credit) => RpcReply::value(&credit.status()),
                 None => Err(RpcError::Failed(

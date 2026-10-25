@@ -6146,6 +6146,7 @@ impl DocHost {
             resume: None,
             worktree: None,
             env: Default::default(),
+            system_prompt: None,
         })
     }
 

@@ -325,6 +325,9 @@ impl ClaudeHarness {
         } else {
             args.extend(["--permission-mode".into(), "default".into()]);
         }
+        if let Some(prompt) = crate::system_prompt(request) {
+            args.extend(["--append-system-prompt".into(), prompt.to_owned()]);
+        }
         let mut settings = serde_json::Map::new();
         if option_is_on(&request.model_options, "fastMode") {
             settings.insert("fastMode".into(), Value::Bool(true));
@@ -673,7 +676,9 @@ impl Harness for ClaudeHarness {
     /// change on the live process (`set_model`, `apply_flag_settings`). Only
     /// the directory and the permission mode it launched with need a new one.
     fn reconfigures_in_place(&self, live: &RunRequest, next: &RunRequest) -> bool {
-        live.cwd == next.cwd && live.auto_approve == next.auto_approve
+        live.cwd == next.cwd
+            && live.auto_approve == next.auto_approve
+            && crate::system_prompt(live) == crate::system_prompt(next)
     }
 
     /// Credential and executable identity scopes both initialize and catalog caches.
@@ -2057,6 +2062,46 @@ mod resolution_tests {
 #[cfg(test)]
 mod mcp_injection_tests {
     use super::*;
+
+    fn run_request(system_prompt: Option<&str>) -> RunRequest {
+        RunRequest {
+            prompt: "hi".into(),
+            harness: None,
+            model: None,
+            reasoning: None,
+            model_options: Default::default(),
+            cwd: "/work".into(),
+            sandbox: zeron_proto::SandboxLevel::WorkspaceWrite,
+            auto_approve: false,
+            resume: None,
+            attachments: Vec::new(),
+            worktree: None,
+            mcp: None,
+            env: Default::default(),
+            system_prompt: system_prompt.map(str::to_owned),
+        }
+    }
+
+    /// The user's system prompt is appended at launch, so a change needs a
+    /// new process; a blank one adds nothing.
+    #[test]
+    fn the_system_prompt_is_appended_at_launch() {
+        let args = ClaudeHarness::launch_args(&run_request(Some("Answer in French.")));
+        let at = args
+            .iter()
+            .position(|arg| arg == "--append-system-prompt")
+            .expect("the flag is passed");
+        assert_eq!(args[at + 1], "Answer in French.");
+        for blank in [None, Some("  ")] {
+            let args = ClaudeHarness::launch_args(&run_request(blank));
+            assert!(!args.iter().any(|arg| arg == "--append-system-prompt"));
+        }
+        let harness = ClaudeHarness::new();
+        let (before, after) = (run_request(None), run_request(Some("Be brief.")));
+        assert!(!harness.same_runtime(&before, &after));
+        assert!(!harness.reconfigures_in_place(&before, &after));
+        assert!(harness.same_runtime(&after, &run_request(Some("Be brief."))));
+    }
 
     #[test]
     fn mcp_config_arg_spells_the_server_the_way_the_cli_reads_it() {

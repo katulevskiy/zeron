@@ -43,6 +43,7 @@ fn request(cwd: &std::path::Path) -> RunRequest {
         worktree: None,
         resume: None,
         env: Default::default(),
+        system_prompt: None,
     }
 }
 

@@ -9561,6 +9561,7 @@ impl Composer {
                         attachments: attachment_paths,
                         worktree: run_worktree,
                         env: Default::default(),
+                        system_prompt: None,
                     },
                     message_id: message_id.clone(),
                 };

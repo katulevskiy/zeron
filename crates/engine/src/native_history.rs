@@ -336,6 +336,7 @@ impl NativeHistoryService {
             worktree: None,
             resume: None,
             env: Default::default(),
+            system_prompt: None,
         };
         if let Err(err) = self
             .registry
