@@ -8,3 +8,4 @@ publish.workspace = true
 # The streaming fade veil without a renderer: the desktop transcript recolors
 # GPUI runs with it; voice captions use it on desktop and mobile.
 [dependencies]
+zeron-workspace-hack = { version = "0.1", path = "../workspace-hack" }

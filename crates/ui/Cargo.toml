@@ -157,6 +157,7 @@ roxmltree = "0.21.1"
 png = "0.18"
 thiserror.workspace = true
 rust-embed = "=8.7.2"
+zeron-workspace-hack = { version = "0.1", path = "../workspace-hack" }
 
 [target.'cfg(target_os = "macos")'.dependencies]
 libc.workspace = true

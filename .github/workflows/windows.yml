@@ -45,14 +45,23 @@ jobs:
     if: ${{ !contains(fromJSON(inputs.skip || '[]'), 'tests') }}
     runs-on: windows-2022
     timeout-minutes: 60
+    # The dev profile (workspace crates unoptimized, dependencies at opt-level 2, as on
+    # Linux and macOS): it compiles faster than the optimized release build the app job
+    # makes. Debug code takes more stack, and Windows gives a main thread 1 MB: 8 MB
+    # for the main thread (linker) and for the threads tests run on.
+    env:
+      CARGO_PROFILE_DEV_DEBUG: 0
+      CARGO_TARGET_X86_64_PC_WINDOWS_MSVC_RUSTFLAGS: -C link-arg=/STACK:8388608
+      RUST_MIN_STACK: 8388608
     steps:
       - uses: actions/checkout@11d5960a326750d5838078e36cf38b85af677262 # v4.4.0
       - uses: ./.github/actions/windows-ci-setup
         with:
+          rust-cache-key: windows-tests
           save-rust-cache: 'true'
       - name: Build tests
         run: >-
-          cargo nextest run --config-file scripts/ci/nextest.toml --no-run --release --locked
+          cargo nextest run --config-file scripts/ci/nextest.toml --no-run --locked
           -p zeron-ui -p zeron-harness -p gpui_windows -p zeron -p zeron-update -p zeron-proto -p zeron-engine -p zeron-voice-media
           --features zeron-harness/native-fixture
           --lib --bins
@@ -71,7 +80,7 @@ jobs:
         env:
           RUST_BACKTRACE: '1'
         run: >-
-          cargo nextest run --config-file scripts/ci/nextest.toml --release --locked --no-fail-fast
+          cargo nextest run --config-file scripts/ci/nextest.toml --locked --no-fail-fast
           -p zeron-ui -p zeron-harness -p gpui_windows -p zeron -p zeron-update -p zeron-proto -p zeron-engine -p zeron-voice-media
           --features zeron-harness/native-fixture
           --lib --bins
@@ -86,7 +95,7 @@ jobs:
           path: rust-toolchain.toml
           key: ${{ inputs.pass-key }}-tests
 
-  # Restores the cache `tests` saves: the same dependencies, built with the same profile.
+  # The release build the packaging needs; its own cache (the tests build the dev profile).
   app:
     if: ${{ !contains(fromJSON(inputs.skip || '[]'), 'app') }}
     runs-on: windows-2022
@@ -94,6 +103,9 @@ jobs:
     steps:
       - uses: actions/checkout@11d5960a326750d5838078e36cf38b85af677262 # v4.4.0
       - uses: ./.github/actions/windows-ci-setup
+        with:
+          rust-cache-key: windows-app
+          save-rust-cache: 'true'
       - name: Build application
         run: cargo build --release --locked -p zeron
       - name: Verify portable and installer packaging

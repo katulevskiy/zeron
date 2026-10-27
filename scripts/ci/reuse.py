@@ -59,7 +59,8 @@ LINUX_SETUP = [".github/actions/linux-ci/**", ".github/actions/fast-linker/**", 
 NEXTEST = ["scripts/ci/nextest.toml"]
 
 SUITE_INPUTS: dict[str, list[str]] = {
-    "core": [".github/workflows/ui-tests.yml", "scripts/ci/test-core.sh"] + LINUX_SETUP + NEXTEST,
+    "core": [".github/workflows/ui-tests.yml", "scripts/ci/test-core.sh", "scripts/ci/check-workspace-hack.sh",
+             ".config/hakari.toml"] + LINUX_SETUP + NEXTEST,
     "ui": [".github/workflows/ui-tests.yml", "scripts/test-linux-browser.sh", "scripts/test-browser-storage.py"]
           + LINUX_SETUP + NEXTEST,
     "cursor": [".github/workflows/cursor-compatibility.yml", "scripts/*cursor-sdk*", "crates/harness/src/cursor/**"],

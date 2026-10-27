@@ -10,3 +10,4 @@ publish.workspace = true
 # mobile core both paint it.
 [dependencies]
 alacritty_terminal.workspace = true
+zeron-workspace-hack = { version = "0.1", path = "../workspace-hack" }

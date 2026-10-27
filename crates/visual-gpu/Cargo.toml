@@ -12,6 +12,7 @@ zeron-visual.workspace = true
 wgpu = { version = "29", features = ["glsl"] }
 pollster = "0.4"
 tracing.workspace = true
+zeron-workspace-hack = { version = "0.1", path = "../workspace-hack" }
 
 [dev-dependencies]
 # Test textures and environment maps.

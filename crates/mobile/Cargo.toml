@@ -42,3 +42,4 @@ zeron-syntax.workspace = true
 zatex = { workspace = true, features = ["bundled"] }
 thiserror.workspace = true
 zeron-term.workspace = true
+zeron-workspace-hack = { version = "0.1", path = "../workspace-hack" }

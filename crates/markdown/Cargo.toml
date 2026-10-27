@@ -9,3 +9,4 @@ publish.workspace = true
 # desktop transcript and the mobile layout core, so it stays UI-free.
 [dependencies]
 pulldown-cmark.workspace = true
+zeron-workspace-hack = { version = "0.1", path = "../workspace-hack" }

@@ -90,7 +90,7 @@ VOICE_PATHS = ["crates/audio/**", "crates/voice-media/**", "dist/voice/**", "scr
                "scripts/codex-voice-remote-smoke.py", "scripts/tests/*voice*", ".github/workflows/voice-tests.yml"]
 
 BROAD: dict[str, list[str]] = {
-    "core": CARGO + ["crates/**", "apps/zeron/**", "scripts/ci/**", ".github/actions/linux-ci/**", ".github/actions/fast-linker/**",
+    "core": CARGO + ["crates/**", "apps/zeron/**", "scripts/ci/**", ".config/hakari.toml", ".github/actions/linux-ci/**", ".github/actions/fast-linker/**",
                      ".github/workflows/ui-tests.yml"],
     "ui": CARGO + ["crates/**", "scripts/ci/**", ".github/actions/linux-ci/**", ".github/actions/fast-linker/**",
                    "scripts/test-linux-browser.sh", "scripts/test-browser-storage.py",

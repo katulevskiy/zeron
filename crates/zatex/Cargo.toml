@@ -10,6 +10,7 @@ description = "Fast, low-memory LaTeX math layout over any OpenType math font"
 # display list (glyph ids and rules). UI-free: hosts paint the glyph outlines.
 [dependencies]
 ttf-parser.workspace = true
+zeron-workspace-hack = { version = "0.1", path = "../workspace-hack" }
 
 [features]
 # Six math faces compiled in (`zatex::bundled`), ~4 MB of read-only data;

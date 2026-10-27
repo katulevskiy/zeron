@@ -8,6 +8,16 @@ inputs:
   fast-linker:
     description: "Link with LLD (.github/actions/fast-linker); 'false' keeps link.exe."
     default: 'true'
+  dev-drive:
+    description: >-
+      Build on a Dev Drive (ReFS, a fresh virtual disk mounted at ./target), which is
+      faster for the many small files a build writes. 'false' keeps target on C:.
+    default: 'true'
+  rust-cache-key:
+    description: >-
+      Rust cache key. Jobs that build the same profile and packages may share one;
+      the tests (dev profile) and the app (release) each have their own.
+    default: windows
   save-rust-cache:
     description: >-
       Whether this job saves the shared Windows Rust cache when it runs on main.
@@ -70,11 +80,19 @@ runs:
     - uses: ./.github/actions/fast-linker
       with:
         enabled: ${{ inputs.fast-linker }}
+    # Mounted at ./target before the Rust cache restores into it. Dynamic: it grows as
+    # the build writes, up to the size.
+    - uses: samypr100/setup-dev-drive@562171fe8df7401fdf582d766cd3b6ab80d5b1a0 # v4.1.0
+      if: inputs.dev-drive == 'true'
+      with:
+        drive-size: 50GB
+        drive-format: ReFS
+        mount-path: ${{ github.workspace }}/target
     # One cache for every Windows job (they build the same dependency graph with
     # the same profile); the job given save-rust-cache writes it, on main only.
     - uses: Swatinem/rust-cache@6323deb102c322ba6fcbdcafc7e3dddab59af2b6 # v2.9.2
       with:
-        shared-key: windows
+        shared-key: ${{ inputs.rust-cache-key }}
         add-job-id-key: false
         save-if: ${{ inputs.save-rust-cache == 'true' && github.ref == 'refs/heads/main' }}
         cache-on-failure: true
