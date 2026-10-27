@@ -13856,6 +13856,7 @@ dependencies = [
  "serde",
  "serde_json",
  "uuid",
+ "zeron-workspace-hack",
 ]
 
 [[package]]
