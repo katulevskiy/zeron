@@ -29,7 +29,6 @@ members = [
     "crates/text",
     "crates/visual",
     "crates/visual-gpu",
-    "crates/workspace-hack",
     "crates/zatex",
     "apps/zeron",
 ]

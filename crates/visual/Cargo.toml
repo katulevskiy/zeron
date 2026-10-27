@@ -17,4 +17,3 @@ image = { version = "0.25.10", default-features = false, features = ["png", "jpe
 thiserror.workspace = true
 # Images embedded in glTF models as data URIs.
 base64 = "0.22"
-zeron-workspace-hack = { version = "0.1", path = "../workspace-hack" }

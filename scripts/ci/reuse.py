@@ -54,13 +54,11 @@ COMMON = [
 # The CI files a suite runs. plan.py, admit.py, reuse.py and emergency.py decide
 # which suites run and when, not whether their tests pass, so they are no input
 # (a change to what a fingerprint means bumps VERSION instead).
-LINUX_SETUP = [".github/actions/linux-ci/**", ".github/actions/fast-linker/**", "scripts/ci/apt-install.sh",
-               "scripts/ci/install-nextest.sh"]
+LINUX_SETUP = [".github/actions/linux-ci/**", "scripts/ci/apt-install.sh", "scripts/ci/install-nextest.sh"]
 NEXTEST = ["scripts/ci/nextest.toml"]
 
 SUITE_INPUTS: dict[str, list[str]] = {
-    "core": [".github/workflows/ui-tests.yml", "scripts/ci/test-core.sh", "scripts/ci/check-workspace-hack.sh",
-             ".config/hakari.toml"] + LINUX_SETUP + NEXTEST,
+    "core": [".github/workflows/ui-tests.yml", "scripts/ci/test-core.sh"] + LINUX_SETUP + NEXTEST,
     "ui": [".github/workflows/ui-tests.yml", "scripts/test-linux-browser.sh", "scripts/test-browser-storage.py"]
           + LINUX_SETUP + NEXTEST,
     "cursor": [".github/workflows/cursor-compatibility.yml", "scripts/*cursor-sdk*", "crates/harness/src/cursor/**"],
@@ -69,14 +67,15 @@ SUITE_INPUTS: dict[str, list[str]] = {
                   "scripts/test-linux-desktop-entry.sh", "dist/zeron.desktop", "dist/zeron.png",
                   "scripts/ci/apt-install.sh"],
     "voice": [".github/workflows/voice-tests.yml", "dist/voice/**", "scripts/package-voice-runtime.py",
-              "scripts/codex-voice-remote-smoke.py", "scripts/tests/*voice*"] + LINUX_SETUP + NEXTEST,
+              "scripts/codex-voice-remote-smoke.py", "scripts/tests/*voice*", ".github/actions/fast-linker/**"]
+             + LINUX_SETUP + NEXTEST,
     "windows": [".github/workflows/windows.yml", "dist/windows/**", "scripts/test-windows-*.ps1",
                 "scripts/package-windows.ps1", ".github/actions/windows-ci-setup/**",
                 ".github/actions/fast-linker/**"] + NEXTEST,
     "macos": [".github/workflows/macos.yml", "edge/**", "scripts/run-macos-browser-fixture.sh",
               "scripts/test-browser-storage.py", "dist/macos/**", "scripts/ci/run-macos-fixture.sh"] + NEXTEST,
     "frame_source": [".github/workflows/macos.yml"],
-    "ios": [".github/workflows/macos.yml", "apps/ios/**", "scripts/ios/**", ".github/actions/fast-linker/**"],
+    "ios": [".github/workflows/macos.yml", "apps/ios/**", "scripts/ios/**"],
     "android": [".github/workflows/android.yml", "apps/android/**", "scripts/android/**",
                 "apps/ios/Zeron/Fonts/**", "apps/ios/Zeron/Assets.xcassets/**"],
 }

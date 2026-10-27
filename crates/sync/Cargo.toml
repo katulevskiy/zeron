@@ -18,7 +18,6 @@ rusqlite.workspace = true
 thiserror.workspace = true
 tracing.workspace = true
 uuid.workspace = true
-zeron-workspace-hack = { version = "0.1", path = "../workspace-hack" }
 
 # NWPathMonitor bridge (net_path.rs) — the update handler is an ObjC block.
 [target.'cfg(target_os = "macos")'.dependencies]

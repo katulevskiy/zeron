@@ -1,10 +1,10 @@
-name: Linker benchmark
+name: Windows build benchmark
 
-# Side by side, from the same cold start: build what CI builds with today's setup
-# and with each of this PR's changes (faster linkers, the Windows Dev Drive and
-# dev profile), one runner each, and compare the build times in the run summary. Builds only;
-# nothing is tested or cached. Runs when the linker setup or this file change,
-# and by hand.
+# Side by side, from the same cold start, one runner each: the Windows tests job's
+# build, then the app's, with today's setup (link.exe, target on C:), with LLD
+# (.github/actions/fast-linker), and with LLD on a Dev Drive (windows-ci-setup).
+# Times are in the run summary and the log. Builds only; nothing is tested or
+# cached. Runs when the Windows build setup or this file changes, and by hand.
 on:
   pull_request:
     paths:
@@ -17,75 +17,33 @@ permissions:
   contents: read
 
 concurrency:
-  group: linker-benchmark-${{ github.ref }}
+  group: windows-build-benchmark-${{ github.ref }}
   cancel-in-progress: true
 
 jobs:
-  linux:
-    strategy:
-      fail-fast: false
-      matrix:
-        suite: [core, ui]
-        linker: [default, fast]
-    name: linux ${{ matrix.suite }} (${{ matrix.linker == 'fast' && 'mold' || 'lld, the default' }})
-    runs-on: ubuntu-24.04
-    timeout-minutes: 45
-    steps:
-      - uses: actions/checkout@11d5960a326750d5838078e36cf38b85af677262 # v4.4.0
-      - uses: ./.github/actions/linux-ci
-        with:
-          # Its own key, never saved: every variant starts cold.
-          rust-cache: linker-benchmark-${{ github.run_id }}-${{ matrix.suite }}-${{ matrix.linker }}
-          fast-linker: ${{ matrix.linker == 'fast' }}
-          apt-cache: ${{ matrix.suite == 'ui' && 'ui-browser' || '' }}
-          apt-packages: >-
-            ${{ matrix.suite == 'ui' && 'libxkbcommon-dev libxkbcommon-x11-dev libwayland-dev libx11-dev libxcb1-dev
-            libx11-xcb-dev libfontconfig1-dev libfreetype-dev libasound2-dev libvulkan-dev pkg-config cmake
-            libwebkit2gtk-4.1-dev libjson-glib-dev' || '' }}
-      - name: Build
-        env:
-          SUITE: ${{ matrix.suite }}
-          LINKER: ${{ matrix.linker }}
-        run: |
-          start=$(date +%s)
-          if [ "$SUITE" = core ]; then
-            scripts/ci/test-core.sh --no-run
-          else
-            cargo nextest run --config-file scripts/ci/nextest.toml --locked --no-run -p zeron-ui --lib
-          fi
-          seconds=$(( $(date +%s) - start ))
-          echo "| linux $SUITE | $LINKER | ${seconds}s |" >> "$GITHUB_STEP_SUMMARY"
-
-  # Windows, one change at a time from today's job: the linker (LLD for link.exe), the
-  # disk (a Dev Drive for C:), then the profile (dev for the tweaked release).
   windows:
     strategy:
       fail-fast: false
       matrix:
         include:
-          - {variant: "today: release, link.exe, C:", profile: release, linker: default, drive: 'false'}
-          - {variant: "release, LLD, C:", profile: release, linker: fast, drive: 'false'}
-          - {variant: "release, LLD, Dev Drive", profile: release, linker: fast, drive: 'true'}
-          - {variant: "dev, LLD, Dev Drive (this PR)", profile: dev, linker: fast, drive: 'true'}
+          - {variant: "link.exe, C: (before)", linker: 'false', drive: 'false'}
+          - {variant: "LLD, C:", linker: 'true', drive: 'false'}
+          - {variant: "LLD, Dev Drive (now)", linker: 'true', drive: 'true'}
     name: windows (${{ matrix.variant }})
     runs-on: windows-2022
-    timeout-minutes: 60
+    timeout-minutes: 75
     defaults:
       run:
         shell: pwsh
-    env:
-      CARGO_PROFILE_DEV_DEBUG: 0
     steps:
       - uses: actions/checkout@11d5960a326750d5838078e36cf38b85af677262 # v4.4.0
       - uses: ./.github/actions/windows-ci-setup
         with:
-          fast-linker: ${{ matrix.linker == 'fast' }}
+          fast-linker: ${{ matrix.linker }}
           dev-drive: ${{ matrix.drive }}
-          rust-cache-key: linker-benchmark-${{ github.run_id }}-${{ strategy.job-index }}
-      - name: Build (the Windows tests job's test binaries, then the application)
+      - name: Build (the tests job's test binaries, then the app, as CI builds them)
         env:
           VARIANT: ${{ matrix.variant }}
-          PROFILE: ${{ matrix.profile }}
         run: |
           # Nothing restored survives: every variant compiles from cold. (./target may be the
           # Dev Drive's mount point, so its contents go, not the folder.)
@@ -93,20 +51,19 @@ jobs:
             Get-ChildItem target -Force | Where-Object Name -ne 'System Volume Information' |
               Remove-Item -Recurse -Force -ErrorAction SilentlyContinue
           }
-          $release = if ($env:PROFILE -eq 'release') { @('--release') } else { @() }
           $tests = Measure-Command {
-            cargo nextest run --config-file scripts/ci/nextest.toml --no-run @release --locked `
+            cargo nextest run --config-file scripts/ci/nextest.toml --no-run --release --locked `
               -p zeron-ui -p zeron-harness -p gpui_windows -p zeron -p zeron-update -p zeron-proto -p zeron-engine -p zeron-voice-media `
               --features zeron-harness/native-fixture --lib --bins `
               --test codex_availability --test windows_native --test opencode --test cursor_shim --test pi_rpc `
               --test background_engine --test noop_browser `
-              --test worktree_on_run --test codex_catalog --test codex_login_resolution --test auth
+              --test worktree_on_run --test codex_catalog --test codex_login_resolution --test auth | Out-Host
             if ($LASTEXITCODE -ne 0) { throw 'test build failed' }
           }
-          # The app job's release build, in the same target directory after the tests.
           $app = Measure-Command {
-            cargo build --release --locked -p zeron
+            cargo build --release --locked -p zeron | Out-Host
             if ($LASTEXITCODE -ne 0) { throw 'app build failed' }
           }
-          "| windows tests | $env:VARIANT | $([int]$tests.TotalSeconds)s |" >> $env:GITHUB_STEP_SUMMARY
-          "| windows app, after the tests | $env:VARIANT | $([int]$app.TotalSeconds)s |" >> $env:GITHUB_STEP_SUMMARY
+          $line = "| $env:VARIANT | tests $([int]$tests.TotalSeconds)s | app $([int]$app.TotalSeconds)s |"
+          $line
+          $line >> $env:GITHUB_STEP_SUMMARY

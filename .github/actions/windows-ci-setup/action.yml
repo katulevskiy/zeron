@@ -10,14 +10,9 @@ inputs:
     default: 'true'
   dev-drive:
     description: >-
-      Build on a Dev Drive (ReFS, a fresh virtual disk mounted at ./target), which is
-      faster for the many small files a build writes. 'false' keeps target on C:.
+      Build on a Dev Drive (ReFS, a fresh virtual disk mounted at ./target): about 5%
+      off the Windows builds on top of LLD (linker-benchmark.yml). 'false' keeps target on C:.
     default: 'true'
-  rust-cache-key:
-    description: >-
-      Rust cache key. Jobs that build the same profile and packages may share one;
-      the tests (dev profile) and the app (release) each have their own.
-    default: windows
   save-rust-cache:
     description: >-
       Whether this job saves the shared Windows Rust cache when it runs on main.
@@ -92,7 +87,7 @@ runs:
     # the same profile); the job given save-rust-cache writes it, on main only.
     - uses: Swatinem/rust-cache@6323deb102c322ba6fcbdcafc7e3dddab59af2b6 # v2.9.2
       with:
-        shared-key: ${{ inputs.rust-cache-key }}
+        shared-key: windows
         add-job-id-key: false
         save-if: ${{ inputs.save-rust-cache == 'true' && github.ref == 'refs/heads/main' }}
         cache-on-failure: true

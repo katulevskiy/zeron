@@ -44,8 +44,6 @@ jobs:
         with:
           rust-cache: core
           save-rust-cache: 'true'
-      - name: The workspace-hack crate matches the dependencies
-        run: scripts/ci/check-workspace-hack.sh
       - name: Harness, engine, sync, update, doc, preview, MCP and voice protocol tests
         run: scripts/ci/test-core.sh
       - name: Record the pass (CI skips this job while its inputs stay the same)

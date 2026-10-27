@@ -42,11 +42,7 @@ for t in misc geometry session_publication restart_resume side_chats message_que
   tests+=(--test "$t")
 done
 
-# --no-fail-fast, unless the caller only builds (`--no-run`: nextest refuses both).
-fail_fast=(--no-fail-fast)
-for arg in "$@"; do [[ "$arg" == --no-run ]] && fail_fast=(); done
-
-exec cargo nextest run --config-file scripts/ci/nextest.toml --locked "${fail_fast[@]}" \
+exec cargo nextest run --config-file scripts/ci/nextest.toml --locked --no-fail-fast \
   -p zeron-harness -p zeron-engine -p zeron-sync -p zeron-update -p zeron-doc -p zeron-preview \
   -p zeron-mcp -p zeron-proto -p zeron-rpc -p zeron-orb -p zeron-voice-session -p zeron-voice-media \
   --features zeron-harness/native-fixture \

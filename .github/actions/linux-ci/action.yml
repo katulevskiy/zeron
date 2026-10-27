@@ -24,9 +24,6 @@ inputs:
   apt-recommends:
     description: Install recommended packages too ('true' or 'false').
     default: 'false'
-  fast-linker:
-    description: "Link with mold (.github/actions/fast-linker); 'false' keeps Rust's default LLD."
-    default: 'true'
 
 runs:
   using: composite
@@ -67,11 +64,6 @@ runs:
     - name: Build settings
       shell: bash
       run: echo "CARGO_PROFILE_DEV_DEBUG=0" >> "$GITHUB_ENV"
-
-    # Before the Rust cache: the linker settings are part of its key.
-    - uses: ./.github/actions/fast-linker
-      with:
-        enabled: ${{ inputs.fast-linker }}
 
     - uses: Swatinem/rust-cache@6323deb102c322ba6fcbdcafc7e3dddab59af2b6 # v2.9.2
       with:
