@@ -90,9 +90,9 @@ VOICE_PATHS = ["crates/audio/**", "crates/voice-media/**", "dist/voice/**", "scr
                "scripts/codex-voice-remote-smoke.py", "scripts/tests/*voice*", ".github/workflows/voice-tests.yml"]
 
 BROAD: dict[str, list[str]] = {
-    "core": CARGO + ["crates/**", "apps/zeron/**", "scripts/ci/**", ".github/actions/linux-ci/**",
+    "core": CARGO + ["crates/**", "apps/zeron/**", "scripts/ci/**", ".github/actions/linux-ci/**", ".github/actions/fast-linker/**",
                      ".github/workflows/ui-tests.yml"],
-    "ui": CARGO + ["crates/**", "scripts/ci/**", ".github/actions/linux-ci/**",
+    "ui": CARGO + ["crates/**", "scripts/ci/**", ".github/actions/linux-ci/**", ".github/actions/fast-linker/**",
                    "scripts/test-linux-browser.sh", "scripts/test-browser-storage.py",
                    ".github/workflows/ui-tests.yml"],
     "cursor": CARGO + ["crates/harness/**", "crates/doc/**", "crates/engine/**",
@@ -103,7 +103,7 @@ BROAD: dict[str, list[str]] = {
                   ".github/workflows/linux-installer.yml"],
     "voice": CARGO + VOICE_PATHS,
     "windows": CARGO + ["crates/**", "apps/zeron/**", "dist/windows/**", "scripts/test-windows-*.ps1",
-                        "scripts/package-windows.ps1", ".github/actions/windows-ci-setup/**",
+                        "scripts/package-windows.ps1", ".github/actions/windows-ci-setup/**", ".github/actions/fast-linker/**",
                         ".github/workflows/windows.yml"],
     "macos": CARGO + ["crates/**", "apps/zeron/**", "edge/**", "scripts/run-macos-browser-fixture.sh",
                       "scripts/test-browser-storage.py", "scripts/ci/run-macos-fixture.sh",
@@ -119,7 +119,7 @@ BROAD: dict[str, list[str]] = {
 FAST_PATHS: dict[str, list[str]] = {
     "voice": VOICE_PATHS,
     "windows": CARGO + ["apps/zeron/**", "dist/windows/**", "scripts/test-windows-*.ps1",
-                        "scripts/package-windows.ps1", ".github/actions/windows-ci-setup/**",
+                        "scripts/package-windows.ps1", ".github/actions/windows-ci-setup/**", ".github/actions/fast-linker/**",
                         ".github/workflows/windows.yml", "crates/update/**"],
     "macos": CARGO + ["apps/zeron/**", "crates/update/**", "crates/preview/**", "crates/text/**",
                       "edge/package.json", "edge/package-lock.json", "scripts/run-macos-browser-fixture.sh",
@@ -138,7 +138,7 @@ JOB_PATHS: dict[tuple[str, str], list[str]] = {
     # Release build, packaging, installer and startup probes (`tests` already
     # compiles the app).
     ("windows", "app"): CARGO + ["apps/zeron/**", "dist/windows/**", "scripts/test-windows-*.ps1",
-                                 "scripts/package-windows.ps1", ".github/actions/windows-ci-setup/**",
+                                 "scripts/package-windows.ps1", ".github/actions/windows-ci-setup/**", ".github/actions/fast-linker/**",
                                  ".github/workflows/windows.yml", "crates/update/**"],
     # The simulator unit tests (and the bindings they link): the app, the FFI
     # crate and the client it wraps; ios-core tests the rest of the mobile core.

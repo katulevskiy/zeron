@@ -1,0 +1,94 @@
+name: Linker benchmark
+
+# Side by side, from the same cold start: build what CI builds with the default
+# linkers and with .github/actions/fast-linker (mold on Linux, LLD on Windows),
+# one runner each, and compare the build times in the run summary. Builds only;
+# nothing is tested or cached. Runs when the linker setup or this file change,
+# and by hand.
+on:
+  pull_request:
+    paths:
+      - .github/actions/fast-linker/**
+      - .github/workflows/linker-benchmark.yml
+  workflow_dispatch:
+
+permissions:
+  contents: read
+
+concurrency:
+  group: linker-benchmark-${{ github.ref }}
+  cancel-in-progress: true
+
+jobs:
+  linux:
+    strategy:
+      fail-fast: false
+      matrix:
+        suite: [core, ui]
+        linker: [default, fast]
+    name: linux ${{ matrix.suite }} (${{ matrix.linker == 'fast' && 'mold' || 'lld, the default' }})
+    runs-on: ubuntu-24.04
+    timeout-minutes: 45
+    steps:
+      - uses: actions/checkout@11d5960a326750d5838078e36cf38b85af677262 # v4.4.0
+      - uses: ./.github/actions/linux-ci
+        with:
+          # Its own key, never saved: every variant starts cold.
+          rust-cache: linker-benchmark-${{ github.run_id }}-${{ matrix.suite }}-${{ matrix.linker }}
+          fast-linker: ${{ matrix.linker == 'fast' }}
+          apt-cache: ${{ matrix.suite == 'ui' && 'ui-browser' || '' }}
+          apt-packages: >-
+            ${{ matrix.suite == 'ui' && 'libxkbcommon-dev libxkbcommon-x11-dev libwayland-dev libx11-dev libxcb1-dev
+            libx11-xcb-dev libfontconfig1-dev libfreetype-dev libasound2-dev libvulkan-dev pkg-config cmake
+            libwebkit2gtk-4.1-dev libjson-glib-dev' || '' }}
+      - name: Build
+        env:
+          SUITE: ${{ matrix.suite }}
+          LINKER: ${{ matrix.linker }}
+        run: |
+          start=$(date +%s)
+          if [ "$SUITE" = core ]; then
+            scripts/ci/test-core.sh --no-run
+          else
+            cargo nextest run --config-file scripts/ci/nextest.toml --locked --no-run -p zeron-ui --lib
+          fi
+          seconds=$(( $(date +%s) - start ))
+          echo "| linux $SUITE | $LINKER | ${seconds}s |" >> "$GITHUB_STEP_SUMMARY"
+
+  windows:
+    strategy:
+      fail-fast: false
+      matrix:
+        linker: [default, fast]
+    name: windows tests + app (${{ matrix.linker == 'fast' && 'lld' || 'link.exe, the default' }})
+    runs-on: windows-2022
+    timeout-minutes: 60
+    defaults:
+      run:
+        shell: pwsh
+    steps:
+      - uses: actions/checkout@11d5960a326750d5838078e36cf38b85af677262 # v4.4.0
+      - uses: ./.github/actions/windows-ci-setup
+        with:
+          fast-linker: ${{ matrix.linker == 'fast' }}
+      - name: Build (the Windows tests job's test binaries, then the application)
+        env:
+          LINKER: ${{ matrix.linker }}
+        run: |
+          # Whatever the Rust cache restored goes: both sides compile from cold.
+          Remove-Item -Recurse -Force target -ErrorAction SilentlyContinue
+          $tests = Measure-Command {
+            cargo nextest run --config-file scripts/ci/nextest.toml --no-run --release --locked `
+              -p zeron-ui -p zeron-harness -p gpui_windows -p zeron -p zeron-update -p zeron-proto -p zeron-engine -p zeron-voice-media `
+              --features zeron-harness/native-fixture --lib --bins `
+              --test codex_availability --test windows_native --test opencode --test cursor_shim --test pi_rpc `
+              --test background_engine --test noop_browser `
+              --test worktree_on_run --test codex_catalog --test codex_login_resolution --test auth
+            if ($LASTEXITCODE -ne 0) { throw 'test build failed' }
+          }
+          $app = Measure-Command {
+            cargo build --release --locked -p zeron
+            if ($LASTEXITCODE -ne 0) { throw 'app build failed' }
+          }
+          "| windows tests | $env:LINKER | $([int]$tests.TotalSeconds)s |" >> $env:GITHUB_STEP_SUMMARY
+          "| windows app (after the tests) | $env:LINKER | $([int]$app.TotalSeconds)s |" >> $env:GITHUB_STEP_SUMMARY

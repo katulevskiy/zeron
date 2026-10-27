@@ -5,6 +5,9 @@ description: >-
   Rust cache.
 
 inputs:
+  fast-linker:
+    description: "Link with LLD (.github/actions/fast-linker); 'false' keeps link.exe."
+    default: 'true'
   save-rust-cache:
     description: >-
       Whether this job saves the shared Windows Rust cache when it runs on main.
@@ -63,6 +66,10 @@ runs:
         $bin = Join-Path $env:RUNNER_TEMP 'nextest-bin'
         Expand-Archive -LiteralPath $zip -DestinationPath $bin -Force
         $bin >> $env:GITHUB_PATH
+    # Before the Rust cache: the linker setting is part of its key.
+    - uses: ./.github/actions/fast-linker
+      with:
+        enabled: ${{ inputs.fast-linker }}
     # One cache for every Windows job (they build the same dependency graph with
     # the same profile); the job given save-rust-cache writes it, on main only.
     - uses: Swatinem/rust-cache@6323deb102c322ba6fcbdcafc7e3dddab59af2b6 # v2.9.2
