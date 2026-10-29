@@ -106,6 +106,8 @@ fn fanout_settle(i: usize) -> Vec<AgentEvent> {
             is_error: failed,
             output: None,
             diff: None,
+            preview_paths: Vec::new(),
+            image_payloads: Vec::new(),
         },
         fanout_tag(
             i,
@@ -319,6 +321,8 @@ impl Harness for MockHarness {
                             is_error: false,
                             output: Some("test result: ok. 128 passed; 0 failed".into()),
                             diff: None,
+                            preview_paths: Vec::new(),
+                            image_payloads: Vec::new(),
                         });
                         send("All 128 tests pass.");
                     } else {
@@ -528,6 +532,8 @@ impl Harness for MockHarness {
                         is_error: false,
                         output: None,
                         diff: None,
+                        preview_paths: Vec::new(),
+                        image_payloads: Vec::new(),
                     },
                 ]
             })
@@ -566,6 +572,8 @@ impl Harness for MockHarness {
                     is_error: false,
                     output: None,
                     diff: None,
+                    preview_paths: Vec::new(),
+                    image_payloads: Vec::new(),
                 };
                 let done = AgentEvent::Done {
                     status: DoneStatus::Completed,
@@ -731,6 +739,8 @@ impl Harness for MockHarness {
                         is_error: false,
                         output: None,
                         diff: None,
+                        preview_paths: Vec::new(),
+                        image_payloads: Vec::new(),
                     },
                 ]
             })
@@ -787,6 +797,8 @@ impl Harness for MockHarness {
                         is_error: false,
                         output: None,
                         diff: None,
+                        preview_paths: Vec::new(),
+                        image_payloads: Vec::new(),
                     });
                     events.push(AgentEvent::TextDelta {
                         text: format!("Update {} written.\n\n", active + 1),
