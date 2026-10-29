@@ -1042,6 +1042,15 @@ impl SkillCompletionSettings {
     }
 }
 
+#[derive(Clone, Copy, Debug, Default, PartialEq, Eq, Serialize, Deserialize)]
+#[serde(rename_all = "lowercase")]
+pub enum VoiceProviderChoice {
+    #[default]
+    Ask,
+    Codex,
+    Grok,
+}
+
 pub const SKILL_COMPLETION_HARNESSES: [(zeron_proto::HarnessId, &str); 9] = [
     (zeron_proto::HarnessId::Antigravity, "Antigravity"),
     (zeron_proto::HarnessId::ClaudeCode, "Claude Code"),
@@ -1278,6 +1287,9 @@ pub struct UiSettings {
     /// Local preference: never transfers an active call or credentials.
     #[serde(default)]
     pub codex_voice_device: Option<String>,
+    /// Ask, Codex, or Grok. Absent files keep Ask.
+    #[serde(default)]
+    pub voice_provider: VoiceProviderChoice,
     /// Pre-theme settings used `accentColor`. Read it once, migrate to
     /// [`Self::accent`], and never write it again.
     #[serde(default, rename = "accentColor", skip_serializing)]
@@ -1380,6 +1392,7 @@ impl Default for UiSettings {
             smooth_scrolling: true,
             codex_voice: None,
             codex_voice_device: None,
+            voice_provider: VoiceProviderChoice::Ask,
             legacy_accent_color: None,
         }
     }
@@ -2218,6 +2231,7 @@ impl UiSettings {
             smooth_scrolling,
             codex_voice,
             codex_voice_device,
+            voice_provider,
             legacy_accent_color,
             pull_request_destination,
             last_pull_request_repository,
@@ -3304,6 +3318,7 @@ mod tests {
             window_geometry: None,
             codex_voice: Some("ember".into()),
             codex_voice_device: Some("fedora".into()),
+            voice_provider: VoiceProviderChoice::Grok,
             sidebar_width: 300.0,
             sidebar_collapsed: true,
             sidebar_grouped: true,
@@ -3462,6 +3477,7 @@ mod tests {
         assert!(json.contains(r#""terminalFontSize": 15.0"#));
         assert!(json.contains(r#""codeFontFamily": "geist""#));
         assert!(json.contains(r#""codeFontSize": 11.0"#));
+        assert!(json.contains(r#""voiceProvider": "grok""#));
     }
 
     #[test]

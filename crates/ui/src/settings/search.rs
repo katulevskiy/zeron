@@ -135,6 +135,8 @@ settings_index! {
         "question waiting approval audio sound"),
     (ErrorSound, Notifications, Some("Sounds"), "Errors and disconnections",
         "failure offline audio sound"),
+    (VoiceProvider, Voice, None, "Voice provider",
+        "codex grok choose which subscription"),
     (CodexVoiceDevice, Voice, None, "Codex voice device",
         "remote host machine"),
     (CodexVoiceStyle, Voice, None, "Codex voice style",

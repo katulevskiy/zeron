@@ -34,6 +34,25 @@ pub(super) async fn run(
     host: String,
     config: zeron_proto::ChatConfig,
     voice: Option<String>,
+    provider: VoiceProvider,
+    cancel: CancellationToken,
+    events: mpsc::Sender<VoiceEvent>,
+    controls: mpsc::Receiver<super::VoiceControl>,
+) -> Result<(), VoiceRejection> {
+    match provider {
+        VoiceProvider::Codex => {
+            run_codex(engine, host, config, voice, cancel, events, controls).await
+        }
+        VoiceProvider::Grok => run_grok(engine, config, cancel, events, controls).await,
+    }
+}
+
+#[allow(clippy::too_many_arguments)]
+async fn run_codex(
+    engine: EngineHandle,
+    host: String,
+    config: zeron_proto::ChatConfig,
+    voice: Option<String>,
     cancel: CancellationToken,
     events: mpsc::Sender<VoiceEvent>,
     mut controls: mpsc::Receiver<super::VoiceControl>,
@@ -57,6 +76,27 @@ pub(super) async fn run(
     let (mute_tx, muted) = watch::channel(false);
     let call =
         zeron_voice_session::run(control, media, config, voice, cancel.clone(), events, muted);
+    tokio::pin!(call);
+    loop {
+        tokio::select! {biased;
+            result=&mut call=>return result,
+            command=controls.recv()=>match command {
+                Some(super::VoiceControl::Mute(value))=>{mute_tx.send_replace(value);},
+                None=>{cancel.cancel();return (&mut call).await;},
+            }
+        }
+    }
+}
+
+async fn run_grok(
+    engine: EngineHandle,
+    config: zeron_proto::ChatConfig,
+    cancel: CancellationToken,
+    events: mpsc::Sender<VoiceEvent>,
+    mut controls: mpsc::Receiver<super::VoiceControl>,
+) -> Result<(), VoiceRejection> {
+    let (mute_tx, muted) = watch::channel(false);
+    let call = super::grok::run(engine, config, cancel.clone(), muted, events);
     tokio::pin!(call);
     loop {
         tokio::select! {biased;

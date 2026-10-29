@@ -6106,7 +6106,9 @@ impl Shell {
                     ));
                 }
                 let live = self.voice.read(cx).is_live();
+                let (codex_ready, grok_ready) = self.voice.read(cx).provider_readiness();
                 card.update(cx, |card, cx| card.set_hosts(hosts, live, cx));
+                card.update(cx, |card, cx| card.set_providers(codex_ready, grok_ready, cx));
                 if let Some(snapshot) = &self.voice.read(cx).snapshot {
                     let voices = snapshot.voices.clone();
                     card.update(cx, |card, cx| card.set_voices(&voices, cx));

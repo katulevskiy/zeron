@@ -35,8 +35,11 @@ pub(crate) fn init(root: PathBuf, cx: &mut App) {
         inputs: Inputs::default(),
         input_select: widgets::SelectState::default(),
         voice_select: widgets::SelectState::default(),
+        provider_select: widgets::SelectState::default(),
         host_select: widgets::SelectState::default(),
         hosts: Vec::new(),
+        codex_ready: None,
+        grok_ready: None,
         call_live: false,
         voices: zeron_proto::voice::DEFAULT_VOICES
             .iter()
@@ -73,8 +76,11 @@ pub(crate) struct VoiceCard {
     inputs: Inputs,
     input_select: widgets::SelectState,
     voice_select: widgets::SelectState,
+    provider_select: widgets::SelectState,
     host_select: widgets::SelectState,
     hosts: Vec<(Option<String>, String, bool, String)>,
+    codex_ready: Option<bool>,
+    grok_ready: Option<bool>,
     call_live: bool,
     /// Native voice styles, refreshed with the live session's reported catalog.
     voices: Vec<String>,
@@ -101,6 +107,19 @@ impl VoiceCard {
         if self.hosts != hosts || self.call_live != live {
             self.hosts = hosts;
             self.call_live = live;
+            cx.notify();
+        }
+    }
+
+    pub(crate) fn set_providers(
+        &mut self,
+        codex: Option<bool>,
+        grok: Option<bool>,
+        cx: &mut Context<Self>,
+    ) {
+        if self.codex_ready != codex || self.grok_ready != grok {
+            self.codex_ready = codex;
+            self.grok_ready = grok;
             cx.notify();
         }
     }
@@ -390,7 +409,7 @@ impl Render for VoiceCard {
                 }
             })
             .render(&self.host_select, cx);
-            widgets::card_row(&theme, true)
+            widgets::card_row(&theme, false)
                 .child(
                     div()
                         .flex_1()
@@ -412,8 +431,84 @@ impl Render for VoiceCard {
                 .child(control)
                 .search_anchor(SettingId::CodexVoiceDevice)
         };
-        let conversation_card = widgets::section_card(&theme).child(host_row).child(
-            widgets::card_row(&theme, true)
+        let provider_row = {
+            let codex_possible = self.codex_ready != Some(false);
+            let grok_available = self.grok_ready == Some(true);
+            if codex_possible && grok_available {
+                let choices = [
+                    settings::VoiceProviderChoice::Ask,
+                    settings::VoiceProviderChoice::Codex,
+                    settings::VoiceProviderChoice::Grok,
+                ];
+                let saved = settings::current(cx).voice_provider;
+                let selected = choices
+                    .iter()
+                    .position(|choice| *choice == saved)
+                    .unwrap_or(0);
+                let control = widgets::select(
+                    "voice-provider",
+                    "Voice provider",
+                    &theme,
+                    |card: &mut Self| &mut card.provider_select,
+                )
+                .options(
+                    vec![
+                        widgets::SelectOption::new("Ask each time"),
+                        widgets::SelectOption::new("Codex"),
+                        widgets::SelectOption::new("Grok"),
+                    ],
+                    selected,
+                )
+                .width(200.0)
+                .on_select(move |_, ix, _, cx| {
+                    let Some(choice) = choices.get(ix).copied() else {
+                        return;
+                    };
+                    settings::update(settings::SavePolicy::Immediate, cx, |settings| {
+                        settings.voice_provider = choice;
+                    });
+                    cx.refresh_windows();
+                    cx.notify();
+                })
+                .render(&self.provider_select, cx);
+                widgets::card_row(&theme, true)
+                    .child(
+                        div()
+                            .flex_1()
+                            .min_w(px(160.0))
+                            .child(widgets::row_title(&theme, "Voice provider")),
+                    )
+                    .child(control)
+                    .search_anchor(SettingId::VoiceProvider)
+            } else {
+                let meta = if grok_available {
+                    "Using Grok"
+                } else if codex_possible {
+                    "Using Codex"
+                } else {
+                    "No voice provider is available on this computer"
+                };
+                widgets::card_row(&theme, true)
+                    .child(
+                        div()
+                            .flex_1()
+                            .min_w(px(160.0))
+                            .flex()
+                            .flex_col()
+                            .child(widgets::row_title(&theme, "Voice provider"))
+                            .child(widgets::meta_line(
+                                &theme,
+                                vec![meta.into_any_element()],
+                            )),
+                    )
+                    .search_anchor(SettingId::VoiceProvider)
+            }
+        };
+        let conversation_card = widgets::section_card(&theme)
+            .child(provider_row)
+            .child(host_row)
+            .child(
+            widgets::card_row(&theme, false)
                 .child(
                     div()
                         .flex_1()
@@ -423,7 +518,7 @@ impl Render for VoiceCard {
                         .child(widgets::row_title(&theme, "Codex voice style"))
                         .child(widgets::meta_line(
                             &theme,
-                            vec!["Applies to your next voice session".into_any_element()],
+                            vec!["Applies to the next Codex session".into_any_element()],
                         )),
                 )
                 .child(voice_control)
