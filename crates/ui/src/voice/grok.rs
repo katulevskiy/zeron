@@ -10,11 +10,23 @@ use tokio::sync::{mpsc, watch};
 use tokio_util::sync::CancellationToken;
 use zeron_proto::voice::{VoiceEvent, VoiceRejection, VoiceTranscript};
 
+pub(super) fn tune_from(style: &super::GrokStyle) -> zeron_grok_voice::Tune {
+    zeron_grok_voice::Tune {
+        instructions: instructions(style.personality),
+        speech: zeron_grok_voice::Speech {
+            voice: style.voice.clone(),
+            speed: style.speed,
+        },
+        input: style.input.clone(),
+    }
+}
+
 pub(super) async fn run(
     engine: EngineHandle,
     config: zeron_proto::ChatConfig,
     cancel: CancellationToken,
     muted: watch::Receiver<bool>,
+    tune: watch::Receiver<zeron_grok_voice::Tune>,
     events: mpsc::Sender<VoiceEvent>,
 ) -> Result<(), VoiceRejection> {
     super::permissions::microphone().await?;
@@ -55,28 +67,42 @@ pub(super) async fn run(
             parameters: def.input_schema,
         })
         .collect();
-    let instructions = format!(
-        "{}\n\nThis is a spoken call. Keep replies short. Tool results are text.",
-        zeron_harness::codex::realtime::ORCHESTRATOR_INSTRUCTIONS
-    );
+    let initial = tune.borrow().clone();
+    let mut duplex = zeron_grok_voice::DesktopDuplex::default();
+    duplex.prefer_input(initial.input.clone());
     zeron_grok_voice::run(
         zeron_grok_voice::GrokBotCredentials,
-        zeron_grok_voice::DesktopDuplex::default(),
+        duplex,
         GrokTools { tools },
         GrokSink {
             zeron,
             chat_id: chat_id.clone(),
         },
         zeron_grok_voice::Call {
-            instructions,
+            instructions: initial.instructions,
             tools: specs,
             chat_id,
+            speech: initial.speech,
         },
         cancel,
         muted,
+        tune,
         events,
     )
     .await
+}
+
+fn instructions(personality: crate::settings::GrokPersonality) -> String {
+    let base = format!(
+        "{}\n\nThis is a spoken call. Keep replies short. Tool results are text.",
+        zeron_harness::codex::realtime::ORCHESTRATOR_INSTRUCTIONS
+    );
+    let Some(direction) = personality.direction() else {
+        return base;
+    };
+    format!(
+        "{base}\n\nSpeaking style: {direction} Still use tools for real work, and keep each spoken reply short."
+    )
 }
 
 struct GrokTools {
@@ -114,5 +140,22 @@ impl zeron_grok_voice::TranscriptSink for GrokSink {
         {
             tracing::warn!("grok voice transcript was not saved");
         }
+    }
+}
+
+#[cfg(test)]
+mod tests {
+    use super::instructions;
+    use crate::settings::GrokPersonality;
+
+    #[test]
+    fn personality_is_added_on_top_of_the_orchestrator_prompt() {
+        let assistant = instructions(GrokPersonality::Assistant);
+        assert!(assistant.contains("Keep replies short"));
+        assert!(!assistant.contains("Speaking style:"));
+        let story = instructions(GrokPersonality::Storyteller);
+        assert!(story.starts_with(&assistant));
+        assert!(story.contains("Speaking style:"));
+        assert!(story.contains("Still use tools for real work"));
     }
 }

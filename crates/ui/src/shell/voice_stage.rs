@@ -32,7 +32,8 @@ pub(super) fn stage_reveal(open: bool, elapsed_ms: f32, reduced: bool) -> f32 {
 impl Shell {
     /// The footer microphone. Codex follows the composer when it already
     /// targets Codex, otherwise Codex's default, and may run on the saved
-    /// device. Grok always uses this computer, with no saved voice style.
+    /// device. Grok stays on this computer and uses the saved voice,
+    /// personality, and speed on the next session.
     pub(super) fn start_voice(&mut self, provider: VoiceProvider, cx: &mut Context<Self>) {
         let state = self.state.read(cx);
         let (Some(engine), Some(local)) = (state.engine().cloned(), state.local_device_id.clone())
@@ -40,6 +41,7 @@ impl Shell {
             return;
         };
         let saved = settings::current(cx);
+        let grok = crate::voice::GrokStyle::from_settings(&saved);
         let (config, device, voice) = match provider {
             VoiceProvider::Codex => {
                 let config = self
@@ -81,7 +83,7 @@ impl Shell {
             .unwrap_or("This device")
             .to_owned();
         self.voice.update(cx, |controller, cx| {
-            controller.start(engine, device, config, voice, provider, cx);
+            controller.start(engine, device, config, voice, grok, provider, cx);
             controller.host_name = Some(host_name);
             controller.set_stage_open(true, cx);
         });
@@ -893,6 +895,7 @@ impl Shell {
             .text_color(popup.text)
             .child(clock)
             .child(divider())
+            .when(grok, |bar| bar.child(self.grok_call_menu.clone()))
             .child(mic)
             .children(transcript)
             .child(end)

@@ -7,12 +7,37 @@ use crate::state::EngineHandle;
 use gpui::{Context, Task};
 use gpui_tokio::Tokio;
 use zeron_proto::voice::*;
+mod call_menu;
 mod grok;
 mod permissions;
 mod remote;
 
+pub(crate) use call_menu::GrokCallMenu;
+
 pub enum VoiceControl {
     Mute(bool),
+    /// Voice, personality, speed, or microphone changed during a Grok call.
+    Retune(GrokStyle),
+}
+
+/// Voice, speed, personality, and microphone for a Grok call. Codex ignores it.
+#[derive(Clone, Debug, PartialEq)]
+pub struct GrokStyle {
+    pub voice: Option<String>,
+    pub speed: f32,
+    pub personality: crate::settings::GrokPersonality,
+    pub input: Option<String>,
+}
+
+impl GrokStyle {
+    pub fn from_settings(settings: &crate::settings::UiSettings) -> Self {
+        Self {
+            voice: settings.grok_voice.clone(),
+            speed: zeron_grok_voice::snap_speed(settings.grok_voice_speed),
+            personality: settings.grok_personality,
+            input: settings.grok_input.clone(),
+        }
+    }
 }
 
 pub struct VoiceController {
@@ -32,6 +57,8 @@ pub struct VoiceController {
     pub active_since: Option<std::time::Instant>,
     engine: Option<EngineHandle>,
     controls: Option<tokio::sync::mpsc::Sender<VoiceControl>>,
+    /// Last style handed to the running Grok call.
+    sent_style: Option<GrokStyle>,
     epoch: u64,
     task: Option<Task<()>>,
     cancellation: tokio_util::sync::CancellationToken,
@@ -68,6 +95,7 @@ impl Default for VoiceController {
             active_since: None,
             engine: None,
             controls: None,
+            sent_style: None,
             epoch: 0,
             task: None,
             cancellation: tokio_util::sync::CancellationToken::new(),
@@ -253,6 +281,7 @@ impl VoiceController {
         host_device_id: String,
         config: zeron_proto::ChatConfig,
         voice: Option<String>,
+        grok: GrokStyle,
         provider: VoiceProvider,
         cx: &mut Context<Self>,
     ) {
@@ -269,6 +298,7 @@ impl VoiceController {
         let cancellation = self.cancellation.clone();
         let (controls, control_rx) = tokio::sync::mpsc::channel(8);
         self.controls = Some(controls);
+        self.sent_style = Some(grok.clone());
         let (events, mut event_rx) = tokio::sync::mpsc::channel(32);
         let query = Tokio::spawn(cx, async move {
             // Media belongs to this viewport, even when the chosen host is
@@ -278,6 +308,7 @@ impl VoiceController {
                 host_device_id,
                 config,
                 voice,
+                grok,
                 provider,
                 cancellation,
                 events,
@@ -340,6 +371,7 @@ impl VoiceController {
         self.microphone_level = 0;
         self.speaker_level = 0;
         self.controls = None;
+        self.sent_style = None;
         self.task = None;
         self.stage_open = false;
         self.active_since = None;
@@ -397,6 +429,29 @@ impl VoiceController {
                 self.cancel(cx);
                 self.reason = Some(VoiceRejection::Overflow);
             }
+        }
+    }
+
+    /// Push the saved Grok voice, personality, speed, and microphone into the
+    /// live call. Unrelated settings writes are ignored. A full control queue
+    /// does not end the call.
+    pub fn sync_grok_style(&mut self, cx: &mut Context<Self>) {
+        if self.provider != Some(VoiceProvider::Grok) {
+            return;
+        }
+        let Some(controls) = &self.controls else {
+            return;
+        };
+        let style = GrokStyle::from_settings(&crate::settings::current(cx));
+        if self.sent_style.as_ref() == Some(&style) {
+            return;
+        }
+        if controls
+            .try_send(VoiceControl::Retune(style.clone()))
+            .is_ok()
+        {
+            self.sent_style = Some(style);
+            cx.notify();
         }
     }
 

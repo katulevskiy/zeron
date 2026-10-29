@@ -11,8 +11,10 @@ again and resume with `conversation_id`. If that resume is unavailable, seed the
 recent transcript with `conversation.item.create` and do not send
 `response.create`.
 
-There is no acoustic echo canceller, so capture is half-duplex: the microphone
-stays closed while assistant audio plays.
+The microphone stays open while the assistant speaks, so the caller can
+interrupt. When the server reports that the caller started speaking, queued
+playback is dropped and an open response is cancelled. There is no acoustic
+echo canceller. Headphones keep the speaker out of the microphone.
 
 Audio stays in the viewport (`zeron-audio`). The engine only prepares this
 device's Grok orchestrator chat (`PrepareGrokVoice`) and commits final

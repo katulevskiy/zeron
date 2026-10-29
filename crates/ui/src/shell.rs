@@ -2096,6 +2096,8 @@ pub struct Shell {
     composer: Entity<Composer>,
     /// The window's voice orchestrator: independent of the selected chat.
     voice: Entity<crate::voice::VoiceController>,
+    /// Grok call-bar menu: voice, personality, speed, and microphone.
+    grok_call_menu: Entity<crate::voice::GrokCallMenu>,
     /// Sidebar footer orb (session live) and the full-window stage's orb.
     voice_footer_orb: Entity<crate::orb::Orb>,
     voice_stage_orb: Entity<crate::orb::Orb>,
@@ -2112,6 +2114,8 @@ pub struct Shell {
     voice_stage_selection: Option<String>,
     _voice_observation: gpui::Subscription,
     _voice_catalog: gpui::Subscription,
+    /// Saved Grok voice, personality, speed, and microphone reach the live call.
+    _grok_style: gpui::Subscription,
     /// Measured height of the bottom chrome stack (status strip + composer +
     /// terminal dock) the full-height transcript scrolls under. Paint-time
     /// measurement schedules another frame whenever this value changes.
@@ -2544,6 +2548,7 @@ impl Shell {
         transcript.update(cx, |transcript, _| transcript.retain_for_route_exit());
         let composer = cx.new(|cx| Composer::new(state.clone(), cx));
         let voice = cx.new(|_| crate::voice::VoiceController::default());
+        let grok_call_menu = cx.new(|cx| crate::voice::GrokCallMenu::new(voice.clone(), cx));
         let voice_footer_orb = cx.new(|_| {
             crate::orb::Orb::new()
                 .size(crate::orb::OrbSize::Inline)
@@ -2568,6 +2573,11 @@ impl Shell {
         let voice_catalog =
             cx.observe_global::<crate::pickers::HarnessCatalogChanged>(|this: &mut Shell, cx| {
                 this.check_voice_codex(true, cx)
+            });
+        let grok_style =
+            cx.observe_global::<crate::settings::SettingsStore>(|this: &mut Shell, cx| {
+                this.voice
+                    .update(cx, |voice, cx| voice.sync_grok_style(cx));
             });
         let links = Self::session_links(None, cx);
         transcript.update(cx, |transcript, _| {
@@ -2724,6 +2734,7 @@ impl Shell {
             transcript,
             composer,
             voice,
+            grok_call_menu,
             voice_footer_orb,
             voice_stage_orb,
             voice_composer_orb,
@@ -2735,6 +2746,7 @@ impl Shell {
             voice_stage_selection: None,
             _voice_observation: voice_observation,
             _voice_catalog: voice_catalog,
+            _grok_style: grok_style,
             // Seed with the compact composer stack's rough height so the
             // first frame's clearance isn't zero (the measure corrects it).
             bottom_stack: std::rc::Rc::new(std::cell::Cell::new(120.0)),

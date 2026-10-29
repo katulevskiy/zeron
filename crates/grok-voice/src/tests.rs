@@ -23,7 +23,7 @@ use zeron_proto::voice::{
 };
 
 use crate::audio::NullDuplex;
-use crate::{Call, Credentials, Minted, ToolExec, ToolSpec, TranscriptSink, run};
+use crate::{Call, Credentials, Minted, Speech, ToolExec, ToolSpec, TranscriptSink, Tune, run};
 
 const SECRET: &str = "test-secret";
 const SAMPLES: [i16; 3] = [1, -2, 300];
@@ -76,6 +76,7 @@ struct Running {
     mints: Arc<AtomicUsize>,
     tool: Arc<RecTool>,
     _mute: watch::Sender<bool>,
+    tune: watch::Sender<Tune>,
 }
 
 struct Seen {
@@ -95,6 +96,11 @@ fn start_call(port: u16) -> Running {
     let tool = Arc::new(RecTool::default());
     let cancel = CancellationToken::new();
     let (mute_tx, mute_rx) = watch::channel(false);
+    let (tune_tx, tune_rx) = watch::channel(Tune {
+        instructions: "be brief".into(),
+        speech: Speech::default(),
+        input: None,
+    });
     let (tx, mut rx) = mpsc::channel(256);
     let events = Arc::new(Mutex::new(Vec::new()));
     let store = Arc::clone(&events);
@@ -116,9 +122,11 @@ fn start_call(port: u16) -> Running {
                 parameters: json!({"type": "object"}),
             }],
             chat_id: "chat-1".into(),
+            speech: Speech::default(),
         },
         cancel.clone(),
         mute_rx,
+        tune_rx,
         tx,
     ));
     Running {
@@ -129,6 +137,7 @@ fn start_call(port: u16) -> Running {
         mints,
         tool,
         _mute: mute_tx,
+        tune: tune_tx,
     }
 }
 
@@ -208,6 +217,10 @@ fn assert_session_update(text: &str) {
     assert_eq!(value["session"]["tools"][0]["name"], "lookup");
     assert_eq!(value["session"]["turn_detection"]["type"], "server_vad");
     assert_eq!(value["session"]["resumption"]["enabled"], true);
+    assert_eq!(
+        value["session"]["audio"]["output"]["speed"].as_f64(),
+        Some(1.0)
+    );
     assert!(value["session"].get("voice").is_none());
 }
 
@@ -655,4 +668,276 @@ async fn failed_dials_body() {
     assert_eq!(result, Err(VoiceRejection::Protocol));
     assert_eq!(call.mints.load(Ordering::SeqCst), 4);
     assert_still_open(&call.events.lock().expect("events"));
+}
+
+#[tokio::test]
+async fn speaking_before_a_reply_does_not_cancel() {
+    timeout(Duration::from_secs(8), idle_speech_body())
+        .await
+        .expect("idle speech test timed out");
+}
+
+async fn idle_speech_body() {
+    let listener = bind().await;
+    let port = listener.local_addr().expect("addr").port();
+    let call = start_call(port);
+    let (ws, seen) = accept_one(&listener).await;
+    assert_handshake(&seen, None);
+    let (mut write, mut read) = ws.split();
+    assert_session_update(&next_text(&mut read).await);
+    send_json(&mut write, json!({"type": "session.updated"})).await;
+    send_json(
+        &mut write,
+        json!({"type": "input_audio_buffer.speech_started"}),
+    )
+    .await;
+    assert!(
+        text_within(&mut read, Duration::from_millis(200))
+            .await
+            .is_none(),
+        "an idle turn must not cancel"
+    );
+    send_json(
+        &mut write,
+        json!({"type": "input_audio_buffer.speech_stopped"}),
+    )
+    .await;
+    send_json(
+        &mut write,
+        json!({
+            "type": "response.output_audio.delta",
+            "delta": pcm_b64(&SAMPLES)
+        }),
+    )
+    .await;
+    send_json(
+        &mut write,
+        json!({
+            "type": "response.output_audio_transcript.delta",
+            "item_id": "asst-idle",
+            "delta": "hi"
+        }),
+    )
+    .await;
+    let pcm = &call.pcm;
+    let events = &call.events;
+    until("audio after the caller stops", || {
+        pcm.lock().expect("pcm").as_slice() == SAMPLES
+            && events
+                .lock()
+                .expect("events")
+                .iter()
+                .any(|event| matches!(event, VoiceEvent::Partial { text, .. } if text == "hi"))
+    })
+    .await;
+    let _events = finish(call, 1).await;
+    drop(write);
+    drop(read);
+}
+
+#[tokio::test]
+async fn an_interrupt_cancels_the_open_reply_and_drops_the_rest() {
+    timeout(Duration::from_secs(8), interrupt_body())
+        .await
+        .expect("interrupt test timed out");
+}
+
+async fn interrupt_body() {
+    let listener = bind().await;
+    let port = listener.local_addr().expect("addr").port();
+    let call = start_call(port);
+    let (ws, seen) = accept_one(&listener).await;
+    assert_handshake(&seen, None);
+    let (mut write, mut read) = ws.split();
+    assert_session_update(&next_text(&mut read).await);
+    send_json(&mut write, json!({"type": "session.updated"})).await;
+    send_json(&mut write, json!({"type": "response.created"})).await;
+    send_json(
+        &mut write,
+        json!({
+            "type": "response.output_audio.delta",
+            "delta": pcm_b64(&SAMPLES)
+        }),
+    )
+    .await;
+    let pcm = Arc::clone(&call.pcm);
+    until("first audio", || {
+        pcm.lock().expect("pcm").as_slice() == SAMPLES
+    })
+    .await;
+    send_json(
+        &mut write,
+        json!({"type": "input_audio_buffer.speech_started"}),
+    )
+    .await;
+    let cancel: Value = serde_json::from_str(&next_text(&mut read).await).expect("cancel");
+    assert_eq!(cancel["type"], "response.cancel");
+    assert!(pcm.lock().expect("pcm").is_empty());
+    let rest = [4i16, 5, 6];
+    send_json(
+        &mut write,
+        json!({
+            "type": "response.output_audio.delta",
+            "delta": pcm_b64(&rest)
+        }),
+    )
+    .await;
+    send_json(
+        &mut write,
+        json!({
+            "type": "response.output_audio_transcript.delta",
+            "item_id": "asst-cut",
+            "delta": "no"
+        }),
+    )
+    .await;
+    let events = &call.events;
+    until("dropped tail still reports the transcript", || {
+        events
+            .lock()
+            .expect("events")
+            .iter()
+            .any(|event| matches!(event, VoiceEvent::Partial { text, .. } if text == "no"))
+    })
+    .await;
+    assert!(
+        pcm.lock().expect("pcm").is_empty(),
+        "audio after the interrupt must not play"
+    );
+    send_json(&mut write, json!({"type": "response.cancelled"})).await;
+    send_json(
+        &mut write,
+        json!({"type": "input_audio_buffer.speech_stopped"}),
+    )
+    .await;
+    send_json(&mut write, json!({"type": "response.created"})).await;
+    send_json(
+        &mut write,
+        json!({
+            "type": "response.output_audio.delta",
+            "delta": pcm_b64(&SAMPLES)
+        }),
+    )
+    .await;
+    send_json(
+        &mut write,
+        json!({
+            "type": "response.output_audio_transcript.delta",
+            "item_id": "asst-next",
+            "delta": "yes"
+        }),
+    )
+    .await;
+    until("the next reply plays", || {
+        pcm.lock().expect("pcm").as_slice() == SAMPLES
+            && events
+                .lock()
+                .expect("events")
+                .iter()
+                .any(|event| matches!(event, VoiceEvent::Partial { text, .. } if text == "yes"))
+    })
+    .await;
+    let _events = finish(call, 1).await;
+    drop(write);
+    drop(read);
+}
+
+#[tokio::test]
+async fn speed_changes_wait_until_the_open_reply_finishes() {
+    timeout(Duration::from_secs(8), speed_change_body())
+        .await
+        .expect("speed change test timed out");
+}
+
+async fn speed_change_body() {
+    let listener = bind().await;
+    let port = listener.local_addr().expect("addr").port();
+    let call = start_call(port);
+    let (ws, seen) = accept_one(&listener).await;
+    assert_handshake(&seen, None);
+    let (mut write, mut read) = ws.split();
+    assert_session_update(&next_text(&mut read).await);
+    send_json(&mut write, json!({"type": "session.updated"})).await;
+
+    call.tune
+        .send(Tune {
+            instructions: "be brief".into(),
+            speech: Speech {
+                voice: Some("liora".into()),
+                speed: 1.15,
+            },
+            input: None,
+        })
+        .expect("tune");
+    let idle: Value = serde_json::from_str(&next_text(&mut read).await).expect("idle update");
+    assert_eq!(idle["type"], "session.update");
+    assert_eq!(idle["session"]["voice"], "liora");
+    assert_eq!(idle["session"]["instructions"], "be brief");
+    let idle_speed = idle["session"]["audio"]["output"]["speed"]
+        .as_f64()
+        .expect("speed");
+    assert!((idle_speed - 1.15).abs() < 0.001, "{idle_speed}");
+    assert!(idle["session"]["tools"][0]["name"] == "lookup");
+
+    send_json(&mut write, json!({"type": "response.created"})).await;
+    send_json(
+        &mut write,
+        json!({
+            "type": "response.output_audio.delta",
+            "delta": pcm_b64(&SAMPLES)
+        }),
+    )
+    .await;
+    let pcm = Arc::clone(&call.pcm);
+    until("the open reply is playing", || {
+        pcm.lock().expect("pcm").as_slice() == SAMPLES
+    })
+    .await;
+    call.tune
+        .send(Tune {
+            instructions: "be brief\n\nwarmer".into(),
+            speech: Speech {
+                voice: Some("ara".into()),
+                speed: 1.5,
+            },
+            input: None,
+        })
+        .expect("tune");
+    assert!(
+        text_within(&mut read, Duration::from_millis(250))
+            .await
+            .is_none(),
+        "an open reply keeps its speed until it finishes"
+    );
+    send_json(&mut write, json!({"type": "response.done"})).await;
+    let done: Value = serde_json::from_str(&next_text(&mut read).await).expect("deferred update");
+    assert_eq!(done["type"], "session.update");
+    assert_eq!(done["session"]["voice"], "ara");
+    assert_eq!(done["session"]["instructions"], "be brief\n\nwarmer");
+    assert_eq!(
+        done["session"]["audio"]["output"]["speed"].as_f64(),
+        Some(1.5)
+    );
+    let _events = finish(call, 1).await;
+    drop(write);
+    drop(read);
+}
+
+async fn text_within<R>(read: &mut R, budget: Duration) -> Option<String>
+where
+    R: Stream<Item = Result<Message, WsError>> + Unpin,
+{
+    timeout(budget, async {
+        loop {
+            match read.next().await {
+                Some(Ok(Message::Text(text))) => return Some(text),
+                Some(Ok(Message::Ping(_) | Message::Pong(_))) => {}
+                Some(Ok(_)) => return None,
+                Some(Err(_)) | None => return None,
+            }
+        }
+    })
+    .await
+    .ok()
+    .flatten()
 }

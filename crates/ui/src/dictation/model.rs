@@ -9,7 +9,9 @@ use crate::{
 };
 use gpui::{App, Context, Entity, Global, Task, Window, div, prelude::*, px};
 use std::{
+    cell::Cell,
     path::PathBuf,
+    rc::Rc,
     sync::{
         Arc,
         atomic::{AtomicBool, AtomicU64, Ordering},
@@ -37,6 +39,10 @@ pub(crate) fn init(root: PathBuf, cx: &mut App) {
         voice_select: widgets::SelectState::default(),
         provider_select: widgets::SelectState::default(),
         host_select: widgets::SelectState::default(),
+        grok_voice_select: widgets::SelectState::default(),
+        grok_personality_select: widgets::SelectState::default(),
+        grok_speed_bounds: Rc::new(Cell::new(None)),
+        grok_speed_drag: None,
         hosts: Vec::new(),
         codex_ready: None,
         grok_ready: None,
@@ -78,6 +84,10 @@ pub(crate) struct VoiceCard {
     voice_select: widgets::SelectState,
     provider_select: widgets::SelectState,
     host_select: widgets::SelectState,
+    grok_voice_select: widgets::SelectState,
+    grok_personality_select: widgets::SelectState,
+    grok_speed_bounds: Rc<Cell<Option<gpui::Bounds<gpui::Pixels>>>>,
+    grok_speed_drag: Option<f32>,
     hosts: Vec<(Option<String>, String, bool, String)>,
     codex_ready: Option<bool>,
     grok_ready: Option<bool>,
@@ -97,6 +107,7 @@ struct Inputs {
     task: Option<Task<()>>,
 }
 const INPUT_REFRESH: Duration = Duration::from_secs(3);
+const GROK_SESSION: &str = "The next reply uses this";
 impl VoiceCard {
     pub(crate) fn set_hosts(
         &mut self,
@@ -323,7 +334,238 @@ impl VoiceCard {
         };
         (options, selected)
     }
+
+    fn grok_rows(&mut self, theme: &Theme, cx: &mut Context<Self>) -> Vec<gpui::AnyElement> {
+        if self.grok_ready != Some(true) {
+            return Vec::new();
+        }
+        vec![
+            self.grok_voice_row(theme, cx),
+            self.grok_personality_row(theme, cx),
+            self.grok_speed_row(theme, cx),
+        ]
+    }
+
+    fn grok_voice_row(&mut self, theme: &Theme, cx: &mut Context<Self>) -> gpui::AnyElement {
+        let saved = settings::current(cx).grok_voice;
+        let mut ids: Vec<Option<String>> = std::iter::once(None)
+            .chain(
+                zeron_grok_voice::VOICES
+                    .iter()
+                    .map(|(id, _)| Some((*id).to_owned())),
+            )
+            .collect();
+        if saved.as_deref().is_some_and(|id| {
+            !zeron_grok_voice::VOICES
+                .iter()
+                .any(|(known, _)| *known == id)
+        }) {
+            ids.push(saved.clone());
+        }
+        let selected = ids.iter().position(|id| id == &saved).unwrap_or(0);
+        let options: Vec<_> = ids
+            .iter()
+            .map(|id| widgets::SelectOption::new(zeron_grok_voice::voice_label(id.as_deref())))
+            .collect();
+        let control = widgets::select("grok-voice", "Grok voice", theme, |card: &mut Self| {
+            &mut card.grok_voice_select
+        })
+        .options(options, selected)
+        .width(200.0)
+        .on_select(move |_, ix, _, cx| {
+            let voice = ids.get(ix).cloned().flatten();
+            settings::update(settings::SavePolicy::Immediate, cx, |settings| {
+                settings.grok_voice = voice;
+            });
+            cx.refresh_windows();
+            cx.notify();
+        })
+        .render(&self.grok_voice_select, cx);
+        grok_style_row(theme, "Grok voice", SettingId::GrokVoice, control).into_any_element()
+    }
+
+    fn grok_personality_row(&mut self, theme: &Theme, cx: &mut Context<Self>) -> gpui::AnyElement {
+        let choices = settings::GrokPersonality::ALL;
+        let saved = settings::current(cx).grok_personality;
+        let selected = choices
+            .iter()
+            .position(|choice| *choice == saved)
+            .unwrap_or(0);
+        let options: Vec<_> = choices
+            .iter()
+            .map(|choice| widgets::SelectOption::new(choice.label()))
+            .collect();
+        let control = widgets::select(
+            "grok-personality",
+            "Grok personality",
+            theme,
+            |card: &mut Self| &mut card.grok_personality_select,
+        )
+        .options(options, selected)
+        .width(200.0)
+        .on_select(move |_, ix, _, cx| {
+            let Some(choice) = choices.get(ix).copied() else {
+                return;
+            };
+            settings::update(settings::SavePolicy::Immediate, cx, |settings| {
+                settings.grok_personality = choice;
+            });
+            cx.refresh_windows();
+            cx.notify();
+        })
+        .render(&self.grok_personality_select, cx);
+        grok_style_row(
+            theme,
+            "Grok personality",
+            SettingId::GrokPersonality,
+            control,
+        )
+        .into_any_element()
+    }
+
+    fn grok_speed_row(&mut self, theme: &Theme, cx: &mut Context<Self>) -> gpui::AnyElement {
+        let saved = zeron_grok_voice::snap_speed(settings::current(cx).grok_voice_speed);
+        let shown = self.grok_speed_drag.unwrap_or(saved);
+        let control = speed_slider(theme, shown, Rc::clone(&self.grok_speed_bounds), cx);
+        grok_style_row(
+            theme,
+            "Grok speech speed",
+            SettingId::GrokVoiceSpeed,
+            control,
+        )
+        .into_any_element()
+    }
+
+    fn drag_grok_speed(&mut self, x: gpui::Pixels, cx: &mut Context<Self>) {
+        let Some(bounds) = self.grok_speed_bounds.get() else {
+            return;
+        };
+        self.grok_speed_drag = Some(widgets::grok_speed_at_x(bounds, x));
+        cx.notify();
+    }
+
+    fn commit_grok_speed(&mut self, speed: f32, cx: &mut Context<Self>) {
+        let speed = zeron_grok_voice::snap_speed(speed);
+        self.grok_speed_drag = None;
+        settings::update(settings::SavePolicy::Immediate, cx, |settings| {
+            settings.grok_voice_speed = speed;
+        });
+        cx.notify();
+    }
 }
+
+#[derive(Clone)]
+struct GrokSpeedDrag;
+
+impl gpui::Render for GrokSpeedDrag {
+    fn render(&mut self, _: &mut Window, _: &mut Context<Self>) -> impl IntoElement {
+        gpui::Empty
+    }
+}
+
+fn speed_slider(
+    theme: &Theme,
+    shown: f32,
+    bounds: Rc<Cell<Option<gpui::Bounds<gpui::Pixels>>>>,
+    cx: &mut Context<VoiceCard>,
+) -> gpui::Div {
+    let fraction = zeron_grok_voice::speed_fraction(shown);
+    let label = zeron_grok_voice::speed_label(shown);
+    let slot = Rc::clone(&bounds);
+    div()
+        .w(px(220.0))
+        .flex()
+        .items_center()
+        .gap(px(8.0))
+        .child(
+            div()
+                .id("grok-speech-speed")
+                .flex_1()
+                .tab_index(0)
+                .role(gpui::Role::Slider)
+                .aria_label("Grok speech speed")
+                .aria_value(label.clone())
+                .aria_numeric_value(f64::from(shown))
+                .aria_min_numeric_value(f64::from(zeron_grok_voice::SPEED_MIN))
+                .aria_max_numeric_value(f64::from(zeron_grok_voice::SPEED_MAX))
+                .aria_numeric_value_step(f64::from(zeron_grok_voice::SPEED_STEP))
+                .focus_visible(|style| style.border_2().border_color(theme.accent))
+                .cursor_pointer()
+                .on_mouse_down(
+                    gpui::MouseButton::Left,
+                    cx.listener(|this, event: &gpui::MouseDownEvent, _, cx| {
+                        this.drag_grok_speed(event.position.x, cx);
+                        cx.stop_propagation();
+                    }),
+                )
+                .on_drag(GrokSpeedDrag, |drag, _, _, cx| {
+                    cx.stop_propagation();
+                    cx.new(|_| drag.clone())
+                })
+                .on_mouse_up(
+                    gpui::MouseButton::Left,
+                    cx.listener(|this, _: &gpui::MouseUpEvent, _, cx| {
+                        if let Some(speed) = this.grok_speed_drag {
+                            this.commit_grok_speed(speed, cx);
+                        }
+                    }),
+                )
+                .on_key_down(cx.listener(|this, event: &gpui::KeyDownEvent, _, cx| {
+                    let current = this.grok_speed_drag.unwrap_or_else(|| {
+                        zeron_grok_voice::snap_speed(settings::current(cx).grok_voice_speed)
+                    });
+                    let next = match event.keystroke.key.as_str() {
+                        "left" | "down" => current - zeron_grok_voice::SPEED_STEP,
+                        "right" | "up" => current + zeron_grok_voice::SPEED_STEP,
+                        "home" => zeron_grok_voice::SPEED_MIN,
+                        "end" => zeron_grok_voice::SPEED_MAX,
+                        _ => return,
+                    };
+                    this.commit_grok_speed(next, cx);
+                    cx.stop_propagation();
+                }))
+                .child(
+                    gpui::canvas(
+                        move |measured, _, _| slot.set(Some(measured)),
+                        |_, _, _, _| {},
+                    )
+                    .absolute()
+                    .inset_0(),
+                )
+                .child(widgets::grok_speed_track(theme, fraction)),
+        )
+        .child(
+            div()
+                .w(px(48.0))
+                .text_size(crate::typography::ui_rems(13.0))
+                .text_color(theme.text)
+                .child(label),
+        )
+}
+
+fn grok_style_row(
+    theme: &Theme,
+    title: &'static str,
+    anchor: SettingId,
+    control: impl IntoElement,
+) -> impl IntoElement {
+    widgets::card_row(theme, false)
+        .child(
+            div()
+                .flex_1()
+                .min_w(px(160.0))
+                .flex()
+                .flex_col()
+                .child(widgets::row_title(theme, title))
+                .child(widgets::meta_line(
+                    theme,
+                    vec![GROK_SESSION.into_any_element()],
+                )),
+        )
+        .child(control)
+        .search_anchor(anchor)
+}
+
 impl Render for VoiceCard {
     fn render(&mut self, _: &mut Window, cx: &mut Context<Self>) -> impl IntoElement {
         let theme = Theme::of(cx).for_settings_surface();
@@ -496,10 +738,7 @@ impl Render for VoiceCard {
                             .flex()
                             .flex_col()
                             .child(widgets::row_title(&theme, "Voice provider"))
-                            .child(widgets::meta_line(
-                                &theme,
-                                vec![meta.into_any_element()],
-                            )),
+                            .child(widgets::meta_line(&theme, vec![meta.into_any_element()])),
                     )
                     .search_anchor(SettingId::VoiceProvider)
             }
@@ -508,22 +747,23 @@ impl Render for VoiceCard {
             .child(provider_row)
             .child(host_row)
             .child(
-            widgets::card_row(&theme, false)
-                .child(
-                    div()
-                        .flex_1()
-                        .min_w(px(160.0))
-                        .flex()
-                        .flex_col()
-                        .child(widgets::row_title(&theme, "Codex voice style"))
-                        .child(widgets::meta_line(
-                            &theme,
-                            vec!["Applies to the next Codex session".into_any_element()],
-                        )),
-                )
-                .child(voice_control)
-                .search_anchor(SettingId::CodexVoiceStyle),
-        );
+                widgets::card_row(&theme, false)
+                    .child(
+                        div()
+                            .flex_1()
+                            .min_w(px(160.0))
+                            .flex()
+                            .flex_col()
+                            .child(widgets::row_title(&theme, "Codex voice style"))
+                            .child(widgets::meta_line(
+                                &theme,
+                                vec!["Applies to the next Codex session".into_any_element()],
+                            )),
+                    )
+                    .child(voice_control)
+                    .search_anchor(SettingId::CodexVoiceStyle),
+            )
+            .children(self.grok_rows(&theme, cx));
         let enabled = settings::current(cx).dictation_enabled;
         let downloading = self.cancel.is_some();
         let on = downloading || (enabled && self.ready);
@@ -709,6 +949,19 @@ impl Render for VoiceCard {
             .id("voice-page-host")
             .relative()
             .size_full()
+            .on_drag_move(
+                cx.listener(|this, event: &gpui::DragMoveEvent<GrokSpeedDrag>, _, cx| {
+                    this.drag_grok_speed(event.event.position.x, cx);
+                }),
+            )
+            .on_mouse_up(
+                gpui::MouseButton::Left,
+                cx.listener(|this, _: &gpui::MouseUpEvent, _, cx| {
+                    if let Some(speed) = this.grok_speed_drag {
+                        this.commit_grok_speed(speed, cx);
+                    }
+                }),
+            )
             .on_hover(cx.listener(|this, hovered: &bool, _, cx| {
                 if this.scroll.set_list_hovered(*hovered) {
                     cx.notify();

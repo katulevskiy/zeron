@@ -19,13 +19,12 @@ use zeron_proto::voice::{
 use crate::audio::Duplex;
 use crate::auth::{Credentials, Minted};
 use crate::protocol::{
-    FRAME_SAMPLES, ListedTool, SeedTurn, ServerEvent, append_audio, function_output,
-    mentions_conversation, parse_server_event, response_create, seed_frames,
-    session_update_message, truncate_chars,
+    FRAME_SAMPLES, ListedTool, SeedTurn, ServerEvent, Speech, append_audio, function_output,
+    mentions_conversation, parse_server_event, response_cancel, response_create, seed_frames,
+    session_update_message, snap_speed, truncate_chars,
 };
 
 const GENERATION: u64 = 1;
-const HALF_DUPLEX_MS: u32 = 50;
 const TOOL_QUIET_MS: u32 = 80;
 const BACKOFF_MS: [u64; 3] = [200, 600, 1_500];
 
@@ -41,6 +40,16 @@ pub struct Call {
     pub instructions: String,
     pub tools: Vec<ToolSpec>,
     pub chat_id: String,
+    pub speech: Speech,
+}
+
+/// Live speech settings. A change is sent on the socket when no reply is open,
+/// and after the current reply when one is.
+#[derive(Clone, Debug, PartialEq)]
+pub struct Tune {
+    pub instructions: String,
+    pub speech: Speech,
+    pub input: Option<String>,
 }
 
 #[async_trait::async_trait]
@@ -81,6 +90,7 @@ pub async fn run(
     call: Call,
     cancel: CancellationToken,
     muted: watch::Receiver<bool>,
+    tune: watch::Receiver<Tune>,
     events: mpsc::Sender<VoiceEvent>,
 ) -> Result<(), VoiceRejection> {
     let tools: Arc<dyn ToolExec> = Arc::new(tools);
@@ -95,6 +105,7 @@ pub async fn run(
         call,
         cancel,
         muted,
+        tune,
         events,
     )
     .await;
@@ -148,6 +159,7 @@ async fn drive<D: Duplex>(
     call: Call,
     cancel: CancellationToken,
     muted: watch::Receiver<bool>,
+    tune: watch::Receiver<Tune>,
     events: mpsc::Sender<VoiceEvent>,
 ) -> Result<(), VoiceRejection> {
     let session_id = uuid::Uuid::new_v4().to_string();
@@ -210,6 +222,7 @@ async fn drive<D: Duplex>(
             &call,
             &cancel,
             &muted,
+            &tune,
             &events,
             &session_id,
             &mut conversation_id,
@@ -371,6 +384,16 @@ struct Ctx<'a, D: Duplex> {
     resume_used: bool,
     tool_queue: VecDeque<(String, String)>,
     pending_pcm: Vec<f32>,
+    /// A model response is open until `response.done` or `response.cancelled`.
+    response_open: bool,
+    /// Server VAD heard the caller. Mic audio is sent either way.
+    caller_speaking: bool,
+    /// The caller cut into this response. Its later audio is not played.
+    interrupted: bool,
+    tune: &'a watch::Receiver<Tune>,
+    specs: &'a [ToolSpec],
+    /// Last speech settings sent on this socket, plus the mic id last requested.
+    applied: Tune,
 }
 
 async fn talk<D: Duplex>(
@@ -381,6 +404,7 @@ async fn talk<D: Duplex>(
     call: &Call,
     cancel: &CancellationToken,
     muted: &watch::Receiver<bool>,
+    tune: &watch::Receiver<Tune>,
     events: &mpsc::Sender<VoiceEvent>,
     session_id: &str,
     conversation_id: &mut Option<String>,
@@ -391,6 +415,11 @@ async fn talk<D: Duplex>(
     let (mut write, mut read) = socket.split();
     let (out_tx, mut out_rx) = mpsc::unbounded_channel();
     let (tool_tx, mut tool_rx) = mpsc::unbounded_channel();
+    let desired = tune.borrow().clone();
+    let speech = Speech {
+        voice: desired.speech.voice.clone(),
+        speed: snap_speed(desired.speech.speed),
+    };
     let listed: Vec<ListedTool<'_>> = call
         .tools
         .iter()
@@ -400,10 +429,16 @@ async fn talk<D: Duplex>(
             parameters: &tool.parameters,
         })
         .collect();
-    let update = session_update_message(&call.instructions, &listed);
+    let update = session_update_message(&desired.instructions, &listed, &speech);
     if out_tx.send(Outgoing::Text(update.to_string())).is_err() {
         return redial(false, conversation_id, false);
     }
+    let _ = lock_duplex(duplex).set_input(desired.input.as_deref());
+    let applied = Tune {
+        instructions: desired.instructions,
+        speech,
+        input: desired.input,
+    };
     let mut established = false;
     let mut assistant = None;
     let mut seeds_sent = false;
@@ -426,6 +461,12 @@ async fn talk<D: Duplex>(
         resume_used,
         tool_queue: VecDeque::new(),
         pending_pcm: Vec::new(),
+        response_open: false,
+        caller_speaking: false,
+        interrupted: false,
+        tune,
+        specs: &call.tools,
+        applied,
     };
     let mut tick = tokio::time::interval(Duration::from_millis(20));
     tick.set_missed_tick_behavior(tokio::time::MissedTickBehavior::Skip);
@@ -489,6 +530,20 @@ async fn talk<D: Duplex>(
     }
 }
 
+fn style_differs(applied: &Tune, desired: &Tune) -> bool {
+    applied.instructions != desired.instructions
+        || snap_speed(applied.speech.speed) != snap_speed(desired.speech.speed)
+        || voice_token(&applied.speech.voice) != voice_token(&desired.speech.voice)
+}
+
+fn voice_token(voice: &Option<String>) -> Option<String> {
+    voice
+        .as_deref()
+        .map(str::trim)
+        .filter(|voice| !voice.is_empty())
+        .map(str::to_owned)
+}
+
 fn redial(resume_failed: bool, conversation_id: &Option<String>, established: bool) -> Stop {
     Stop::Redial {
         resume_failed,
@@ -515,7 +570,55 @@ impl<D: Duplex> Ctx<'_, D> {
                 };
             }
         }
-        self.flush_tools()
+        let tools = self.flush_tools();
+        if !matches!(tools, Step::Continue) {
+            return tools;
+        }
+        self.apply_tune()
+    }
+
+    /// Send speech changes now when the model is idle, or keep them until the
+    /// open reply finishes. The microphone switches immediately.
+    fn apply_tune(&mut self) -> Step {
+        let desired = self.tune.borrow().clone();
+        if desired.input != self.applied.input {
+            if let Err(err) = lock_duplex(self.duplex).set_input(desired.input.as_deref()) {
+                return Step::Fail(err);
+            }
+            self.applied.input = desired.input.clone();
+        }
+        if !style_differs(&self.applied, &desired) {
+            return Step::Continue;
+        }
+        if self.response_open {
+            return Step::Continue;
+        }
+        let listed: Vec<ListedTool<'_>> = self
+            .specs
+            .iter()
+            .map(|tool| ListedTool {
+                name: &tool.name,
+                description: &tool.description,
+                parameters: &tool.parameters,
+            })
+            .collect();
+        let speech = Speech {
+            voice: desired.speech.voice.clone(),
+            speed: snap_speed(desired.speech.speed),
+        };
+        let update = session_update_message(&desired.instructions, &listed, &speech);
+        if self
+            .out_tx
+            .send(Outgoing::Text(update.to_string()))
+            .is_err()
+        {
+            return Step::Redial {
+                resume_failed: false,
+            };
+        }
+        self.applied.instructions = desired.instructions;
+        self.applied.speech = speech;
+        Step::Continue
     }
 
     fn capture_tick(&mut self) -> Result<MicTick, VoiceRejection> {
@@ -527,9 +630,10 @@ impl<D: Duplex> Ctx<'_, D> {
             if let Err(err) = duplex.pull_mic(&mut pulled) {
                 return Err(err);
             }
-            is_muted || duplex.speaker_queued_ms() > HALF_DUPLEX_MS
+            is_muted
         };
-        // No echo canceller: drop mic frames while the speaker still has audio.
+        // Mute drops the samples. Playback does not: the server has to hear an
+        // interrupt while the reply is still coming out of the speaker.
         if discard {
             self.pending_pcm.clear();
         } else {
@@ -580,8 +684,28 @@ impl<D: Duplex> Ctx<'_, D> {
             ServerEvent::Ignore => Step::Continue,
             ServerEvent::SessionReady => self.session_ready().await,
             ServerEvent::Audio(pcm) => {
+                if self.caller_speaking || self.interrupted {
+                    return Step::Continue;
+                }
+                self.response_open = true;
                 lock_duplex(self.duplex).push_speaker(&pcm);
                 Step::Continue
+            }
+            ServerEvent::SpeechStarted => self.on_speech_started(),
+            ServerEvent::SpeechStopped => {
+                self.caller_speaking = false;
+                Step::Continue
+            }
+            ServerEvent::ResponseStarted => {
+                self.response_open = true;
+                // The next response can play once the caller is quiet.
+                self.interrupted = false;
+                Step::Continue
+            }
+            ServerEvent::ResponseFinished => {
+                self.response_open = false;
+                self.interrupted = false;
+                self.apply_tune()
             }
             ServerEvent::TranscriptDelta { item_id, delta } => {
                 let (id, text) = push_delta(self.assistant, item_id, &delta);
@@ -636,6 +760,25 @@ impl<D: Duplex> Ctx<'_, D> {
             }
             ServerEvent::Error(message) => self.on_error(&message),
         }
+    }
+
+    fn on_speech_started(&mut self) -> Step {
+        lock_duplex(self.duplex).clear_speaker();
+        self.caller_speaking = true;
+        if !self.response_open {
+            return Step::Continue;
+        }
+        // Stop generation. Leftover deltas of this response stay dropped until
+        // it finishes or the next one starts. Cancelling when nothing is open
+        // makes the server answer with an error.
+        self.response_open = false;
+        self.interrupted = true;
+        if self.out_tx.send(Outgoing::Text(response_cancel())).is_err() {
+            return Step::Redial {
+                resume_failed: false,
+            };
+        }
+        Step::Continue
     }
 
     async fn session_ready(&mut self) -> Step {

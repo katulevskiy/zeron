@@ -7,8 +7,12 @@ mod protocol;
 mod session;
 
 pub use audio::{DesktopDuplex, Duplex};
-pub use auth::{signed_in, Credentials, GrokBotCredentials, Minted};
-pub use session::{run, Call, ToolExec, ToolSpec, TranscriptSink};
+pub use auth::{Credentials, GrokBotCredentials, Minted, signed_in};
+pub use protocol::{
+    SPEED_MAX, SPEED_MIN, SPEED_STEP, Speech, VOICES, snap_speed, speed_fraction,
+    speed_from_fraction, speed_label, voice_label,
+};
+pub use session::{Call, ToolExec, ToolSpec, TranscriptSink, Tune, run};
 
 #[cfg(test)]
 mod tests;
