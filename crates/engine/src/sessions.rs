@@ -2162,9 +2162,25 @@ impl Inner {
             .unwrap_or(0)
     }
 
+    /// A chat the user navigates to in a chat list. Another chat's worker
+    /// (`parent_chat_id`) is driven by its parent over MCP and is never
+    /// focused, so focus order says nothing about whether it is next. A chat
+    /// whose row is not known here is treated the same way.
+    fn user_facing_chat(&self, chat_id: &str) -> bool {
+        self.workspace().is_some_and(|ws| {
+            !ws.parent_unknown(chat_id)
+                && ws
+                    .chat(chat_id)
+                    .ok()
+                    .flatten()
+                    .is_some_and(|chat| chat.is_top_level())
+        })
+    }
+
     /// `chat_id` is parked, idle past the grace, and outside the most recently
-    /// focused warm set. Background work, voice, and orchestrators are not in
-    /// that set: they neither count toward the cap nor get reaped by it.
+    /// focused warm set. Background work, voice, orchestrators and side chats
+    /// are not in that set: they neither count toward the cap nor get reaped
+    /// by it.
     fn parked_over_cap(&self, chat_id: &str) -> bool {
         let cap = parked_session_cap();
         if cap == 0 {
@@ -2182,6 +2198,10 @@ impl Inner {
                 .map(|(id, _)| id.clone())
                 .collect::<Vec<_>>()
         };
+        let parked = parked
+            .into_iter()
+            .filter(|id| self.user_facing_chat(id))
+            .collect::<Vec<_>>();
         let ranked = parked
             .into_iter()
             .map(|id| ParkedRank {
@@ -3475,27 +3495,32 @@ fn cursor_unstarted_history(
     ))
 }
 
-/// How many persistent sessions may sit parked between turns. The two most
-/// recently focused stay warm, so a switch-and-send does not cold-start the
-/// chat you just left. Older parked CLIs exit and their docs can leave the
-/// LRU. `ZERON_PARKED_SESSION_CAP=0` disables the cap (the 30-minute idle
-/// reaper still applies).
+/// How many user-facing persistent sessions may sit parked between turns.
+/// The three most recently focused stay warm: the chat on screen plus two to
+/// switch between, so a switch-and-send does not cold-start any of them.
+/// Older parked CLIs exit and their docs can leave the LRU. Side chats keep
+/// the 30-minute window. `ZERON_PARKED_SESSION_CAP=0` disables the cap (the
+/// idle reaper still applies).
+const PARKED_SESSION_CAP: usize = 3;
+
 fn parked_session_cap() -> usize {
-    match std::env::var("ZERON_PARKED_SESSION_CAP") {
-        Ok(value) => value.parse().unwrap_or(2),
-        Err(_) => 2,
-    }
+    std::env::var("ZERON_PARKED_SESSION_CAP")
+        .ok()
+        .and_then(|value| value.parse().ok())
+        .unwrap_or(PARKED_SESSION_CAP)
 }
 
 /// A session idle for less than this stays up even when it is over the cap,
-/// so bouncing through three chats does not kill the one just left.
-/// `ZERON_PARKED_OVERFLOW_MS` overrides.
+/// so coming back to an older chat within a few minutes does not pay a CLI
+/// cold start. `ZERON_PARKED_OVERFLOW_MS` overrides.
+const PARKED_OVERFLOW_GRACE: std::time::Duration = std::time::Duration::from_secs(5 * 60);
+
 fn parked_overflow_grace() -> std::time::Duration {
     std::env::var("ZERON_PARKED_OVERFLOW_MS")
         .ok()
         .and_then(|value| value.parse::<u64>().ok())
         .map(std::time::Duration::from_millis)
-        .unwrap_or(std::time::Duration::from_secs(60))
+        .unwrap_or(PARKED_OVERFLOW_GRACE)
 }
 
 #[derive(Clone)]
@@ -4095,11 +4120,16 @@ async fn drive_run(
                     mark_run_parked(&inner, &chat_id, &run_id, idle_since.is_some());
                     // Parked-process cap. The 30-minute reaper still owns a
                     // session the user may return to; this only drops CLIs
-                    // past the two most recently focused, after a short grace
-                    // so a quick pass through an older chat does not cold-start
-                    // it. Same clean exit as the idle reaper: cancel the
-                    // harness token and break Idle. Never the Interrupted path.
+                    // past the most recently focused few, after a grace so a
+                    // quick pass through an older chat does not cold-start it.
+                    // Same clean exit as the idle reaper: cancel the harness
+                    // token and break Idle. Never the Interrupted path. Work
+                    // that just ended holds it off the same way it holds the
+                    // idle reaper.
                     if idle_since.is_some_and(|at| at.elapsed() >= parked_overflow_grace())
+                        && !held_for_background
+                        && reap_deferred_until
+                            .is_none_or(|until| tokio::time::Instant::now() >= until)
                         && subagents.is_empty()
                         && !turn.background_live()
                         && !resume_state.voice_active.live()

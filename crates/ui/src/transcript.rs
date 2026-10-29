@@ -3314,6 +3314,9 @@ struct ParkedPresentation {
     last_scroll_distance: f32,
     show_jump_button: bool,
     code_fences: HashMap<SharedString, render::CodeFenceRuntime>,
+    /// Font and zoom changes remeasure only the active list; a parked one
+    /// remeasures when it comes back under a newer generation.
+    typography_generation: u32,
 }
 
 pub struct Transcript {
@@ -5139,6 +5142,7 @@ impl Transcript {
             last_scroll_distance: self.last_scroll_distance,
             show_jump_button: self.show_jump_button,
             code_fences: std::mem::take(&mut self.code_fences),
+            typography_generation: self.typography_generation,
         });
         let room = if held_destination.is_some() {
             PARKED_PRESENTATION_CAP.saturating_sub(1)
@@ -5196,6 +5200,9 @@ impl Transcript {
         self.last_scroll_distance = parked.last_scroll_distance;
         self.show_jump_button = parked.show_jump_button;
         self.code_fences = parked.code_fences;
+        if parked.typography_generation != self.typography_generation {
+            self.list.remeasure();
+        }
         // The list already holds its scroll. A saved viewport applied on top
         // would jump a chat the user had left mid-read.
         self.pending_viewport = None;
